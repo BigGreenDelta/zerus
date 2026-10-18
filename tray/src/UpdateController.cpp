@@ -38,6 +38,9 @@ bool integer(const QJsonValue &v,qint64 low,qint64 high){double n=v.toDouble(-1)
 bool safe(const QString &s){return matches(s,"\\A[A-Za-z0-9][A-Za-z0-9._+-]{0,179}\\z")&&!s.contains("..");}
 QString configuredChannel(){QString c=QSettings().value("updates/channel","stable").toString();return c=="nightly"||c=="dev"?c:"stable";}
 bool macosInstallation(const DesktopInstallation &installation){return installation.kind=="homebrew-cask"||installation.kind=="macos-bundle";}
+// The portable zip (also through winget) and the per-user installer: Windows builds
+// learn about newer ones from the feed and link their release pages.
+bool windowsBuild(const DesktopInstallation &installation){return installation.kind=="portable"||installation.kind=="installer";}
 bool parseMacos(const QJsonObject &raw,const QString &version,const QString &prefix,DesktopUpdateFeed &result){
     if(!raw.contains("macos"))return true;
     if(!raw["macos"].isObject())return false;
@@ -137,7 +140,7 @@ QString UpdateController::preferredChannel(const DesktopInstallation &installati
     return prefersNightly(installation)?QStringLiteral("nightly"):QStringLiteral("stable");
 }
 QUrl UpdateController::downloadUrl(const DesktopInstallation &installation,const DesktopUpdateFeed &feed,const QString &platform){
-    if(!feed.valid||installation.kind=="portable")return {};
+    if(!feed.valid||windowsBuild(installation))return {};
     if(platform=="macos"&&!feed.macosZipUrl.isEmpty())return QUrl(feed.macosDmgUrl.isEmpty()?feed.macosZipUrl:feed.macosDmgUrl);
     if(feed.buildNumber>0&&!macosInstallation(installation))return QUrl(installation.arch?feed.packageUrl:feed.sourceUrl);
     return {};
@@ -225,6 +228,7 @@ InstallationGuide UpdateController::installationGuide(const DesktopInstallation 
     else if(installation.kind=="checking")guide.ownership=tr("Checking installation ownership…");
     else if(installation.kind=="portable"&&installation.package==wingetIdentifier)guide.ownership=tr("winget package %1\nPortable Windows build %2").arg(installation.package,QCoreApplication::applicationVersion());
     else if(installation.kind=="portable")guide.ownership=tr("Portable Windows build %1. Download newer builds from the release page.").arg(QCoreApplication::applicationVersion());
+    else if(installation.kind=="installer")guide.ownership=tr("Windows build %1, installed for this user by the Zerus installer. It does not update itself yet; download newer builds from the release page.").arg(QCoreApplication::applicationVersion());
     else guide.ownership=tr("Local / manually installed build; package ownership unconfirmed.");
     if(installation.arch)guide.ownership+=tr("\nSystem: Arch-based Linux");
     if(macosInstallation(installation)){
@@ -242,7 +246,7 @@ InstallationGuide UpdateController::installationGuide(const DesktopInstallation 
         guide.instructions=tr("Run this in Terminal. Homebrew replaces Zerus.app without quitting Zerus, agents or tmux; then choose Restart to finish update.");
         return guide;
     }
-    if(installation.kind=="portable"){
+    if(windowsBuild(installation)){
         if(installation.package!=wingetIdentifier)return guide;
         if(value.isEmpty()){guide.instructions=tr("winget carries stable releases only. Choose the stable channel for its update command.");return guide;}
         guide.command=tr("winget: ")+value;guide.copyName=tr("Copy winget command");
@@ -291,6 +295,13 @@ QString UpdateController::wingetPackage(const QString &executable){
     }
     return {};
 }
+bool UpdateController::installerRecord(const QByteArray &data){
+    if(data.isEmpty()||data.size()>installerRecordLimit)return false;
+    QJsonParseError error;const auto document=QJsonDocument::fromJson(data,&error);
+    if(error.error!=QJsonParseError::NoError||!document.isObject())return false;
+    const auto record=document.object();
+    return integer(record["schema"],1,1)&&record["kind"]=="installer"&&record["product"]=="Zerus";
+}
 bool UpdateController::stableHasWindowsBuild(const QString &version){return plainStableIsNewer(QString::fromLatin1(lastStableWithoutWindows),version);}
 bool UpdateController::portableUpdateAvailable(const QString &appVersion,const DesktopUpdateFeed &feed){
     // The zip reports only its product version, so only a newer product version is
@@ -313,19 +324,21 @@ bool UpdateController::claimNotification(const QString &token){
 }
 QString UpdateController::comparisonMessage(const DesktopInstallation &installation,const DesktopUpdateFeed &feed,const QString &appVersion,int comparison,bool compared){
     if(!feed.valid)return tr("No verified release catalog yet.");
-    // Windows Phase 1: a portable zip without an installer or self-update. Stable
-    // and nightly releases carry it; Dev builds do not.
-    if(installation.kind=="portable"){
+    // Windows builds, portable or installed per user, do not update themselves.
+    // Stable and nightly releases carry the zip; Dev builds do not.
+    if(windowsBuild(installation)){
         if(feed.buildNumber>0)return tr("Dev builds do not include a Windows build yet. Choose the stable or nightly channel to hear about newer Windows builds.");
         if(matches(feed.version,stableVersion)){
             if(portableUpdateAvailable(appVersion,feed))return installation.package==wingetIdentifier?tr("Zerus %1 is available. Quit Zerus, then update it with winget.").arg(feed.version)
                                                                                          :tr("Zerus %1 is available. Download its Windows zip from the release page.").arg(feed.version);
             if(!stableHasWindowsBuild(feed.version)&&plainStableIsNewer(appVersion,feed.version))
                 return tr("Zerus %1 has no Windows build; stable releases after it carry one. Until then, choose the nightly channel to hear about newer Windows builds.").arg(feed.version);
-            return tr("Portable Windows build: there is no self-update, and no newer stable release is published.");
+            return installation.kind=="installer"?tr("This Windows build does not update itself yet, and no newer stable release is published.")
+                                                  :tr("Portable Windows build: there is no self-update, and no newer stable release is published.");
         }
-        return portableUpdateAvailable(appVersion,feed)?tr("Zerus nightly %1 is available. Download its Windows zip from the release page.").arg(feed.version)
-                                                       :tr("Portable Windows build: there is no self-update, and nightly builds of the same version cannot be compared. The release page has the newest Windows zip.");
+        if(portableUpdateAvailable(appVersion,feed))return tr("Zerus nightly %1 is available. Download its Windows zip from the release page.").arg(feed.version);
+        return installation.kind=="installer"?tr("This Windows build does not update itself yet, and nightly builds of the same version cannot be compared. The release page has the newest Windows zip.")
+                                              :tr("Portable Windows build: there is no self-update, and nightly builds of the same version cannot be compared. The release page has the newest Windows zip.");
     }
     if(macosInstallation(installation)){
         if(feed.macosZipUrl.isEmpty())return tr("No macOS build is published in this channel yet. Choose another channel.");
@@ -460,7 +473,7 @@ void UpdateController::checkOnStart(){if(!automaticChecks())return;m_startCheck=
 void UpdateController::checkAutomatically(){
     if(!automaticChecks())return;if(m_installation.kind=="checking"){m_startCheck=true;return;}auto now=QDateTime::currentSecsSinceEpoch();auto last=QSettings().value("updates/lastAttempt/"+channel(),0).toLongLong();
     // Dev builds carry no Windows zip: a portable build has nothing to poll for.
-    const int interval=m_installation.kind=="portable"?automaticInterval("stable"):automaticInterval(channel());if(last<=0||last>now||now-last>=interval)startCheck(true);
+    const int interval=windowsBuild(m_installation)?automaticInterval("stable"):automaticInterval(channel());if(last<=0||last>now||now-last>=interval)startCheck(true);
 }
 QString UpdateController::lastChecked() const{return m_lastSuccess>0?QLocale().toString(QDateTime::fromSecsSinceEpoch(m_lastSuccess).toLocalTime(),QLocale::ShortFormat):tr("Never");}
 QString UpdateController::updateToken() const{return m_available&&m_feed.valid?(channel()=="dev"?"zerus-update:v2:":"zerus-update:v1:")+channel()+":"+QString::number(m_feed.releaseId):QString();}
@@ -491,7 +504,14 @@ void UpdateController::sourceInstallation(const QString &executable){
     // Stable stays the default: stable releases after 0.42.2 carry the same tested
     // zip as nightlies. A channel saved by an earlier build, which defaulted to
     // nightly, is kept.
-    if(m_installation.kind=="unknown"){m_installation.kind="portable";m_installation.package=wingetPackage(executable);}
+    // The per-user installer leaves installation.json next to hgs-tray.exe
+    // (scripts/windows_installer.py); a zip has none. Neither updates itself.
+    if(m_installation.kind=="unknown"){
+        QFile record(QFileInfo(executable).absoluteDir().filePath("installation.json"));QByteArray data;
+        if(record.open(QIODevice::ReadOnly))data=record.read(installerRecordLimit+1);
+        if(installerRecord(data))m_installation.kind="installer";
+        else{m_installation.kind="portable";m_installation.package=wingetPackage(executable);}
+    }
 #endif
     emit changed();compare();
 }
@@ -547,11 +567,11 @@ void UpdateController::compare(){
 #ifdef ZERUS_SOURCE_COMMIT
         installedCommit=QStringLiteral(ZERUS_SOURCE_COMMIT);
 #endif
-        completeComparison(m_installation.kind!="portable"&&devBuildIsNewer(m_feed,buildInfo()["devBuildNumber"].toInteger(),installedCommit),comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;
+        completeComparison(!windowsBuild(m_installation)&&devBuildIsNewer(m_feed,buildInfo()["devBuildNumber"].toInteger(),installedCommit),comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;
     }
     if(m_installation.kind!="package"){
         const auto version=QCoreApplication::applicationVersion();
-        bool newer=m_installation.kind=="portable"?portableUpdateAvailable(version,m_feed):channel()=="stable"&&plainStableIsNewer(version,m_feed.version);
+        bool newer=windowsBuild(m_installation)?portableUpdateAvailable(version,m_feed):channel()=="stable"&&plainStableIsNewer(version,m_feed.version);
         completeComparison(newer,comparisonMessage(m_installation,m_feed,version,0,false));return;
     }
     if(m_installation.package=="zerus-git"||m_installation.version.isEmpty()||!m_feed.packages.contains(m_installation.package)){completeComparison(false,comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;}
