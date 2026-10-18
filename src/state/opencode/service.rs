@@ -47,6 +47,8 @@ pub(super) const REQUIRED: &[(&str, &str, &[&str])] = &[
         &["decision"],
     ),
     ("get", "/api/model", &[]),
+    ("get", "/api/model/default", &[]),
+    ("get", "/api/provider", &[]),
     ("get", "/api/experimental/migration/v1", &[]),
 ];
 
@@ -972,6 +974,23 @@ mod tests {
         .unwrap();
         assert_eq!(missing_operations(&openapi), Vec::<String>::new());
         assert!(verdict(&openapi).unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_fresh_catalog_route_is_required() {
+        let openapi: Value = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/opencode2/openapi-2.0.32.json"
+        ))
+        .unwrap();
+        for path in ["/api/model", "/api/model/default", "/api/provider"] {
+            let mut changed = openapi.clone();
+            changed["paths"]
+                .as_object_mut()
+                .unwrap()
+                .remove(path)
+                .unwrap();
+            assert_eq!(missing_operations(&changed), vec![format!("GET {path}")]);
+        }
     }
 
     #[test]
