@@ -331,16 +331,9 @@ fn send(
     args: &[String],
     who: &Actor,
 ) -> Result<Value> {
-    match task.stage().map_err(fail)? {
-        Stage::Backlog | Stage::Todo => {}
-        Stage::Active => return Err(fail(task.already_running())),
-        stage => {
-            return Err(fail(format!(
-                "a task in {} is not sent; move it back to To do first",
-                stage.label()
-            )))
-        }
-    }
+    // Everything that could stop the send from being recorded is checked
+    // before the paste; only I/O can fail after it.
+    task.check_send().map_err(fail)?;
     let view = task.view().map_err(fail)?;
     let local = |session: &str| SessionKey {
         machine: here.to_owned(),

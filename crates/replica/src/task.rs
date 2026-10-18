@@ -353,6 +353,19 @@ impl TaskDoc {
         Ok(())
     }
 
+    /// Whether a send could be recorded; check it before pasting anything.
+    pub fn check_send(&self) -> Result<()> {
+        self.writable()?;
+        match self.stage()? {
+            Stage::Backlog | Stage::Todo => Ok(()),
+            Stage::Active => Err(self.already_running()),
+            stage => Err(Error::new(format!(
+                "a task in {} is not sent; move it back to To do first",
+                stage.label()
+            ))),
+        }
+    }
+
     /// The send that Zerus pasted into `session`; the task becomes In progress.
     pub fn record_send(
         &mut self,
@@ -361,17 +374,7 @@ impl TaskDoc {
         actor: &Actor,
         now: i64,
     ) -> Result<()> {
-        self.writable()?;
-        match self.stage()? {
-            Stage::Backlog | Stage::Todo => {}
-            Stage::Active => return Err(self.already_running()),
-            stage => {
-                return Err(Error::new(format!(
-                    "a task in {} is not sent; move it back to To do first",
-                    stage.label()
-                )))
-            }
-        }
+        self.check_send()?;
         let fields = self.fields();
         fields.insert("stage", Stage::Active.as_str())?;
         fields.insert("session", serde_json::to_string(session)?)?;
@@ -652,6 +655,22 @@ mod tests {
         assert!(!t.view().unwrap().writable);
         assert_eq!(
             t.comment("x", &Actor::Person, 2).unwrap_err().to_string(),
+            "Update Zerus to edit this task"
+        );
+    }
+
+    #[test]
+    fn a_send_is_checked_before_anything_is_pasted() {
+        let mut t = task(Stage::Todo);
+        t.check_send().unwrap();
+        t.record_send(&api(), "r", &Actor::Person, 2).unwrap();
+        let running = t.check_send().unwrap_err().to_string();
+        assert!(running.contains("already In progress"), "{running}");
+        let newer = task(Stage::Todo);
+        newer.meta().insert("schema", SCHEMA + 1).unwrap();
+        newer.doc.commit();
+        assert_eq!(
+            newer.check_send().unwrap_err().to_string(),
             "Update Zerus to edit this task"
         );
     }
