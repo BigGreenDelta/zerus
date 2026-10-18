@@ -71,6 +71,24 @@ impl Scope {
         );
     }
 }
+#[cfg(test)]
+impl Scope {
+    /// The scope `attempt` builds for these expected identities.
+    pub(super) fn expecting(name: &str, run: &str, conversation: &str) -> Self {
+        Scope {
+            name: name.into(),
+            run: run.into(),
+            conversation: conversation.into(),
+            archive: None,
+            changed: Cell::new(false),
+            target: RefCell::new(None),
+        }
+    }
+    /// Whether a failure would be reported as uncertain rather than failed.
+    pub(super) fn was_changing(&self) -> bool {
+        self.changed.get()
+    }
+}
 
 /// A presentation gate, never a substitute for the locked action checks.
 /// `resumed` is the summary's single verification of a pending resume.

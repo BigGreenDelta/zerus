@@ -28,7 +28,8 @@ stops, restarts or replaces it, so other OpenCode clients are unaffected.
 
 Zerus starts it (`opencode service start`, in its own transient user scope on
 Linux so that it outlives Zerus) only when no service is registered or the
-registered process is dead, and only for a launch or the explicit **Start
+registered process is dead, never while an existing registration cannot be
+read, and only for a launch or the explicit **Start
 OpenCode** action (`hgs account start native-opencode`). Inspection never starts
 it. Without a registered live service, Zerus shows "OpenCode is not running on
 <computer>" and offers Start OpenCode; a registered service that does not answer
@@ -129,9 +130,13 @@ process to pause), Terminal, attachments, compaction, fork and child sessions
 ### Delivery
 
 Zerus pre-generates each message ID. If a response is lost, it reconciles the
-exact message (message list, inbox, same-ID repost) instead of guessing. A 4xx
-reply is a definite refusal and is never resent. Interrupted or failed delivery
-is never resubmitted automatically; an uncertain result stays for inspection.
+exact message (message list, then inbox) instead of guessing, and never posts
+the message again, so a message removed from the queue cannot come back. A 4xx
+reply is a definite refusal and is never resent. Removing a queued message is
+recorded before OpenCode is asked; once OpenCode confirms the removal, the
+request reports "Removed from the OpenCode queue before delivery". Interrupted
+or failed delivery, or a removal OpenCode did not confirm, is never resubmitted
+automatically; an uncertain result stays for inspection.
 
 ## OpenCode 1 conversations
 

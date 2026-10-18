@@ -824,6 +824,8 @@ Expected: compile errors.
 2. `GET /inbox`: an item with this `id` → compare `payload.text` → `Queued`. Absent → step 3.
 3. `POST /prompt` with `{"id","text","delivery":"queue"}`: 200 and `data.id == id` and `data.payload.text == text` → `Delivered` (a repost of a known ID returns the original admission; an unknown ID is admitted now exactly once). Otherwise `Err` uncertain.
 
+> **Superseded 2026-10-18:** step 3 is removed. OpenCode 2.0.32 forgets an ID once `DELETE /inbox/{id}` removed its queued message, so the repost could deliver a removed message. A message absent from history and inbox stays uncertain, and a removal record consulted first makes a confirmed removal a definite non-delivery. The current rule is in the spec's "Identity, launch and delivery".
+
 `send(record, request)`:
 - keep existing validations (64 KiB, empty text, no attachments, no compaction continuation, no child target);
 - `message_id = new_id("msg_")` stored in the receipt before the POST; the receipt keeps `request_id`, `digest`, `native_message_id`, `text`, `status: "pending"`, `transport: "native_opencode"`;

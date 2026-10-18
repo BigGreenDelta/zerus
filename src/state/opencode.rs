@@ -905,19 +905,167 @@ fn refusal_reason(response: &Response) -> String {
     format!("HTTP {}: {clean}", response.status)
 }
 fn refused(reason: &str) -> String {
+    if reason == REMOVED {
+        return REMOVED.into();
+    }
     format!("OpenCode refused this message: {reason}")
 }
 const MISMATCH: &str = "Native message acknowledgement did not match; delivery uncertain";
 const UNCERTAIN: &str = "Native message ID has conflicting text; delivery uncertain";
+const UNCERTAIN_STATE: &str = "Native delivery state is uncertain";
 const UNCERTAIN_REPLAY: &str = "Delivery uncertain; this request will not be replayed. Inspect native history before creating a new request";
-/// Resolve one message ID exactly: look it up, then the inbox, and only then
-/// repost the same ID, which the service admits at most once.
+/// The definite non-delivery of a message the user removed from the queue.
+const REMOVED: &str = "Removed from the OpenCode queue before delivery";
+const REMOVAL_UNCONFIRMED: &str =
+    "OpenCode did not confirm the removal; Zerus will not send this message again";
+const REMOVALS_UNREADABLE: &str = "OpenCode removal records cannot be read";
+const REMOVAL_LIMIT: usize = 5000;
+/// Private delivery state under `opencode/`: receipts by request ID, an
+/// index from native message ID to request ID, the removal records and the
+/// lock that orders receipt changes.
+struct Ledger(PathBuf);
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Removal {
+    /// Written before the DELETE: forbids any repost, proves nothing.
+    Intended,
+    /// OpenCode confirmed the message left the queue without delivery.
+    Removed,
+}
+impl Ledger {
+    fn current() -> Self {
+        Ledger(root().join("opencode"))
+    }
+    fn receipt(&self, request_id: &str) -> PathBuf {
+        self.0.join("receipts").join(format!("{request_id}.json"))
+    }
+    fn index(&self, message_id: &str) -> PathBuf {
+        self.0
+            .join("receipt-index")
+            .join(format!("{message_id}.json"))
+    }
+    fn lock(&self) -> Result<Guard> {
+        lock(Some(&self.0.join("receipts.lock")))
+    }
+    fn removals_path(&self) -> PathBuf {
+        self.0.join("removed-messages.json")
+    }
+    /// Every removal record, oldest first. A missing file has none; any
+    /// other failure is an error, never "none".
+    fn removals(&self) -> Result<Vec<Value>> {
+        let file = match fs::File::open(self.removals_path()) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(_) => return Err(REMOVALS_UNREADABLE.into()),
+        };
+        let mut bytes = Vec::new();
+        if file
+            .take(4 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() > 4 * 1024 * 1024
+        {
+            return Err(REMOVALS_UNREADABLE.into());
+        }
+        serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| value["removals"].as_array().cloned())
+            .ok_or_else(|| REMOVALS_UNREADABLE.into())
+    }
+    fn removal(&self, record: &Value, message_id: &str) -> Result<Option<Removal>> {
+        Ok(self
+            .removals()?
+            .iter()
+            .find(|e| {
+                e["conversation_id"] == record["conversation_id"] && e["message_id"] == message_id
+            })
+            .map(|e| {
+                if e["state"] == "removed" {
+                    Removal::Removed
+                } else {
+                    Removal::Intended
+                }
+            }))
+    }
+    /// Record a removal of one session's message, keeping the newest
+    /// `REMOVAL_LIMIT`. Callers hold the bindings lock.
+    fn record_removal(&self, record: &Value, message_id: &str, state: Removal) -> Result<()> {
+        let mut entries = self.removals()?;
+        entries.retain(|e| {
+            e["conversation_id"] != record["conversation_id"] || e["message_id"] != message_id
+        });
+        let state = if state == Removal::Removed {
+            "removed"
+        } else {
+            "intended"
+        };
+        entries.push(json!({"conversation_id":record["conversation_id"],"message_id":message_id,"state":state,"at":now()}));
+        let excess = entries.len().saturating_sub(REMOVAL_LIMIT);
+        entries.drain(..excess);
+        atomic(
+            &self.removals_path(),
+            &json!({ "removals": entries }).to_string(),
+        )
+    }
+    /// The request ID and session that sent a native message, if indexed.
+    fn indexed(&self, message_id: &str) -> Option<Value> {
+        let bytes = fs::read(self.index(message_id)).ok()?;
+        let value: Value = serde_json::from_slice(&bytes).ok()?;
+        uuid::Uuid::parse_str(string(&value, "request_id")).ok()?;
+        Some(value)
+    }
+}
+/// Mark one receipt as a definite non-delivery after a confirmed removal.
+fn refuse_removed(ledger: &Ledger, record: &Value, message_id: &str) -> Result<()> {
+    let Some(index) = ledger.indexed(message_id) else {
+        return Ok(());
+    };
+    let path = ledger.receipt(string(&index, "request_id"));
+    let _guard = ledger.lock()?;
+    let Ok(bytes) = fs::read(&path) else {
+        return Ok(());
+    };
+    let mut receipt: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if receipt["native_message_id"] != message_id
+        || receipt["conversation_id"] != record["conversation_id"]
+        || receipt["status"] == "refused"
+    {
+        return Ok(());
+    }
+    receipt["status"] = json!("refused");
+    receipt["reason"] = json!(REMOVED);
+    atomic(&path, &receipt.to_string())
+}
+/// A receipt whose message was confirmed removed becomes that definite
+/// non-delivery before anything else is read; nothing is sent for it.
+fn apply_removal(ledger: &Ledger, record: &Value, receipt: &mut Value, path: &Path) -> Result<()> {
+    let id = string(receipt, "native_message_id").to_owned();
+    if receipt["status"] == "refused"
+        || receipt["conversation_id"] != record["conversation_id"]
+        || !native_id(&id, "msg_")
+        || !matches!(ledger.removal(record, &id), Ok(Some(Removal::Removed)))
+    {
+        return Ok(());
+    }
+    let _guard = ledger.lock()?;
+    receipt["status"] = json!("refused");
+    receipt["reason"] = json!(REMOVED);
+    atomic(path, &receipt.to_string())
+}
+/// Resolve one message ID exactly from native state. It is never posted
+/// again: OpenCode 2.0.32 forgets an ID once its queued message is removed,
+/// so a repost could deliver a message the user removed. A message in
+/// neither history nor the inbox stays uncertain.
 fn reconcile(
     native: &dyn Native,
+    ledger: &Ledger,
     record: &Value,
     message_id: &str,
     text: &str,
 ) -> Result<Delivery> {
+    let removal = ledger.removal(record, message_id)?;
+    if removal == Some(Removal::Removed) {
+        return Ok(Delivery::Refused(REMOVED.into()));
+    }
     let found = native.raw(
         "GET",
         &session_path(record, &format!("/message/{message_id}")),
@@ -932,48 +1080,26 @@ fn reconcile(
             return Err(UNCERTAIN.into());
         }
         404 if found.body["_tag"] == "MessageNotFoundError" => {}
-        _ => return Err("Native delivery state is uncertain".into()),
+        _ => return Err(UNCERTAIN_STATE.into()),
+    }
+    // An unconfirmed removal: only history can still answer.
+    if removal.is_some() {
+        return Err(UNCERTAIN_STATE.into());
     }
     let inbox = native.raw("GET", &session_path(record, "/inbox"), None)?;
     if inbox.status != 200 {
-        return Err("Native delivery state is uncertain".into());
+        return Err(UNCERTAIN_STATE.into());
     }
-    if let Some(item) = inbox.body["data"]
+    match inbox.body["data"]
         .as_array()
         .into_iter()
         .flatten()
         .find(|item| item["id"] == message_id)
     {
-        if item["payload"]["text"] == text {
-            return Ok(Delivery::Queued);
-        }
-        return Err(UNCERTAIN.into());
+        Some(item) if item["payload"]["text"] == text => Ok(Delivery::Queued),
+        Some(_) => Err(UNCERTAIN.into()),
+        None => Err(UNCERTAIN_STATE.into()),
     }
-    let posted = native.raw(
-        "POST",
-        &session_path(record, "/prompt"),
-        Some(&json!({"id":message_id,"text":text,"delivery":"queue"})),
-    )?;
-    match posted.status {
-        200..=299 => {
-            let data = &posted.body["data"];
-            if data["id"] == message_id
-                && data["sessionID"] == record["conversation_id"]
-                && data["payload"]["text"] == text
-            {
-                Ok(Delivery::Delivered)
-            } else {
-                Err(MISMATCH.into())
-            }
-        }
-        400..=499 => Ok(Delivery::Refused(refusal_reason(&posted))),
-        _ => Err("Native delivery state is uncertain".into()),
-    }
-}
-fn receipt_path(receipt: &Value) -> PathBuf {
-    root()
-        .join("opencode/receipts")
-        .join(format!("{}.json", string(receipt, "request_id")))
 }
 fn running_service() -> Result<service::Service> {
     // Sending is explicit, but phase 1 does not start the service for it.
@@ -991,6 +1117,7 @@ fn check_receipt_identity(record: &Value, receipt: &Value) -> Result<()> {
 /// Reconcile one receipt; a definite refusal is recorded in it.
 fn settle(
     native: &dyn Native,
+    ledger: &Ledger,
     record: &Value,
     receipt: &mut Value,
     path: &Path,
@@ -998,7 +1125,14 @@ fn settle(
     check_receipt_identity(record, receipt)?;
     let id = string(receipt, "native_message_id").to_owned();
     let text = string(receipt, "text").to_owned();
-    let outcome = reconcile(native, record, &id, &text)?;
+    let outcome = reconcile(native, ledger, record, &id, &text)?;
+    // A removal recorded since the inbox was read wins over that read.
+    let _guard = ledger.lock()?;
+    let outcome = match (outcome, ledger.removal(record, &id)?) {
+        (Delivery::Queued, Some(Removal::Intended)) => return Err(UNCERTAIN_STATE.into()),
+        (Delivery::Queued, Some(Removal::Removed)) => Delivery::Refused(REMOVED.into()),
+        (outcome, _) => outcome,
+    };
     match &outcome {
         Delivery::Delivered | Delivery::Queued => receipt["status"] = json!("submitted"),
         Delivery::Refused(reason) => {
@@ -1010,14 +1144,26 @@ fn settle(
     Ok(outcome)
 }
 pub(super) fn reconcile_receipt(record: &Value, receipt: &mut Value) -> Result<bool> {
+    reconcile_receipt_with(&Ledger::current(), record, receipt, running_service)
+}
+/// Core of `reconcile_receipt`: a confirmed removal answers without
+/// connecting; otherwise the exact native session is read.
+fn reconcile_receipt_with<N: Native>(
+    ledger: &Ledger,
+    record: &Value,
+    receipt: &mut Value,
+    connect: impl FnOnce() -> Result<N>,
+) -> Result<bool> {
+    let path = ledger.receipt(string(receipt, "request_id"));
+    apply_removal(ledger, record, receipt, &path)?;
     match receipt["status"].as_str() {
         Some("submitted") => return Ok(true),
         Some("refused") => return Err(refused(string(receipt, "reason"))),
         _ => {}
     }
-    let service = running_service()?;
-    verify_session(&service, record)?;
-    match settle(&service, record, receipt, &receipt_path(receipt))? {
+    let native = connect()?;
+    verify_session(&native, record)?;
+    match settle(&native, ledger, record, receipt, &path)? {
         Delivery::Refused(reason) => Err(refused(&reason)),
         _ => Ok(true),
     }
@@ -1064,9 +1210,6 @@ fn send(record: &Value, request: &Value) -> Result<Value> {
     if text.trim().is_empty() {
         return Err("Message is empty".into());
     }
-    let path = root()
-        .join("opencode/receipts")
-        .join(format!("{}.json", string(request, "request_id")));
     let digest = format!(
         "{:x}",
         Sha256::digest(json!([record["name"], request]).to_string().as_bytes())
@@ -1074,9 +1217,9 @@ fn send(record: &Value, request: &Value) -> Result<Value> {
     let service = running_service()?;
     deliver(
         &service,
+        &Ledger::current(),
         record,
         request,
-        &path,
         digest,
         session_graph::target_receipt(record),
     )
@@ -1084,26 +1227,28 @@ fn send(record: &Value, request: &Value) -> Result<Value> {
 /// Core of `send`: everything after validation, against any native service.
 fn deliver(
     native: &dyn Native,
+    ledger: &Ledger,
     record: &Value,
     request: &Value,
-    path: &Path,
     digest: String,
     graph_target: Option<Value>,
 ) -> Result<Value> {
     let text = string(request, "text");
+    let path = &ledger.receipt(string(request, "request_id"));
     if path.exists() {
         let mut prior: Value = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         if prior["digest"] != digest {
             return Err("This request ID was already used for another message".into());
         }
+        apply_removal(ledger, record, &mut prior, path)?;
         match prior["status"].as_str() {
             Some("submitted") => return Ok(prior),
             Some("refused") => return Err(refused(string(&prior, "reason"))),
             _ => {}
         }
         verify_native(native, record)?;
-        return match settle(native, record, &mut prior, path) {
+        return match settle(native, ledger, record, &mut prior, path) {
             Ok(Delivery::Refused(reason)) => Err(refused(&reason)),
             Ok(_) => Ok(prior),
             Err(_) => Err(UNCERTAIN_REPLAY.into()),
@@ -1121,6 +1266,13 @@ fn deliver(
         receipt["graph_target"] = target;
     }
     let queued = session_active(native, record);
+    // The index first: a receipt is never written without it, so a removal
+    // can find the receipt of the message it removes.
+    atomic(
+        &ledger.index(&message_id),
+        &json!({"request_id":request["request_id"],"conversation_id":record["conversation_id"]})
+            .to_string(),
+    )?;
     atomic(path, &receipt.to_string())?;
     let posted = native.raw(
         "POST",
@@ -1145,7 +1297,7 @@ fn deliver(
             return Err(refused(&reason));
         }
         // A transport error or a 5xx leaves the admission unknown.
-        _ => match settle(native, record, &mut receipt, path) {
+        _ => match settle(native, ledger, record, &mut receipt, path) {
             Ok(Delivery::Refused(reason)) => return Err(refused(&reason)),
             Ok(_) => {}
             Err(_) => return Err(UNCERTAIN_REPLAY.into()),
@@ -1311,27 +1463,69 @@ fn queued_id(request: &Value) -> Result<String> {
     }
     Ok(id.to_owned())
 }
+/// Whether a message ID is in this session's history: `Some(true)` when
+/// delivered, `Some(false)` only for OpenCode's exact MessageNotFoundError.
+fn delivered(native: &dyn Native, record: &Value, id: &str) -> Result<Option<bool>> {
+    let found = native.raw(
+        "GET",
+        &session_path(record, &format!("/message/{id}")),
+        None,
+    )?;
+    Ok(match found.status {
+        200 => Some(true),
+        404 if found.body["_tag"] == "MessageNotFoundError" => Some(false),
+        _ => None,
+    })
+}
+/// Whether this session's inbox lists the message, or None when unreadable.
+fn listed(native: &dyn Native, record: &Value, id: &str) -> Option<bool> {
+    let inbox = native
+        .raw("GET", &session_path(record, "/inbox"), None)
+        .ok()?;
+    if inbox.status != 200 {
+        return None;
+    }
+    let items = inbox.body["data"].as_array()?;
+    Some(items.iter().any(|item| item["id"] == id))
+}
 /// Core of `remove_queued`: a message can be removed only while it sits in
-/// the inbox of a session that is not running; it is then not delivered.
-/// `before_delete` runs once, immediately before the DELETE, so a clean
-/// refusal is never recorded as a possible change.
+/// the inbox of this session, which is not running, and was never delivered.
+/// A removal intent is recorded before the DELETE so no retry ever posts
+/// the message again; only a removal OpenCode confirms makes its receipt a
+/// definite non-delivery. `before_delete` runs once, immediately before the
+/// DELETE, so a clean refusal is never recorded as a possible change.
 fn remove_queued_with(
     native: &dyn Native,
+    ledger: &Ledger,
     record: &Value,
     id: &str,
     before_delete: impl FnOnce(),
 ) -> Result<()> {
+    let conversation = &record["conversation_id"];
     let inbox = get(native, &session_path(record, "/inbox"))?;
-    if !inbox["data"]
+    let item = inbox["data"]
         .as_array()
-        .is_some_and(|items| items.iter().any(|item| item["id"] == id))
-    {
+        .and_then(|items| items.iter().find(|item| item["id"] == id))
+        .ok_or(NOT_QUEUED)?;
+    if item["sessionID"] != *conversation {
         return Err(NOT_QUEUED.into());
     }
     let active = active_sessions(native)?;
     if active.get(string(record, "conversation_id")).is_some() {
         return Err(NOT_QUEUED.into());
     }
+    match delivered(native, record, id)? {
+        Some(false) => {}
+        Some(true) => return Err(NOT_QUEUED.into()),
+        None => return Err("OpenCode could not confirm this message is still queued".into()),
+    }
+    if ledger
+        .indexed(id)
+        .is_some_and(|index| index["conversation_id"] != *conversation)
+    {
+        return Err(NOT_QUEUED.into());
+    }
+    ledger.record_removal(record, id, Removal::Intended)?;
     before_delete();
     let reply = native.raw("DELETE", &session_path(record, &format!("/inbox/{id}")), None)?;
     if reply.status == 404 {
@@ -1340,8 +1534,20 @@ fn remove_queued_with(
     if !successful(&reply) {
         return Err(format!("OpenCode could not remove this message ({})", refusal_reason(&reply)));
     }
-    // A 2xx DELETE is accepted without re-reading the inbox; the next
-    // inspection reflects it.
+    // OpenCode 2.0.32 answers 204 even when the message had already left the
+    // inbox, so read again: the inbox first, then history, because delivery
+    // moves a message from one to the other in a single transaction.
+    if listed(native, record, id) != Some(false) {
+        return Err(REMOVAL_UNCONFIRMED.into());
+    }
+    match delivered(native, record, id) {
+        Ok(Some(false)) => {}
+        Ok(Some(true)) => return Err(NOT_QUEUED.into()),
+        _ => return Err(REMOVAL_UNCONFIRMED.into()),
+    }
+    ledger.record_removal(record, id, Removal::Removed)?;
+    // Best effort: the removal record gives every later read the same answer.
+    let _ = refuse_removed(ledger, record, id);
     Ok(())
 }
 /// Core of a model change: set the exact model, then read it back.
@@ -1392,6 +1598,26 @@ fn action(
     message_id: Option<&str>,
     scope: Option<&session_action::Scope>,
 ) -> Result<()> {
+    action_in(
+        &Ledger::current(),
+        running_service,
+        record,
+        action,
+        new_name,
+        message_id,
+        scope,
+    )
+}
+/// Core of `action`, against any native service and private state.
+fn action_in<N: Native>(
+    ledger: &Ledger,
+    connect: impl FnOnce() -> Result<N>,
+    record: &mut Value,
+    action: &str,
+    new_name: Option<&str>,
+    message_id: Option<&str>,
+    scope: Option<&session_action::Scope>,
+) -> Result<()> {
     if ["pause", "resume"].contains(&action) {
         return Err(NO_PROCESS.into());
     }
@@ -1411,7 +1637,7 @@ fn action(
     let old = string(record, "name").to_owned();
     if action == "remove_queued" {
         let id = queued_id(&json!({"message_id": message_id}))?;
-        remove_queued_with(&running_service()?, record, &id, || {
+        remove_queued_with(&connect()?, ledger, record, &id, || {
             if let Some(scope) = scope {
                 scope.changing();
             }
@@ -1443,7 +1669,7 @@ fn action(
         if let Some(scope) = scope {
             scope.changing();
         }
-        change_title(&running_service()?, record, b[2])?;
+        change_title(&connect()?, record, b[2])?;
         record["name"] = json!(new);
     } else if let Some(scope) = scope {
         scope.changing();
@@ -1539,7 +1765,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             {
                 return Err(NOT_QUEUED.into());
             }
-            remove_queued_with(&running_service()?, &record, &id, || {})?;
+            remove_queued_with(&running_service()?, &Ledger::current(), &record, &id, || {})?;
             println!("{}", own_state(name)?);
         }
         "pause" | "resume" => return Err(NO_PROCESS.into()),
@@ -1774,13 +2000,21 @@ mod tests {
             ),
             ("GET /api/session/ses_A/inbox".into(), 200, inbox.clone()),
         ]));
+        let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
-            reconcile(&native, &record, &queued, "queued later").unwrap(),
+            reconcile(
+                &native,
+                &Ledger(dir.path().into()),
+                &record,
+                &queued,
+                "queued later"
+            )
+            .unwrap(),
             Delivery::Queued
         ));
     }
     #[test]
-    fn an_unknown_message_is_reposted_with_the_same_id_and_never_twice() {
+    fn an_unknown_message_is_uncertain_and_never_reposted() {
         let prompt = fixture(include_bytes!("../../tests/fixtures/opencode2/prompt.json"));
         let session = prompt["data"]["sessionID"].as_str().unwrap().to_owned();
         let record = json!({"conversation_id": session});
@@ -1791,13 +2025,17 @@ mod tests {
                 404,
                 json!({"_tag": "MessageNotFoundError"}),
             ),
-            (format!("GET /api/session/{session}/inbox"), 200, json!({"data": []})),
-            (format!("POST /api/session/{session}/prompt"), 200, prompt.clone()),
+            (
+                format!("GET /api/session/{session}/inbox"),
+                200,
+                json!({"data": []}),
+            ),
         ]));
-        assert!(matches!(
-            reconcile(&native, &record, &id, "hello").unwrap(),
-            Delivery::Delivered
-        ));
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            reconcile(&native, &Ledger(dir.path().into()), &record, &id, "hello").unwrap_err(),
+            UNCERTAIN_STATE
+        );
         assert!(native.0.borrow().is_empty());
     }
     #[test]
@@ -1808,7 +2046,15 @@ mod tests {
             200,
             json!({"data": {"id": "msg_X", "type": "user", "text": "other"}}),
         )]));
-        assert!(reconcile(&native, &record, "msg_X", "hello").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(reconcile(
+            &native,
+            &Ledger(dir.path().into()),
+            &record,
+            "msg_X",
+            "hello"
+        )
+        .is_err());
     }
     #[test]
     fn pending_forms_or_permissions_block_sending_but_a_busy_session_does_not() {
@@ -1845,6 +2091,7 @@ mod tests {
     struct Live {
         script: std::cell::RefCell<Vec<Step>>,
         posted: std::cell::RefCell<Vec<Value>>,
+        dir: PathBuf,
         path: PathBuf,
     }
     impl Native for Live {
@@ -1873,7 +2120,10 @@ mod tests {
                 steps.into_iter().map(|(p, r)| (p.to_owned(), r)).collect(),
             ),
             posted: Default::default(),
-            path: dir.join("receipt.json"),
+            dir: dir.into(),
+            path: dir
+                .join("receipts")
+                .join(format!("{}.json", string(&request(), "request_id"))),
         }
     }
     fn session_record() -> Value {
@@ -1891,7 +2141,14 @@ mod tests {
         ]
     }
     fn run(native: &Live, digest: &str) -> Result<Value> {
-        deliver(native, &session_record(), &request(), &native.path, digest.into(), None)
+        deliver(
+            native,
+            &Ledger(native.dir.clone()),
+            &session_record(),
+            &request(),
+            digest.into(),
+            None,
+        )
     }
     #[test]
     fn a_message_is_journaled_before_the_post_and_marked_queued_when_busy() {
@@ -1911,7 +2168,15 @@ mod tests {
                 self.0.raw(m, p, b)
             }
         }
-        let receipt = deliver(&Echo(&native), &session_record(), &request(), &native.path, "d".into(), None).unwrap();
+        let receipt = deliver(
+            &Echo(&native),
+            &Ledger(native.dir.clone()),
+            &session_record(),
+            &request(),
+            "d".into(),
+            None,
+        )
+        .unwrap();
         assert_eq!(receipt["status"], "submitted");
         assert_eq!(receipt["queued"], true);
         assert!(native.script.borrow().is_empty());
@@ -1963,7 +2228,15 @@ mod tests {
                 self.0.raw(m, p, b)
             }
         }
-        let error = deliver(&Loose(&native), &session_record(), &request(), &native.path, "d".into(), None).unwrap_err();
+        let error = deliver(
+            &Loose(&native),
+            &Ledger(native.dir.clone()),
+            &session_record(),
+            &request(),
+            "d".into(),
+            None,
+        )
+        .unwrap_err();
         assert!(error.starts_with("Delivery uncertain"));
         let first = native.posted.borrow()[0]["id"].as_str().unwrap().to_owned();
         let saved: Value = serde_json::from_slice(&fs::read(&native.path).unwrap()).unwrap();
@@ -1977,34 +2250,461 @@ mod tests {
                 ("GET /api/session/ses_A/message/ID", ok(json!({"data":{"id":first,"type":"user","text":"hello"}}))),
             ],
         );
-        let receipt = deliver(&Loose(&retry), &session_record(), &request(), &retry.path, "d".into(), None).unwrap();
+        let receipt = deliver(
+            &Loose(&retry),
+            &Ledger(retry.dir.clone()),
+            &session_record(),
+            &request(),
+            "d".into(),
+            None,
+        )
+        .unwrap();
         assert_eq!(receipt["status"], "submitted");
         assert_eq!(receipt["native_message_id"], first);
         assert!(retry.posted.borrow().is_empty());
     }
     #[test]
-    fn only_a_message_not_found_404_allows_the_inbox_and_repost() {
+    fn only_a_message_not_found_404_reads_the_inbox() {
         let record = json!({"conversation_id": "ses_A"});
         let native = Scripted(std::cell::RefCell::new(vec![(
             "GET /api/session/ses_A/message/msg_X".into(),
             404,
             json!({"_tag": "SessionNotFoundError"}),
         )]));
-        assert!(reconcile(&native, &record, "msg_X", "hello").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(reconcile(
+            &native,
+            &Ledger(dir.path().into()),
+            &record,
+            "msg_X",
+            "hello"
+        )
+        .is_err());
         assert!(native.0.borrow().is_empty());
     }
+    /// How the fake answers a DELETE of a queued message.
+    #[derive(Clone, Copy, Default, PartialEq)]
+    enum Deletion {
+        /// Removed, 204.
+        #[default]
+        Removes,
+        /// Removed, but the response is lost.
+        LostAfterRemoving,
+        /// Not removed, HTTP 500.
+        Fails,
+        /// Not removed, HTTP 404.
+        Missing,
+        /// Gone without a trace, HTTP 404.
+        MissingAndGone,
+        /// Delivered by a racing turn first; OpenCode 2.0.32 still answers 204.
+        DeliveredFirst,
+    }
+    /// One OpenCode 2.0.32 session `ses_A` in directory `/x`, modelled on the
+    /// pinned upstream inbox: a prompt ID is deduplicated only against the
+    /// current inbox and delivered messages, so a removed ID is admitted again.
+    #[derive(Default)]
+    struct World {
+        active: bool,
+        down: bool,
+        lose_post: bool,
+        deletion: Deletion,
+        inbox: Vec<Value>,
+        messages: Vec<Value>,
+        posts: usize,
+        deletes: usize,
+        calls: usize,
+    }
+    struct Fake(std::cell::RefCell<World>);
+    impl Native for &Fake {
+        fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+            let mut w = self.0.borrow_mut();
+            w.calls += 1;
+            if w.down {
+                return Err("connection refused".into());
+            }
+            let reply = |status: u16, body: Value| Ok(Response { status, body });
+            if let Some(id) = path.strip_prefix("/api/session/ses_A/message/") {
+                assert_eq!(method, "GET");
+                return match w.messages.iter().find(|m| m["id"] == id) {
+                    Some(m) => reply(200, json!({ "data": m })),
+                    None => reply(404, json!({"_tag": "MessageNotFoundError"})),
+                };
+            }
+            if let Some(id) = path.strip_prefix("/api/session/ses_A/inbox/") {
+                assert_eq!(method, "DELETE");
+                w.deletes += 1;
+                let id = id.to_owned();
+                let present = w.inbox.iter().any(|i| i["id"] == id.as_str());
+                let remove = |w: &mut World| w.inbox.retain(|i| i["id"] != id.as_str());
+                return match w.deletion {
+                    Deletion::Removes => {
+                        remove(&mut w);
+                        reply(204, Value::Null)
+                    }
+                    Deletion::LostAfterRemoving => {
+                        remove(&mut w);
+                        Err("connection reset".into())
+                    }
+                    Deletion::Fails => reply(500, json!({"message": "busy"})),
+                    Deletion::Missing => reply(404, json!({"_tag": "SessionNotFoundError"})),
+                    Deletion::MissingAndGone => {
+                        remove(&mut w);
+                        reply(404, json!({"_tag": "SessionNotFoundError"}))
+                    }
+                    Deletion::DeliveredFirst => {
+                        if present {
+                            remove(&mut w);
+                            w.messages
+                                .push(json!({"id": id, "type": "user", "text": "hello"}));
+                        }
+                        reply(204, Value::Null)
+                    }
+                };
+            }
+            match (method, path) {
+                ("GET", "/api/session/active") => {
+                    let data = if w.active {
+                        json!({"ses_A": {}})
+                    } else {
+                        json!({})
+                    };
+                    reply(200, json!({ "data": data }))
+                }
+                ("GET", "/api/session/ses_A") => reply(
+                    200,
+                    json!({"data": {"id": "ses_A", "location": {"directory": "/x"}}}),
+                ),
+                ("GET", "/api/session/ses_A/form") | ("GET", "/api/session/ses_A/permission") => {
+                    reply(200, json!({"data": []}))
+                }
+                ("GET", "/api/session/ses_A/inbox") => reply(200, json!({"data": w.inbox.clone()})),
+                ("POST", "/api/session/ses_A/prompt") => {
+                    w.posts += 1;
+                    let body = body.unwrap();
+                    let item = json!({"id": body["id"], "sessionID": "ses_A", "type": "user", "delivery": "queue", "payload": {"text": body["text"]}});
+                    let known = w.inbox.iter().any(|i| i["id"] == body["id"])
+                        || w.messages.iter().any(|m| m["id"] == body["id"]);
+                    if !known {
+                        if w.active {
+                            w.inbox.push(item.clone());
+                        } else {
+                            w.messages.push(
+                                json!({"id": body["id"], "type": "user", "text": body["text"]}),
+                            );
+                        }
+                    }
+                    if w.lose_post {
+                        // The process loses the service right after the POST.
+                        w.down = true;
+                        return Err("connection reset".into());
+                    }
+                    reply(200, json!({ "data": item }))
+                }
+                _ => panic!("unexpected {method} {path}"),
+            }
+        }
+    }
+    impl Fake {
+        fn new() -> Self {
+            Fake(Default::default())
+        }
+        fn w(&self) -> std::cell::RefMut<'_, World> {
+            self.0.borrow_mut()
+        }
+        /// The message `hello` of `request()` was admitted while the session
+        /// was busy, every response after the POST was lost, and the user
+        /// then stopped the session: the receipt is pending, the message
+        /// queued and removable.
+        fn queued_while_pending(dir: &Path) -> (Self, String) {
+            let fake = Fake::new();
+            fake.w().active = true;
+            fake.w().lose_post = true;
+            let error = t_deliver(&fake, dir).unwrap_err();
+            assert_eq!(error, UNCERTAIN_REPLAY);
+            let receipt = t_receipt(dir);
+            assert_eq!(receipt["status"], "pending");
+            let id = receipt["native_message_id"].as_str().unwrap().to_owned();
+            let mut w = fake.w();
+            assert_eq!(w.posts, 1);
+            assert_eq!(w.inbox.len(), 1);
+            w.down = false;
+            w.lose_post = false;
+            w.active = false;
+            drop(w);
+            (fake, id)
+        }
+    }
+    fn t_receipt_path(dir: &Path) -> PathBuf {
+        dir.join("receipts")
+            .join(format!("{}.json", string(&request(), "request_id")))
+    }
+    fn t_receipt(dir: &Path) -> Value {
+        serde_json::from_slice(&fs::read(t_receipt_path(dir)).unwrap()).unwrap()
+    }
+    fn t_deliver(fake: &Fake, dir: &Path) -> Result<Value> {
+        deliver(
+            &fake,
+            &Ledger(dir.into()),
+            &session_record(),
+            &request(),
+            "d".into(),
+            None,
+        )
+    }
+    fn t_remove(fake: &Fake, dir: &Path, id: &str) -> Result<()> {
+        remove_queued_with(&fake, &Ledger(dir.into()), &session_record(), id, || {})
+    }
+    fn t_reconcile(fake: &Fake, dir: &Path, id: &str) -> Result<Delivery> {
+        reconcile(&fake, &Ledger(dir.into()), &session_record(), id, "hello")
+    }
+    fn t_reconcile_receipt(fake: &Fake, dir: &Path, receipt: &mut Value) -> Result<bool> {
+        reconcile_receipt_with(&Ledger(dir.into()), &session_record(), receipt, || Ok(fake))
+    }
+    const T_REMOVED: &str = "Removed from the OpenCode queue before delivery";
     #[test]
-    fn a_refused_repost_is_a_definite_refusal() {
-        let record = json!({"conversation_id": "ses_A"});
-        let native = Scripted(std::cell::RefCell::new(vec![
-            ("GET /api/session/ses_A/message/msg_X".into(), 404, json!({"_tag": "MessageNotFoundError"})),
-            ("GET /api/session/ses_A/inbox".into(), 200, json!({"data": []})),
-            ("POST /api/session/ses_A/prompt".into(), 422, json!({"message": "no"})),
-        ]));
-        assert!(matches!(
-            reconcile(&native, &record, "msg_X", "hello").unwrap(),
-            Delivery::Refused(_)
-        ));
+    fn a_message_removed_while_its_receipt_is_pending_is_never_reposted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        t_remove(&fake, dir.path(), &id).unwrap();
+        assert!(fake.w().inbox.is_empty());
+        // The same request again: a definite non-delivery, never a second POST.
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), T_REMOVED);
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), T_REMOVED);
+        let w = fake.w();
+        assert_eq!((w.posts, w.deletes), (1, 1));
+        assert!(w.inbox.is_empty() && w.messages.is_empty());
+        let receipt = t_receipt(dir.path());
+        assert_eq!(
+            (receipt["status"].as_str(), receipt["reason"].as_str()),
+            (Some("refused"), Some(T_REMOVED))
+        );
+        assert_eq!(receipt["native_message_id"], id);
+    }
+    #[test]
+    fn a_late_reconciliation_after_removal_is_refused_without_contacting_opencode() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        let mut receipt = t_receipt(dir.path());
+        // A receipt the removal could not find by its message ID.
+        let _ = fs::remove_dir_all(dir.path().join("receipt-index"));
+        t_remove(&fake, dir.path(), &id).unwrap();
+        assert_eq!(t_receipt(dir.path())["status"], "pending");
+        let calls = fake.w().calls;
+        assert_eq!(
+            t_reconcile_receipt(&fake, dir.path(), &mut receipt).unwrap_err(),
+            T_REMOVED
+        );
+        assert_eq!(fake.w().calls, calls);
+        assert_eq!(fake.w().posts, 1);
+        assert_eq!(
+            (receipt["status"].as_str(), receipt["reason"].as_str()),
+            (Some("refused"), Some(T_REMOVED))
+        );
+        assert_eq!(t_receipt(dir.path()), receipt);
+    }
+    #[test]
+    fn a_message_in_neither_history_nor_inbox_is_uncertain_and_never_posted() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::new();
+        assert!(t_reconcile(&fake, dir.path(), "msg_X").is_err());
+        assert_eq!(fake.w().posts, 0);
+        // A journaled request whose POST never reached OpenCode is not sent either.
+        let (fake, _) = Fake::queued_while_pending(dir.path());
+        fake.w().inbox.clear();
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), UNCERTAIN_REPLAY);
+        assert_eq!(fake.w().posts, 1);
+        assert_eq!(t_receipt(dir.path())["status"], "pending");
+    }
+    #[test]
+    fn stale_removal_targets_are_refused_without_a_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let item = |session: &str| json!({"id": "msg_Q", "sessionID": session, "type": "user", "delivery": "queue", "payload": {"text": "hello"}});
+        // Each refusal is clean: no DELETE and no removal record.
+        let refused_untouched = |fake: &Fake| {
+            assert_eq!(t_remove(fake, dir.path(), "msg_Q").unwrap_err(), NOT_QUEUED);
+            assert_eq!(fake.w().deletes, 0);
+            let ledger = Ledger(dir.path().into());
+            assert_eq!(ledger.removal(&session_record(), "msg_Q").unwrap(), None);
+            assert!(!ledger.removals_path().exists());
+        };
+        // Not queued.
+        refused_untouched(&Fake::new());
+        // Already delivered: present in history. Without the history check
+        // before the DELETE this would record an intent and DELETE.
+        let fake = Fake::new();
+        fake.w().inbox.push(item("ses_A"));
+        fake.w()
+            .messages
+            .push(json!({"id": "msg_Q", "type": "user", "text": "hello"}));
+        refused_untouched(&fake);
+        // Listed for another session.
+        let fake = Fake::new();
+        fake.w().inbox.push(item("ses_B"));
+        refused_untouched(&fake);
+        // The session is running.
+        let fake = Fake::new();
+        fake.w().inbox.push(item("ses_A"));
+        fake.w().active = true;
+        refused_untouched(&fake);
+    }
+    /// A scoped Remove for another run or session is refused before any
+    /// native call or removal record.
+    #[test]
+    fn a_removal_for_another_run_or_session_touches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let fake = Fake::new();
+        fake.w().inbox.push(json!({"id": "msg_Q", "sessionID": "ses_A", "type": "user", "delivery": "queue", "payload": {"text": "hello"}}));
+        // No binding exists under this name, so nothing past the identity
+        // check could succeed either.
+        let name = format!("opencode/p/{}", uuid::Uuid::new_v4());
+        for (run, conversation) in [("r2", "ses_A"), ("r1", "ses_B")] {
+            let scope = session_action::Scope::expecting(&name, run, conversation);
+            let mut record =
+                json!({"name": name, "run_id": "r1", "conversation_id": "ses_A", "cwd": "/x"});
+            let connected = std::cell::Cell::new(false);
+            let error = action_in(
+                &ledger,
+                || {
+                    connected.set(true);
+                    Ok(&fake)
+                },
+                &mut record,
+                "remove_queued",
+                None,
+                Some("msg_Q"),
+                Some(&scope),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                "Session identity changed; no replacement session was selected"
+            );
+            assert!(!connected.get());
+            assert!(!scope.was_changing());
+            let w = fake.w();
+            assert_eq!((w.calls, w.deletes, w.inbox.len()), (0, 0, 1));
+            drop(w);
+            assert_eq!(ledger.removal(&session_record(), "msg_Q").unwrap(), None);
+            assert!(!ledger.removals_path().exists());
+        }
+    }
+    #[test]
+    fn a_lost_or_failed_delete_never_allows_a_repost() {
+        for deletion in [Deletion::LostAfterRemoving, Deletion::Fails] {
+            let dir = tempfile::tempdir().unwrap();
+            let (fake, id) = Fake::queued_while_pending(dir.path());
+            fake.w().deletion = deletion;
+            assert!(t_remove(&fake, dir.path(), &id).is_err());
+            assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), UNCERTAIN_REPLAY);
+            assert_eq!(fake.w().posts, 1);
+            assert_eq!(t_receipt(dir.path())["status"], "pending");
+            assert!(fake.w().messages.is_empty());
+        }
+    }
+    #[test]
+    fn a_missing_delete_is_delivered_only_when_history_shows_it() {
+        // 404, and the message is later delivered: reported delivered.
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        fake.w().deletion = Deletion::Missing;
+        assert_eq!(t_remove(&fake, dir.path(), &id).unwrap_err(), NOT_QUEUED);
+        let mut w = fake.w();
+        w.inbox.clear();
+        w.messages
+            .push(json!({"id": id, "type": "user", "text": "hello"}));
+        drop(w);
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap()["status"], "submitted");
+        assert_eq!(t_receipt(dir.path())["status"], "submitted");
+        // 404, and the message is nowhere: uncertain, never posted again.
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        fake.w().deletion = Deletion::MissingAndGone;
+        assert_eq!(t_remove(&fake, dir.path(), &id).unwrap_err(), NOT_QUEUED);
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), UNCERTAIN_REPLAY);
+        assert_eq!(fake.w().posts, 1);
+        assert_eq!(t_receipt(dir.path())["status"], "pending");
+    }
+    #[test]
+    fn a_204_for_a_message_delivered_meanwhile_is_not_a_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        fake.w().deletion = Deletion::DeliveredFirst;
+        assert_eq!(t_remove(&fake, dir.path(), &id).unwrap_err(), NOT_QUEUED);
+        assert_eq!(t_receipt(dir.path())["status"], "pending");
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap()["status"], "submitted");
+        assert_eq!(fake.w().posts, 1);
+    }
+    #[test]
+    fn a_crash_between_the_intent_and_the_delete_never_reposts() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        // The intent was written, then the process died before the DELETE.
+        ledger
+            .record_removal(&session_record(), &id, Removal::Intended)
+            .unwrap();
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), UNCERTAIN_REPLAY);
+        let mut receipt = t_receipt(dir.path());
+        assert!(t_reconcile_receipt(&fake, dir.path(), &mut receipt).is_err());
+        assert_eq!(t_receipt(dir.path())["status"], "pending");
+        let w = fake.w();
+        assert_eq!((w.posts, w.inbox.len()), (1, 1));
+        drop(w);
+        // Removing it again confirms the removal.
+        t_remove(&fake, dir.path(), &id).unwrap();
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), T_REMOVED);
+        assert_eq!(fake.w().posts, 1);
+        assert!(fake.w().messages.is_empty());
+    }
+    #[test]
+    fn a_message_indexed_for_another_session_is_not_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        atomic(
+            &ledger.index("msg_Q"),
+            &json!({"request_id": "22222222-2222-4222-8222-222222222222", "conversation_id": "ses_B"}).to_string(),
+        )
+        .unwrap();
+        let fake = Fake::new();
+        fake.w().inbox.push(json!({"id": "msg_Q", "sessionID": "ses_A", "type": "user", "payload": {"text": "hello"}}));
+        assert_eq!(
+            t_remove(&fake, dir.path(), "msg_Q").unwrap_err(),
+            NOT_QUEUED
+        );
+        assert_eq!(fake.w().deletes, 0);
+        assert_eq!(ledger.removal(&session_record(), "msg_Q").unwrap(), None);
+    }
+    #[test]
+    fn removal_records_are_bounded_and_unreadable_ones_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let entries: Vec<Value> = (0..REMOVAL_LIMIT)
+            .map(|n| json!({"conversation_id": "ses_A", "message_id": format!("msg_{n}"), "state": "removed"}))
+            .collect();
+        atomic(
+            &ledger.removals_path(),
+            &json!({ "removals": entries }).to_string(),
+        )
+        .unwrap();
+        ledger
+            .record_removal(&session_record(), "msg_new", Removal::Intended)
+            .unwrap();
+        let kept = ledger.removals().unwrap();
+        assert_eq!(kept.len(), REMOVAL_LIMIT);
+        assert_eq!(kept[0]["message_id"], "msg_1");
+        assert_eq!(
+            ledger.removal(&session_record(), "msg_new").unwrap(),
+            Some(Removal::Intended)
+        );
+        // Unreadable records never read as "no removal" and block a removal.
+        fs::write(ledger.removals_path(), b"{\"removals\":").unwrap();
+        let (fake, id) = Fake::queued_while_pending(dir.path());
+        assert!(t_reconcile(&fake, dir.path(), &id).is_err());
+        assert!(t_remove(&fake, dir.path(), &id).is_err());
+        assert_eq!(t_deliver(&fake, dir.path()).unwrap_err(), UNCERTAIN_REPLAY);
+        let w = fake.w();
+        assert_eq!((w.posts, w.deletes), (1, 0));
     }
     fn opencode2(name: &str) -> Value {
         let path = format!(
@@ -2529,28 +3229,100 @@ mod tests {
     }
     #[test]
     fn a_queued_message_is_removed_only_while_stopped_and_still_queued() {
-        let inbox = json!({"data":[{"id":"msg_A","type":"user","payload":{"text":"x"}}]});
+        let inbox = json!({"data":[{"id":"msg_A","sessionID":"ses_A","type":"user","payload":{"text":"x"}}]});
+        let unknown = json!({"_tag": "MessageNotFoundError"});
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
         let ok = seen(vec![
             ("GET /api/session/ses_A/inbox", 200, inbox.clone()),
             ("GET /api/session/active", 200, json!({"data": {}})),
+            ("GET /api/session/ses_A/message/msg_A", 404, unknown.clone()),
             ("DELETE /api/session/ses_A/inbox/msg_A", 204, Value::Null),
+            ("GET /api/session/ses_A/inbox", 200, json!({"data": []})),
+            ("GET /api/session/ses_A/message/msg_A", 404, unknown.clone()),
         ]);
         let calls = std::cell::Cell::new(0);
-        remove_queued_with(&ok, &bound(), "msg_A", || calls.set(calls.get() + 1)).unwrap();
+        remove_queued_with(&ok, &ledger, &bound(), "msg_A", || {
+            // The intent is durable before the DELETE.
+            assert_eq!(
+                ledger.removal(&bound(), "msg_A").unwrap(),
+                Some(Removal::Intended)
+            );
+            calls.set(calls.get() + 1)
+        })
+        .unwrap();
         assert_eq!(calls.get(), 1);
         assert!(ok.script.borrow().is_empty());
-        let gone = seen(vec![("GET /api/session/ses_A/inbox", 200, json!({"data":[]}))]);
         assert_eq!(
-            remove_queued_with(&gone, &bound(), "msg_A", || panic!("no change")).unwrap_err(),
+            ledger.removal(&bound(), "msg_A").unwrap(),
+            Some(Removal::Removed)
+        );
+        // Removal records are per session.
+        assert_eq!(
+            ledger
+                .removal(&json!({"conversation_id": "ses_B"}), "msg_A")
+                .unwrap(),
+            None
+        );
+        let gone = seen(vec![(
+            "GET /api/session/ses_A/inbox",
+            200,
+            json!({"data":[]}),
+        )]);
+        assert_eq!(
+            remove_queued_with(&gone, &ledger, &bound(), "msg_A", || panic!("no change"))
+                .unwrap_err(),
             NOT_QUEUED
         );
         let active = seen(vec![
-            ("GET /api/session/ses_A/inbox", 200, inbox),
-            ("GET /api/session/active", 200, json!({"data": {"ses_A": {}}})),
+            ("GET /api/session/ses_A/inbox", 200, inbox.clone()),
+            (
+                "GET /api/session/active",
+                200,
+                json!({"data": {"ses_A": {}}}),
+            ),
         ]);
         assert_eq!(
-            remove_queued_with(&active, &bound(), "msg_A", || panic!("no change")).unwrap_err(),
+            remove_queued_with(&active, &ledger, &bound(), "msg_A", || panic!("no change"))
+                .unwrap_err(),
             NOT_QUEUED
+        );
+        // History that cannot be read is not "never delivered".
+        let unread = seen(vec![
+            ("GET /api/session/ses_A/inbox", 200, inbox.clone()),
+            ("GET /api/session/active", 200, json!({"data": {}})),
+            (
+                "GET /api/session/ses_A/message/msg_A",
+                500,
+                json!({"message": "down"}),
+            ),
+        ]);
+        let fresh = Ledger(dir.path().join("unread"));
+        assert_eq!(
+            remove_queued_with(&unread, &fresh, &bound(), "msg_A", || panic!("no change"))
+                .unwrap_err(),
+            "OpenCode could not confirm this message is still queued"
+        );
+        // It reached the history read, and nothing was recorded or deleted.
+        assert!(unread.script.borrow().is_empty());
+        assert_eq!(fresh.removal(&bound(), "msg_A").unwrap(), None);
+        assert!(!fresh.removals_path().exists());
+        // A 204 whose message is still listed is not a confirmed removal.
+        let listed = seen(vec![
+            ("GET /api/session/ses_A/inbox", 200, inbox.clone()),
+            ("GET /api/session/active", 200, json!({"data": {}})),
+            ("GET /api/session/ses_A/message/msg_A", 404, unknown.clone()),
+            ("DELETE /api/session/ses_A/inbox/msg_A", 204, Value::Null),
+            ("GET /api/session/ses_A/inbox", 200, inbox),
+        ]);
+        let other = Ledger(dir.path().join("other"));
+        assert_eq!(
+            remove_queued_with(&listed, &other, &bound(), "msg_A", || {}).unwrap_err(),
+            REMOVAL_UNCONFIRMED
+        );
+        assert_eq!(
+            other.removal(&bound(), "msg_A").unwrap(),
+            Some(Removal::Intended)
         );
     }
     #[test]

@@ -62,7 +62,9 @@ OpenCode 2.0.32 (`/openapi.json`, 119 paths):
   `metadata` object and the whole `permissions` list);
   `/api/session/active`.
 - Messages: `POST /prompt` with optional client message `id` (`^msg_`;
-  posting the same ID again returns the original admission), `text`, `files`
+  posting the same ID again returns the original admission while it is still
+  in `/inbox` or history; once `DELETE /inbox/{id}` removed it, the same ID is
+  admitted again as a new message), `text`, `files`
   (`uri`, `name`; at most 20 MiB each), `delivery` (`steer` or `queue`;
   `steer` when omitted) and `resume`. A queued prompt is listed in `/inbox`
   and `GET /message/{id}` returns 404 until OpenCode runs it; queued items
@@ -72,7 +74,9 @@ OpenCode 2.0.32 (`/openapi.json`, 119 paths):
   400 for an empty session); `/form`, `/form/{id}/reply`
   (`{"answer": {<key>: value}}`); `/permission`, `/permission/{id}/reply`
   (`once`, `always`, `reject`; a reject rejects every pending request of that
-  session); `/inbox` and `DELETE /inbox/{id}`.
+  session); `/inbox` and `DELETE /inbox/{id}` (it deletes the pending row and
+  keeps no tombstone; 204 even when the item had already left the inbox, 404
+  only for an unknown session).
 - Catalog routes (`/api/model`, `/api/provider`, `/api/integration`) take a
   `location`; a project `opencode.json` adds providers for that folder only.
   Their responses include provider `settings`, `headers` and `body`, which can
@@ -144,7 +148,9 @@ ensures the service, see Service lifecycle); a Node sidecar using
    `service-<channel>.json` for the channel the installed CLI reports.
 2. Parse `id`, `version`, `url`, `pid` and optional `password`. Require a
    loopback HTTP `url` and a live `pid`. Never log or forward the password,
-   URL or file contents.
+   URL or file contents. Only a file that does not exist means no service; a
+   registration that exists but cannot be read, is oversized or does not
+   parse makes the service unavailable.
 3. `GET /api/info` with basic authentication within 2 seconds. Readiness is
    HTTP 200 with a version at or above `OPENCODE_MINIMUM` (2.0.32).
 4. Fetch `/openapi.json` once per service identity (`id`, `pid`, `version`,
@@ -171,7 +177,8 @@ ensures the service, see Service lifecycle); a Node sidecar using
 - `Start OpenCode` is an explicit action (Accounts, New session, a session's
   unavailable banner) and launch implicitly starts it. Start runs only when no
   registration file exists or its `pid` is not alive; it never runs while a
-  registered process is alive, however slow. It starts
+  registered process is alive, however slow, nor while an existing
+  registration cannot be read. It starts
   `opencode service start` with the environment `hgs` uses for new tmux
   servers, additionally without `HGS_*`, `SSH_*`, `OPENCODE_SERVER_*` and
   the connector's own variables, detached from `hgs`, and on Linux in its own
@@ -206,14 +213,29 @@ New session and launch validation use the selected project folder.
 - Bindings store run ID, session ID, directory and name. The service URL and
   password come only from the registration file.
 - Each message gets a pre-generated `msg_` ID recorded in the durable request
-  journal before `POST /prompt` with `delivery: queue` always. A lost
-  response is reconciled with `GET /message/{id}`, then `GET /inbox`, then by
-  posting the same ID again, which returns the original admission without a
-  second message. Only when the service stays unreachable does the result
-  remain uncertain for explicit inspection, as today.
+  journal, with a private index from that ID to its request, before
+  `POST /prompt` with `delivery: queue` always. A lost response is reconciled
+  with `GET /message/{id}`, then `GET /inbox`. Zerus never posts the same ID
+  again: OpenCode forgets an ID once its queued message is removed, so a
+  repost could deliver a message the user removed. A message found in
+  neither place, like an unreachable service, leaves the result uncertain for
+  explicit inspection, and the request is never replayed.
 - Pending inbox items appear in Activity as queued. After Stop they stay
   visible as not delivered, with Remove (`DELETE /inbox/{id}`) behind a
-  confirmation.
+  confirmation. Remove requires the item in this session's inbox, the session
+  not running, the ID absent from history and no Zerus request index naming
+  another session for that ID; a scoped Remove for another run or session is
+  refused before any native call. Before the DELETE, Zerus records
+  a removal intent for the session and message ID in private state (the
+  newest 5000 records): it forbids any repost but proves nothing. Because the
+  DELETE answers 204 even for an item that already left the inbox, Zerus then
+  reads the inbox and, after it, history; only a message gone from both is a
+  confirmed removal. Its request then reports the definite non-delivery
+  "Removed from the OpenCode queue before delivery" (a voice transcript
+  becomes failed), and every later reconciliation answers the same without
+  contacting OpenCode. A lost, failed or 404 DELETE keeps the intent: the
+  message counts as delivered if history shows it, otherwise it stays
+  uncertain.
 - Voice transcripts use the same guarded text path.
 - Every `PATCH` reads the session first and writes back the complete
   `metadata` object or `permissions` list, so the `zerus` metadata key and
@@ -389,15 +411,20 @@ unavailable with reasons.
   names, dead `pid`), version comparison, OpenAPI requirement checks, ID
   formats, the catalog allowlist against fixtures carrying keys and headers,
   form mapping and answer validation, permission rulesets, inbox
-  reconciliation, bounds.
+  reconciliation without a repost, queue removal (stale targets, intent before
+  the DELETE, confirmation, lost or failed DELETE, removal records bounded and
+  failing closed), unreadable registrations (including a directory in its
+  place) never starting the service, bounds.
 - Native qualification (`tests/test_opencode_native.py`) against the actual
   minimum OpenCode with private `XDG_*` directories, a private service port
   and an offline catalog, its own service registration and a keyless local
   model fixture. Phase 1: launch with own IDs, lost launch and message
   responses (including a queued message), Stop with a pending queue item,
-  history pages, model and variant, question-tool forms and permissions,
-  OpenCode 1 binding adoption and refusal, service not running, start only
-  with a dead registration, incompatible version and missing operation.
+  a queued message removed while its receipt is pending and never delivered
+  by a same-request retry (`test_10`), history pages, model and variant,
+  question-tool forms and permissions, OpenCode 1 binding adoption and
+  refusal, service not running, start only with a dead registration,
+  incompatible version and missing operation.
   Phase 2: children and `Background`, compaction, fork reconciliation,
   attachments, Bypass with a configured deny.
 - Qt tests for effort, forms and allowed actions; Android and iOS tests from
