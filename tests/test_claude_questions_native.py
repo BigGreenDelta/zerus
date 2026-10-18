@@ -475,8 +475,17 @@ sys.exit(result.returncode)
   (folder/'claimed.json').write_text(json.dumps(dict(request_id=str(uuid.uuid4()),answers={})))
   card=self.inspect()['pending_questions'][0]
   self.assertFalse(card['can_answer']);self.assertIn("Claude's answer channel",card['answer_unavailable_reason'])
-  before=self.screen();self.assertIn("Claude's answer channel",self.answer(success=False))
-  self.assertEqual(self.screen(),before);self.assertIn('Which release should we prepare?',self.screen())
+  self.enable_gutter_capture(False)
+  def question_region(screen):
+   rows=screen.splitlines();first=next((i for i,row in enumerate(rows) if 'Which release should we prepare?' in row),-1)
+   self.assertGreaterEqual(first,0)
+   return first,rows[first:]
+  before=question_region(self.screen());self.reset_events()
+  self.assertIn("Claude's answer channel",self.answer(success=False))
+  # The logo above the question animates; every question/editor/footer row and
+  # its position must stay exact, and no input or staged text may be emitted.
+  self.assertEqual(question_region(self.screen()),before);self.assertIn('Which release should we prepare?',self.screen())
+  self.assertEqual(self.events(),[]);self.assertEqual(self.staged(),[])
  def test_channel_single_killed_falls_back_to_screen(self):
   self.channel_card();waiting,folder=self.channel();os.kill(waiting['pid'],signal.SIGKILL)
   self.wait_for(lambda:not self.running(waiting['pid']))
