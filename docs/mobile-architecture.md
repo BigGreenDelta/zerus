@@ -626,9 +626,10 @@ Terminal snapshot results expire 120 seconds after entering a completed, failed
 or uncertain relay state.
 Abandoned claims first become uncertain through claim expiry or relay restart,
 then expire on the same schedule. Durable input attempt identities remain.
-Authenticated role/IP limits allow
-2,400 requests per minute for interactive reads, with a separate global limit
-of 6,000 and unchanged invitation limits. Terminal remains capability-gated for
+The relay allows each credential
+2,400 authenticated requests per minute, admits work through bounded lanes and
+keeps its invitation limits; global and per-address limits belong to the reverse
+proxy (see [Mobile deployment](mobile-deployment.md)). Terminal remains capability-gated for
 unsupported native adapters, archived sessions and child activity views.
 
 ### Conversation history and composition

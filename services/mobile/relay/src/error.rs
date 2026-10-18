@@ -16,6 +16,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl Error {
     pub const BAD: Self = Self(StatusCode::BAD_REQUEST, "invalid request");
     pub const BUSY: Self = Self(StatusCode::TOO_MANY_REQUESTS, "relay capacity is busy");
+    // A workspace's own limits, which its phone shows: the relay is not busy,
+    // the phone has to wait for its computers to collect what is queued.
+    pub const QUEUE_FULL: Self = Self(StatusCode::TOO_MANY_REQUESTS, "workspace queue is full");
+    pub const RETAINED_REQUESTS: Self = Self(
+        StatusCode::TOO_MANY_REQUESTS,
+        "workspace retained request limit reached",
+    );
+    pub const RETAINED_PAYLOAD: Self = Self(
+        StatusCode::TOO_MANY_REQUESTS,
+        "workspace retained payload budget is full",
+    );
     pub const UNAVAILABLE: Self = Self(
         StatusCode::SERVICE_UNAVAILABLE,
         "relay temporarily unavailable",
