@@ -125,7 +125,8 @@ The project directory remains on the agent computer.
 - **Permissions.** Allow once, Always allow or Reject. Reject rejects every
   pending request of that session.
 - **Model and effort** can be changed; **rename** changes the session title.
-- **Forget** removes only the Zerus binding; native history is kept.
+- **Forget** removes the Zerus binding and its local history cache; native
+  history is kept. The cache keeps at most 64 recent conversations and 256 MiB.
 - **Voice** transcripts use the same guarded send path; a refused voice message
   shows as failed, and the original audio stays in Zerus history.
 

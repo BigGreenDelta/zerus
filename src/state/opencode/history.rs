@@ -70,7 +70,67 @@ fn load_at(path: &Path, record: &Value) -> Option<Cache> {
 /// Best effort: the cache only saves reading older pages again.
 fn save_at(path: &Path, record: &Value, page: &Page) {
     let value = json!({"conversation_id": record["conversation_id"], "truncated": page.truncated, "messages": page.messages});
-    let _ = atomic(path, &value.to_string());
+    if atomic(path, &value.to_string()).is_ok() {
+        if let Some(dir) = path.parent() {
+            prune(dir, path, CACHE_FILES, CACHE_BYTES);
+        }
+    }
+}
+/// Forgetting a session drops its cache; a later binding reads it again.
+pub(super) fn forget(record: &Value) {
+    let _ = std::fs::remove_file(cache_path(record));
+}
+
+/// The cache directory keeps at most this many conversations and bytes.
+const CACHE_FILES: usize = 64;
+const CACHE_BYTES: u64 = 256 * 1024 * 1024;
+/// A temporary file left by an interrupted save is removed after this long.
+const STALE_TEMP: Duration = Duration::from_secs(3600);
+
+fn cache_name(name: &str) -> bool {
+    name.strip_suffix(".json").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+/// Best effort: removes the least recently saved caches beyond the bounds,
+/// never `keep`, and temporary files of interrupted saves.
+fn prune(dir: &Path, keep: &Path, files: usize, bytes: u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut caches = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !meta.is_file() {
+            continue;
+        }
+        if name.starts_with(".hgs-") {
+            if now.duration_since(modified).is_ok_and(|age| age > STALE_TEMP) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        } else if cache_name(&name) && entry.path() != keep {
+            caches.push((modified, meta.len(), entry.path()));
+        }
+    }
+    let mut count = 1;
+    let mut total = std::fs::metadata(keep).map_or(0, |m| m.len());
+    caches.sort_by_key(|cache| std::cmp::Reverse(cache.0));
+    for (_, len, path) in caches {
+        count += 1;
+        total = total.saturating_add(len);
+        if count > files || total > bytes {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn valid(message: &Value) -> bool {
@@ -753,6 +813,83 @@ mod tests {
         let native = pages(vec![odd]);
         let (page, _) = scan(&native, &record(), None, Bounds::default(), later()).unwrap();
         assert_eq!(ids(&page), ["msg_1"]);
+    }
+
+    fn aged(path: &Path, seconds: u64) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        let then = std::time::SystemTime::now() - Duration::from_secs(seconds);
+        file.set_modified(then).unwrap();
+    }
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn pruning_drops_the_least_recently_saved_caches_beyond_the_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = |n: u8| format!("{}.json", format!("{n:x}").repeat(64));
+        // Saved oldest to newest: 1, 2, 3, 4, 5.
+        for n in 1..=5u8 {
+            std::fs::write(dir.path().join(name(n)), [b'x'; 10]).unwrap();
+            aged(&dir.path().join(name(n)), 100 - u64::from(n));
+        }
+        // 3 was just saved: it stays although 4 and 5 are newer.
+        let keep = dir.path().join(name(3));
+        prune(dir.path(), &keep, 3, u64::MAX);
+        assert_eq!(names(dir.path()), [name(3), name(4), name(5)]);
+        // 3 and 5 fit in 20 bytes; 4 does not.
+        prune(dir.path(), &keep, 10, 20);
+        assert_eq!(names(dir.path()), [name(3), name(5)]);
+        // The kept cache stays even when it alone exceeds the byte bound.
+        prune(dir.path(), &keep, 10, 1);
+        assert_eq!(names(dir.path()), [name(3)]);
+    }
+
+    #[test]
+    fn pruning_keeps_other_names_and_fresh_temporary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep = dir.path().join(format!("{}.json", "a".repeat(64)));
+        std::fs::write(&keep, b"x").unwrap();
+        for name in [".hgs-old", ".hgs-fresh", "notes.json", &format!("{}.json", "A".repeat(64))] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        std::fs::create_dir(dir.path().join(format!("{}.json", "b".repeat(64)))).unwrap();
+        aged(&dir.path().join(".hgs-old"), 7200);
+        prune(dir.path(), &keep, 1, 1);
+        let mut expected = vec![
+            ".hgs-fresh".to_owned(),
+            format!("{}.json", "A".repeat(64)),
+            format!("{}.json", "a".repeat(64)),
+            format!("{}.json", "b".repeat(64)),
+            "notes.json".to_owned(),
+        ];
+        expected.sort();
+        assert_eq!(names(dir.path()), expected);
+    }
+
+    #[test]
+    fn saving_a_cache_prunes_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = Page {
+            messages: vec![message("msg_1", "x")],
+            truncated: true,
+        };
+        for n in 0..CACHE_FILES {
+            let path = dir.path().join(format!("{n:064x}.json"));
+            std::fs::write(&path, b"{}").unwrap();
+            aged(&path, 1000 + n as u64);
+        }
+        let path = dir.path().join(format!("{}.json", "f".repeat(64)));
+        save_at(&path, &record(), &page);
+        assert_eq!(names(dir.path()).len(), CACHE_FILES);
+        assert!(path.exists());
+        // The oldest older cache went first.
+        assert!(!dir.path().join(format!("{:064x}.json", CACHE_FILES - 1)).exists());
     }
 
     #[test]

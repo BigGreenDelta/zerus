@@ -1688,6 +1688,7 @@ fn action_in<N: Native>(
     }
     if action == "forget" {
         archive::remove_synced(&binding_path(&old))?;
+        history::forget(record);
         return Ok(());
     }
     save(record)?;

@@ -925,5 +925,18 @@ class OpenCodeNative(unittest.TestCase):
         self.assertEqual([r for r in self.model.requests if r['last_user'] == left_text and r['tools']][1:], [])
 
 
+    def test_12_forget_drops_the_history_cache_and_keeps_native_history(self):
+        b = self.create()
+        name, conversation = b['name'], b['conversation_id']
+        sent = self.hgs(['send', name, '--json'], self.payload(b, text='Cached turn'))
+        self.wait(name, lambda v: v['phase'] == 'idle' and any(
+            e.get('message_id') == sent['native_message_id'] for e in v['events']))
+        cache = self.state / 'opencode/history' / (hashlib.sha256(conversation.encode()).hexdigest() + '.json')
+        self.assertTrue(cache.is_file())
+        self.action(b, 'forget')
+        self.assertFalse(self.binding_path(name).exists())
+        self.assertFalse(cache.exists())
+        self.assertIn((sent['native_message_id'], 'Cached turn'), self.user_messages(conversation))
+
 if __name__ == '__main__':
     unittest.main()
