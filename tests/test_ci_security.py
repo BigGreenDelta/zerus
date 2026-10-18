@@ -367,6 +367,15 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("        working-directory: mobile/android\n"
                       "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true\n", listed[gradle])
         self.assertIn("-PzerusFirebase=true", signed)
+        # The notices must list exactly the resolved release classpath, with its artifacts,
+        # of the same Firebase build; the generator downloads only missing POM files.
+        notices = names.index("Android library notices match the release classpath")
+        self.assertLess(gradle, notices)
+        self.assertLess(notices, names.index("Save Gradle cache"))
+        self.assertIn("        working-directory: mobile/android\n        run: |\n"
+                      "          ./gradlew --no-daemon -q --init-script ../../scripts/android-resolved-artifacts.gradle"
+                      " -PzerusFirebase=true :app:zerusResolvedNotices\n"
+                      "          python3 -I ../../scripts/android-notices.py --check\n", listed[notices])
         config = re.search(r"(?s)cat > mobile/android/app/google-services\.json <<'JSON'\n(.*?)\n          JSON\n",
                            listed[configure])[1]
         self.assertEqual(json.loads(textwrap.dedent(config)), {

@@ -474,6 +474,13 @@ jobs:
       - name: Unit tests and release lint
         working-directory: mobile/android
         run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true
+      # Third-party notices must list exactly what the published Firebase release
+      # build resolves, with the notices inside its resolved artifacts.
+      - name: Android library notices match the release classpath
+        working-directory: mobile/android
+        run: |
+          ./gradlew --no-daemon -q --init-script ../../scripts/android-resolved-artifacts.gradle -PzerusFirebase=true :app:zerusResolvedNotices
+          python3 -I ../../scripts/android-notices.py --check
       - name: Save Gradle cache
         if: inputs.save_caches && steps.gradle-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
