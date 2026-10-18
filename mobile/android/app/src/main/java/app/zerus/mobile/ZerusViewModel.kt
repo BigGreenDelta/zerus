@@ -223,7 +223,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private var unreadBoundaryCaptured=false
     // Marks submitted by this process; a failed submission is forgotten so the next view retries.
     private val sharedReadsSent=mutableSetOf<String>()
-    private val sharedReadsUnapplied=mutableMapOf<String,Int>()
+    // Marks completed without being applied wait in one bounded table, released by one owned timer.
+    private val sharedReadRetries=SharedReadRetries()
+    private var sharedReadRetryTimer:Job?=null
     private var readAllShares:Job?=null
     fun conversationViewport(target:Target)=readState.record(target)?.viewport
     fun saveConversationViewport(target:Target,eventId:String,offset:Int) {
@@ -588,11 +590,18 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val receipt=try { api.markRead(request.connection,request.target,request.payload) }
             catch(e:Exception) { sharedReadsSent.remove(request.key);if(e is CancellationException) throw e;return }
         if(receipt.string("state")!="completed") { sharedReadsSent.remove(request.key);return }
-        if(SharedReadPolicies.applied(receipt,request.payload)) { sharedReadsUnapplied.remove(request.key);return }
+        if(SharedReadPolicies.applied(receipt,request.payload)) { sharedReadRetries.applied(request.key);return }
         // Completed without applying: the same mark may go again only after a delay, without holding Read all.
-        val unapplied=sharedReadsUnapplied[request.key] ?: 0
-        sharedReadsUnapplied[request.key]=unapplied+1
-        viewModelScope.launch { delay(SharedReadPolicies.retryDelayMs(unapplied));sharedReadsSent.remove(request.key) }
+        // At capacity it stays sent, so nothing is ever resent beyond the bound.
+        if(sharedReadRetries.unapplied(request.key,request.target.connectionId,android.os.SystemClock.elapsedRealtime())!=null) scheduleSharedReadRetries()
+    }
+    /**
+     * The one owned timer: it wakes at the earliest due mark and lets exactly the released marks go again.
+     * Rescheduling cancels it, and a late wakeup releases only marks that are due by the monotonic clock.
+     */
+    private fun scheduleSharedReadRetries() {
+        sharedReadRetryTimer?.cancel()
+        sharedReadRetryTimer=viewModelScope.launch { sharedReadRetries.releaseWhenDue(android.os.SystemClock::elapsedRealtime) { sharedReadsSent.remove(it) } }
     }
     /** Tell the session's computer that this phone showed its current reply (C4 `mark_read`). */
     private fun shareRead(target:Target) {
