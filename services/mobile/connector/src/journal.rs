@@ -43,7 +43,7 @@ pub const ADDED_COLUMNS: [(&str, &str); 5] = [
     ("delivered_at", "REAL"),
     ("response_expired", "INTEGER NOT NULL DEFAULT 0"),
 ];
-pub const INDEXES: [(&str, &str); 9] = [
+pub const INDEXES: [(&str, &str); 10] = [
     ("delivered_history", "CREATE INDEX IF NOT EXISTS delivered_history ON requests(delivered,delivered_at)"),
     ("project_assignment_delivered_v1", "CREATE INDEX IF NOT EXISTS project_assignment_delivered_v1 ON requests(delivered_at) WHERE operation='project_assignment' AND delivered=1 AND state!='running'"),
     ("analytics_delivered_reads", "CREATE INDEX IF NOT EXISTS analytics_delivered_reads ON requests(delivered_at) WHERE operation='analytics_read' AND delivered=1 AND state!='running'"),

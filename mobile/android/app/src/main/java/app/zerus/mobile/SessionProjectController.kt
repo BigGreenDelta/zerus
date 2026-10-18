@@ -29,12 +29,15 @@ internal interface SessionProjectAccess {
     fun refresh()
 }
 internal interface SessionProjectNetwork {
+    /** Only the POST admission. Receipt polling is a separate transport phase. */
     suspend fun submit(connection:Connection,target:Target,operation:String,payload:JSONObject,id:String):JSONObject
+    suspend fun await(connection:Connection,initial:JSONObject):JSONObject
     suspend fun receipt(connection:Connection,id:String):JSONObject
 }
 private class RelaySessionProjects(private val api:RelayApi):SessionProjectNetwork {
     override suspend fun submit(connection:Connection,target:Target,operation:String,payload:JSONObject,id:String)=
-        api.await(connection,api.submit(connection,target,operation,payload,id))
+        api.submit(connection,target,operation,payload,id)
+    override suspend fun await(connection:Connection,initial:JSONObject)=api.await(connection,initial)
     override suspend fun receipt(connection:Connection,id:String)=api.await(connection,api.receipt(connection,id))
 }
 /** Reads may be canceled. Once saved, one mutation is independent of dialog lifetime and never reposted. */
@@ -70,8 +73,8 @@ internal class SessionProjectController(private val host: SessionProjectAccess, 
                 do {
                     check(host.current(captured)) { "The selected session or connection changed." }
                     val id=UUID.randomUUID().toString()
-                    val raw=network.submit(captured.connection,selected,SessionProjectProtocol.read,
-                        SessionProjectProtocol.readPayload(selected,captured.machine.machineId,id,cursor),id)
+                    val raw=network.await(captured.connection,network.submit(captured.connection,selected,SessionProjectProtocol.read,
+                        SessionProjectProtocol.readPayload(selected,captured.machine.machineId,id,cursor),id))
                     val page=SessionProjectProtocol.catalog(raw,selected,captured.machine.machineId,id)
                     val original=first
                     check(original==null || original.swarmId==page.swarmId && original.currentProjectId==page.currentProjectId &&
@@ -105,18 +108,21 @@ internal class SessionProjectController(private val host: SessionProjectAccess, 
         active=active+action.requestId;host.flight(action.requestId,true);notice=""
         scope.launch {
             var posted=false
+            var refused=false
             try {
                 host.persist(action) // Exact scope, choice and UUID before the only POST.
                 check(host.current(captured) && host.mutationReason(captured.target,action.requestId).isBlank()) { "The session or connection changed before sending." }
                 val payload=SessionProjectProtocol.payload(action)
                 posted=true
-                val receipt=network.submit(captured.connection,action.target,action.operation,payload,action.requestId)
+                val initial=try { network.submit(captured.connection,action.target,action.operation,payload,action.requestId) }
+                    catch(error:RelayException) { refused=error.status in setOf(400,401,403,404,413,422,429);throw error }
+                // An admitted POST stays uncertain if later GET/polling fails, including 4xx.
+                val receipt=network.await(captured.connection,initial)
                 host.settle(action,receipt)
                 host.refresh()
                 if(target==action.target) { catalog=null;confirmed=null;notice=host.actions().find { it.requestId==action.requestId }?.error.orEmpty().ifBlank { "Project grouping updated. Refresh for current choices." } }
             } catch(error:Exception) {
                 withContext(NonCancellable) {
-                    val refused=error is RelayException && error.code in setOf(400,401,403,404,413,422,429)
                     runCatching { host.persist(action.copy(status=if(!posted || refused) "failed" else "uncertain",
                         error=if(!posted || refused) "The project move was not sent or was refused. Refresh and review before another attempt." else SessionProjectProtocol.uncertain)) }
                     if(target==action.target) notice=if(posted && !refused) SessionProjectProtocol.uncertain else "The project move was not sent or was refused. Refresh and review before another attempt."
@@ -141,7 +147,7 @@ internal class SessionProjectController(private val host: SessionProjectAccess, 
                 if(target==action.target) notice=host.actions().find { it.requestId==action.requestId }?.error.orEmpty()
             } catch(cancelled:CancellationException) { throw cancelled }
             catch(_:Exception) { if(target==action.target) notice="The original project receipt could not be checked. Nothing has been retried." }
-            finally { active=active-action.requestId }
+            finally { active=active-action.requestId;host.flight(action.requestId,false) }
         }
     }
 }

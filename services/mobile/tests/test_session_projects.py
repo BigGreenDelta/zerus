@@ -60,11 +60,13 @@ class SessionProjectContracts(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(native.await_count,1)
         self.assertIn("project_assignment",READ_OPERATIONS);self.assertNotIn("project_assign",READ_OPERATIONS)
     async def test_unknown_mutation_is_never_reposted_and_read_only_check_is_separate(self):
-        req=request("project_assign")
-        with patch.object(self.connector,"native",AsyncMock(side_effect=TimeoutError("synthetic"))) as native:
-            receipt=await self.connector.execute(req)
-            self.assertEqual(receipt["state"],"uncertain")
-            self.assertEqual(await self.connector.execute(req),receipt);self.assertEqual(native.await_count,1)
+        for failure in [TimeoutError("synthetic"),{"status":"assigned","project_id":"two"}]:
+            req=request("project_assign")
+            scripted=AsyncMock(side_effect=failure) if isinstance(failure,Exception) else AsyncMock(return_value=failure)
+            with patch.object(self.connector,"native",scripted) as native:
+                receipt=await self.connector.execute(req)
+                self.assertEqual(receipt["state"],"uncertain")
+                self.assertEqual(await self.connector.execute(req),receipt);self.assertEqual(native.await_count,1)
         raw=result(req,"uncertain")
         self.assertTrue(projects.result_valid(req["operation"],raw,req["payload"],NAME))
     async def test_missing_or_partial_marker_and_extra_authority_fields_never_execute(self):

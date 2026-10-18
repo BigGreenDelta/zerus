@@ -286,7 +286,7 @@ impl<N: Native + 'static> Connector<N> {
                 self.create(&validated, request_id, &mutation_started)
                     .await?
             } else {
-                self.run(&validated, request_id).await?
+                self.run(&validated, request_id, &mutation_started).await?
             };
             if validated.operation == "analytics_read" {
                 let local = self
@@ -508,7 +508,12 @@ impl<N: Native + 'static> Connector<N> {
         Ok(self.native(call).await?.json())
     }
 
-    async fn run(&self, validated: &Validated, request_id: &str) -> Result<Value, Failure> {
+    async fn run(
+        &self,
+        validated: &Validated,
+        request_id: &str,
+        mutation_started: &Cell<bool>,
+    ) -> Result<Value, Failure> {
         let session = validated.session.as_str();
         let payload = validated.payload.as_ref();
         match validated.operation.as_str() {
@@ -556,6 +561,14 @@ impl<N: Native + 'static> Connector<N> {
             }
             "project_assignment" | "project_assign" => {
                 let payload = payload.expect("validated");
+                if validated.operation == "project_assign" {
+                    if self.stopping.is_set() {
+                        return Err(Failure::Stopped);
+                    }
+                    // From the sole native write boundary, a lost/invalid acknowledgement
+                    // is uncertain. The original claimed UUID is never executed again.
+                    mutation_started.set(true);
+                }
                 let result = self
                     .call(crate::session_projects::call(
                         &validated.operation,
