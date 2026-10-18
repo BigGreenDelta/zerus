@@ -3,11 +3,15 @@
 //! a Loro upgrade or a schema change happens here once.
 mod error;
 pub mod ids;
+mod project;
 pub mod rank;
+mod render;
 mod schema;
 mod task;
 
 pub use error::{Error, Result};
+pub use project::{ProjectDoc, Settings};
+pub use render::{cancel_message, task_prompt, Tools};
 pub use schema::{
     Actor, LogEntry, SessionKey, Stage, Target, TaskView, MAX_DOCUMENT, MAX_TEXT, SCHEMA,
 };
