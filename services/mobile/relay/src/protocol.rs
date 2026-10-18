@@ -523,16 +523,18 @@ pub fn request(v: &Value) -> Result<()> {
                     return Err(Error::BAD);
                 }
                 if let Some(e) = p.get("effort") {
-                    // The fixed names, or a bounded safe variant id: the
-                    // connector decides per model for OpenCode sessions and
-                    // keeps the fixed list for every other agent.
+                    // The fixed names, or for an OpenCode session a bounded
+                    // safe variant id: the connector decides per model.
+                    let opencode = v["session"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with("opencode/"));
                     if ![
                         "", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max",
                         "ultra", "on",
                     ]
                     .iter()
                     .any(|x| e == x)
-                        && !e.as_str().is_some_and(variant_id)
+                        && !(opencode && e.as_str().is_some_and(variant_id))
                     {
                         return Err(Error::BAD);
                     }

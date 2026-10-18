@@ -25,9 +25,13 @@ fn launch(changes: Value) -> bool {
 }
 
 fn settings(effort: Value) -> bool {
+    settings_for("opencode/example/session", effort)
+}
+
+fn settings_for(session: &str, effort: Value) -> bool {
     protocol::request(
         &json!({"request_id": ID, "computer_id": COMPUTER, "operation": "settings",
-        "session": "opencode/example/session",
+        "session": session,
         "payload": {"request_id": ID, "expected_run_id": "run",
                     "expected_conversation_id": "conversation", "effort": effort}}),
     )
@@ -68,6 +72,22 @@ fn a_settings_effort_is_a_fixed_name_or_a_safe_variant_id() {
     }
     assert!(!settings(json!("a".repeat(41))));
     assert!(!settings(json!(7)));
+}
+
+#[test]
+fn only_opencode_sessions_admit_a_variant_id_in_settings() {
+    for session in [
+        "codex/example/session",
+        "claude/example/session",
+        "opencodex/example/session",
+    ] {
+        assert!(settings_for(session, json!("high")), "{session}");
+        assert!(!settings_for(session, json!("thinking-8k")), "{session}");
+    }
+    assert!(settings_for(
+        "opencode/example/session",
+        json!("thinking-8k")
+    ));
 }
 
 #[test]

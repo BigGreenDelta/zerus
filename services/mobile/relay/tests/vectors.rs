@@ -89,10 +89,6 @@ const ORACLE_DIFFERENCES: &[(&str, &str)] = &[
         "payload/run-delete",
         "the relay refuses DEL in expected_run_id (zerus-3rqx.6)",
     ),
-    (
-        "settings/effort-invented",
-        "the relay admits safe OpenCode variant ids; the connector still refuses them for other agents",
-    ),
 ];
 
 fn vectors() -> PathBuf {

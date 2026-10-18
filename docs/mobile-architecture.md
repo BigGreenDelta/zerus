@@ -942,6 +942,11 @@ with `effort is not offered for this model` before anything starts. For any othe
 agent the field is refused as an unknown field, as before. A `settings` change for
 an `opencode/` session is checked the same way against the target model's
 `effort_options` in the session's own inspection instead of the fixed list.
+The relay admits a name outside the fixed effort list only as a safe variant id
+(1-40 ASCII letters, digits, `-`, `_` or `.`): in `launch` for agent `opencode`
+with a model, and in `settings` only for an `opencode/` session. It advertises
+`opencode_launch_effort` too; phones offer such names only when both the relay
+and the computer advertise it.
 The connector also accepts a `remove_queued` session action carrying an exact
 `msg_` `message_id`, run and conversation identity and journals it like other
 session actions, and an in-flight one recovers as uncertain after a restart.
