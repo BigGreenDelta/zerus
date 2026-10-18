@@ -368,6 +368,36 @@ public enum VoiceRoutes {
         guard let computer = computers.first(where: { $0.id == draft.machineId }) else {
             return "The selected voice computer is unavailable. Choose a provider or refresh."
         }
+/// Global voice defaults come from computer-scoped reads; they never authorize a conversation or alter a saved recording.
+public enum DefaultVoiceRoutes {
+    static func eligible(_ machine: Machine, _ connections: [Connection]) -> Bool {
+        machine.online && !machine.lastKnown && AttachmentPolicy.validId(machine.machineId) && connections.contains { $0.id == machine.connectionId }
+    }
+
+    /// The saved default's computer, by stable machine UUID or older relay ID, only while it is verified and unambiguous.
+    public static func resolve(_ saved: MachineKey?, machines: [Machine], connections: [Connection]) -> SpeechConfigHost? {
+        guard let saved else { return nil }
+        let matches = machines.filter {
+            eligible($0, connections) && $0.connectionId == saved.connectionId && ($0.machineId == saved.computerId || $0.id == saved.computerId)
+        }
+        guard matches.count == 1 else { return nil }
+        return SpeechConfigHost(key: matches[0].key, machineId: matches[0].machineId, name: matches[0].name)
+    }
+
+    /// Verified online computers matching `query`, at most 100, one per physical machine in each workspace.
+    public static func hosts(_ machines: [Machine], connections: [Connection], query: String = "") -> [SpeechConfigHost] {
+        let needle = query.trimmingCharacters(in: .whitespaces)
+        var seen = Set<MachineKey>()
+        var result: [SpeechConfigHost] = []
+        for machine in machines where eligible(machine, connections) && (needle.isEmpty || machine.name.localizedCaseInsensitiveContains(needle)) {
+            guard seen.insert(MachineKey(connectionId: machine.connectionId, computerId: machine.machineId)).inserted else { continue }
+            result.append(SpeechConfigHost(key: machine.key, machineId: machine.machineId, name: machine.name))
+            if result.count == 100 { break }
+        }
+        return result
+    }
+}
+
         guard let profile = computer.profiles.first(where: { $0.id == draft.profileId }) else {
             return "The selected voice profile is unavailable. Choose a provider or refresh."
         }

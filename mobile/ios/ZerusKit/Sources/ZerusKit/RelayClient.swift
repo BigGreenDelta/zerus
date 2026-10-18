@@ -273,10 +273,11 @@ public struct RelayClient: Sendable {
         return result
     }
 
-    /// A computer-scoped speech request (statistics or provider configuration) with an empty session.
+    /// A computer-scoped speech request (statistics, profiles or provider configuration) with an empty session.
     public func speech(_ connection: Connection, host: MachineKey, operation: String, payload: JSONObject,
                        id: String = UUID().uuidString.lowercased(), fallback: String) async throws -> JSONObject {
-        guard host.connectionId == connection.id, operation == "speech_stats" || SpeechConfigProtocol.operations.contains(operation) else {
+        guard host.connectionId == connection.id,
+              ["speech_stats", "speech_profiles"].contains(operation) || SpeechConfigProtocol.operations.contains(operation) else {
             throw ZerusError.invalid("Invalid speech request.")
         }
         let receipt = try await waitForReceipt(connection, initial: post(connection, computerId: host.computerId, operation: operation, payload: payload, id: id))

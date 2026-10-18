@@ -78,6 +78,15 @@ final class VoiceController {
     @ObservationIgnored private var profileGeneration = 0
     @ObservationIgnored private var requestedProfileTarget: Target?
     @ObservationIgnored private var statsTask: Task<Void, Never>?
+
+    // Global defaults read the chosen computer's profiles directly, without a conversation.
+    private(set) var defaultLoading = false
+    private(set) var defaultNotice = ""
+    private var defaultReceived: [SpeechProfile] = []
+    private var defaultConfirmed: (host: SpeechConfigHost, connection: Connection)?
+    @ObservationIgnored private var defaultRequested: (host: SpeechConfigHost?, connection: Connection?)?
+    @ObservationIgnored private var defaultGeneration = 0
+    @ObservationIgnored private var defaultTask: Task<Void, Never>?
     @ObservationIgnored private var statusTasks: [String: Task<Void, Never>] = [:]
 
     init(app: AppModel) { self.app = app }
@@ -175,6 +184,100 @@ final class VoiceController {
             } catch { notice = "Could not save the default voice provider." }
         }
         return true
+    }
+
+    // MARK: Global defaults
+
+    var defaultHost: SpeechConfigHost? { DefaultVoiceRoutes.resolve(selection.host, machines: app.machines, connections: app.connections) }
+
+    func defaultHosts(_ query: String = "") -> [SpeechConfigHost] { DefaultVoiceRoutes.hosts(app.machines, connections: app.connections, query: query) }
+
+    /// Profiles confirmed for the current default computer through its current workspace; anything else shows none.
+    var defaultProfiles: [SpeechProfile] {
+        guard let host = defaultHost, let confirmed = defaultConfirmed, confirmed.host == host, defaultReason(host).isEmpty,
+              defaultConnection(host) == confirmed.connection else { return [] }
+        return defaultReceived
+    }
+
+    func defaultReason(_ host: SpeechConfigHost) -> String {
+        if app.demo || !app.storageReady { return "Connect a computer to load its voice profiles." }
+        if !app.connections.contains(where: { $0.id == host.key.connectionId }) { return "The voice workspace is disconnected." }
+        if DefaultVoiceRoutes.resolve(MachineKey(connectionId: host.key.connectionId, computerId: host.machineId), machines: app.machines,
+                                      connections: app.connections) != host {
+            return "The voice computer is unavailable or its identity changed. Refresh Machines and try again."
+        }
+        if !(app.relayOperations[host.key.connectionId] ?? []).contains("speech_profiles") { return "Update this gateway to load voice profiles." }
+        if !(app.machineOperations[host.key] ?? []).contains("speech_profiles") { return "Update Zerus on this computer to load voice profiles." }
+        return ""
+    }
+
+    private func defaultConnection(_ host: SpeechConfigHost) -> Connection? {
+        let matches = app.connections.filter { $0.id == host.key.connectionId }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    func refreshDefaultProfiles() {
+        guard ready else { return }
+        let captured = defaultHost
+        let route = captured.flatMap(defaultConnection)
+        if defaultLoading, let requested = defaultRequested, requested.host == captured, requested.connection == route, let captured, defaultReason(captured).isEmpty {
+            return
+        }
+        defaultGeneration += 1
+        let version = defaultGeneration
+        defaultTask?.cancel()
+        defaultRequested = (captured, route)
+        defaultConfirmed = nil
+        defaultLoading = false
+        defaultReceived = []
+        guard let captured else {
+            defaultNotice = selection.host != nil ? "The saved voice computer is unavailable. Choose an online computer."
+                : defaultHosts().isEmpty ? "No verified online voice computers are available. Refresh Machines and try again."
+                : "Choose a voice computer to load its profiles."
+            return
+        }
+        defaultNotice = defaultReason(captured)
+        guard defaultNotice.isEmpty, let connection = route else { return }
+        defaultLoading = true
+        let client = app.client
+        defaultTask = Task { [weak self] in
+            do {
+                let result = try await client.speech(connection, host: captured.key, operation: "speech_profiles", payload: [:],
+                                                     fallback: "Could not load voice profiles. Refresh to try again.")
+                let received = try SpeechProtocol.profiles(result)
+                guard let self, version == defaultGeneration else { return }
+                defaultLoading = false
+                guard defaultHost == captured, defaultConnection(captured) == connection, defaultReason(captured).isEmpty else { return }
+                defaultReceived = received
+                defaultConfirmed = (captured, connection)
+                defaultNotice = !result.bool("available", default: true) ? (result.string("reason").nonEmpty ?? "The speech service is unavailable on this computer.")
+                    : received.isEmpty ? "No voice profiles are configured on this computer. Manage speech providers to add one." : ""
+            } catch {
+                guard let self, version == defaultGeneration else { return }
+                defaultLoading = false
+                if error is CancellationError || defaultHost != captured { return }
+                defaultNotice = error is URLError ? "Could not connect to this computer. Refresh voice profiles to try again."
+                    : AppModel.message(error, fallback: "Could not load voice profiles. Refresh to try again.")
+            }
+        }
+    }
+
+    @discardableResult
+    func chooseDefaultHost(_ captured: SpeechConfigHost) -> Bool {
+        guard defaultReason(captured).isEmpty else { return false }
+        let same = defaultHost == captured
+        guard chooseDefault(SpeechSelection(host: MachineKey(connectionId: captured.key.connectionId, computerId: captured.machineId),
+                                            profileId: same ? selection.profileId : "", profileRevision: same ? selection.profileRevision : nil)) else { return false }
+        refreshDefaultProfiles()
+        return true
+    }
+
+    @discardableResult
+    func chooseDefaultProfile(_ profile: SpeechProfile) -> Bool {
+        guard let captured = defaultHost, !defaultLoading, defaultConfirmed?.host == captured, defaultReason(captured).isEmpty,
+              defaultProfiles.contains(profile) else { return false }
+        return chooseDefault(SpeechSelection(host: MachineKey(connectionId: captured.key.connectionId, computerId: captured.machineId),
+                                             profileId: profile.id, profileRevision: profile.profileRevision))
     }
 
     func refreshProfiles(_ target: Target?) {

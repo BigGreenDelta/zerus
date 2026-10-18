@@ -571,32 +571,36 @@ struct VoiceSettingsSheet: View {
                         }
                         .disabled(!voice.ready || voice.recording || voice.savingRecording)
                     }
-                    Section {
-                        Picker("Computer", selection: Binding(get: { choice.host?.computerId ?? "" }, set: { id in
-                            guard let target else { return }
-                            voice.chooseHost(MachineKey(connectionId: target.connectionId, computerId: id), target: target, previewId: choicePreview?.audio.id)
-                        })) {
-                            if selected == nil { Text(choice.host == nil ? "Choose voice computer" : "Selected computer unavailable").tag(choice.host?.computerId ?? "") }
-                            ForEach(voice.computers, id: \.id) { Text($0.name).tag($0.id) }
-                        }
-                        .disabled(voice.loading || voice.computers.isEmpty || voice.recording)
-                        Picker("Profile", selection: Binding(get: { choice.profileId }, set: { id in
-                            guard let target else { return }
-                            voice.chooseProfile(id, target: target, previewId: choicePreview?.audio.id)
-                        })) {
-                            if chosen == nil { Text(choice.profileId.isEmpty ? "Choose voice profile" : choice.profileId).tag(choice.profileId) }
-                            ForEach(profiles, id: \.id) { profile in
-                                Text(profile.available ? profile.name : "\(profile.name) (\(profile.reason.isEmpty ? "unavailable" : profile.reason))").tag(profile.id)
+                    if target == nil {
+                        DefaultVoiceProviderSection()
+                    } else {
+                        Section {
+                            Picker("Computer", selection: Binding(get: { choice.host?.computerId ?? "" }, set: { id in
+                                guard let target else { return }
+                                voice.chooseHost(MachineKey(connectionId: target.connectionId, computerId: id), target: target, previewId: choicePreview?.audio.id)
+                            })) {
+                                if selected == nil { Text(choice.host == nil ? "Choose voice computer" : "Selected computer unavailable").tag(choice.host?.computerId ?? "") }
+                                ForEach(voice.computers, id: \.id) { Text($0.name).tag($0.id) }
                             }
-                        }
-                        .disabled(voice.loading || profiles.isEmpty || voice.recording)
-                        if voice.loading { ProgressView().frame(maxWidth: .infinity) }
-                        Button("Refresh voice profiles") { voice.refreshProfiles(target) }.disabled(voice.loading)
-                    } footer: {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.")
-                            if !voice.profileNotice.isEmpty { Text(voice.profileNotice) }
-                            if !voice.statistics.isEmpty { Text(voice.statistics) }
+                            .disabled(voice.loading || voice.computers.isEmpty || voice.recording)
+                            Picker("Profile", selection: Binding(get: { choice.profileId }, set: { id in
+                                guard let target else { return }
+                                voice.chooseProfile(id, target: target, previewId: choicePreview?.audio.id)
+                            })) {
+                                if chosen == nil { Text(choice.profileId.isEmpty ? "Choose voice profile" : choice.profileId).tag(choice.profileId) }
+                                ForEach(profiles, id: \.id) { profile in
+                                    Text(profile.available ? profile.name : "\(profile.name) (\(profile.reason.isEmpty ? "unavailable" : profile.reason))").tag(profile.id)
+                                }
+                            }
+                            .disabled(voice.loading || profiles.isEmpty || voice.recording)
+                            if voice.loading { ProgressView().frame(maxWidth: .infinity) }
+                            Button("Refresh voice profiles") { voice.refreshProfiles(target) }.disabled(voice.loading)
+                        } footer: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.")
+                                if !voice.profileNotice.isEmpty { Text(voice.profileNotice) }
+                                if !voice.statistics.isEmpty { Text(voice.statistics) }
+                            }
                         }
                     }
                     Section {
@@ -624,7 +628,82 @@ struct VoiceSettingsSheet: View {
             .navigationDestination(isPresented: $manage) { SpeechProvidersView(defaultSelection: choice) }
             .zerusScreen()
         }
-        .task(id: target?.key) { if current { voice.refreshProfiles(target) } }
+        .task(id: target?.key) {
+            if target == nil { voice.refreshDefaultProfiles() } else if current { voice.refreshProfiles(target) }
+        }
+    }
+}
+
+/// The default computer and profile for new recordings, chosen from verified online computers without a conversation.
+private struct DefaultVoiceProviderSection: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        let voice = app.voice!
+        let host = voice.defaultHost
+        let profiles = voice.defaultProfiles
+        let selected = voice.selection.profileId
+        Section {
+            NavigationLink { DefaultVoiceComputerPicker() } label: {
+                LabeledContent("Computer", value: host?.name ?? (voice.selection.host == nil ? "Choose voice computer" : "Selected computer unavailable"))
+            }
+            .disabled(!voice.ready || voice.recording || voice.savingRecording)
+            Picker("Profile", selection: Binding(get: { selected }, set: { id in
+                if let profile = profiles.first(where: { $0.id == id }) { voice.chooseDefaultProfile(profile) }
+            })) {
+                if !profiles.contains(where: { $0.id == selected }) { Text(selected.isEmpty ? "Choose voice profile" : selected).tag(selected) }
+                ForEach(profiles, id: \.id) { profile in
+                    Text(profile.available ? profile.name : "\(profile.name) (\(profile.reason.isEmpty ? "unavailable" : profile.reason))").tag(profile.id)
+                }
+            }
+            .disabled(voice.defaultLoading || profiles.isEmpty || voice.recording || voice.savingRecording)
+            if voice.defaultLoading { ProgressView().frame(maxWidth: .infinity) }
+            Button("Refresh voice profiles") { voice.refreshDefaultProfiles() }.disabled(voice.defaultLoading)
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Choose the computer and profile that transcribe new recordings. Existing recordings keep their computer, profile and reviewed revision.")
+                if !voice.defaultNotice.isEmpty { Text(voice.defaultNotice) }
+                if !voice.statistics.isEmpty { Text(voice.statistics) }
+            }
+        }
+    }
+}
+
+/// A searchable list of at most 100 verified online computers.
+private struct DefaultVoiceComputerPicker: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    var body: some View {
+        let voice = app.voice!
+        let hosts = voice.defaultHosts(query)
+        List {
+            ForEach(hosts, id: \.self) { host in
+                let reason = voice.defaultReason(host)
+                Button {
+                    if voice.chooseDefaultHost(host) { dismiss() }
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(host.name)
+                            if !reason.isEmpty { Text(reason).font(.caption).foregroundStyle(Theme.muted) }
+                        }
+                        Spacer()
+                        if voice.defaultHost == host { Image(systemName: "checkmark").accessibilityLabel("Selected") }
+                    }
+                }
+                .disabled(!reason.isEmpty || voice.recording || voice.savingRecording)
+            }
+            if hosts.isEmpty {
+                Text(query.isEmpty ? "No verified online voice computers are available. Refresh Machines and try again." : "No computers match.")
+                    .foregroundStyle(Theme.muted)
+            }
+        }
+        .searchable(text: $query, prompt: "Search computers")
+        .navigationTitle("Voice computer")
+        .navigationBarTitleDisplayMode(.inline)
+        .zerusScreen()
     }
 }
 
