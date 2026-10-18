@@ -8,6 +8,7 @@ struct Composer: View {
     let session: Session
     let online: Bool
     let onReview: (Draft) -> Void
+    let onReviewOutgoing: (OutgoingMessage) -> Void
 
     @State private var text = ""
     @State private var generation = ""
@@ -37,11 +38,8 @@ struct Composer: View {
                         .disabled(draft.status == "submitting" || model.receiptFlights.contains(draft.key))
                 }
             }
-            if previous?.status == "sending" {
-                Text("Sending… You can write the next message.").font(.caption).foregroundStyle(Theme.muted)
-            } else if previous?.status == "uncertain" {
-                Text("Delivery unknown. Check the previous message before sending again.").font(.caption).foregroundStyle(Theme.amber)
-            }
+            // Routine sending feedback belongs to the outgoing bubble; only an unconfirmed message needs a decision here.
+            if let previous, previous.status == "uncertain" { outgoingRecovery(previous) }
             if !model.contextNotice.isEmpty {
                 Text(model.contextNotice).font(.caption).foregroundStyle(Theme.amber)
             }
@@ -61,7 +59,7 @@ struct Composer: View {
                 if app.voice.recording && (app.voice.touchRecording || app.voice.videoRecorder == nil) {
                     RecordingRow()
                 } else {
-                    messageField(draft, reason: reason)
+                    messageField(draft)
                 }
                 if app.voice.recording || (text.isEmpty && draft.attachments.isEmpty && model.messageState.pickerDraft?.target != target) {
                     VoiceButton(target: target) { if model.draft(target).text != text { model.edit(target, text: text) } }
@@ -128,8 +126,34 @@ struct Composer: View {
         .sheet(isPresented: $expanded) { ExpandedMessageEditor(text: $text, title: session.title) }
     }
 
-    private func messageField(_ draft: Draft, reason: String) -> some View {
-        TextField(reason.isEmpty ? "Message" : reason, text: $text, axis: .vertical)
+    /// The original unconfirmed message, with a status-only receipt check and an explicit review.
+    private func outgoingRecovery(_ message: OutgoingMessage) -> some View {
+        let checking = model.receiptFlights.contains("outgoing:\(message.requestId)")
+        return HStack(spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Previous message not confirmed").font(.caption.weight(.semibold)).foregroundStyle(Theme.amber).lineLimit(1)
+                Text(message.text.isEmpty ? message.attachments.map(\.name).joined(separator: ", ") : message.text)
+                    .font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            Button { Task { await model.checkOutgoing(message) } } label: {
+                if checking { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.clockwise") }
+            }
+            .frame(width: 44, height: 44)
+            .disabled(checking)
+            .accessibilityLabel("Check previous message delivery")
+            Button { onReviewOutgoing(message) } label: { Image(systemName: "ellipsis.circle") }
+                .frame(width: 44, height: 44)
+                .disabled(checking)
+                .accessibilityLabel("Review previous message")
+        }
+        .padding(.leading, 12)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func messageField(_ draft: Draft) -> some View {
+        // The field keeps its placeholder; a blocked send explains itself when tapped.
+        TextField("Message", text: $text, axis: .vertical)
             .lineLimit(1...6)
             .focused($focused)
             .disabled(draft.status != "editing" || app.demo)

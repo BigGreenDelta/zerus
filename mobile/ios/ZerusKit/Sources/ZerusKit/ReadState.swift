@@ -84,6 +84,14 @@ public struct ConversationReadState: Codable, Hashable, Sendable {
         return next.viewed(target, Set(incoming.filter { $0.incomingSeq == nil || $0.historyEpoch != previous?.epoch }.map(\.id)))
     }
 
+    /// Raises the watermark of the record's current epoch; it never lowers it.
+    public func acknowledged(_ target: Target, through: Int64) -> ConversationReadState {
+        guard var record = record(target), !record.epoch.isEmpty, through > record.readThrough else { return self }
+        record.readThrough = through
+        record.established = true
+        return put(record)
+    }
+
     public func head(_ target: Target, epoch: String, latest: Int64?, total: Int64?, complete: Bool) -> ConversationReadState {
         if epoch.isEmpty || epoch.count > 512 || (latest.map { $0 < 0 } ?? false) || (total.map { $0 < 0 } ?? false) { return self }
         var old = record(target) ?? ConversationReadRecord(target: target)
@@ -137,6 +145,29 @@ public struct ConversationReadState: Codable, Hashable, Sendable {
             rows.append(record)
         }
         return ConversationReadState(records: rows)
+    }
+}
+
+/// A later canonical page can identify rows already read from the bounded native inspection.
+public enum ConversationReadHead {
+    /// Exact native-provided aliases of canonical rows in this page's epoch keep their seen identity; equal text never does.
+    /// The watermark then advances only along consecutive incoming sequences whose rows are seen, stopping at the first
+    /// unseen, missing or duplicated sequence, so no unseen incoming row is ever acknowledged and a later reply stays unread.
+    public static func observe(_ state: ConversationReadState, _ page: HistoryPage) -> ConversationReadState {
+        let canonical = page.events.filter { $0.historyEpoch == page.epoch && !$0.historyId.isEmpty && !$0.historyCursor.isEmpty }
+        let aliases = HistoryAliases.exact(canonical, known: Set(state.record(page.target)?.seen ?? []))
+        let next = state.head(page.target, epoch: page.epoch, latest: page.latestIncoming, total: page.totalIncoming, complete: page.complete)
+            .supersede(page.target, aliases)
+        guard let record = next.record(page.target), !record.epoch.isEmpty, record.epoch == page.epoch else { return next }
+        var rows: [Int64: [String]] = [:]
+        for event in canonical where ConversationReadPolicies.incoming(event) {
+            if let sequence = event.incomingSeq { rows[sequence, default: []].append(event.id) }
+        }
+        let seen = Set(record.seen)
+        var through = record.readThrough
+        // A maximum watermark has no successor; checking first keeps the walk from overflowing.
+        while through < Int64.max, let ids = rows[through + 1], ids.count == 1, seen.contains(ids[0]) { through += 1 }
+        return next.acknowledged(page.target, through: through)
     }
 }
 
@@ -430,6 +461,18 @@ public enum SharedReadPolicies {
         let signature = row.raw.string("attention_signature")
         return !signature.isEmpty && mark(row)?.string("attention_signature") == signature
     }
+
+    /// Whether a `mark_read` receipt shows the computer applied every field this phone sent. A completed request can
+    /// apply nothing: the value is no longer current, or the computer's question index is not ready. That needs a newer
+    /// snapshot, so the same mark waits.
+    public static func applied(_ receipt: JSONObject, payload: JSONObject) -> Bool {
+        guard receipt.string("state") == "completed", let result = receipt.object("result"), result["ok"] == .bool(true),
+              let applied = result.object("applied") else { return false }
+        return ["reply_id", "attention_signature"].allSatisfy { field in (payload[field] ?? .null) == .null || applied[field] == .bool(true) }
+    }
+
+    /// Delay before the same unapplied mark may be sent again: two minutes, doubling up to 16.
+    public static func retryDelay(_ unapplied: Int) -> Duration { .seconds(120 << min(max(unapplied, 0), 3)) }
 
     /// The `mark_read` payload once this phone has shown the current reply; nil when nothing is new.
     public static func payload(_ row: Session, freshHead: Bool, localUnread: Int?, acknowledge: Bool = true) -> JSONObject? {
