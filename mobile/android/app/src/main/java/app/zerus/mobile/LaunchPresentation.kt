@@ -69,8 +69,10 @@ object LaunchPresentation {
             (row.opt("auth_status") as? String)?.takeIf { it in setOf("signed_in","signed_out","expired","credentials_locked","desktop_session_unavailable","credentials_unavailable") } ?: "unknown",
             if(row.optJSONObject("usage") != null) AccountSnapshots.account(row) else null)
     }.distinctBy { it.id }
-    /** Connector feature: `launch` accepts an OpenCode variant of the chosen model as `effort`. */
+    /** Relay and connector feature: `launch` and `settings` accept an OpenCode variant of the model as `effort`. */
     const val OPENCODE_LAUNCH_EFFORT = "opencode_launch_effort"
+    /** Both the relay and the computer's connector must advertise it; older ones refuse native variant names. */
+    fun effortSupported(relayFeatures:Set<String>,computerFeatures:Set<String>) = OPENCODE_LAUNCH_EFFORT in relayFeatures && OPENCODE_LAUNCH_EFFORT in computerFeatures
     fun validModel(value:String) = value.isNotBlank() && value.length<=120 && value.contains('/') && value.none(Char::isISOControl)
     /** A native variant ID: bounded, one token, no path separator. Membership is checked against the model's own list. */
     fun validEffort(value:String) = value.isNotEmpty() && value.toByteArray(Charsets.UTF_8).size<=64 && value.none { it.isWhitespace() || it.isISOControl() || it=='/' }
@@ -94,8 +96,8 @@ object LaunchPresentation {
         }.distinctBy { it.value }
     }
     /**
-     * Effort choices for New session: the chosen OpenCode model's variants, only when its connector
-     * advertises [OPENCODE_LAUNCH_EFFORT]. Empty means no Effort row and no `effort` in the request.
+     * Effort choices for New session: the chosen OpenCode model's variants, only when the relay and the
+     * connector advertise [OPENCODE_LAUNCH_EFFORT] ([effortSupported]). Empty means no Effort row and no `effort` in the request.
      */
     fun efforts(raw:JSONObject?,provider:String,accountId:String,model:String,supported:Boolean):List<LaunchEffort> =
         if(!supported || provider!="opencode" || model.isBlank()) emptyList()

@@ -16,6 +16,12 @@ object SessionActionPolicies {
     val lifecycle = setOf("pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget")
     val operations = lifecycle + setOf("send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create", "directory_create", "recovery_action")
     val terminalKeys=setOf("Enter","Escape","Tab","BTab","BSpace","Up","Down","Left","Right","Home","End","PPage","NPage","DC","C-c","C-d","C-l","C-a","C-e","C-u","C-w")
+    /** Effort names every relay accepts in `settings`. */
+    val relayEfforts = setOf("", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on")
+    /** Other native names (OpenCode variants) need `opencode_launch_effort` on both the relay and the connector. */
+    fun effortReason(operation: String, args: JSONObject, nativeNames: Boolean): String =
+        if (operation == "settings" && !nativeNames && args.has("effort") && args.optString("effort") !in relayEfforts)
+            "Update this gateway and computer to choose this effort." else ""
     private fun uuid(value: String) = runCatching { UUID.fromString(value).toString() == value }.getOrDefault(false)
     fun arguments(operation: String, raw: JSONObject): JSONObject {
         require(operation in operations) { "Unsupported session action." }

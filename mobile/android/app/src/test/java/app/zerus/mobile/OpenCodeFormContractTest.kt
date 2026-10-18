@@ -97,6 +97,25 @@ class OpenCodeFormContractTest {
         assertEquals("Complete this request on your machine.", QuestionPolicies.unavailableNotice(legacy.copy(unavailableReason = "")))
     }
 
+    @Test fun anUnanswerableCardWithoutItemsStillShowsItsReason() {
+        // hgs clears the items of a form over 16 KiB; the contract's oversized card without them.
+        val card = JSONObject(case("oversized").getJSONObject("card").toString()).put("questions", JSONArray()).put("question_hash", "hash-cleared")
+        val cleared = NativeParser.questions(JSONObject().put("pending_questions", JSONArray().put(card))).single()
+        assertTrue(cleared.prompts.isEmpty())
+        assertTrue(QuestionPolicies.shown(cleared))
+        val target = Target("computer", "opencode/project/local", "run", "ses_A", "workspace")
+        assertEquals(cleared, QuestionPolicies.queue(listOf(cleared), target, "").selected)
+        assertFalse(QuestionPolicies.submitVisible(cleared))
+        assertEquals("Answer this form in OpenCode", QuestionPolicies.unavailableNotice(cleared))
+        val step = QuestionSteps.current(cleared.prompts, 0, emptyMap(), emptyMap())
+        assertNull(step.nextPage); assertFalse(step.complete)
+        assertFalse(QuestionPolicies.complete(cleared.prompts, emptyMap(), emptyMap()))
+        // An answerable card still needs items, and an unnamed card is never shown.
+        assertFalse(QuestionPolicies.shown(cleared.copy(canAnswer = true)))
+        assertNull(QuestionPolicies.queue(listOf(cleared.copy(canAnswer = true)), target, "").selected)
+        assertFalse(QuestionPolicies.shown(cleared.copy(id = "")))
+    }
+
     @Test fun multiselectBoundsMatchTheComputerValidation() {
         val question = question(case("multiselect"))
         val (chosen, texts) = answers(case("multiselect"))

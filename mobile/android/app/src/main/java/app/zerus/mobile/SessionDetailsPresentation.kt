@@ -35,9 +35,13 @@ object SessionDetailsPresentation {
         raw?.string("pending_settings_id").orEmpty(), raw?.string("settings_apply_when").orEmpty(), raw?.optBoolean("settings_change_supported") == true,
         raw?.string("settings_change_reason").orEmpty(), raw?.string("settings_change_notice").orEmpty())
 
-    /** Effort page rows for [model]: Default first, then that model's own options, else the session's list. */
-    fun effortChoices(settings: NativeSettings, model: String): List<String> =
+    /**
+     * Effort page rows for [model]: Default first, then that model's own options, else the session's list.
+     * Without [nativeNames] (relay and connector `opencode_launch_effort`) only names every relay accepts remain.
+     */
+    fun effortChoices(settings: NativeSettings, model: String, nativeNames: Boolean): List<String> =
         (listOf("") + (settings.models.find { it.id == model }?.efforts ?: settings.efforts)).distinct()
+            .filter { nativeNames || it in SessionActionPolicies.relayEfforts }
     /** Labels at the same index as `effort_options`; a missing or unusable label falls back to the shared name. */
     private fun effortLabels(option: JSONObject): Map<String, String> {
         val ids = option.optJSONArray("effort_options") ?: return emptyMap()

@@ -56,6 +56,34 @@ class OpenCodeEffortTest {
         assertThrows(IllegalArgumentException::class.java) { SessionActionPolicies.arguments("launch",JSONObject(args.toString()).put("effort","has space")) }
     }
 
+    @Test fun nativeEffortNeedsTheFeatureOnBothRelayAndConnector() {
+        val feature = setOf(LaunchPresentation.OPENCODE_LAUNCH_EFFORT,"inspect_agent")
+        assertTrue(LaunchPresentation.effortSupported(feature,feature))
+        assertFalse(LaunchPresentation.effortSupported(setOf("inspect_agent"),feature))   // older relay
+        assertFalse(LaunchPresentation.effortSupported(feature,setOf("inspect_agent")))   // Python or older connector
+        assertFalse(LaunchPresentation.effortSupported(emptySet(),emptySet()))
+        // With an older relay the row is hidden and Create sends no effort, without an error.
+        val raw = LaunchPresentation.sanitizeCatalog(catalog())
+        val supported = LaunchPresentation.effortSupported(setOf("inspect_agent"),feature)
+        assertTrue(LaunchPresentation.efforts(raw,"opencode","native-opencode","fixture/local",supported).isEmpty())
+        assertFalse(launch(raw,"fixture/local","",supported).has("effort"))
+    }
+
+    @Test fun modelSheetOffersOnlyRelayNamesUntilTheRelayAcceptsNativeVariants() {
+        val raw = JSONObject().put("settings_model","fixture/local").put("effort","high").put("settings_change_supported",true)
+            .put("model_options",JSONArray().put(option("fixture/local","Local",listOf("low","high","thinking"),listOf("Low","High","Deep thinking"))))
+        val settings = SessionDetailsPresentation.settings(raw)
+        assertEquals(listOf("","low","high"),SessionDetailsPresentation.effortChoices(settings,"fixture/local",false))
+        assertEquals(listOf("","low","high","thinking"),SessionDetailsPresentation.effortChoices(settings,"fixture/local",true))
+        // The send path refuses a native-only name without both features, before anything is recorded.
+        val thinking = JSONObject().put("model","fixture/local").put("effort","thinking")
+        assertEquals("Update this gateway and computer to choose this effort.",SessionActionPolicies.effortReason("settings",thinking,false))
+        assertEquals("",SessionActionPolicies.effortReason("settings",thinking,true))
+        assertEquals("",SessionActionPolicies.effortReason("settings",JSONObject().put("effort","high"),false))
+        assertEquals("",SessionActionPolicies.effortReason("settings",JSONObject().put("model","fixture/local"),false))
+        assertEquals("",SessionActionPolicies.effortReason("launch",thinking,false))
+    }
+
     @Test fun modelSheetOffersTheSessionModelsOwnVariantsWithNativeLabels() {
         // OpenCode inspection: per-model variants; a fixed session list must not leak into the sheet.
         val raw = JSONObject().put("settings_model","fixture/local").put("model","local").put("effort","high").put("settings_change_supported",true)
@@ -63,10 +91,10 @@ class OpenCodeEffortTest {
             .put("model_options",JSONArray().put(option("fixture/local","Local",listOf("low","high","thinking"),listOf("Low","High","Deep thinking")))
                 .put(option("fixture/plain","Plain",emptyList())))
         val settings = SessionDetailsPresentation.settings(raw)
-        assertEquals(listOf("","low","high","thinking"),SessionDetailsPresentation.effortChoices(settings,"fixture/local"))
+        assertEquals(listOf("","low","high","thinking"),SessionDetailsPresentation.effortChoices(settings,"fixture/local",true))
         assertEquals(listOf("Default","Low","High","Deep thinking"),
-            SessionDetailsPresentation.effortChoices(settings,"fixture/local").map { SessionDetailsPresentation.effortLabel(settings,"fixture/local",it) })
-        assertEquals(listOf(""),SessionDetailsPresentation.effortChoices(settings,"fixture/plain"))
+            SessionDetailsPresentation.effortChoices(settings,"fixture/local",true).map { SessionDetailsPresentation.effortLabel(settings,"fixture/local",it) })
+        assertEquals(listOf(""),SessionDetailsPresentation.effortChoices(settings,"fixture/plain",true))
         // Labels change with the model, so another model's label is never shown.
         assertNotEquals(SessionDetailsPresentation.settings(raw).signature,
             SessionDetailsPresentation.settings(JSONObject(raw.toString()).put("model_options",JSONArray().put(option("fixture/local","Local",listOf("low","high","thinking"))))).signature)

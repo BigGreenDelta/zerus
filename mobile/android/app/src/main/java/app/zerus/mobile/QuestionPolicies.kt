@@ -16,6 +16,8 @@ object QuestionPolicies {
             question.id.isNotBlank() && question.hash.isNotBlank() && target.run.isNotBlank()
     }
     fun key(question: Question) = question.id + ":" + question.hash
+    /** A card needs items to be answered; an unanswerable one without items still shows its reason. */
+    fun shown(question: Question) = question.id.isNotBlank() && (question.prompts.isNotEmpty() || !question.canAnswer)
 
     /**
      * Whether one snapshot `mobile_attention` item is an optional Codex question the agent can
@@ -28,7 +30,7 @@ object QuestionPolicies {
         else (item.opt("question_id") as? String)?.startsWith("codex-async:") == true
 
     fun queue(questions: List<Question>, target: Target, chosen: String): QuestionQueue {
-        val distinct = questions.filter { it.id.isNotBlank() && it.prompts.isNotEmpty() }.distinctBy { it.id }
+        val distinct = questions.filter(::shown).distinctBy { it.id }
         val submitted = distinct.filter { submitted(it, target) != null }
         val offered = distinct.filter { it !in submitted }
         val required = offered.filter { !it.optional }.let { cards -> cards.firstOrNull { it.canAnswer } ?: cards.firstOrNull() }

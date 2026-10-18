@@ -39,11 +39,11 @@ import kotlinx.coroutines.flow.first
 @Composable internal fun NativeSettingsSheetContent(
     settings: NativeSettings,scope: String,selectedModel: String,selectedEffort: String,reason: String,
     onModelChange: (String) -> Unit,onEffortChange: (String) -> Unit,
-    onApply: () -> Unit,onDismiss: () -> Unit,modifier: Modifier = Modifier,
+    onApply: () -> Unit,onDismiss: () -> Unit,modifier: Modifier = Modifier,nativeEfforts: Boolean = false,
 ) {
     var effortPage by remember { mutableStateOf(false) }
     val modelLabel = settings.models.find { it.id == selectedModel }?.label ?: selectedModel.ifBlank { "Not reported" }
-    val efforts = SessionDetailsPresentation.effortChoices(settings,selectedModel)
+    val efforts = SessionDetailsPresentation.effortChoices(settings,selectedModel,nativeEfforts)
     fun effortLabel(effort: String) = SessionDetailsPresentation.effortLabel(settings,selectedModel,effort)
     val modelsScroll = rememberLazyListState()
     val effortsScroll = rememberLazyListState()
