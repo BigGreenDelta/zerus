@@ -1882,7 +1882,8 @@ its reason is kept as a comment and never pasted. A task this computer already
 shows In progress is not sent again. Run inside a session (`HGS_SESSION` and
 `HGS_RUN_ID`), `hgs task` acts as that session's agent: `add` files the task
 for that session, and the project settings can keep agents to their own
-session or limit how many tasks they start per hour.
+session or limit how many tasks they start per hour. `settings --set` reads a
+JSON object and changes only the fields it names.
 
 Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
 project; a task file that fails to load is listed under `damaged` and left in

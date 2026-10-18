@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """`hgs task` through the real CLI: an isolated catalog and state; sends go to
 a scripted agent on a private tmux socket."""
+import fcntl
 import hashlib
 import json
 import os
@@ -138,14 +139,31 @@ class TaskCommands(Fixture):
         settings["task_template"] = "{prompt}"
         self.assertIn("must start with", self.hgs("settings", "--project", "orchard", "--set", text=json.dumps(settings), ok=False))
 
+    def test_settings_change_only_the_fields_given(self):
+        self.hgs("settings", "--project", "orchard", "--set", text=json.dumps({"agent_limit": 2}))
+        self.hgs("settings", "--project", "orchard", "--set", text=json.dumps({"agents_other": False}))
+        settings = self.hgs("settings", "--project", "orchard")["settings"]
+        self.assertEqual((settings["agent_limit"], settings["agents_other"]), (2, False))
+        self.assertTrue(settings["task_template"].startswith("[Zerus task {ref}]"))
+        typo = self.hgs("settings", "--project", "orchard", "--set", text=json.dumps({"agent_limt": 3}), ok=False)
+        self.assertIn("agent_limt", typo)
+
     def test_concurrent_adds_all_land(self):
-        processes = [subprocess.Popen([str(HGS), "task", "add", "--project", "orchard"], stdin=subprocess.PIPE,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, text=True)
-                     for _ in range(6)]
-        # Every process has its text before any of them finishes: all six race for the project.
-        for index, process in enumerate(processes):
-            process.stdin.write("task %d" % index)
-            process.stdin.close()
+        self.hgs("list", "--project", "orchard")  # creates the project's lock file
+        lock = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / ".lock"
+        with open(lock, "a") as held:
+            # The test holds the project lock while all six start, so they all
+            # wait for it at once and race when it is released.
+            fcntl.flock(held, fcntl.LOCK_EX)
+            processes = [subprocess.Popen([str(HGS), "task", "add", "--project", "orchard"], stdin=subprocess.PIPE,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env, text=True)
+                         for _ in range(6)]
+            for index, process in enumerate(processes):
+                process.stdin.write("task %d" % index)
+                process.stdin.close()
+            time.sleep(.3)
+            self.assertEqual([process.poll() for process in processes], [None] * 6, "an add did not wait for the lock")
+            fcntl.flock(held, fcntl.LOCK_UN)
         for process in processes:
             self.assertEqual(process.wait(timeout=30), 0, process.stderr.read())
         tasks = self.hgs("list", "--project", "orchard")["tasks"]

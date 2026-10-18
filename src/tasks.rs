@@ -445,11 +445,12 @@ fn cancel(
 }
 
 fn settings(config: &Config, args: &[String]) -> Result<i32> {
-    let wanted = if flag(args, "--set") {
-        Some(
-            serde_json::from_str::<Settings>(&stdin_text("settings")?)
-                .map_err(|e| fail(format!("invalid settings: {e}")))?,
-        )
+    let invalid = |e: &dyn std::fmt::Display| fail(format!("invalid settings: {e}"));
+    let changes = if flag(args, "--set") {
+        match serde_json::from_str(&stdin_text("settings")?).map_err(|e| invalid(&e))? {
+            Value::Object(changes) => Some(changes),
+            _ => return Err(invalid(&"expected a JSON object")),
+        }
     } else {
         None
     };
@@ -459,7 +460,16 @@ fn settings(config: &Config, args: &[String]) -> Result<i32> {
     )?;
     let store = store(config, &id)?;
     let mut doc = store.project().map_err(fail)?;
-    if let Some(wanted) = wanted {
+    if let Some(changes) = changes {
+        // Only the fields given change; the others keep their current values.
+        let mut merged = serde_json::to_value(doc.settings()).map_err(fail)?;
+        for (key, value) in changes {
+            if merged.get(&key).is_none() {
+                return Err(invalid(&format!("unknown field {key:?}")));
+            }
+            merged[key] = value;
+        }
+        let wanted: Settings = serde_json::from_value(merged).map_err(|e| invalid(&e))?;
         doc.set_settings(&wanted).map_err(fail)?;
         store.save_project(&doc).map_err(fail)?;
     }
