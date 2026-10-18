@@ -1,0 +1,77 @@
+{
+  "uuid": "21744732-49e0-40fa-9793-d6b15732eff1",
+  "id": "T-a1b2c3",
+  "project": "project-1",
+  "schema": 1,
+  "writable": true,
+  "created_at": 1760000000000,
+  "author": {
+    "kind": "agent",
+    "machine": "00000000-0000-4000-8000-000000000001",
+    "session": "codex/api"
+  },
+  "stage": "review",
+  "target": {
+    "kind": "session",
+    "machine": "00000000-0000-4000-8000-000000000001",
+    "session": "codex/api"
+  },
+  "rank": "V",
+  "session": {
+    "machine": "00000000-0000-4000-8000-000000000001",
+    "session": "codex/api"
+  },
+  "summary": "Token bucket in Redis; 6 tests.",
+  "cancelled_at": null,
+  "cancel_reason": "",
+  "text": "Add rate limiting to POST /v1/orders.",
+  "log": [
+    {
+      "kind": "created",
+      "actor": {
+        "kind": "agent",
+        "machine": "00000000-0000-4000-8000-000000000001",
+        "session": "codex/api"
+      },
+      "at": 1760000000000
+    },
+    {
+      "kind": "comment",
+      "actor": {
+        "kind": "person"
+      },
+      "at": 1760000001000,
+      "text": "Use the config value."
+    },
+    {
+      "kind": "sent",
+      "actor": {
+        "kind": "person"
+      },
+      "at": 1760000002000,
+      "text": "00000000-0000-4000-8000-000000000002",
+      "session": {
+        "machine": "00000000-0000-4000-8000-000000000001",
+        "session": "codex/api"
+      }
+    },
+    {
+      "kind": "comment",
+      "actor": {
+        "kind": "person"
+      },
+      "at": 1760000002500,
+      "text": "Limit per API key."
+    },
+    {
+      "kind": "report",
+      "actor": {
+        "kind": "agent",
+        "machine": "00000000-0000-4000-8000-000000000001",
+        "session": "codex/api"
+      },
+      "at": 1760000003000,
+      "text": "Token bucket in Redis; 6 tests."
+    }
+  ]
+}

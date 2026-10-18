@@ -197,6 +197,9 @@ impl TaskDoc {
                 session: string(&entry, "session").and_then(|s| serde_json::from_str(&s).ok()),
             });
         }
+        // A merge orders entries appended on two replicas by peer, not by time;
+        // the history reads oldest first, keeping the order of equal times.
+        log.sort_by_key(|entry| entry.at);
         Ok(TaskView {
             uuid: self.uuid.clone(),
             id: self.id(),

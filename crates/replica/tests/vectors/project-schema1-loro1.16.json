@@ -1,0 +1,6 @@
+{
+  "task_template": "[Zerus task {ref}]\nWritten by {author}.\n{prompt}\n{history}\nWhen you finish, or find that it cannot be done, report with\n{tools}.task_report: one to three sentences on what you changed, how you\nchecked it, and what is left undone or why it cannot be done.",
+  "cancel_template": "[Zerus task {ref} cancelled]\nThe person cancelled this task. Stop working on it. Do not continue and do\nnot revert anything; list what you changed and wait for the person.",
+  "agents_other": false,
+  "agent_limit": 3
+}
