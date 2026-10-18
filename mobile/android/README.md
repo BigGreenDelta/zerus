@@ -90,8 +90,19 @@ request offers it, **Always allow…** follows the same review and then asks for
 separate confirmation, which shows what it saves when the computer describes it
 (for example `Allows without asking again: printf *`). The confirmation sends
 nothing and closes if the request changed, can no longer be answered, or the app
-left the foreground meanwhile; opening it again needs a fresh review. Other
-approvals without Allow and Deny remain answerable only on the computer.
+left the foreground meanwhile; opening it again needs a fresh review.
+An approval marked `approval_choices`, such as a Claude terminal panel or a
+Kimi tool approval, lists the agent's own options verbatim, in its order, and
+sends the chosen one with **Send** once the approval review finishes, a
+rejection included, as on the desktop. An option with `scope: "broader"`, such
+as Kimi's **Approve for this session**, says that it applies beyond the request
+and then asks for a separate confirmation that shows the agent's description of
+it; the confirmation closes without sending if the request or the chosen option
+changed, the request can no longer be answered, or the app left the foreground.
+When the card offers an Other answer, such as Kimi's **Reject with feedback**,
+its one-line text is sent instead of an option. A card the computer cannot
+answer shows its options read-only with its reason. Other approvals without
+Allow and Deny remain answerable only on the computer.
 
 Conversation messages use 16 sp text and a 20 sp baseline; the editor uses 18 sp
 text and a 22 sp baseline. Both keep natural character spacing. Compact Markdown
