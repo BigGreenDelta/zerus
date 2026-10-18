@@ -534,6 +534,11 @@ class PackageTests(unittest.TestCase):
             self.assertIn(f"Zerus {VERSION} for Windows", readme)
             self.assertIn(head, readme)
             self.assertIn("Microsoft.Windows.Console.ConPTY 1.25.260930003, under the MIT license", readme)
+            # The archive keeps every Qt release; official_releases drops superseded ones.
+            self.assertIn("https://download.qt.io/archive/qt/6.10/6.10.3/single/qt-everywhere-src-6.10.3.tar.xz",
+                          readme)
+            self.assertIn("Git tags v6.10.3 in the Qt Project repositories", readme)
+            self.assertNotIn("official_releases", readme)
             self.assertNotRegex(readme, r"@[A-Z_]+@")
             self.assertNotRegex(readme, r"[^\r]\n")
         # Equal inputs give equal bytes, so a rebuilt zip can be compared.

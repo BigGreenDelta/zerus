@@ -57,8 +57,10 @@ Zerus is licensed under the MIT license in LICENSE; THIRD_PARTY_NOTICES.md
 describes the components it uses. The folder also contains:
 - Qt @QT_VERSION@ libraries and plugins, used under the GNU LGPL version 3
   (licenses\qt). They are separate DLLs that can be replaced with compatible
-  builds. Their source code is available from
-  https://download.qt.io/official_releases/qt/ for this exact version.
+  builds. Their exact source code is available from
+    https://download.qt.io/archive/qt/@QT_SERIES@/@QT_VERSION@/single/qt-everywhere-src-@QT_VERSION@.tar.xz
+  and as Git tags v@QT_VERSION@ in the Qt Project repositories at
+  https://code.qt.io.
 - SPDX documents supplied with Qt (licenses\qt\sbom) that name the license
   and copyright of each Qt module and of the third-party code inside it.
   licenses\qt holds the text of every standard license and exception they
