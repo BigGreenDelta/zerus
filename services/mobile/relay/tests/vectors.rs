@@ -390,7 +390,9 @@ fn operation_tables_match_the_python_connector() {
     // advertised only by native-capable connectors; presence alerts are relay-owned.
     // The scoped project feature is additive; the legacy FEATURES vector stays frozen.
     assert!(protocol::FEATURES.contains(&"session_project_assignment_v1"));
-    assert!(!set(&["FEATURES"]).contains("session_project_assignment_v1"));
+    assert!(!set(&["FEATURES"])
+        .iter()
+        .any(|feature| feature == "session_project_assignment_v1"));
     let features: Vec<&str> = protocol::FEATURES
         .iter()
         .copied()
