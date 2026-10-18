@@ -429,7 +429,9 @@ Compact and continue retains a cancellable send intent only in memory. It waits
 for the matching native compaction request to complete and the agent to be idle,
 then sends only the original unchanged draft with its native compaction UUID.
 An edit, attachment change, navigation, restart, cancellation, failed or unchanged
-compaction, or identity change cancels that continuation. Acceptance of the
+compaction, or identity change cancels that continuation. A later prompt,
+interruption, permission request or session end also ends it; a compaction that
+already completed keeps its Completed result. Acceptance of the
 compact command alone is never completion. Clear and compact never run merely
 because context is large or a cache has expired.
 
@@ -762,9 +764,12 @@ to the source document do not change a pending message. A send uses the existing
 native `attachments: [{name, mime, data_base64, reference?}]` contract. No phone
 supplied path is opened on the computer. `hgs` creates its own private attachment
 files and retains them when input may have reached the native agent. Claude may
-record pasted input as `<pasted_content id="…">…</pasted_content id="…">`; `hgs`
-keeps only the inner text, so the native prompt still matches its delivery
-receipt and the message appears once.
+record pasted input as `<pasted_content id="…">…</pasted_content id="…">`, and
+frames a prompt that is only pasted text with blank lines; `hgs` keeps only the
+inner text, so the native prompt still matches its delivery receipt and the
+message appears once. As in desktop Activity, history leaves out Claude's
+compaction summaries and its record of local slash commands and their output;
+a slash prompt Claude records as typed text remains.
 
 Limits match native input: eight files, ten MiB per file, twenty MiB total and
 64 KiB of message text. `/v1/requests` accepts a bounded 29 MiB JSON envelope;
