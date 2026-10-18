@@ -855,3 +855,78 @@ fn typed_failure_invalidates_only_its_observed_owner_work_interval() {
         );
     }
 }
+
+#[test]
+fn native_clock_requires_generation_and_supported_platform_time() {
+    let record = json!({"run_id":"synthetic-run","process_start":"synthetic-generation"});
+    let first = adapters::clock(&record);
+    #[cfg(any(unix, windows))]
+    {
+        let first = first.expect("supported native clock must be available");
+        let second = adapters::clock(&record).unwrap();
+        assert_eq!(first.generation.0, second.generation.0);
+        assert!(second.monotonic_ms >= first.monotonic_ms);
+        let changed = adapters::clock(
+            &json!({"run_id":"another-run","process_start":"synthetic-generation"}),
+        )
+        .unwrap();
+        assert_ne!(first.generation.0, changed.generation.0);
+        let changed = adapters::clock(
+            &json!({"run_id":"synthetic-run","process_start":"another-generation"}),
+        )
+        .unwrap();
+        assert_ne!(first.generation.0, changed.generation.0);
+    }
+    #[cfg(not(any(unix, windows)))]
+    assert!(first.is_none());
+    for missing in [
+        json!({}),
+        json!({"run_id":"synthetic-run"}),
+        json!({"process_start":"synthetic-generation"}),
+    ] {
+        assert!(adapters::clock(&missing).is_none());
+    }
+}
+
+#[test]
+fn wait_counts_and_durations_require_matching_clock_evidence() {
+    for case in 0..5 {
+        let (_dir, mut db) = enabled();
+        let mut ask = event("ask", Kind::WaitStarted(Interval::Input), AT);
+        let mut answer = event("answer", Kind::WaitResolved(Interval::Input), AT + 1000);
+        match case {
+            1 => {
+                ask.clock = None;
+                answer.clock = None;
+            }
+            2 => {
+                answer.clock.as_mut().unwrap().generation = Identity::new(&["restarted"]);
+            }
+            // Model suspend: native elapsed excludes sleep; UTC has moved ahead.
+            3 => {
+                answer.observed_ms += 6000;
+            }
+            // Merely having a clock never supplies a matching native request.
+            4 => {
+                answer.correlation = Some(Identity::new(&["foreign-request"]));
+            }
+            _ => (),
+        }
+        db.record(&ask, AT).unwrap();
+        db.record(&answer, AT + 7000).unwrap();
+        db.record(&answer, AT + 7000).unwrap();
+        let value = summary(&db);
+        assert_eq!(total(&value, "input_requested"), 1, "case {case}");
+        assert_eq!(
+            total(&value, "input_resolved"),
+            u64::from(!matches!(case, 1 | 4)),
+            "case {case}"
+        );
+        assert_eq!(
+            total(&value, "input_wait_ms"),
+            if case == 0 { 1000 } else { 0 },
+            "case {case}"
+        );
+        assert_eq!(value["unresolved_waits"]["observed"], u64::from(case == 4));
+    }
+}
