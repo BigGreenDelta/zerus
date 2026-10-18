@@ -5,6 +5,7 @@
 #include "WorktreeBatchCleanupDialog.h"
 #include "DownloadCache.h"
 #include "SessionFileDrop.h"
+#include "SessionCommands.h"
 #include "SessionCardDelegate.h"
 #include "SessionPanelDock.h"
 #include "ExternalFile.h"
@@ -2098,20 +2099,17 @@ QString SessionsWindow::terminalDropTarget() const
 
 void SessionsWindow::pasteTerminalPaths(const QStringList &paths)
 {
-    // A local Windows session gets native paths, in double quotes when needed (no
-    // Windows name contains one) or, with `$` or a backtick that PowerShell expands
-    // there, in single quotes with `'` doubled; POSIX machines, including every peer,
-    // single quotes.
+    // Windows defaults to PowerShell: use its shared literal quoting, including
+    // typographic quote delimiters. POSIX machines, including every peer, keep
+    // their own single-quote escaping.
     const auto *entry=selected();
     const bool windows=entry&&MachinePlatform::of(m_fleet.local().metrics,entry->host.isEmpty())==MachinePlatform::Style::Windows;
-    static const QRegularExpression plain("^[\\w.:\\\\~+-]+$",QRegularExpression::UseUnicodePropertiesOption);
     QStringList quoted;
     for(auto path:paths) {
         if(path.contains(QRegularExpression("[\\x00-\\x1f\\x7f]"))) {showNotice(tr("File names containing control characters cannot be pasted into Terminal."),true);return;}
         if(windows) {
             path=MachinePlatform::native(path,MachinePlatform::Style::Windows);
-            if(path.contains('$')||path.contains('`'))quoted<<'\''+path.replace('\'',QStringLiteral("''"))+'\'';
-            else quoted<<(plain.match(path).hasMatch()?path:'"'+path+'"');
+            quoted<<SessionCommands::powerShellQuote(path);
             continue;
         }
         path.replace('\'',QStringLiteral("'\\''"));quoted<<'\''+path+'\'';

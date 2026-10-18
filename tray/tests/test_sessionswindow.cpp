@@ -5255,7 +5255,7 @@ void TestSessionsWindow::terminalDropKeepsActivityDraftAndDoesNotSubmit()
     QByteArray pasted;for(const auto &item:output)pasted+=item.first().toByteArray();
 #ifdef Q_OS_WIN
     // This Windows computer reads native paths (terminalDropQuotesPathsForTheMachine).
-    QVERIFY(pasted.contains(('"'+QDir::toNativeSeparators(path)+'"').toUtf8()));
+    QVERIFY(pasted.contains(('\''+QDir::toNativeSeparators(path).replace('\'',QStringLiteral("''"))+'\'').toUtf8()));
 #else
     QVERIFY(pasted.contains("report'\\''s draft.pdf"));
 #endif
@@ -5883,9 +5883,8 @@ void TestSessionsWindow::fileReferenceOpeningOutlivesDialog()
 
 void TestSessionsWindow::terminalDropQuotesPathsForTheMachine()
 {
-    // The local Windows machine reads native paths in double quotes, or in single
-    // quotes when PowerShell would expand `$` or a backtick; a peer's staged copies and
-    // a POSIX local machine keep single quotes.
+    // PowerShell accepts typographic quotes as delimiters, too. Keep every unsafe
+    // Windows path literal; a peer's staged copies retain POSIX quoting.
     const auto program=m_dir->filePath("terminal-quoting-hgs");QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
     fixture.write("#!/usr/bin/env python3\nimport json,os,runpy,sys\na=sys.argv[1:]\nif a and a[0].startswith('@'):a=a[1:]\n"
         "if a[:1]==['a']:\n if os.name!='nt':\n  import tty;tty.setraw(0)\n"
@@ -5895,9 +5894,23 @@ void TestSessionsWindow::terminalDropQuotesPathsForTheMachine()
         "status='staged',files=[dict(path=\"/srv/inbox/report's draft.pdf\") for _ in p['attachments']])));sys.exit(0)\n"
         "sys.argv[0]="+FakeCli::pythonString(script())+";runpy.run_path(sys.argv[0],run_name='__main__')\n");
     fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    const QList<QPair<QString,QString>> cases{
+        {QStringLiteral("plain.txt"),QStringLiteral("plain.txt")},
+        {QStringLiteral("report's draft.pdf"),QStringLiteral("'report''s draft.pdf'")},
+        {QStringLiteral("a&b.txt"),QStringLiteral("'a&b.txt'")},
+        {QStringLiteral("cost $5's `q`.txt"),QStringLiteral("'cost $5''s `q`.txt'")},
+        {QStringLiteral("left\u2018$probe`n.txt"),QStringLiteral("'left\u2018\u2018$probe`n.txt'")},
+        {QStringLiteral("right\u2019$probe`n.txt"),QStringLiteral("'right\u2019\u2019$probe`n.txt'")},
+        {QStringLiteral("low\u201a$probe`n.txt"),QStringLiteral("'low\u201a\u201a$probe`n.txt'")},
+        {QStringLiteral("reversed\u201b$probe`n.txt"),QStringLiteral("'reversed\u201b\u201b$probe`n.txt'")},
+        {QStringLiteral("left\u201cquote.txt"),QStringLiteral("'left\u201cquote.txt'")},
+        {QStringLiteral("right\u201dquote.txt"),QStringLiteral("'right\u201dquote.txt'")},
+        {QStringLiteral("\u043f\u0443\u0442\u044c \u043f\u0440\u0438\u043c\u0435\u0440.txt"),
+         QStringLiteral("'\u043f\u0443\u0442\u044c \u043f\u0440\u0438\u043c\u0435\u0440.txt'")}
+    };
     QStringList paths;
-    for(const auto &name:{QString("plain.txt"),QString("report's draft.pdf"),QString("a&b.txt"),QString("cost $5's `q`.txt")}) {
-        QFile file(m_dir->filePath(name));QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture");paths<<file.fileName();
+    for(const auto &item:cases) {
+        QFile file(m_dir->filePath(item.first));QVERIFY(file.open(QIODevice::WriteOnly));file.write("fixture");paths<<file.fileName();
     }
     QMimeData mime;QList<QUrl> urls;for(const auto &path:paths)urls<<QUrl::fromLocalFile(path);mime.setUrls(urls);
     const auto native=[](QString path){return path.replace('/','\\');};
@@ -5922,19 +5935,30 @@ void TestSessionsWindow::terminalDropQuotesPathsForTheMachine()
         SessionsWindow window(FakeCli::program(program));window.setFleet(state);window.resize(1100,760);window.show();
         const auto pasted=QString::fromUtf8(drop(window,{},"codex/hgs/dashboard"));
         if(platform=="windows") {
-            QVERIFY2(pasted.contains(native(paths[0])+" \""+native(paths[1])+"\" \""+native(paths[2])+"\" '"
-                                     +native(paths[3]).replace("'","''")+"' "),qPrintable(pasted));
-            QVERIFY(!pasted.contains('/'));QVERIFY(!pasted.contains('\''+native(paths[1])));
+            QStringList expected;
+            const QString prefix=native(m_dir->path())+'\\';
+            for(const auto &item:cases) {
+                QString literal=item.second;
+                if(literal.startsWith('\''))literal.insert(1,prefix);else literal.prepend(prefix);
+                expected<<literal;
+            }
+            // First establish the injection-sensitive literals, independently of
+            // the ordinary path presentation that also changes with this fix.
+            for(int i=4;i<10;++i)QVERIFY2(pasted.contains(expected[i]),qPrintable(pasted));
+            QVERIFY2(pasted.contains(expected.join(' ')+" "),qPrintable(pasted));
+            QVERIFY(!pasted.contains('/'));QVERIFY(pasted.contains('\''+native(paths[1]).replace("'","''")+'\''));
         } else {
             QVERIFY2(pasted.contains('\''+paths[0]+"' '"+QString(paths[1]).replace("'","'\\''")+"' '"+paths[2]+"' '"
                                      +QString(paths[3]).replace("'","'\\''")+"' "),qPrintable(pasted));
             QVERIFY(!pasted.contains('"'));
         }
+        QVERIFY(!pasted.contains('\r'));QVERIFY(!pasted.contains('\n'));
         // A peer's staged copies keep POSIX quoting whatever this computer runs.
         const auto remote=QString::fromUtf8(drop(window,"mac","claude/infra/review"));
         QVERIFY2(remote.contains("'/srv/inbox/report'\\''s draft.pdf' '/srv/inbox/report'\\''s draft.pdf' '/srv/inbox/report'\\''s draft.pdf' "),
                  qPrintable(remote));
         QVERIFY(!remote.contains('"'));QVERIFY(!remote.contains('\\'+QString("srv")));
+        QVERIFY(!remote.contains('\r'));QVERIFY(!remote.contains('\n'));
     }
 }
 
