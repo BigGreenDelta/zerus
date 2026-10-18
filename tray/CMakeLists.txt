@@ -245,7 +245,8 @@ if(APPLE)
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "com.hgdev.hgs-tray"
+        # Uninstalled/ad-hoc copies must not replace the installed app's TCC identity.
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.hgdev.hgs-tray.local"
         MACOSX_BUNDLE_ICON_FILE "hgs-zerus-swarm.icns"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/packaging/Info.plist"
     )

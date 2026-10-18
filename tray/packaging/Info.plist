@@ -9,7 +9,7 @@
     <key>LSHasLocalizedDisplayName</key> <true/>
     <key>CFBundleDevelopmentRegion</key> <string>en</string>
     <key>CFBundleExecutable</key>        <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
-    <key>CFBundleIdentifier</key>        <string>com.hgdev.hgs-tray</string>
+    <key>CFBundleIdentifier</key>        <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
     <key>CFBundleIconFile</key>          <string>${MACOSX_BUNDLE_ICON_FILE}</string>
     <key>CFBundleIconName</key>          <string>hgs-zerus-swarm</string>
     <key>CFBundleVersion</key>           <string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>

@@ -103,12 +103,13 @@ def main():
 
     info_path = staged / "Contents/Info.plist"
     info = plistlib.loads(info_path.read_bytes())
-    if info.get("CFBundleShortVersionString") != args.version or info.get("CFBundleIdentifier") != "com.hgdev.hgs-tray":
+    if (info.get("CFBundleShortVersionString") != args.version
+            or info.get("CFBundleIdentifier") not in ("com.hgdev.hgs-tray.local", "com.hgdev.hgs-tray")):
         parser.error("the GUI build does not match this version and bundle identifier")
     # LaunchServices needs CFBundleExecutable once the bundle is no longer named hgs-tray.app.
     # Terminal integration runs osascript; under the hardened runtime TCC attributes its
     # Apple Events to Zerus, which therefore declares their purpose.
-    info.update(CFBundleName="Zerus", CFBundleDisplayName="Zerus", CFBundleExecutable="hgs-tray",
+    info.update(CFBundleIdentifier="com.hgdev.hgs-tray", CFBundleName="Zerus", CFBundleDisplayName="Zerus", CFBundleExecutable="hgs-tray",
                 LSMinimumSystemVersion=MINIMUM_SYSTEM, ZerusReleaseVersion=args.release or args.version,
                 NSAppleEventsUsageDescription="Zerus opens your agent sessions in Terminal.")
     info_path.write_bytes(plistlib.dumps(info))
