@@ -1146,9 +1146,10 @@ card answers through it, so a clipped panel no longer needs a larger Terminal.
 - **Yes** allows this one tool call without changing any permission setting.
   **No** ends Claude's turn as in Terminal. **Tell Claude what to do instead**
   denies the call with your message, and Claude continues without it.
-- Options that reach beyond this request, and every choice when the hook does
-  not take it within three seconds, go only through the verified panel, with
-  the second **Confirm**.
+- Options that reach beyond this request go only through the verified panel,
+  with the second **Confirm**. A **Yes** or **No** that the hook does not take
+  within three seconds also goes through a verified panel; feedback it does not
+  take is not sent.
 - A decision the hook has taken is never sent again. Until Claude confirms it,
   the card stays locked and is answered in Terminal.
 - `hgs answer` receipts report `transport` `claude_hook` or `claude_tui`.

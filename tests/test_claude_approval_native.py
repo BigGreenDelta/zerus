@@ -344,6 +344,19 @@ class NativeClaudeApprovalChannel(unittest.TestCase):
         self.wait_for(self.approved)
         self.assertEqual(self.keys()[self.keys_before:], [])
 
+    def test_clipped_rm_80x24_in_an_unviewed_pane_is_answered_without_growth(self):
+        # tmux's default size for a pane no client has attached to.
+        self.assertEqual(self.tmux('display-message', '-p', '-t', '=' + self.name + ':', '#{window_height}').strip(), '24')
+        card = self.channel_card()
+        self.assertTrue(card['can_answer'], card['answer_unavailable_reason'])
+        self.assertFalse(card['panel_verified'])
+        receipt = self.answer(self.payload(card, 'Yes'))
+        self.assertEqual((receipt['status'], receipt['transport']), ('answered', 'claude_hook'))
+        self.wait_for(self.approved)
+        self.assertEqual(self.tmux('display-message', '-p', '-t', '=' + self.name + ':', '#{window_height}').strip(), '24',
+                         'a waiting hook needs no taller pane')
+        self.assertEqual(self.keys()[self.keys_before:], [])
+
     def test_broader_option_goes_through_the_verified_screen(self):
         card = self.channel_card()
         broader = next(o for o in card['questions'][0]['options'] if o['scope'] == 'broader')

@@ -72,9 +72,9 @@ class AnswerChannelApproval(AnswerChannelConversation):
         digest=hashlib.sha256(json.dumps(self.INPUT,separators=(',',':'),sort_keys=True).encode()).hexdigest()
         with tempfile.TemporaryDirectory(prefix='hgs-answer-channel-') as state:
             record=dict(version=1,name=self.NAME,agent='claude',run_id=self.RUN,conversation_id=self.CONVERSATION,pid=1,
-                        process_start='not this process',phase='approval',pending_approval_at=20.0,
+                        process_start='not this process',phase='approval',pending_approval_at=time.time(),
                         pending_approval=dict(hook_event_name='PermissionRequest',tool_name='Bash',tool_input=self.INPUT),
-                        claude_tool_uses=uses if uses is not None else dict(toolu_1=dict(tool_name='Bash',input=digest,at=10.0)))
+                        claude_tool_uses=uses if uses is not None else dict(toolu_1=dict(tool_name='Bash',input=digest,at=time.time()-1)))
             path=os.path.join(state,hashlib.sha256(self.NAME.encode()).hexdigest()+'.json')
             with open(path,'w') as file:json.dump(record,file)
             values=dict(os.environ,HGS_STATE_DIR=state,HGS_CONFIG_DIR=os.path.join(state,'config'),HGS_SESSION=self.NAME,HGS_RUN_ID=self.RUN)
@@ -102,10 +102,11 @@ class AnswerChannelApproval(AnswerChannelConversation):
                       self.event(tool_name='ExitPlanMode'),self.event(tool_name='AskUserQuestion')):
             self.assertEqual(self.bound(event),[],event)
         digest=hashlib.sha256(json.dumps(self.INPUT,separators=(',',':'),sort_keys=True).encode()).hexdigest()
-        twice=dict(toolu_1=dict(tool_name='Bash',input=digest,at=10.0),toolu_2=dict(tool_name='Bash',input=digest,at=11.0))
+        now=time.time()
+        twice=dict(toolu_1=dict(tool_name='Bash',input=digest,at=now-2),toolu_2=dict(tool_name='Bash',input=digest,at=now-1))
         self.assertEqual(self.bound(self.event(),twice),[],'two identical calls are ambiguous')
         self.assertEqual(self.bound(self.event(),{}),[],'no call began')
-        late=dict(toolu_1=dict(tool_name='Bash',input=digest,at=30.0))
+        late=dict(toolu_1=dict(tool_name='Bash',input=digest,at=time.time()+60))
         self.assertEqual(self.bound(self.event(),late),[],'a call after the request is not its call')
 
 

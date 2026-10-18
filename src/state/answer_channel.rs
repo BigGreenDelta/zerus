@@ -134,6 +134,17 @@ fn claim(dir: &Path) -> Result<Option<Value>> {
         .ok_or_else(|| "claimed answer is unreadable".into())
 }
 
+/// Take an offered answer to `kind` only when `ready`. An approval waits for
+/// the screen to show its request; until then the offer stays unclaimed, and
+/// `hgs answer` retracts it with nothing sent.
+fn take_offer(kind: Kind, dir: &Path, ready: impl FnOnce() -> bool) -> Result<Option<Value>> {
+    // An offer that appears after this look waits for the next poll.
+    if kind == Kind::Approval && (!dir.join(ANSWER).exists() || !ready()) {
+        return Ok(None);
+    }
+    claim(dir)
+}
+
 /// Withdraw the offer; false when the waiting process already claimed it.
 fn retract(dir: &Path) -> Result<bool> {
     take(dir, RETRACTED)
@@ -559,7 +570,8 @@ fn wait() -> Result<()> {
                 return Ok(());
             }
         }
-        if let Some(offer) = claim(&dir)? {
+        let ready = || current.as_ref().is_some_and(claude_approval::channel::waits_now);
+        if let Some(offer) = take_offer(kind, &dir, ready)? {
             // The question must still be the bound one when its answer goes out.
             // Claude tells the hook nothing of a Terminal approval: only the
             // screen still showing the request proves it waits.
@@ -567,7 +579,7 @@ fn wait() -> Result<()> {
             let unchanged = should_close(kind, current.as_ref(), &record, &card).is_none()
                 && current.as_ref().is_some_and(|current| match kind {
                     Kind::Question => bind(current, &event).as_ref() == Some(&card),
-                    Kind::Approval => claude_approval::channel::shown_now(current),
+                    Kind::Approval => claude_approval::channel::waits_now(current),
                 })
                 && !transcript.answered(current.as_ref().unwrap_or(&record), &tool);
             let output = decision_kind(kind, &event, &card, &offer);
@@ -996,6 +1008,32 @@ mod tests {
         gone.process_start = "not this process".into();
         write(dir, WAITING, &json!(gone)).unwrap();
         assert_eq!(route_in(dir, &record(), &card()), Route::Screen);
+    }
+
+    #[test]
+    fn an_approval_offer_stays_unclaimed_until_its_screen_shows_it() {
+        let (temp, waiting) = channel(|dir| {
+            for _ in 0..40 {
+                assert!(take_offer(Kind::Approval, dir, || false).unwrap().is_none());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let screen = std::cell::Cell::new(0);
+        let error = deliver(temp.path(), &json!({"request_id":"one","decision":"allow"}), Duration::from_millis(200),
+            Duration::from_millis(200), || { screen.set(screen.get() + 1); Err("Nothing was sent".into()) }).unwrap_err();
+        assert_eq!(error, "Nothing was sent", "a retracted offer is no uncertain delivery");
+        assert_eq!(screen.get(), 1);
+        assert!(!temp.path().join(CLAIMED).exists());
+        assert!(temp.path().join(RETRACTED).exists());
+        waiting.join().unwrap();
+        // Once shown, the approval is taken; a question never waits for it.
+        for (kind, ready) in [(Kind::Approval, true), (Kind::Question, false)] {
+            let temp = tempfile::tempdir().unwrap();
+            offer(temp.path(), &json!({"request_id":"two"})).unwrap();
+            assert_eq!(take_offer(kind, temp.path(), || ready).unwrap().unwrap()["request_id"], "two", "{kind:?}");
+        }
+        let empty = tempfile::tempdir().unwrap();
+        assert!(take_offer(Kind::Approval, empty.path(), || panic!("no offer, no capture")).unwrap().is_none());
     }
 
     #[test]

@@ -79,14 +79,20 @@ pub(in crate::state) fn requested(event:&Value)->bool {
         &&!tool.is_empty()&&!question_tool(tool)&&!TERMINAL_ONLY_TOOLS.contains(&tool)
 }
 
+/// How recently the journal must have recorded the request a new hook binds
+/// to: both hooks start together, and an older request with the same input is
+/// not this one.
+const FRESH:f64=10.;
+
 /// The identity a waiting hook serves for Claude's PermissionRequest `event`:
-/// only from this conversation, for the request hgs recorded, with one active
-/// tool use of the same tool and input.
+/// only from this conversation, for the request hgs just recorded, with one
+/// active tool use of the same tool and input.
 pub(in crate::state) fn bind(record:&Value,event:&Value)->Option<Value> {
     let conversation=string(record,"conversation_id");
     let request=&record["pending_approval"];
     if !requested(event)||conversation.is_empty()||string(event,"session_id")!=conversation
-        ||request["tool_name"]!=event["tool_name"]||request["tool_input"]!=event["tool_input"] {return None;}
+        ||request["tool_name"]!=event["tool_name"]||request["tool_input"]!=event["tool_input"]
+        ||record["pending_approval_at"].as_f64().is_none_or(|at|now()-at>FRESH) {return None;}
     identity(record)
 }
 
@@ -97,15 +103,25 @@ pub(in crate::state) fn pending(current:&Value,card:&Value)->bool {
 }
 
 /// Whether the screen still shows Claude waiting for this request: a chooser,
-/// and a complete panel only when it is this request. A clipped panel shows no
-/// other request, and the decision goes to the bound tool use alone.
+/// and a complete panel only when it is this request and no recorded child
+/// request. A clipped panel may be a child's, so it proves nothing while one
+/// is recorded. The decision itself goes to the bound tool use alone.
 pub(super) fn shown(record:&Value,screen:&str)->bool {
-    visible(screen)&&request(record).is_some_and(|request|parse(screen).is_none_or(|panel|matches(request,&panel)))
+    let Some(request)=request(record) else {return false};
+    if !visible(screen)||children::overflow(record) {return false;}
+    match parse(screen) {
+        Some(panel) => matches(request,&panel)&&!children::entries(record).any(|(_,entry)|matches(&entry["request"],&panel)),
+        None => children::entries(record).next().is_none(),
+    }
 }
 
-/// The same proof, read from the terminal now.
-pub(in crate::state) fn shown_now(record:&Value)->bool {
-    kimi_tui_choice::identity(record).and_then(|live|kimi_tui_choice::capture(&live)).is_ok_and(|screen|shown(record,&screen))
+/// The same proof, read from the terminal now through the same identity and
+/// capture as `hgs answer`. A capture that fails proves nothing: it never
+/// overrides the proof that let `hgs answer` offer, since a retracted offer
+/// leaves this request to the screen for good. Claude ignores a decision that
+/// arrives after a Terminal answer.
+pub(in crate::state) fn waits_now(record:&Value)->bool {
+    kimi_tui_choice::identity(record).and_then(|live|kimi_tui_choice::capture(&live)).map_or(true,|screen|shown(record,&screen))
 }
 
 /// Claude's PermissionRequest decision for an offered approval. Allow carries
@@ -197,6 +213,33 @@ pub(in crate::state) fn decision(offer:&Value)->Result<Value> {
         }
         let mut forgotten=r.clone();forget(&mut forgotten,"toolu_one");
         assert!(!pending(&forgotten,&card));assert!(forgotten.get(USES).is_none());
+    }
+
+    #[test] fn only_a_freshly_recorded_request_binds() {
+        let mut stale=waiting();
+        stale["pending_approval_at"]=json!(now()-FRESH-1.);
+        stale[USES]["toolu_one"]["at"]=json!(now()-FRESH-2.);
+        assert!(identity(&stale).is_some(),"its identity stays for an answer already bound");
+        assert!(bind(&stale,&event("PermissionRequest",json!({}))).is_none());
+    }
+
+    #[test] fn a_child_request_or_its_panel_proves_nothing_for_the_main_agent() {
+        const PANEL:&str="────────────────────────────────────────\n Bash command\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n printf hi > out.txt\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend\n";
+        let clipped=PANEL.split_once(" Bash command\n").unwrap().1;
+        let r=waiting();
+        assert!(shown(&r,PANEL)&&shown(&r,clipped));
+        assert!(!shown(&r,"────────────────────────────────────────\n❯ \n"));
+        assert!(!shown(&r,&PANEL.replace("printf hi","printf ho")),"another request's complete panel");
+        let mut child=r.clone();
+        questions::observe(&mut child,&event("PermissionRequest",json!({"agent_id":"child"})));
+        assert!(!shown(&child,PANEL),"the same command from a child is ambiguous");
+        assert!(!shown(&child,clipped),"a clipped panel may be the child's");
+        let mut other=r.clone();
+        questions::observe(&mut other,&event("PermissionRequest",json!({"agent_id":"child","tool_input":{"command":"ls"}})));
+        assert!(shown(&other,PANEL),"a complete panel of this request only");
+        assert!(!shown(&other,clipped));
+        let mut overflow=r.clone();overflow["child_approval_overflow"]=json!(true);
+        assert!(!shown(&overflow,PANEL));
     }
 
     #[test] fn decisions_grant_once_deny_or_pass_feedback() {

@@ -833,8 +833,14 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             .find(|o| string(o, "id") == id)
             .map(|o| string(o, "label"))
             .unwrap_or("");
-        // A denial with feedback is the person's own text.
-        let label = if label.is_empty() { string(&answers[0], "text") } else { label };
+        // A denial with feedback records the person's own text as a denial.
+        let feedback;
+        let label = if label.is_empty() && !string(&answers[0], "text").is_empty() {
+            feedback = format!("Denied: {}", string(&answers[0], "text"));
+            feedback.as_str()
+        } else {
+            label
+        };
         if question["source"] == "claude_usage_limit" && ["Switch to usage credits", "Switch to extra usage"].contains(&label) {
             receipt["open_terminal"] = json!(true);
         }

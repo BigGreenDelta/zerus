@@ -299,21 +299,22 @@ const FEEDBACK:&str="Tell Claude what to do instead";
 /// itself, so the screen need only prove that Claude still waits. A complete
 /// panel of this request adds its native options; one reaching beyond this
 /// request goes through the verified screen. None when the screen proves
-/// nothing, or when a child's request may be the one shown.
+/// nothing, or when a child's request may be the one shown (`channel::shown`).
 fn channel_card(record:&Value,screen:Option<&str>,identity:&Value)->Option<Value> {
     let screen=screen?;
     let request=request(record)?;
-    if !eligible(record)||children::overflow(record)||!channel::shown(record,screen) {return None;}
+    if !eligible(record)||!channel::shown(record,screen) {return None;}
     let native=parse(screen).filter(|panel|matches(request,panel));
-    if native.is_none()&&children::entries(record).next().is_some() {return None;}
     let tool=string(request,"tool_name");
     let (question,body,options)=match &native {
         Some(panel) => (panel.question.clone(),native_body(panel),native_options(panel)),
         None => (format!("Claude asks to use {tool}"),with_warning(request_body(request)?,Some(screen)),
             vec![json!({"id":"1","label":"Yes","scope":"once"}),json!({"id":"2","label":"No","scope":"once"})]),
     };
+    // The visible warning is part of the review; its countdown is not.
     let hash=format!("{:x}",Sha256::digest(json!([identity["question_hash"],
-        native.as_ref().map(|p|json!([p.title,identity_body(p),p.question,p.labels]))]).to_string()));
+        native.as_ref().map(|p|json!([p.title,identity_body(p),p.question,p.labels])),
+        native.is_none().then(||safety_panel(screen).map(|p|identity_body(&p))).flatten()]).to_string()));
     let created=record["pending_approval_at"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
     Some(json!({"question_id":identity["question_id"],"question_hash":hash,"tool_call_id":identity["tool_call_id"],
         "agent_id":request["agent_id"],"child_request_id":"","run_id":record["run_id"],"conversation_id":record["conversation_id"],
@@ -974,6 +975,25 @@ pub(super) fn reconcile(record:Value)->Value {
         assert!(channel_card(&child,Some(SAFETY),&identity).is_some());
         let mut paused=r.clone();paused["phase"]=json!("working");
         assert!(channel_card(&paused,Some(clipped),&identity).is_none());
+    }
+    #[test] fn waiting_hook_card_refuses_a_panel_a_child_may_own() {
+        let command="printf hi > out.txt";
+        let mut r=hooked("Bash",json!({"command":command,"description":"Write \"hi\" into out.txt without a trailing newline"}));
+        let identity=channel::identity(&r).unwrap();
+        assert!(channel_card(&r,Some(BASH),&identity).is_some());
+        child(&mut r,"child-a",command);
+        assert!(channel_card(&r,Some(BASH),&identity).is_none());
+        assert!(channel_snapshot(&r,BASH).is_none(),"no keys for an ambiguous panel either");
+        assert_eq!(card(&r,BASH)["can_answer"],false,"the screen card stays ambiguous");
+    }
+    #[test] fn waiting_hook_card_hash_covers_the_warning_but_not_its_countdown() {
+        let command="T=$(pwd); test \"$T\" = /workspace/example && rm -f $T/*.jsonl $T/*.port";
+        let r=hooked("Bash",json!({"command":command}));
+        let identity=channel::identity(&r).unwrap();
+        let clipped=&SAFETY[SAFETY.find(" │ T=$(pwd)").unwrap()..];
+        let hash=|screen:&str|channel_card(&r,Some(screen),&identity).unwrap()["question_hash"].clone();
+        assert_eq!(hash(clipped),hash(&clipped.replace("in 2:00,","in 1:59,")));
+        assert_ne!(hash(clipped),hash(&clipped.replace("possibly-empty","possibly-wrong")));
     }
     #[test] fn waiting_hook_card_keeps_broader_options_behind_the_screen() {
         let r=hooked("Bash",json!({"command":"printf hi > out.txt","description":"Write \"hi\" into out.txt without a trailing newline"}));

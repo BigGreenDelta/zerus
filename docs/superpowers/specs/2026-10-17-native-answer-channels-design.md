@@ -278,7 +278,15 @@ delivery. The channel is only another transport.
   not the bound one and does not close it.
 - A Terminal answer sends the hook no signal. Inspection, `hgs answer` and the
   worker's claim therefore also require Terminal to show a chooser. A complete
-  panel must match the request.
+  panel must match the request and no recorded child request; a clipped panel
+  counts only while no child request is recorded.
+- The worker takes an approval offer only while that proof holds, through the
+  same identity and capture as `hgs answer`. Until then the offer stays
+  unclaimed, and `hgs answer` retracts it with nothing sent.
+  - A retraction retires that channel, so the request continues on the screen.
+  - A capture that fails in the hook proves nothing and never blocks the claim.
+    Claude ignores a decision that arrives after a Terminal answer.
+- A hook binds only to a request recorded in the last ten seconds.
 - The card's options:
   - With a complete matching panel, it lists Claude's options verbatim, and
     `panel_verified` is true.
