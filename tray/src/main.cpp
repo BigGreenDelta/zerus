@@ -21,6 +21,7 @@
 #include "WorkspaceStyle.h"
 #include "WorkspaceFocus.h"
 #include "SingleInstance.h"
+#include "UiLanguage.h"
 #ifndef Q_OS_WIN
 #include "TerminationSignals.h"
 #endif
@@ -274,6 +275,10 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationName(QStringLiteral("hgs-tray"));
     QCoreApplication::setApplicationVersion(QLatin1String(HGS_TRAY_VERSION));
     QApplication::setQuitOnLastWindowClosed(false);
+    ZerusTranslator translator;
+    QTranslator qtTranslator;
+    if (!installZerusTranslation(app, translator, qtTranslator))
+        errOut << "hgs-tray: Russian translation could not be loaded; using English.\n";
     QGuiApplication::setDesktopFileName(QStringLiteral("hgs-tray"));
     // Window decorations must always receive the flat silhouette. Do not mix
     // sculpted and symbolic images in a QIcon: a compositor may pick a larger

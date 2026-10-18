@@ -64,9 +64,14 @@ fresh consent once; no permissions are reset automatically. Source builds link
 Homebrew Qt and are signed locally without the hardened runtime or notarization;
 use the published app for distribution. See [macOS signing](macos-distribution.md#local-source-builds).
 
-On Arch Linux, desktop dependencies include `cmake`, `qt6-base`, `qt6-multimedia`, `qt6-svg`,
+On Arch Linux, desktop dependencies include `cmake`, `qt6-base`, `qt6-tools`, `qt6-multimedia`, `qt6-svg`,
 `kstatusnotifieritem`, `kwindowsystem`, `kidletime` and C++ build tools; add
 `qt6-webengine` for the embedded Native UI.
+
+The desktop starts in English on every operating system. Settings > Appearance >
+Interface language offers an optional Russian preview; restart only Zerus to
+apply it. Agent sessions keep running, and untranslated text stays in English.
+See [translation coverage and maintenance](../tray/translations/README.md).
 
 Add `~/.local/bin` to `PATH`. The CLI installs to `~/.local/bin/hgs`; SSH calls
 use that exact path. The desktop installs to `~/.local/bin/hgs-tray` on Linux or
@@ -204,9 +209,14 @@ zerus-setup --workers     # recovery and swarm background workers
 
 Through 0.42.2, `--autostart` wrote a LaunchAgent that launchd runs as a background
 daemon: whenever other programs keep every core busy, the Zerus window stops
-responding and is restarted after 30 seconds. Run `zerus-setup --autostart` again
-after upgrading to update it. It applies at your next login; to apply it now, quit
-Zerus from its menu and reload the agent:
+responding and is restarted after 30 seconds. A Zerus that its login item started at
+background priority shows **Fix login item** in the Sessions window's status bar.
+Nothing changes until you choose: **Update Only** (the default) runs
+`zerus-setup --autostart` and applies at your next login while Zerus keeps running;
+**Update and Restart** also quits and reopens Zerus now. Saved drafts, sessions and
+agents stay; a voice or video message that is still recording stops and is not
+kept. You can also run `zerus-setup --autostart` again yourself. It applies at your
+next login; to apply it now, quit Zerus from its menu and reload the agent:
 
 ```sh
 launchctl bootout "gui/$(id -u)/com.hgdev.hgs-tray"
@@ -216,13 +226,21 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.hgdev.hgs-tray.pli
 `brew upgrade --cask zerus` (or the installed nightly/dev cask) replaces the application but never
 quits it, unloads its LaunchAgents or stops tmux and native agents. When the
 installed bundle is another build than the running GUI, Zerus shows **Restart to
-finish update**; drafts are kept. Background workers keep the previous binary until
-you restart them:
+finish update**; drafts are kept. Background workers finish their current round
+and exit when an upgrade replaces their executable, and launchd starts the new
+version. A worker that `launchctl print "gui/$(id -u)/com.hgdev.hgs-swarm"` shows
+without a `pid` and with `last exit code = 78: EX_CONFIG` cannot be started: the
+system log reports `Unable to get updated LWCR`, a launch constraint from its Login
+Items record that names an earlier build, which launchd's retries do not renew. Running
+`zerus-setup --workers` (or `install.sh` for a source installation) again loads such
+a worker again, as does:
 
 ```sh
-launchctl kickstart -k "gui/$(id -u)/com.hgdev.hgs-recovery"
-launchctl kickstart -k "gui/$(id -u)/com.hgdev.hgs-swarm"
+launchctl bootout "gui/$(id -u)/com.hgdev.hgs-swarm"
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.hgdev.hgs-swarm.plist
 ```
+
+Use `com.hgdev.hgs-recovery` the same way.
 
 To uninstall, remove the per-user integration first:
 

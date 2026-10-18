@@ -8,6 +8,8 @@ data class ConversationScroll(val state: ConversationFollowState, val index: Int
     val failure: String = "")
 
 object ConversationViewport {
+    /** The row of this phone's latest send, to bring into view. */
+    fun own(events: List<Event>, ownSendId: String): Event? = events.lastOrNull { it.outgoingId == ownSendId || it.receiptRequestId == ownSendId }
     fun content(state: ConversationFollowState, keys: List<String>, ownSendId: String, ownItemKey: String?): ConversationScroll {
         if (keys.isEmpty()) return ConversationScroll(state)
         val ownIndex = ownItemKey?.let(keys::indexOf)?.takeIf { it >= 0 }

@@ -21,6 +21,49 @@ fn bindings() -> PathBuf {
 fn binding_path(name: &str) -> PathBuf {
     bindings().join(format!("{:x}.json", Sha256::digest(name.as_bytes())))
 }
+thread_local! {
+    /// Whether this thread holds opencode/bindings.lock. Code running under
+    /// an action's own lock (its inspection, an adoption) never waits on it.
+    static BINDINGS_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// opencode/bindings.lock, released when dropped. A guard taken while this
+/// thread already holds the lock holds nothing more. It stays on the thread
+/// that took it, whose flag it clears.
+pub(super) struct Bindings(Option<Guard>, std::marker::PhantomData<*const ()>);
+impl Drop for Bindings {
+    fn drop(&mut self) {
+        if self.0.take().is_some() {
+            BINDINGS_HELD.with(|held| held.set(false));
+        }
+    }
+}
+fn bindings_lock() -> PathBuf {
+    root().join("opencode/bindings.lock")
+}
+/// The bindings lock, waiting as long as another process holds it.
+pub(super) fn lock_bindings() -> Result<Bindings> {
+    lock_bindings_at(&bindings_lock())
+}
+fn lock_bindings_at(path: &Path) -> Result<Bindings> {
+    if BINDINGS_HELD.with(std::cell::Cell::get) {
+        return Ok(Bindings(None, std::marker::PhantomData));
+    }
+    let guard = lock(Some(path))?;
+    BINDINGS_HELD.with(|held| held.set(true));
+    Ok(Bindings(Some(guard), std::marker::PhantomData))
+}
+/// The bindings lock within `wait`, or None while another process holds it.
+pub(super) fn try_bindings(wait: Duration) -> Option<Bindings> {
+    try_bindings_at(&bindings_lock(), wait)
+}
+fn try_bindings_at(path: &Path, wait: Duration) -> Option<Bindings> {
+    if BINDINGS_HELD.with(std::cell::Cell::get) {
+        return Some(Bindings(None, std::marker::PhantomData));
+    }
+    let guard = lock_until(path, Instant::now() + wait).ok()??;
+    BINDINGS_HELD.with(|held| held.set(true));
+    Some(Bindings(Some(guard), std::marker::PhantomData))
+}
 pub(crate) fn exists(name: &str) -> bool {
     binding_path(name).is_file()
 }
@@ -268,8 +311,7 @@ fn save_verdicts(keys: &[String]) {
 /// Rewrite an adopted binding so it is never checked again. Skipped when the
 /// binding lock is busy; the next poll tries again.
 fn adopt_binding(name: &str, conversation_id: &str) {
-    let deadline = Instant::now() + Duration::from_millis(200);
-    let Ok(Some(_guard)) = lock_until(&root().join("opencode/bindings.lock"), deadline) else {
+    let Some(_guard) = try_bindings(Duration::from_millis(200)) else {
         return;
     };
     if let Ok(mut record) = binding(name) {
@@ -348,7 +390,7 @@ pub(crate) fn launch(
         return Ok(());
     }
     let _writer = lock(None)?;
-    let _guard = lock(Some(&root().join("opencode/bindings.lock")))?;
+    let _guard = lock_bindings()?;
     if record_path(name).exists() || live()?.contains_key(name) {
         return Err(
             "This name belongs to an existing terminal session; it was left untouched".into(),
@@ -485,6 +527,9 @@ struct Observed {
     inbox: Value,
     forms: Value,
     permissions: Value,
+    /// The Zerus request that sent each of the newest user messages, from the
+    /// receipt index (message ID to request ID).
+    requests: std::collections::HashMap<String, String>,
 }
 /// The status of one binding; `None` when the service could not be read,
 /// which keeps native state unknown rather than stopped.
@@ -563,6 +608,15 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
     let idle = available && pending.is_empty();
     let mut events = delivered.clone();
     events.extend(queued);
+    // A prompt Zerus sent names its request, so a client can match its own
+    // message even when OpenCode dates a queued prompt by its delivery.
+    if let Some(observed) = observed {
+        for row in events.iter_mut().filter(|e| e["type"] == "UserPromptSubmit") {
+            if let Some(request) = observed.requests.get(string(row, "message_id")) {
+                row["request_id"] = json!(request);
+            }
+        }
+    }
     let mut value = json!({"name":record["name"],"cmd":"opencode","agent":"opencode","backend":"opencode","project":parts.get(1),"tag":parts.get(2),"run_id":record["run_id"],"conversation_id":record["conversation_id"],"launch_id":record["launch_id"],"created":record["created"],"cwd":record["cwd"],"cwd_source":"native_session","tracked":true,"resumable":true,"attached":0,"clients":[],
         "state":state,"process_state":process_state,"runtime_state":runtime_state,"conversation_state":"active","phase":phase,"activity":activity,"activity_summary":summary,
         "activity_detail":reply.map(|r|r["detail"].clone()),"prompt":prompt.map(|r|r["detail"].clone()),"reply_id":reply.map(|r|r["reply_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),
@@ -658,6 +712,7 @@ fn observe(
     record: &Value,
     active: &Value,
     history: impl FnOnce() -> Result<history::Page>,
+    requests: bool,
 ) -> Result<Observed> {
     let session = exact_session(record, get(native, &session_path(record, ""))?)?;
     let forms = pending_requests(native, record, "/form")?;
@@ -669,6 +724,12 @@ fn observe(
         return Err("Invalid OpenCode inbox".into());
     }
     let page = history()?;
+    // Only a full inspection shows events; listings and actions drop them.
+    let requests = if requests {
+        sent_requests(&Ledger::current(), record, &page.messages, &inbox)
+    } else {
+        Default::default()
+    };
     Ok(Observed {
         session,
         active: active.get(string(record, "conversation_id")).is_some(),
@@ -676,7 +737,54 @@ fn observe(
         inbox,
         forms,
         permissions,
+        requests,
     })
+}
+/// At most this many of the newest user messages are looked up.
+const SENT_LOOKUPS: usize = 100;
+/// A receipt larger than this is not read for attribution.
+const RECEIPT_READ: u64 = 512 * 1024;
+/// The Zerus requests that sent the newest user messages of this session:
+/// queued ones first, then history newest first. A message is attributed
+/// only when its body is exactly the text its receipt sent, as `reconcile`
+/// requires; the same ID with another body stays unattributed.
+fn sent_requests(
+    ledger: &Ledger,
+    record: &Value,
+    messages: &[Value],
+    inbox: &Value,
+) -> std::collections::HashMap<String, String> {
+    // A message delivered between the inbox and history reads is judged by
+    // its delivered copy only.
+    let delivered: std::collections::HashSet<&str> =
+        messages.iter().map(|m| string(m, "id")).collect();
+    let queued = inbox["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| !delivered.contains(string(item, "id")))
+        .map(|item| (item, &item["payload"]["text"]));
+    queued
+        .chain(messages.iter().rev().map(|message| (message, &message["text"])))
+        .filter(|(m, _)| m["type"] == "user")
+        .map(|(m, text)| (string(m, "id"), text))
+        .filter(|(id, _)| native_id(id, "msg_"))
+        .take(SENT_LOOKUPS)
+        .filter_map(|(id, text)| {
+            let index = ledger.indexed(id)?;
+            if index["conversation_id"] != record["conversation_id"] {
+                return None;
+            }
+            let request = string(&index, "request_id");
+            let receipt = ledger.sent(request)?;
+            (receipt["native_message_id"] == id
+                && receipt["conversation_id"] == record["conversation_id"]
+                && receipt["run_id"] == record["run_id"]
+                && text.is_string()
+                && receipt["text"] == *text)
+                .then(|| (id.to_owned(), request.to_owned()))
+        })
+        .collect()
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Detail {
@@ -696,7 +804,13 @@ fn parent_view(
     active: &Value,
     detail: Detail,
 ) -> Result<Value> {
-    let observed = observe(service, record, active, || history::fetch(service, record))?;
+    let observed = observe(
+        service,
+        record,
+        active,
+        || history::fetch(service, record),
+        detail == Detail::Full,
+    )?;
     let mut result = normalize(record, Some(&observed));
     if detail != Detail::Listing {
         result["attachment_messages"] = attachments::messages(record, "");
@@ -723,7 +837,8 @@ fn parent_view(
 /// `/api/session/active` and one migration check per instance.
 struct Inspector {
     service: std::result::Result<service::Service, service::Unavailable>,
-    computer: String,
+    /// Named only when a reason needs it.
+    computer: Option<String>,
     active: Option<Result<Value>>,
     migration: Option<Reply>,
     verdicts: Option<Vec<String>>,
@@ -734,7 +849,7 @@ impl Inspector {
     fn connect() -> Self {
         Inspector {
             service: service::connect(),
-            computer: crate::platform::hostname(),
+            computer: None,
             active: None,
             migration: None,
             verdicts: None,
@@ -750,7 +865,10 @@ impl Inspector {
     }
     fn view(&mut self, record: &Value, detail: Detail) -> Value {
         let service = match &self.service {
-            Err(why) => return unavailable(record, why.reason(&self.computer)),
+            Err(why) => {
+                let computer = self.computer.get_or_insert_with(service::computer);
+                return unavailable(record, why.reason(computer));
+            }
             Ok(service) => service,
         };
         let key = verdict_key(record, &service.reg);
@@ -1018,9 +1136,31 @@ impl Ledger {
             &json!({ "removals": entries }).to_string(),
         )
     }
+    /// The receipt of one send, read within a bound; None when absent or
+    /// unreadable.
+    fn sent(&self, request_id: &str) -> Option<Value> {
+        let mut bytes = Vec::new();
+        fs::File::open(self.receipt(request_id))
+            .ok()?
+            .take(RECEIPT_READ + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > RECEIPT_READ {
+            return None;
+        }
+        serde_json::from_slice(&bytes).ok()
+    }
     /// The request ID and session that sent a native message, if indexed.
     fn indexed(&self, message_id: &str) -> Option<Value> {
-        let bytes = fs::read(self.index(message_id)).ok()?;
+        let mut bytes = Vec::new();
+        fs::File::open(self.index(message_id))
+            .ok()?
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > 4096 {
+            return None;
+        }
         let value: Value = serde_json::from_slice(&bytes).ok()?;
         uuid::Uuid::parse_str(string(&value, "request_id")).ok()?;
         Some(value)
@@ -1115,7 +1255,7 @@ fn reconcile(
 }
 fn running_service() -> Result<service::Service> {
     // Sending is explicit, but phase 1 does not start the service for it.
-    service::connect().map_err(|why| why.reason(&crate::platform::hostname()))
+    service::connect().map_err(|why| why.reason(&service::computer()))
 }
 fn check_receipt_identity(record: &Value, receipt: &Value) -> Result<()> {
     if !native_id(string(receipt, "native_message_id"), "msg_")
@@ -1434,7 +1574,7 @@ fn answer_with(
     Ok(receipt)
 }
 pub(crate) fn interrupt(record: &Value) -> Result<()> {
-    let _guard = lock(Some(&root().join("opencode/bindings.lock")))?;
+    let _guard = lock_bindings()?;
     let original = binding(string(record, "name"))?;
     if record["run_id"] != original["run_id"]
         || record["conversation_id"] != original["conversation_id"]
@@ -1688,6 +1828,7 @@ fn action_in<N: Native>(
     }
     if action == "forget" {
         archive::remove_synced(&binding_path(&old))?;
+        history::forget(record);
         return Ok(());
     }
     save(record)?;
@@ -1706,14 +1847,14 @@ pub(super) fn session_action(
     message_id: Option<&str>,
     scope: &session_action::Scope,
 ) -> Result<()> {
-    let _guard = lock(Some(&root().join("opencode/bindings.lock")))?;
+    let _guard = lock_bindings()?;
     let mut record = binding(name)?;
     action(&mut record, kind, new_name, message_id, Some(scope))
 }
 pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or("Choose an OpenCode session")?;
     let _guard = if command != "inspect" && command != "exists" {
-        Some(lock(Some(&root().join("opencode/bindings.lock")))?)
+        Some(lock_bindings()?)
     } else {
         None
     };
@@ -2817,6 +2958,7 @@ mod tests {
             inbox,
             forms: json!([]),
             permissions: json!([]),
+            requests: Default::default(),
         }
     }
     fn status_record(id: &str) -> Value {
@@ -2893,6 +3035,154 @@ mod tests {
         assert_eq!(value["allowed_actions"], json!(["rename", "forget"]));
         // Queued text is not the prompt the agent is working on.
         assert_eq!(value["prompt"], "hello");
+    }
+    #[test]
+    fn prompts_zerus_sent_name_their_request() {
+        let mut observed = observed("messages", true, opencode2("inbox_busy"));
+        observed.requests = [
+            ("msg_6kezDqwZEklnh8eFGVy3UbP6iX", "request-delivered"),
+            ("msg_gVmstesSuU81H2vTHdmxp65tNI", "request-queued"),
+            ("msg_14bb2d63e001NhfRTKy4frROM8", "request-not-a-prompt"),
+        ]
+        .map(|(id, request)| (id.to_owned(), request.to_owned()))
+        .into();
+        let value = normalize(&status_record("ses_A"), Some(&observed));
+        let named: Vec<(&str, &str, &str)> = value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (string(e, "type"), string(e, "message_id"), string(e, "request_id")))
+            .filter(|(_, _, request)| !request.is_empty())
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("UserPromptSubmit", "msg_6kezDqwZEklnh8eFGVy3UbP6iX", "request-delivered"),
+                ("UserPromptSubmit", "msg_gVmstesSuU81H2vTHdmxp65tNI", "request-queued"),
+            ]
+        );
+    }
+    #[test]
+    fn sent_requests_come_only_from_this_sessions_receipt_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let index = |id: &str, request: &str, conversation: &str| {
+            atomic(
+                &ledger.index(id),
+                &json!({"request_id": request, "conversation_id": conversation}).to_string(),
+            )
+            .unwrap()
+        };
+        // Receipts with the exact bodies OpenCode shows.
+        let receipt = |id: &str, request: &str, text: &str| {
+            atomic(
+                &ledger.receipt(request),
+                &json!({"request_id": request, "conversation_id": "ses_A", "run_id": "run",
+                    "native_message_id": id, "text": text})
+                .to_string(),
+            )
+            .unwrap()
+        };
+        let a = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a01";
+        let b = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a02";
+        index("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "ses_A");
+        index("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "ses_A");
+        receipt("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "hello");
+        receipt("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "queued later");
+        // User messages whose index names another session or no request.
+        index("msg_otherSession00000000000000", a, "ses_B");
+        index("msg_notARequest000000000000000", "not-a-uuid", "ses_A");
+        let observed = observed("messages", true, opencode2("inbox_busy"));
+        let mut messages = observed.page.messages.clone();
+        messages.push(json!({"id": "msg_otherSession00000000000000", "type": "user"}));
+        messages.push(json!({"id": "msg_notARequest000000000000000", "type": "user"}));
+        let found = sent_requests(&ledger, &status_record("ses_A"), &messages, &observed.inbox);
+        let expected: std::collections::HashMap<String, String> = [
+            ("msg_6kezDqwZEklnh8eFGVy3UbP6iX".to_owned(), a.to_owned()),
+            ("msg_gVmstesSuU81H2vTHdmxp65tNI".to_owned(), b.to_owned()),
+        ]
+        .into();
+        assert_eq!(found, expected);
+        // Only the newest user messages are looked up: the queued one first.
+        let many: Vec<Value> = (0..SENT_LOOKUPS + 5)
+            .map(|n| json!({"id": format!("msg_{n:026}"), "type": "user", "text": format!("t{n}")}))
+            .collect();
+        for n in 0..SENT_LOOKUPS + 5 {
+            let request = format!("6f0e3f43-4b4c-4f2d-9f43-{n:012}");
+            index(&format!("msg_{n:026}"), &request, "ses_A");
+            receipt(&format!("msg_{n:026}"), &request, &format!("t{n}"));
+        }
+        let found = sent_requests(&ledger, &status_record("ses_A"), &many, &observed.inbox);
+        assert_eq!(found.len(), SENT_LOOKUPS);
+        assert!(found.contains_key("msg_gVmstesSuU81H2vTHdmxp65tNI"));
+        assert!(found.contains_key(&format!("msg_{:026}", SENT_LOOKUPS + 4)));
+        assert!(!found.contains_key(&format!("msg_{:026}", 5)));
+    }
+    #[test]
+    fn the_bindings_lock_never_waits_on_this_threads_own_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bindings.lock");
+        let held = lock_bindings_at(&path).unwrap();
+        // An action's own inspection: granted at once, holding nothing more.
+        let started = Instant::now();
+        let inner = try_bindings_at(&path, Duration::from_secs(5)).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(inner);
+        // Another thread (as another process would) waits and gives up.
+        let other = path.clone();
+        let busy = std::thread::spawn(move || {
+            try_bindings_at(&other, Duration::from_millis(50)).is_none()
+        });
+        assert!(busy.join().unwrap());
+        drop(held);
+        let other = path.clone();
+        let free = std::thread::spawn(move || {
+            try_bindings_at(&other, Duration::from_millis(50)).is_some()
+        });
+        assert!(free.join().unwrap());
+    }
+    #[test]
+    fn a_request_is_attributed_only_to_its_exact_message_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let sent = |id: &str, request: &str, text: &str| {
+            atomic(
+                &ledger.index(id),
+                &json!({"request_id": request, "conversation_id": "ses_A"}).to_string(),
+            )
+            .unwrap();
+            atomic(
+                &ledger.receipt(request),
+                &json!({"request_id": request, "conversation_id": "ses_A", "run_id": "run",
+                    "native_message_id": id, "text": text, "status": "uncertain"})
+                .to_string(),
+            )
+            .unwrap();
+        };
+        let a = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a01";
+        let b = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a02";
+        // The same message ID with another body is not this request, as
+        // reconcile leaves it uncertain.
+        sent("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "not what OpenCode shows");
+        // A message dated by its late delivery, with the exact body, is.
+        sent("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "queued later");
+        let observed = observed("messages", true, opencode2("inbox_busy"));
+        let found = sent_requests(&ledger, &status_record("ses_A"), &observed.page.messages, &observed.inbox);
+        let expected: std::collections::HashMap<String, String> =
+            [("msg_gVmstesSuU81H2vTHdmxp65tNI".to_owned(), b.to_owned())].into();
+        assert_eq!(found, expected);
+        // A message in both reads is judged by its delivered copy: an edited
+        // delivered body is not attributed even though the queued copy matched.
+        let edited = vec![json!({"id": "msg_gVmstesSuU81H2vTHdmxp65tNI", "type": "user", "text": "edited on delivery"})];
+        assert!(sent_requests(&ledger, &status_record("ses_A"), &edited, &observed.inbox).is_empty());
+        // Another run of the same conversation is not this receipt's.
+        let mut other_run = status_record("ses_A");
+        other_run["run_id"] = json!("another-run");
+        assert!(sent_requests(&ledger, &other_run, &observed.page.messages, &observed.inbox).is_empty());
+        // The delivered copy of the same message, with its exact body, too.
+        let delivered = vec![json!({"id": "msg_gVmstesSuU81H2vTHdmxp65tNI", "type": "user", "text": "queued later"})];
+        let found = sent_requests(&ledger, &status_record("ses_A"), &delivered, &json!({"data": []}));
+        assert_eq!(found, expected);
     }
     #[test]
     fn after_stop_queued_messages_are_not_delivered_and_removable() {
@@ -3169,9 +3459,13 @@ mod tests {
         ]));
         let active = opencode2("active_busy")["data"].clone();
         let cache = dir.path().join("history.json");
-        let seen = observe(&native, &record, &active, || {
-            history::fetch_at(&native, &record, &cache)
-        })
+        let seen = observe(
+            &native,
+            &record,
+            &active,
+            || history::fetch_at(&native, &record, &cache),
+            false,
+        )
         .unwrap();
         assert!(native.0.borrow().is_empty());
         assert!(seen.active);
@@ -3201,9 +3495,13 @@ mod tests {
                 opencode2("messages"),
             ),
         ]));
-        let seen = observe(&native, &record, &json!({}), || {
-            history::fetch_at(&native, &record, &cache)
-        })
+        let seen = observe(
+            &native,
+            &record,
+            &json!({}),
+            || history::fetch_at(&native, &record, &cache),
+            false,
+        )
         .unwrap();
         assert!(native.0.borrow().is_empty());
         assert!(!seen.active);
@@ -3218,7 +3516,7 @@ mod tests {
             json!({"data":{"id":"ses_A","location":{"directory":"/elsewhere"}}}),
         )]));
         let none = || -> Result<history::Page> { panic!("no history read") };
-        assert!(observe(&moved, &record, &json!({}), none).is_err());
+        assert!(observe(&moved, &record, &json!({}), none, false).is_err());
         let invalid = Scripted(std::cell::RefCell::new(vec![
             (
                 "GET /api/session/ses_A".into(),
@@ -3231,7 +3529,7 @@ mod tests {
                 json!({"data": {}}),
             ),
         ]));
-        assert!(observe(&invalid, &record, &json!({}), none).is_err());
+        assert!(observe(&invalid, &record, &json!({}), none, false).is_err());
         let refused = Scripted(std::cell::RefCell::new(vec![(
             "GET /api/session/active".into(),
             500,

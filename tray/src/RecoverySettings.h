@@ -61,7 +61,8 @@ public:
         QStringList missing;for(const auto &host:hosts())if(errors.contains(host)||!copies.contains(host))missing<<label(host);
         if(!pending.isEmpty())return tr("Synchronizing recovery settings…");
         if(!missing.isEmpty())return tr("Waiting for %1. Changes will sync when connected; those machines keep their last settings.").arg(missing.join(", "));
-        return tr("Synchronized across %1 machines. Changes from any Zerus are shared.").arg(hosts().size());
+        return hosts().size() == 1 ? tr("Synchronized with 1 machine. Changes from any Zerus are shared.")
+                                   : tr("Synchronized across %1 machines. Changes from any Zerus are shared.").arg(hosts().size());
     }
     bool busy()const{return !pending.isEmpty();}
     QString error()const{return saveError;}

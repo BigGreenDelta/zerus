@@ -70,7 +70,76 @@ fn load_at(path: &Path, record: &Value) -> Option<Cache> {
 /// Best effort: the cache only saves reading older pages again.
 fn save_at(path: &Path, record: &Value, page: &Page) {
     let value = json!({"conversation_id": record["conversation_id"], "truncated": page.truncated, "messages": page.messages});
-    let _ = atomic(path, &value.to_string());
+    if atomic(path, &value.to_string()).is_ok() {
+        if let Some(dir) = path.parent() {
+            prune(dir, path, CACHE_FILES, CACHE_BYTES);
+        }
+    }
+}
+/// Best effort: an unchanged cache in use counts as recent for pruning.
+fn touch(path: &Path) {
+    if let Ok(file) = std::fs::File::options().append(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+}
+/// Forgetting a session drops its cache; a later binding reads it again.
+pub(super) fn forget(record: &Value) {
+    let _ = std::fs::remove_file(cache_path(record));
+}
+
+/// The cache directory keeps at most this many conversations and bytes.
+const CACHE_FILES: usize = 64;
+const CACHE_BYTES: u64 = 256 * 1024 * 1024;
+/// A temporary file left by an interrupted save is removed after this long.
+const STALE_TEMP: Duration = Duration::from_secs(3600);
+
+fn cache_name(name: &str) -> bool {
+    name.strip_suffix(".json").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+/// Best effort: removes the least recently used caches beyond the bounds,
+/// never `keep`, and temporary files of interrupted saves.
+fn prune(dir: &Path, keep: &Path, files: usize, bytes: u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut caches = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !meta.is_file() {
+            continue;
+        }
+        if name.starts_with(".hgs-") {
+            if now
+                .duration_since(modified)
+                .is_ok_and(|age| age > STALE_TEMP)
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        } else if cache_name(&name) && entry.path() != keep {
+            caches.push((modified, meta.len(), entry.path()));
+        }
+    }
+    let mut count = 1;
+    let mut total = std::fs::metadata(keep).map_or(0, |m| m.len());
+    caches.sort_by_key(|cache| std::cmp::Reverse(cache.0));
+    for (_, len, path) in caches {
+        count += 1;
+        total = total.saturating_add(len);
+        if count > files || total > bytes {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn valid(message: &Value) -> bool {
@@ -81,16 +150,92 @@ fn valid(message: &Value) -> bool {
 
 /// Reads the newest window of `/message` with the cache, within 20 seconds.
 pub(super) fn fetch(native: &dyn Native, record: &Value) -> Result<Page> {
-    fetch_at(native, record, &cache_path(record))
+    fetch_published(native, record, &cache_path(record), publish_lock, || {
+        super::binding(string(record, "name")).ok()
+    })
 }
+/// `fetch` with a cache path of the caller's own, saved without a binding.
+#[cfg(test)]
 pub(super) fn fetch_at(native: &dyn Native, record: &Value, cache: &Path) -> Result<Page> {
+    fetch_with(native, record, cache, |page| save_at(cache, record, page))
+}
+/// `fetch` with its lock and current binding given: a changed read is saved
+/// only through `publish_with`.
+fn fetch_published<G>(
+    native: &dyn Native,
+    record: &Value,
+    cache: &Path,
+    lock: impl FnOnce() -> Option<G>,
+    current: impl FnOnce() -> Option<Value>,
+) -> Result<Page> {
+    fetch_with(native, record, cache, |page| {
+        publish_with(lock, current, record, cache, page)
+    })
+}
+fn fetch_with(
+    native: &dyn Native,
+    record: &Value,
+    cache: &Path,
+    save: impl FnOnce(&Page),
+) -> Result<Page> {
     let cached = load_at(cache, record);
     let deadline = Instant::now() + Duration::from_secs(20);
     let (page, changed) = scan(native, record, cached.as_ref(), Bounds::default(), deadline)?;
     if changed {
-        save_at(cache, record, &page);
+        save(&page);
+    } else if cached.is_some() {
+        touch(cache);
     }
     Ok(page)
+}
+/// How long a read waits for the bindings lock before it skips its save.
+const PUBLISH_WAIT: Duration = Duration::from_millis(200);
+/// Set once a read in this process found the lock busy: later reads (the
+/// rest of a listing) try once and never wait again.
+static PUBLISH_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The bindings lock for a read's save, within `PUBLISH_WAIT` until a read
+/// in this process found it busy.
+fn publish_lock() -> Option<super::Bindings> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let wait = if PUBLISH_BUSY.load(Relaxed) {
+        Duration::ZERO
+    } else {
+        PUBLISH_WAIT
+    };
+    let guard = super::try_bindings(wait);
+    if guard.is_none() {
+        PUBLISH_BUSY.store(true, Relaxed);
+    }
+    guard
+}
+/// Saves the cache only under the bindings lock, which Forget holds while it
+/// removes a binding and its cache, and only while this exact binding (run
+/// and conversation) is still the one under its name. A Forget, rename or
+/// re-creation that ran during the read wins: nothing is saved and this
+/// conversation's cache is removed. Without the lock the save is skipped;
+/// an action that already holds it saves at once.
+fn publish_with<G>(
+    lock: impl FnOnce() -> Option<G>,
+    current: impl FnOnce() -> Option<Value>,
+    record: &Value,
+    cache: &Path,
+    page: &Page,
+) {
+    let Some(_guard) = lock() else {
+        return;
+    };
+    publish_locked(record, cache, page, current().as_ref());
+}
+fn publish_locked(record: &Value, cache: &Path, page: &Page, current: Option<&Value>) {
+    let same = current.is_some_and(|binding| {
+        binding["run_id"] == record["run_id"]
+            && binding["conversation_id"] == record["conversation_id"]
+    });
+    if same {
+        save_at(cache, record, page);
+    } else {
+        let _ = std::fs::remove_file(cache);
+    }
 }
 
 /// Pages newest first until the end, a budget or a page that reaches back
@@ -753,6 +898,187 @@ mod tests {
         let native = pages(vec![odd]);
         let (page, _) = scan(&native, &record(), None, Bounds::default(), later()).unwrap();
         assert_eq!(ids(&page), ["msg_1"]);
+    }
+
+    fn aged(path: &Path, seconds: u64) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        let then = std::time::SystemTime::now() - Duration::from_secs(seconds);
+        file.set_modified(then).unwrap();
+    }
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn pruning_drops_the_least_recently_saved_caches_beyond_the_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = |n: u8| format!("{}.json", format!("{n:x}").repeat(64));
+        // Saved oldest to newest: 1, 2, 3, 4, 5.
+        for n in 1..=5u8 {
+            std::fs::write(dir.path().join(name(n)), [b'x'; 10]).unwrap();
+            aged(&dir.path().join(name(n)), 100 - u64::from(n));
+        }
+        // 3 was just saved: it stays although 4 and 5 are newer.
+        let keep = dir.path().join(name(3));
+        prune(dir.path(), &keep, 3, u64::MAX);
+        assert_eq!(names(dir.path()), [name(3), name(4), name(5)]);
+        // 3 and 5 fit in 20 bytes; 4 does not.
+        prune(dir.path(), &keep, 10, 20);
+        assert_eq!(names(dir.path()), [name(3), name(5)]);
+        // The kept cache stays even when it alone exceeds the byte bound.
+        prune(dir.path(), &keep, 10, 1);
+        assert_eq!(names(dir.path()), [name(3)]);
+    }
+
+    #[test]
+    fn pruning_keeps_other_names_and_fresh_temporary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep = dir.path().join(format!("{}.json", "a".repeat(64)));
+        std::fs::write(&keep, b"x").unwrap();
+        // Upper case is not a cache name; "C" aliases no other file on
+        // case-insensitive file systems.
+        for name in [
+            ".hgs-old",
+            ".hgs-fresh",
+            "notes.json",
+            &format!("{}.json", "C".repeat(64)),
+        ] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        std::fs::create_dir(dir.path().join(format!("{}.json", "b".repeat(64)))).unwrap();
+        aged(&dir.path().join(".hgs-old"), 7200);
+        prune(dir.path(), &keep, 1, 1);
+        let mut expected = vec![
+            ".hgs-fresh".to_owned(),
+            format!("{}.json", "C".repeat(64)),
+            format!("{}.json", "a".repeat(64)),
+            format!("{}.json", "b".repeat(64)),
+            "notes.json".to_owned(),
+        ];
+        expected.sort();
+        assert_eq!(names(dir.path()), expected);
+    }
+
+    #[test]
+    fn saving_a_cache_prunes_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = Page {
+            messages: vec![message("msg_1", "x")],
+            truncated: true,
+        };
+        for n in 0..CACHE_FILES {
+            let path = dir.path().join(format!("{n:064x}.json"));
+            std::fs::write(&path, b"{}").unwrap();
+            aged(&path, 1000 + n as u64);
+        }
+        let path = dir.path().join(format!("{}.json", "f".repeat(64)));
+        save_at(&path, &record(), &page);
+        assert_eq!(names(dir.path()).len(), CACHE_FILES);
+        assert!(path.exists());
+        // The oldest older cache went first.
+        assert!(!dir
+            .path()
+            .join(format!("{:064x}.json", CACHE_FILES - 1))
+            .exists());
+    }
+
+    #[test]
+    fn a_read_publishes_its_cache_only_for_the_exact_current_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let page = Page {
+            messages: vec![message("msg_1", "x")],
+            truncated: false,
+        };
+        let a = json!({"name": "opencode/p/t", "run_id": "run-a", "conversation_id": "ses_A"});
+        // Same identity: saved.
+        publish_locked(&a, &cache, &page, Some(&a));
+        assert!(load_at(&cache, &a).is_some());
+        // Forget of A, then the same name re-created as B: A's late read
+        // publishes nothing and removes A's cache.
+        let b = json!({"name": "opencode/p/t", "run_id": "run-b", "conversation_id": "ses_B"});
+        publish_locked(&a, &cache, &page, Some(&b));
+        assert!(!cache.exists());
+        // Same conversation under a new run is another binding too.
+        let rerun = json!({"name": "opencode/p/t", "run_id": "run-c", "conversation_id": "ses_A"});
+        publish_locked(&a, &cache, &page, Some(&rerun));
+        assert!(!cache.exists());
+        // Forgotten (no binding): nothing saved.
+        publish_locked(&a, &cache, &page, None);
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn a_read_saves_nothing_without_the_lock_and_rechecks_the_binding_under_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let page = Page {
+            messages: vec![message("msg_1", "x")],
+            truncated: false,
+        };
+        let a = json!({"name": "opencode/p/t", "run_id": "run-a", "conversation_id": "ses_A"});
+        let b = json!({"name": "opencode/p/t", "run_id": "run-b", "conversation_id": "ses_B"});
+        // Lock busy: nothing is saved, the binding is not even read.
+        publish_with(
+            || None::<()>,
+            || panic!("read without the lock"),
+            &a,
+            &cache,
+            &page,
+        );
+        assert!(!cache.exists());
+        // Under the lock the binding is read then: swapped mid-read to B.
+        std::fs::write(&cache, b"{}").unwrap();
+        publish_with(|| Some(()), || Some(b.clone()), &a, &cache, &page);
+        assert!(!cache.exists());
+        // Unchanged binding: saved.
+        publish_with(|| Some(()), || Some(a.clone()), &a, &cache, &page);
+        assert!(load_at(&cache, &a).is_some());
+    }
+
+    #[test]
+    fn a_changed_read_is_published_only_under_the_lock_for_its_exact_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let a = json!({"name": "opencode/p/t", "run_id": "run-a", "conversation_id": "ses_A"});
+        let b = json!({"name": "opencode/p/t", "run_id": "run-b", "conversation_id": "ses_B"});
+        // Lock busy: the read still answers, saves nothing and reads no binding.
+        let native = pages(vec![listed(&["msg_1"], None)]);
+        let page =
+            fetch_published(&native, &a, &cache, || None::<()>, || panic!("unlocked")).unwrap();
+        assert_eq!(ids(&page), ["msg_1"]);
+        assert!(!cache.exists());
+        // Under the lock for the exact binding: saved.
+        let native = pages(vec![listed(&["msg_1"], None)]);
+        fetch_published(&native, &a, &cache, || Some(()), || Some(a.clone())).unwrap();
+        assert!(load_at(&cache, &a).is_some());
+        // The name was re-created during a changed read: its cache is removed.
+        let native = pages(vec![listed(&["msg_1", "msg_2"], None)]);
+        let page = fetch_published(&native, &a, &cache, || Some(()), || Some(b.clone())).unwrap();
+        assert_eq!(ids(&page), ["msg_1", "msg_2"]);
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn using_a_cache_makes_it_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        std::fs::write(&path, b"{}").unwrap();
+        aged(&path, 1000);
+        touch(&path);
+        let age = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap();
+        assert!(age < Duration::from_secs(100), "{age:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
     }
 
     #[test]

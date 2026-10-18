@@ -918,6 +918,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         emit refreshRequested();rebuild();inspect();
     });
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &,const QString &error) {
+        if(!m_selectionForgetRequest||id!=m_selectionForgetRequest)return;
+        // A failed or unconfirmed receipt counts as failed and is never retried.
+        m_selectionForgetRequest=0;finishSelectionAction(m_selectionCommand,ok,error);
+    });
+    connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &,const QString &error) {
         if(!m_removeQueuedRequest||id!=m_removeQueuedRequest)return;
         m_removeQueuedRequest=0;m_removeQueuedMessage.clear();
         if(m_selectedKey==m_removeQueuedKey){showNotice(ok?tr("Queued message removed."):error,!ok);renderDetails();inspect();}
@@ -1452,6 +1457,57 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(updates, &UpdateController::changed, this, restartEntryState);
     connect(restartEntry, &QPushButton::clicked, updates, &UpdateController::restartIntoInstalledBundle);
     restartEntryState();
+    // A login item without ProcessType Interactive starts the GUI as a daemon, which any
+    // CPU load starves. Nothing changes until the person chooses to update it.
+    auto *loginItemEntry = new QPushButton(tr("Fix login item"));
+    loginItemEntry->setObjectName("fixLoginItem");
+    loginItemEntry->setProperty("glyph", "zerus");
+    loginItemEntry->setIconSize(QSize(14, 14));
+    loginItemEntry->setAttribute(Qt::WA_LayoutUsesWidgetRect);
+    loginItemEntry->setToolTip(tr("macOS starts Zerus at background priority, so it can stop responding while the computer is busy."));
+    loginItemEntry->setAccessibleName(loginItemEntry->toolTip());
+    loginItemEntry->setVisible(updates->loginItemDeprioritized());
+    statusLayout->addWidget(loginItemEntry);
+    connect(loginItemEntry, &QPushButton::clicked, this, [this, updates, loginItemEntry] {
+        QMessageBox dialog(this);
+        dialog.setIcon(QMessageBox::Warning);
+        dialog.setWindowTitle(tr("Fix the Zerus login item"));
+        dialog.setText(tr("macOS runs Zerus at background priority."));
+        dialog.setInformativeText(tr("Zerus was started by its login item, which macOS runs at background priority, so "
+                                     "Zerus can stop responding while other programs keep the computer busy. Updating "
+                                     "the login item makes macOS start Zerus like other apps.\n\n"
+                                     "Update Only applies this at your next login; Zerus keeps running.\n"
+                                     "Update and Restart applies it now: Zerus quits and opens again. Saved drafts, "
+                                     "sessions and agents stay; a voice or video message that is still recording "
+                                     "stops and is not kept."));
+        auto *only = dialog.addButton(tr("Update Only"), QMessageBox::AcceptRole);
+        auto *restart = dialog.addButton(tr("Update and Restart"), QMessageBox::ActionRole);
+        auto *cancel = dialog.addButton(QMessageBox::Cancel);
+        dialog.setDefaultButton(only);
+        dialog.setEscapeButton(cancel);
+        dialog.exec();
+        if (dialog.clickedButton() != restart && dialog.clickedButton() != only)
+            return;
+        const bool restartNow = dialog.clickedButton() == restart;
+        loginItemEntry->setEnabled(false);
+        updates->updateLoginItem([self = QPointer<SessionsWindow>(this), entry = QPointer<QPushButton>(loginItemEntry),
+                                  updates, restartNow](const QString &error) {
+            if (entry)
+                entry->setEnabled(true);
+            if (!error.isEmpty()) {
+                if (self)
+                    QMessageBox::warning(self, tr("Fix the Zerus login item"),
+                                         tr("The login item was not changed.\n\n%1").arg(error));
+                return;
+            }
+            if (entry)
+                entry->hide();
+            if (restartNow)
+                updates->restartIntoInstalledBundle();
+            else if (self)
+                self->showNotice(tr("The Zerus login item is updated; it applies at your next login."));
+        });
+    });
     m_connectionRetry = new QPushButton(tr("Retry now")); m_connectionRetry->setObjectName("connectionRetry");
     m_connectionRetry->setFlat(true); m_connectionRetry->hide(); statusLayout->addWidget(m_connectionRetry);
     connect(m_connectionRetry, &QPushButton::clicked, this, &SessionsWindow::refreshRequested);
@@ -5150,7 +5206,15 @@ void SessionsWindow::changeEvent(QEvent *event)
 {
     QWidget::changeEvent(event);
     if (event->type() == QEvent::WindowStateChange && m_brand) m_brand->syncAnimation();
-    if (event->type() == QEvent::ApplicationPaletteChange && m_activityView) applyTheme();
+    // A runtime light/dark switch of the system reaches a window only as PaletteChange:
+    // QWidget::event() consumes ApplicationPaletteChange. The window's own stylesheet
+    // also sends PaletteChange, so re-theme later and only when Follow system appearance
+    // now picks the other theme.
+    if (event->type() == QEvent::PaletteChange && m_activityView)
+        QTimer::singleShot(0, this, [this] {
+            if (QSettings().value("workspace/theme", "system").toString() != "system") return;
+            if ((qApp->palette().color(QPalette::Window).lightness() < 128) != m_dark) applyTheme();
+        });
 }
 
 void SessionsWindow::updateWorktrees()

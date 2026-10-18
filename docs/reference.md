@@ -2577,6 +2577,9 @@ starts a daemon and clamps all its threads below ordinary CPU load, niced load
 included: a busy machine then starves the whole window until the main-thread
 watchdog aborts it, and no QoS request from inside the process lifts the clamp.
 `launchctl print "gui/$(id -u)/com.hgdev.hgs-tray"` shows `spawn type = interactive`.
+At startup the GUI reads the highest priority its main thread may reach: a login item
+(`XPC_SERVICE_NAME` `com.hgdev.hgs-tray`) limited below 31 offers **Fix login item**,
+which runs the bundled `zerus-setup --autostart` only after confirmation.
 Finder, the Dock and Spotlight start the bundle without the LaunchAgent's `--hgs`
 and with PATH `/usr/bin:/bin:/usr/sbin:/sbin`; the desktop then finds the CLI in
 the standard install directories listed under **Desktop option** below.
@@ -2733,11 +2736,12 @@ checks take longer than half a second. Settings are in
 `%APPDATA%\hgdev\hgs-tray.ini`, with drafts beside it, and one instance runs per
 user. When the local box reports `local_sessions: false`, the app offers remote
 machines only: in New session, Overview, the tray menu, Accounts, Projects and
-search. The Machines page lists this computer as a control console without SSH
-settings, with **Enable local sessions** (`hgs.exe session-host install`, after a
-confirmation), and shows the session host's state, PID, ConPTY, integrity level
-and Windows session in both modes. Without remote machines, New session, Accounts
-and automatic recovery send you to Machines: to add a remote machine and, where
+search. The Machines page lists this computer as a control console with
+**Enable local sessions** (`hgs.exe session-host install`, after a
+confirmation). In both modes, this computer's page has no SSH settings or
+actions; it shows the session host's state, PID, ConPTY, integrity level and
+Windows session. Without remote machines, New session, Accounts and automatic
+recovery send you to Machines: to add a remote machine and, where
 Machines offers **Enable local sessions**, to enable them. New session then has
 **Open Machines**, which only selects this computer there. Automatic recovery
 settings of a control console are saved to the first reachable remote machine, and
@@ -2746,8 +2750,9 @@ session and Accounts offer this computer without DeepSeek and OpenCode, the shel
 entry is **Run PowerShell**, voice messages to its sessions are disabled with the
 reason as the tooltip, and it is listed at most once every 5 seconds. In both modes,
 Settings → Mobile connection is hidden and no desktop presence is recorded.
-Attention notices are tray notifications with a taskbar badge. A start without
-options opens the workspace, because Windows 11 first hides a new notification
+Attention notices are tray notifications with the Zerus icon and a taskbar
+badge. A start without options opens the workspace, because Windows 11 first
+hides a new notification
 icon in the overflow; `--background` starts in the notification area only, as a
 Startup-folder shortcut should. Starting `hgs-tray.exe` again opens the running
 app's workspace, unless with `--background`. After a main-thread watchdog abort,

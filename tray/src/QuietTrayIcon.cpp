@@ -62,6 +62,13 @@ void QuietTrayIcon::showClickableMessage(const QString &title, const QString &bo
     m_inner->showClickableMessage(title, body, icon, msecs, std::move(clicked));
 }
 
+void QuietTrayIcon::showClickableIconMessage(const QString &title, const QString &body,
+                                             const QIcon &icon, int msecs,
+                                             std::function<void()> clicked)
+{
+    m_inner->showClickableIconMessage(title, body, icon, msecs, std::move(clicked));
+}
+
 void QuietTrayIcon::show()
 {
     m_inner->show();

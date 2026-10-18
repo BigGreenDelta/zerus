@@ -397,7 +397,7 @@ struct ConversationView: View {
     private func applyContent(target: Target, keys: [String], events: [Event], questions: [Question], unreadBoundary: String, readReady: Bool) {
         guard !(events.isEmpty && questions.isEmpty && model.activity == nil && !app.demo) else { return }
         let ownSendId = model.ownSendId(target)
-        let own = events.last { $0.outgoingId == ownSendId || $0.requestId == ownSendId }
+        let own = events.last { $0.outgoingId == ownSendId || $0.receiptRequestId == ownSendId }
         let ownKey = own.map { questions.isEmpty ? "history:tail" : "event:" + $0.id }
         let explicitSend = !ownSendId.isEmpty && ownSendId != follow.ownSendId && ownKey != nil
         let firstOpen = !follow.opened

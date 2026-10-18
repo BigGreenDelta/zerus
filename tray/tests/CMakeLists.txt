@@ -1,5 +1,10 @@
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
+add_executable(test_ui_language test_ui_language.cpp)
+target_include_directories(test_ui_language PRIVATE ../src)
+target_link_libraries(test_ui_language PRIVATE Qt6::Test Qt6::Widgets hgs-translations)
+# Registered below, after the common native-test launcher is defined.
+
 # support/FakeCli.h starts fixture scripts as fake executables on every platform.
 set(ZERUS_TEST_SUPPORT "${CMAKE_CURRENT_SOURCE_DIR}/support")
 if(WIN32)
@@ -440,6 +445,11 @@ if(TARGET hgs-tray-native-ui)
     set_tests_properties(nativeuiplugin PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu;QT_QUICK_BACKEND=software")
 endif()
 
+zerus_add_test(ui-language test_ui_language)
+set_tests_properties(ui-language PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_test(NAME translation-catalog COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+    -s "${PROJECT_SOURCE_DIR}/translations" -p "test_*.py")
+
 add_executable(test_activityview test_activityview.cpp)
 target_include_directories(test_activityview PRIVATE ../src)
 target_link_libraries(test_activityview PRIVATE Qt6::Test Qt6::Widgets Qt6::Multimedia hgs-markdown hgs-tray-activity)
@@ -477,6 +487,7 @@ set_tests_properties(composertoolbar PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=off
 add_executable(test_questioncard test_questioncard.cpp)
 target_include_directories(test_questioncard PRIVATE ../src)
 target_link_libraries(test_questioncard PRIVATE Qt6::Test Qt6::Widgets hgs-markdown hgs-tray-ui)
+target_compile_definitions(test_questioncard PRIVATE ZERUS_OPENCODE_FORM_CONTRACT="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-form-contract.json")
 zerus_add_test(questioncard test_questioncard)
 set_tests_properties(questioncard PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
@@ -606,7 +617,7 @@ set_tests_properties(phonepairing PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscr
 # Windows pieces with portable logic: the Windows Terminal command, the console
 # host, terminal templates, tray-icon notifications and the swarm worker the
 # Windows tray supervises.
-add_executable(test_windowsdesktop test_windowsdesktop.cpp)
+add_executable(test_windowsdesktop test_windowsdesktop.cpp ../resources.qrc)
 target_include_directories(test_windowsdesktop PRIVATE ../src)
 target_link_libraries(test_windowsdesktop PRIVATE Qt6::Test Qt6::Widgets hgs-tray-windows)
 if(WIN32)

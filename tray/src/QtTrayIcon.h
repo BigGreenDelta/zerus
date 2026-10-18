@@ -21,6 +21,8 @@ public:
     void showClickableMessage(const QString &title, const QString &body,
                               QSystemTrayIcon::MessageIcon icon, int msecs,
                               std::function<void()> clicked) override;
+    void showClickableIconMessage(const QString &title, const QString &body, const QIcon &icon,
+                                  int msecs, std::function<void()> clicked) override;
     void show() override;
 
 private:
