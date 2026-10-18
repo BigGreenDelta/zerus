@@ -59,13 +59,7 @@ enum ActionText {
         return name + " / " + state
     }
 
-    static func effort(_ value: String) -> String {
-        switch value {
-        case "": "Default"
-        case "xhigh": "Extra high"
-        default: value.prefix(1).uppercased() + value.dropFirst()
-        }
-    }
+    static func effort(_ value: String) -> String { EffortOption.text(value) }
 }
 
 /// Name, owning computer and desktop-coloured status; tapping opens session details.
@@ -128,7 +122,8 @@ struct SessionHeaderTools: View {
                 } label: {
                     HStack(spacing: 6) {
                         ProviderLabel(agent: provider)
-                        Text([native.model.isEmpty ? "Model not reported" : native.model, native.effort].filter { !$0.isEmpty }.joined(separator: " / "))
+                        Text([native.model.isEmpty ? "Model not reported" : native.model, native.effortLabel(native.effort, model: native.model) ?? native.effort]
+                            .filter { !$0.isEmpty }.joined(separator: " / "))
                             .font(.caption.weight(.medium))
                             .lineLimit(1)
                             .foregroundStyle(Theme.onSurface)

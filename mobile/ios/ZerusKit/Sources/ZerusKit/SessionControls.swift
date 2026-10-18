@@ -8,7 +8,15 @@ public enum SessionActionPolicies {
                                                                  "directory_create", "recovery_action"])
     public static let terminalKeys: Set<String> = ["Enter", "Escape", "Tab", "BTab", "BSpace", "Up", "Down", "Left", "Right", "Home", "End", "PPage",
                                                    "NPage", "DC", "C-c", "C-d", "C-l", "C-a", "C-e", "C-u", "C-w"]
+    /// The relay's fixed effort levels; other native variants need `effortVariants`.
     static let efforts: Set<String> = ["", "off", "none", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+    public static let effortUpdateRequired = "This effort needs an updated relay and Zerus on this computer."
+
+    /// Native variants beyond the relay's fixed levels: only for an OpenCode session when the relay and this computer
+    /// both advertise `LaunchPresentation.effortFeature`.
+    public static func effortVariants(agent: String, relay: Set<String>?, computer: Set<String>?) -> Bool {
+        agent == "opencode" && LaunchPresentation.effortSupported(relay: relay, computer: computer)
+    }
 
     static func control(_ text: String) -> Bool { text.unicodeScalars.contains(where: PairingInvite.isISOControl) }
     static func blank(_ text: String) -> Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -17,15 +25,16 @@ public enum SessionActionPolicies {
         return value
     }
 
-    /// Validated exact arguments for one operation; unknown keys are refused.
-    public static func arguments(_ operation: String, _ raw: JSONObject) throws -> JSONObject {
+    /// Validated exact arguments for one operation; unknown keys are refused. A settings effort outside the relay's
+    /// fixed levels needs `effortVariants` for this session, relay and computer.
+    public static func arguments(_ operation: String, _ raw: JSONObject, effortVariants: Bool = false) throws -> JSONObject {
         guard operations.contains(operation) else { throw ZerusError.invalid("Unsupported session action.") }
         let allowed: Set<String>
         switch operation {
         case "rename": allowed = ["new_name"]
         case "fork": allowed = ["tag"]
         case "send_now": allowed = ["queue_id"]
-        case "launch": allowed = ["agent", "directory", "tag", "account_id", "model", "swarm_id", "project_id", "project_folder_id", "add_folder",
+        case "launch": allowed = ["agent", "directory", "tag", "account_id", "model", "effort", "swarm_id", "project_id", "project_folder_id", "add_folder",
                                   "worktree_folder_id", "worktree_common_dir"]
         case "worktree_create": allowed = ["path", "common_dir", "destination", "branch", "base"]
         case "directory_create": allowed = ["path"]
@@ -58,7 +67,14 @@ public enum SessionActionPolicies {
                 let model = try string(raw, "model")
                 try require(!blank(model) && model.utf16.count <= 120 && !control(model), "Invalid model.")
             }
-            if raw.has("effort") { try require(efforts.contains(try string(raw, "effort")), "Invalid effort.") }
+            // OpenCode variants are open-ended; `inspectReason` checks the model's fresh `effort_options`.
+            if raw.has("effort") {
+                let effort = try string(raw, "effort")
+                if !efforts.contains(effort) {
+                    try require(EffortOption.valid(effort), "Invalid effort.")
+                    try require(effortVariants, effortUpdateRequired)
+                }
+            }
             if raw.has("expected_pending_id") { try require(AttachmentPolicy.validId(try string(raw, "expected_pending_id")), "The pending settings identity changed.") }
         case "worktree_create":
             for key in ["path", "common_dir", "destination"] { try require(LaunchPresentation.absoluteFolder(try string(raw, key))) }
@@ -68,6 +84,9 @@ public enum SessionActionPolicies {
             let agent = try string(raw, "agent")
             try require(LaunchPresentation.agentIds.contains(agent))
             if raw.has("model") { try require(agent == "opencode" && LaunchPresentation.validModel(try string(raw, "model")), "Choose a valid native OpenCode model.") }
+            if raw.has("effort") {
+                try require(agent == "opencode" && raw.has("model") && EffortOption.valid(try string(raw, "effort")), "Choose an effort offered for this model.")
+            }
             let directory = try string(raw, "directory")
             try require(directory.hasPrefix("/") && directory.utf16.count <= 4096 && !control(directory))
             let tag = try string(raw, "tag")

@@ -96,13 +96,17 @@ struct MessageBubble: View {
         }
     }
 
+    /// A message the agent has not admitted shows the native "Queued" or "Not delivered"; phones offer no removal.
     @ViewBuilder
     private var footer: some View {
-        if event.at > 0 || !event.delivery.isEmpty {
+        let queued = QueuedDelivery.label(event.deliveryState)
+        if event.at > 0 || !event.delivery.isEmpty || !queued.isEmpty {
             HStack(spacing: 8) {
                 Spacer(minLength: 0)
                 if event.at > 0 { Text(MessageTime.text(event.at)) }
-                if !event.delivery.isEmpty {
+                if !queued.isEmpty {
+                    Text(queued).foregroundStyle(event.deliveryState == "not_delivered" ? Theme.amber : Theme.muted)
+                } else if !event.delivery.isEmpty {
                     Text(DeliveryLabel.text(event.delivery))
                         .foregroundStyle(["failed", "uncertain"].contains(event.delivery) ? Theme.amber : Theme.muted)
                 }

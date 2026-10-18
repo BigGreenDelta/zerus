@@ -72,12 +72,16 @@ struct QuestionCard: View {
         let native = QuestionPolicies.submitted(question, target)
         let identity = "\(target.key)|\(QuestionPolicies.key(question))|\(native?.requestId ?? "")|\(draft.generation)"
         let editing = draft.status == "editing" && native == nil && model.pendingQuestionSend == nil
+        // A card that cannot be answered here is read-only, so no draft is written that could never be sent.
+        let inputs = editing && question.canAnswer
         let page = min(max(display.page(question), 0), max(question.prompts.count - 1, 0))
         let prompts = question.prompts.indices.contains(page) ? [question.prompts[page]] : []
         let otherPrompts = prompts.filter { $0.other && !question.approval }
         let error = QuestionPolicies.answerError(question.prompts, options: options, texts: texts)
         let complete = QuestionPolicies.complete(question.prompts, options: options, texts: texts)
         let sendEnabled = question.canAnswer && editing && complete && available && !submitting
+        // A card that cannot be answered here shows its reason and no Submit.
+        let showsSubmit = QuestionPolicies.showsSubmit(question)
         let approvalSupported = QuestionPolicies.approvalSupported(question)
         let eligible = visible && scenePhase == .active && available && editing && question.canAnswer && approvalSupported
         let remaining = review.secondsRemaining(now: now)
@@ -98,7 +102,7 @@ struct QuestionCard: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(prompts, id: \.id) { prompt in
-                        promptView(prompt, editing: editing)
+                        promptView(prompt, editing: inputs)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -114,10 +118,13 @@ struct QuestionCard: View {
                         persist()
                     }))
                     .textFieldStyle(.roundedBorder)
-                    .disabled(!editing)
+                    .disabled(!inputs)
                     .submitLabel(.send)
                     .onSubmit { submit(editing: editing) }
-                    if index == otherPrompts.count - 1 { sendButton(enabled: sendEnabled, multiple: question.prompts.count > 1, editing: editing) }
+                    if index == otherPrompts.count - 1 && showsSubmit { sendButton(enabled: sendEnabled, multiple: question.prompts.count > 1, editing: editing) }
+                }
+                if !QuestionPolicies.textHint(prompt).isEmpty {
+                    Text(QuestionPolicies.textHint(prompt)).font(.footnote).foregroundStyle(Theme.muted)
                 }
             }
             status(draft: draft, native: native)
@@ -147,7 +154,7 @@ struct QuestionCard: View {
                     if question.canSkip {
                         Button("Skip") { skip() }.disabled(!(editing && available))
                     }
-                    if otherPrompts.isEmpty { sendButton(enabled: sendEnabled, multiple: question.prompts.count > 1, editing: editing) }
+                    if otherPrompts.isEmpty && showsSubmit { sendButton(enabled: sendEnabled, multiple: question.prompts.count > 1, editing: editing) }
                 }
             }
             if !available {
@@ -214,6 +221,9 @@ struct QuestionCard: View {
                     }
                 }
             }
+            if !QuestionPolicies.choiceHint(prompt).isEmpty {
+                Text(QuestionPolicies.choiceHint(prompt)).font(.footnote).foregroundStyle(Theme.muted)
+            }
         }
     }
 
@@ -264,7 +274,10 @@ struct QuestionCard: View {
 
     private func otherLabel(_ prompt: Prompt) -> String {
         if !prompt.otherLabel.isEmpty { return prompt.otherLabel }
-        return question.prompts.count > 1 ? "Other: \(prompt.header.isEmpty ? prompt.text : prompt.header)" : "Other answer"
+        // A text form item has no options, so its field is the answer itself.
+        let text = prompt.inputKind == "text"
+        if question.prompts.count > 1 { return "\(text ? "Answer" : "Other"): \(prompt.header.isEmpty ? prompt.text : prompt.header)" }
+        return text ? "Answer" : "Other answer"
     }
 
     private func load(identity: String, draft: Draft, native: NativeQuestionDelivery?) {
@@ -281,7 +294,11 @@ struct QuestionCard: View {
                 saved[id] = NativeQuestionAnswer(questionId: id, optionIds: row.strings("selected_option_ids"), text: row.string("text"), skip: row.bool("skip"))
             }
         }
-        options = Dictionary(uniqueKeysWithValues: question.prompts.map { ($0.id, Set(saved[$0.id]?.optionIds ?? [])) })
+        // A form's preselected answers apply until this draft records its own choice.
+        let defaults = native == nil ? QuestionPolicies.defaults(question.prompts) : [:]
+        options = Dictionary(uniqueKeysWithValues: question.prompts.map { prompt in
+            (prompt.id, saved[prompt.id].map { Set($0.optionIds) } ?? defaults[prompt.id] ?? [])
+        })
         texts = Dictionary(uniqueKeysWithValues: question.prompts.map { ($0.id, saved[$0.id]?.text ?? "") })
     }
 
