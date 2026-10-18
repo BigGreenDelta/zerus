@@ -115,6 +115,9 @@ public struct Prompt: Codable, Hashable, Sendable {
     public var defaultOptionIds: [String] = []
     /// The prefilled answer of a native OpenCode text item (`default_text`), bounded like a typed answer; "" otherwise.
     public var defaultText = ""
+    /// An item of an OpenCode form (not a permission): its text reaches the native form reply, never a terminal, so text
+    /// starting with / or ! is an ordinary answer. Every other card keeps such text on the computer.
+    public var literalText = false
 }
 
 public struct NativeQuestionAnswer: Codable, Hashable, Sendable {
@@ -580,7 +583,8 @@ public enum NativeEvents {
                                        inputKind: ["choice", "text"].contains(prompt.string("input_kind")) ? prompt.string("input_kind") : "",
                                        minLength: limit(prompt, "min_length"), maxLength: limit(prompt, "max_length"),
                                        minItems: limit(prompt, "min_items"), maxItems: limit(prompt, "max_items"),
-                                       defaultOptionIds: prompt.strings("default_option_ids"), defaultText: defaultText(prompt, source: card.string("source")))
+                                       defaultOptionIds: prompt.strings("default_option_ids"), defaultText: defaultText(prompt, source: card.string("source")),
+                                       literalText: card.string("source") == "opencode_native" && !card.bool("approval"))
                             },
                             canAnswer: card.bool("can_answer"), canSkip: card.bool("can_skip"), optional: card.bool("optional"),
                             delivery: delivery?.status ?? "", createdAt: created, source: card.string("source"), approval: card.bool("approval"),
