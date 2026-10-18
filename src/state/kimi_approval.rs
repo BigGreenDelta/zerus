@@ -415,7 +415,7 @@ struct Header {
 
 /// Every interaction record of a whole wire. Err when the wire is longer than
 /// `max`, ends in a record Kimi is still writing, or holds any line that is
-/// not a JSON record with one string type: then a request may be missing.
+/// not a JSON object with one string type: then a request may be missing.
 fn history(path: &Path, max: u64) -> Result<Vec<Value>> {
     let unreadable = |_| UNVERIFIED.to_owned();
     let mut bytes = Vec::new();
@@ -432,6 +432,10 @@ fn history(path: &Path, max: u64) -> Result<Vec<Value>> {
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
     {
+        // Every record is a JSON object: serde also reads a struct from an array.
+        if line.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{') {
+            return Err(UNVERIFIED.into());
+        }
         let header: Header = serde_json::from_slice(line).map_err(|_| UNVERIFIED)?;
         if header.kind.starts_with("interaction.") {
             events.push(serde_json::from_slice(line).map_err(|_| UNVERIFIED)?);
@@ -1540,12 +1544,19 @@ mod tests {
         ] {
             refused(format!("{old_line}\n{unknown}\n{new}\n"), UNVERIFIED);
         }
-        // Every record names one string type.
+        // Every record is one JSON object naming one string type.
         for malformed in [
             r#"{"time":1}"#,
             r#"{"type":5,"time":1}"#,
             r#"{"type":"turn.ended","type":"interaction.request","id":"x"}"#,
             "[]",
+            r#"["interaction.request"]"#,
+            r#"["turn.ended"]"#,
+            r#"[{"type":"turn.ended"}]"#,
+            r#""interaction.request""#,
+            "null",
+            "7",
+            r#"{"type":"turn.ended"} {"type":"interaction.request","id":"x"}"#,
         ] {
             refused(format!("{malformed}\n{new}\n"), UNVERIFIED);
         }
@@ -1563,7 +1574,12 @@ mod tests {
             json!({"type":"metadata","time":1400}),
         ];
         let lines: String = unrelated.iter().map(|row| format!("{row}\n")).collect();
-        fs::write(&wire, format!("{lines}{new}\n")).unwrap();
+        // JSON allows whitespace around the object.
+        fs::write(
+            &wire,
+            format!("{lines}  {{\"type\":\"turn.ended\",\"time\":1500}}\r\n{new}\n"),
+        )
+        .unwrap();
         assert_eq!(bound(&r, &card).unwrap()["id"], "approval_new");
     }
 
