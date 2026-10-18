@@ -169,6 +169,15 @@ pub(super) fn checked_resumed(name: &str, run_id: &str, conversation_id: &str) -
     Ok(record)
 }
 
+/// A Claude turn stopped with Esc, whose prompt may take /clear before Ready.
+pub(super) fn checked_interrupted(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
+    let record = checked_input(name, run_id, conversation_id, true)?;
+    if !clear_context::stopped(&record) {
+        return Err("The session is no longer interrupted; refresh before clearing".into());
+    }
+    Ok(record)
+}
+
 /// Session settings may precede the first user message, when Codex/Kimi have
 /// not created a conversation yet. Other idle-only actions keep checked_ready.
 pub(super) fn checked_settings(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {

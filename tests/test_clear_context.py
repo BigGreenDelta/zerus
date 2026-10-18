@@ -176,6 +176,37 @@ class ClearContext(unittest.TestCase):
     import signal
     self.record['agent']=agent;self.write_record();(self.root/'provider').write_text(agent);os=__import__('os');os.kill(self.record['pid'],signal.SIGUSR1);time.sleep(.12)
     before=self.received();self.assertEqual(self.clear()['status'],'confirmed');self.assertEqual(self.received()[len(before):],b'/clear\r')
+ def interrupted_claude(self):
+  # Claude sends no hook when Esc stops a turn: the session stays Interrupted
+  # until its next message, while its native prompt may already take /clear.
+  import os,signal
+  (self.root/'provider').write_text('claude');os.kill(self.record['pid'],signal.SIGUSR1)
+  self.wait_for(lambda:'❯' in self.tmux('capture-pane','-p','-t',self.pane))
+  self.record.update(agent='claude',activity='unknown',phase='interrupted',main_done=False,last_error='Interrupted')
+  self.write_record()
+ def test_claude_turn_stopped_with_escape_clears_from_its_empty_prompt(self):
+  self.interrupted_claude();initial=self.record.copy();waiting='Wait until the agent reports Ready'
+  # Remaining work and another provider keep the clear waiting.
+  for patch,reason in [(dict(subagents={'worker':dict(name='Explore',state='working')}),
+                         waiting+'. Still working: subagent \u201cExplore\u201d'),(dict(agent='codex'),waiting)]:
+   with self.subTest(patch=patch):
+    self.record=dict(initial,**patch);self.write_record();info=self.inspect()
+    self.assertFalse(info['clear_context_supported']);self.assertEqual(info['clear_context_reason'],reason)
+    self.clear(success=False);self.assertEqual(self.received(),b'')
+  self.record=initial;self.write_record();info=self.inspect()
+  self.assertTrue(info['interrupted_message_can_send'],info.get('interrupted_message_reason'))
+  self.assertTrue(info['clear_context_supported']);self.assertEqual(info['clear_context_reason'],'')
+  # Compaction keeps waiting for Ready.
+  self.assertFalse(info['compact_context_supported']);self.assertEqual(info['compact_context_reason'],waiting)
+  self.assertEqual(self.clear()['status'],'confirmed');self.assertEqual(self.received(),b'/clear\r')
+ def test_native_draft_keeps_an_interrupted_claude_turn_from_clearing(self):
+  self.interrupted_claude()
+  self.tmux('send-keys','-t',self.pane,'-l','Keep this draft')
+  self.wait_for(lambda:'Keep this draft' in self.tmux('capture-pane','-p','-t',self.pane))
+  # The clear names the draft that keeps the message from sending.
+  info=self.inspect();self.assertFalse(info['clear_context_supported']);self.assertFalse(info['interrupted_message_can_send'])
+  self.assertIn('draft',info['clear_context_reason']);self.assertEqual(info['clear_context_reason'],info['interrupted_message_reason'])
+  self.clear(success=False);self.assertEqual(self.received(),b'Keep this draft')
  def test_stale_busy_draft_and_reused_request_do_not_submit(self):
   p=dict(request_id=str(uuid.uuid4()),expected_run_id='old',expected_conversation_id=self.conversation_id)
   self.clear(p,False);self.assertEqual(self.received(),b'')
