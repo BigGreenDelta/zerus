@@ -74,12 +74,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.source.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
       - run: python3 scripts/ci/check-source.py
       - name: Release publication contract checks
         run: python3 -m unittest discover -s tests -p 'test_*publication.py'
       - name: Workflow trust boundary checks
         run: python3 -m unittest discover -s tests -p test_ci_security.py
+      - name: Scan the tree and all history for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          scan_dir=$(mktemp -d)
+          cd "$scan_dir"
+          curl -fsSLO https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks_8.30.1_linux_x64.tar.gz' | sha256sum --check --strict
+          tar xzf gitleaks_8.30.1_linux_x64.tar.gz gitleaks
+          cd "$GITHUB_WORKSPACE"
+          "$scan_dir/gitleaks" git --no-banner --redact --ignore-gitleaks-allow --exit-code 1 .
+          "$scan_dir/gitleaks" dir --no-banner --redact --ignore-gitleaks-allow --exit-code 1 .
       - name: Validate GitHub Actions
         shell: bash
         run: |
