@@ -47,7 +47,7 @@ fn integer(map: &LoroMap, key: &str) -> Option<i64> {
 
 fn decode<T: serde::de::DeserializeOwned>(map: &LoroMap, key: &str) -> Result<T> {
     let text =
-        string(map, key).ok_or_else(|| Error::new(format!("task field {key} is missing")))?;
+        string(map, key).ok_or_else(|| Error::failed(format!("task field {key} is missing")))?;
     Ok(serde_json::from_str(&text)?)
 }
 
@@ -99,9 +99,9 @@ impl TaskDoc {
         let doc = LoroDoc::new();
         doc.import(bytes)?;
         let uuid = string(&doc.get_map("meta"), "uuid")
-            .ok_or_else(|| Error::new("not a task document"))?;
+            .ok_or_else(|| Error::failed("not a task document"))?;
         if !ids::is_uuid(&uuid) {
-            return Err(Error::new("not a task document"));
+            return Err(Error::failed("not a task document"));
         }
         Ok(Self {
             uuid,
@@ -156,6 +156,17 @@ impl TaskDoc {
 
     fn fields(&self) -> LoroMap {
         self.doc.get_map("fields")
+    }
+
+    /// The bytes of text the task holds: its prompt and every history entry.
+    /// Snapshots compress, so their size does not bound the history.
+    fn content_len(&self) -> usize {
+        let list = self.doc.get_list("log");
+        let entries: usize = (0..list.len())
+            .filter_map(|index| list.get(index)?.into_container().ok()?.into_map().ok())
+            .map(|entry| string(&entry, "text").map_or(0, |text| text.len()))
+            .sum();
+        self.doc.get_text("text").len_utf8() + entries
     }
 
     /// Writes a field as is, bypassing the rules, to build damaged documents.
@@ -433,7 +444,7 @@ impl TaskDoc {
     pub fn comment(&mut self, text: &str, actor: &Actor, now: i64) -> Result<()> {
         self.writable()?;
         check_text(text, "comment")?;
-        if self.snapshot()?.len() >= MAX_DOCUMENT {
+        if self.content_len() + text.len() > MAX_DOCUMENT {
             return Err(Error::new(
                 "this task's history is full; it accepts no more comments",
             ));
@@ -690,6 +701,22 @@ mod tests {
             (sent.text.as_str(), sent.request_id.as_deref()),
             ("", Some("req-1"))
         );
+    }
+
+    #[test]
+    fn a_full_history_accepts_no_more_comments() {
+        let mut t = task(Stage::Todo);
+        let long = "x".repeat(crate::schema::MAX_TEXT - 1);
+        let mut accepted = 0;
+        let error = loop {
+            match t.comment(&long, &Actor::Person, 2) {
+                Ok(()) => accepted += 1,
+                Err(error) => break error,
+            }
+            assert!(accepted < 100, "the history never filled");
+        };
+        assert!((60..=64).contains(&accepted), "{accepted}");
+        assert!(error.to_string().contains("history is full"), "{error}");
     }
 
     #[test]

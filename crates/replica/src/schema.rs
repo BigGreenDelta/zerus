@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub const SCHEMA: i64 = 1;
 /// The longest prompt or comment: the input limit of hgs.
 pub const MAX_TEXT: usize = 64 * 1024;
-/// A task document this large accepts no further comments.
+/// A task holding this much text (its prompt and history) accepts no further comments.
 pub const MAX_DOCUMENT: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

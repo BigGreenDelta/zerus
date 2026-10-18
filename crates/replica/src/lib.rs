@@ -10,7 +10,7 @@ mod schema;
 mod store;
 mod task;
 
-pub use error::{Error, Result};
+pub use error::{Error, ErrorKind, Result};
 pub use project::{ProjectDoc, Settings};
 pub use render::{cancel_message, task_prompt, Tools};
 pub use schema::{

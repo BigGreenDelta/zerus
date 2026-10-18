@@ -130,6 +130,21 @@ impl ProjectStore {
             .write(true)
             .open(dir.join(".lock"))?;
         lock.lock_exclusive()?;
+        // A crash during an atomic write leaves its temporary file behind. No
+        // one else writes while this lock is held, so any left now is garbage;
+        // removing it is best effort.
+        for folder in [dir.clone(), dir.join("tasks")] {
+            for entry in fs::read_dir(&folder)? {
+                let path = entry?.path();
+                let temporary = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.starts_with("tmp-"));
+                if temporary {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
         let name = dir.join("project-id");
         if !name.exists() {
             write_atomic(&name, project.as_bytes())?;
@@ -186,7 +201,7 @@ impl ProjectStore {
     pub fn load(&self, uuid: &str) -> Result<TaskDoc> {
         let mut task = TaskDoc::from_bytes(&fs::read(self.snapshot_path(uuid))?)?;
         if task.uuid() != uuid {
-            return Err(Error::new("the task file does not match its name"));
+            return Err(Error::failed("the task file does not match its name"));
         }
         match fs::read(self.updates_path(uuid)) {
             Ok(bytes) => {
@@ -273,14 +288,27 @@ impl ProjectStore {
     /// A task by its UUID or its short ID.
     pub fn find(&self, reference: &str) -> Result<TaskDoc> {
         if ids::is_uuid(reference) {
-            return self.load(reference);
+            if !self.snapshot_path(reference).exists() && !self.updates_path(reference).exists() {
+                return Err(Error::new(format!("no task {reference} in this project")));
+            }
+            return self
+                .load(reference)
+                .map_err(|e| Error::failed(format!("task {reference} is damaged: {e}")));
         }
         if !ids::is_short_id(reference) {
             return Err(Error::new(format!("{reference:?} is not a task ID")));
         }
-        let (tasks, _) = self.tasks()?;
+        let (tasks, damaged) = self.tasks()?;
         let mut found: Vec<_> = tasks.into_iter().filter(|t| t.id() == reference).collect();
         match found.len() {
+            // A damaged file's short ID cannot be read: it may be the one.
+            0 if !damaged.is_empty() => Err(Error::new(format!(
+                "no task {reference} in this project; {} could not be read",
+                match damaged.len() {
+                    1 => "1 task file".to_owned(),
+                    n => format!("{n} task files"),
+                }
+            ))),
             0 => Err(Error::new(format!("no task {reference} in this project"))),
             1 => Ok(found.pop().expect("one")),
             _ => Err(Error::new(format!(
@@ -389,6 +417,7 @@ mod tests {
     use super::*;
     use crate::schema::{SessionKey, Target};
     use crate::task::NewTask;
+    use crate::ErrorKind;
 
     fn new_task(store: &ProjectStore, rank: &str) -> TaskDoc {
         TaskDoc::create(NewTask {
@@ -538,6 +567,47 @@ mod tests {
         assert!(other.tasks().unwrap().0.is_empty());
         assert!(store.find("T-zzzzzz").is_err());
         assert!(store.find("nonsense").is_err());
+    }
+
+    #[test]
+    fn a_damaged_task_is_named_as_damaged() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let mut task = new_task(&store, "V");
+        store.save(&mut task).unwrap();
+        let bad = ids::new_uuid();
+        fs::write(store.snapshot_path(&bad), b"not loro").unwrap();
+        let by_uuid = store.find(&bad).err().unwrap();
+        assert!(by_uuid.to_string().contains("is damaged"), "{by_uuid}");
+        assert_eq!(by_uuid.kind(), ErrorKind::Failed);
+        let by_id = store.find("T-zzzzzz").err().unwrap().to_string();
+        assert!(by_id.contains("1 task file could not be read"), "{by_id}");
+        let missing = store.find(&ids::new_uuid()).err().unwrap().to_string();
+        assert!(missing.starts_with("no task"), "{missing}");
+        let refused = task.set_stage(Stage::Done, &Actor::Person, 2).unwrap_err();
+        assert_eq!(refused.kind(), ErrorKind::Refused);
+    }
+
+    #[test]
+    fn leftover_temporary_files_are_swept_on_open() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let mut task = new_task(&store, "V");
+        store.save(&mut task).unwrap();
+        let strays = [
+            store
+                .dir
+                .join("tasks")
+                .join(format!("{}.tmp-{}", task.uuid(), ids::new_uuid())),
+            store.dir.join(format!("project.tmp-{}", ids::new_uuid())),
+        ];
+        for stray in &strays {
+            fs::write(stray, b"half written").unwrap();
+        }
+        drop(store);
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        assert!(strays.iter().all(|s| !s.exists()));
+        assert!(store.load(task.uuid()).is_ok());
     }
 
     #[test]
