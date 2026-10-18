@@ -244,8 +244,7 @@ pub(super) fn clipped(screen: &str) -> bool {
         return false;
     };
     let rows: Vec<&str> = plain.lines().collect();
-    dialog_bottom(&rows)
-        .is_some_and(|end| !rows[..end].iter().any(|row| row.trim() == "question"))
+    dialog_bottom(&rows).is_some_and(|end| !rows[..end].iter().any(|row| row.trim() == "question"))
 }
 
 /// A Kimi question dialog whose heading and bottom both show.
@@ -254,8 +253,7 @@ pub(super) fn complete(screen: &str) -> bool {
         return false;
     };
     let rows: Vec<&str> = plain.lines().collect();
-    dialog_bottom(&rows)
-        .is_some_and(|end| rows[..end].iter().any(|row| row.trim() == "question"))
+    dialog_bottom(&rows).is_some_and(|end| rows[..end].iter().any(|row| row.trim() == "question"))
 }
 
 /// Grow the pane no client views until this recorded Kimi question's clipped

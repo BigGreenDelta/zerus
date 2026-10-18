@@ -1157,7 +1157,11 @@ larger Terminal.
 Claude keeps no scrollback for a question or approval panel taller than its
 pane, so a long question or command can lose its title and beginning
 everywhere. A Kimi question dialog taller than its pane loses its heading the
-same way. A session no client views keeps tmux's default 80x24 size. While a
+same way, and so does Kimi 2.1's startup folder trust prompt with a long project
+MCP disclosure. Kimi 2.2 pages that disclosure, or asks for a larger terminal,
+when its pane is short; Zerus offers the trust choice only once the whole
+disclosure shows on one page, and never chooses for you. A session no client
+views keeps tmux's default 80x24 size. While a
 recorded question or permission request waits and such a pane shows a clipped
 panel, Zerus makes that pane taller, doubling its height up to 192 rows without
 changing its width, until the agent redraws the complete panel. The exact request match still decides; the next

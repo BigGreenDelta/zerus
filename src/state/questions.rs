@@ -386,6 +386,7 @@ pub(super) fn inspection(record: &Value, live_pane: bool) -> Result<Value> {
     if !live_pane || !process_alive(record) {
         return Ok(json!([]));
     }
+    kimi_trust::fit(record);
     match current(record) {
         Ok(mut pending) => {
             for card in &mut pending {

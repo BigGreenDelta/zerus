@@ -1,0 +1,16 @@
+ ──────────────────────────────────────────────────────────────────────────────
+  Trust this folder?
+  ↑↓ navigate · Enter select · Esc exit
+
+  /work/example
+
+  Start 4 MCP servers automatically
+    Config: .kimi-code/mcp.json, .mcp.json
+
+  ←→ page · 1 / 2
+  Trust is remembered for this folder, including future project config changes.
+  Tool approvals follow your permission settings.
+
+   ❯ Trust and continue
+     Exit
+ ──────────────────────────────────────────────────────────────────────────────

@@ -25,14 +25,27 @@ TALL=[dict(question='Which release should we prepare?',header='Release',
            options=[dict(label=f'Option {i}',description=LONG) for i in range(1,5)])]
 SHORT=[dict(question='Which release should we prepare?',header='Release',
             options=[dict(label='Stable',description='Use stable build'),dict(label='Preview',description='Use preview build')])]
+# Trust choices of Kimi 2.1 and of Kimi 2.2.
+TRUST_LABELS=(['Trust this folder',"Don't trust"],['Trust and continue','Exit'])
+
+def gated_project(work):
+ """Project MCP servers and instructions that trust would activate. The
+ servers' command does nothing, so trusting starts nothing real."""
+ servers={f'tracker{i}':dict(command='/bin/true',args=[f'example-mcp-{i}']) for i in range(3)}
+ (work/'.mcp.json').write_text(json.dumps(dict(mcpServers=servers)))
+ (work/'.kimi-code').mkdir()
+ (work/'.kimi-code/mcp.json').write_text(json.dumps(dict(mcpServers={'local':dict(command='/bin/true',args=['server.js'])})))
+ (work/'AGENTS.md').write_text('# Example instructions\n')
 
 @unittest.skipUnless(KIMI,'Set HGS_KIMI_TEST_BIN to test a pinned native Kimi against a local fake API')
-class NativeKimiQuestions(unittest.TestCase):
+class NativeKimi(unittest.TestCase):
+ """A sealed private copy of the pinned Kimi in a private home and tmux socket."""
  script=fixtures.InputTransport.script
  tmux=fixtures.InputTransport.tmux
  write_record=fixtures.InputTransport.write_record
  inspect=questions.Questions.inspect
  answer=questions.Questions.answer
+ items=SHORT
  def wait_for(self,callback,seconds=30):
   deadline=time.monotonic()+seconds
   while time.monotonic()<deadline:
@@ -42,10 +55,10 @@ class NativeKimiQuestions(unittest.TestCase):
   self.fail('Native fixture timed out:\n'+self.screen())
  def screen(self):return self.tmux('capture-pane','-p','-t',self.pane,check=False)
  def height(self):return int(self.tmux('display-message','-p','-t',self.pane,'#{window_height}'))
- def setUp(self):
+ def launch(self,name,rows=24,project=lambda work:None):
   self.temp=tempfile.TemporaryDirectory(prefix='hgs-kimi-native-');self.addCleanup(self.temp.cleanup)
   self.root=Path(self.temp.name).resolve();self.bin=self.root/'.local/bin';self.bin.mkdir(parents=True)
-  self.state=self.root/'state';self.state.mkdir();work=self.root/'work';work.mkdir()
+  self.state=self.root/'state';self.state.mkdir();self.work=work=self.root/'work';work.mkdir();project(work)
   self.kimi_home=self.root/'.kimi-code';self.kimi_home.mkdir()
   # Kimi stages updates beside its executable and swaps them in at the next
   # start: run a private copy of exactly the pinned build, keep both update
@@ -57,7 +70,6 @@ class NativeKimiQuestions(unittest.TestCase):
   self.kimi=kimi=self.root/'kimi-bin/kimi';kimi.parent.mkdir();shutil.copy2(KIMI,kimi)
   self.assertEqual(sha256(kimi),KIMI_SHA256)
   (self.kimi_home/'tui.toml').write_text('[upgrade]\nauto_install = false\n')
-  self.items=SHORT if '_short_' in self._testMethodName else TALL
   fixture=self;self.native_requests=[]
   class Server(BaseHTTPRequestHandler):
    def log_message(self,*args):pass
@@ -95,17 +107,48 @@ display_name = "Fixture"
   self.script('tmux','#!/bin/sh\nexec '+shlex.quote(fixtures.TMUX)+' -S '+shlex.quote(str(self.socket))+' -f /dev/null "$@"\n')
   self.env=dict(os.environ,HOME=str(self.root),HGS_STATE_DIR=str(self.state),HGS_CONFIG_DIR=str(self.root/'config'),PATH=str(self.bin)+':'+os.environ['PATH'],HGS_SELF='test')
   for v in ('TMUX','TMUX_PANE','HGS_RUN_ID','HGS_SESSION','HGS_EXECUTABLE'):self.env.pop(v,None)
-  self.name='kimi/question-native';self.run_id=str(uuid.uuid4())
+  self.name=name;self.run_id=str(uuid.uuid4())
   self.addCleanup(lambda:fixtures.InputTransport.tearDown(self))
-  # tmux's default size for a session no client has attached to yet.
-  self.tmux('new-session','-d','-s',self.name,'-x','80','-y','24','-c',str(work),'env','-i','HOME='+str(self.root),
+  # tmux's default size for a session no client has attached to is 80x24.
+  self.tmux('new-session','-d','-s',self.name,'-x','80','-y',str(rows),'-c',str(work),'env','-i','HOME='+str(self.root),
             'PATH='+os.environ['PATH'],'TERM=xterm-256color','LANG=C.UTF-8','KIMI_CODE_HOME='+str(self.kimi_home),
             'KIMI_DISABLE_TELEMETRY=1','KIMI_CODE_NO_AUTO_UPDATE=1',str(kimi))
   self.pane=self.tmux('display-message','-p','-t','='+self.name+':','#{pane_id}').strip()
   self.addCleanup(self.retain)
-  pid=int(self.tmux('display-message','-p','-t',self.pane,'#{pane_pid}'))
+  self.pid=pid=int(self.tmux('display-message','-p','-t',self.pane,'#{pane_pid}'))
   # The pane runs the private copy, not any other Kimi.
   if Path('/proc').is_dir():self.wait_for(lambda:os.readlink(f'/proc/{pid}/exe')==str(kimi),10)
+  self.start=subprocess.check_output(['ps','-p',str(pid),'-o','lstart='],env=dict(self.env,LC_ALL='C',TZ='UTC'),text=True).strip()
+  self.tmux('set-option','-t','='+self.name+':','@hgs_run',self.run_id)
+  self.record_path=self.state/(hashlib.sha256(self.name.encode()).hexdigest()+'.json')
+ def retain(self):
+  """Keep this run's screens, logs and metadata before its home is removed."""
+  if not EVIDENCE:return
+  out=Path(EVIDENCE)/self.id().rsplit('.',1)[-1];out.mkdir(parents=True,exist_ok=True)
+  (out/'screen.txt').write_text(self.screen())
+  (out/'screen-styled.txt').write_text(self.tmux('capture-pane','-p','-e','-t',self.pane,check=False))
+  for source in [self.kimi_home/'logs',*self.kimi_home.glob('sessions/*/*/agents/main')]:
+   if source.is_dir():shutil.copytree(source,out/source.relative_to(self.kimi_home),dirs_exist_ok=True)
+  if self.record_path.exists():shutil.copy2(self.record_path,out/'record.json')
+  (out/'metadata.json').write_text(json.dumps(dict(pinned=KIMI,pinned_sha256=KIMI_SHA256,copy=str(self.kimi),copy_sha256=sha256(self.kimi),
+   guarded={str(path):sha256(path) for path in GUARDED},height=self.tmux('display-message','-p','-t',self.pane,'#{window_height}',check=False).strip(),
+   requests=len(self.native_requests)),indent=1))
+ def attach_client(self):
+  """A control-mode client: tmux counts the session as viewed."""
+  client=subprocess.Popen([fixtures.TMUX,'-S',str(self.socket),'-f','/dev/null','-C','attach','-t','='+self.name],
+                          stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=self.env)
+  self.addCleanup(lambda:(client.stdin.close(),client.wait(5)))
+  self.wait_for(lambda:self.tmux('display-message','-p','-t',self.pane,'#{session_attached}').strip()=='1')
+ def cards(self):return self.inspect()['pending_questions']
+ def card(self):
+  cards=self.cards()
+  self.assertEqual(len(cards),1,cards)
+  return cards[0]
+
+class NativeKimiQuestions(NativeKimi):
+ def setUp(self):
+  self.items=SHORT if '_short_' in self._testMethodName else TALL
+  self.launch('kimi/question-native')
   def started():
    screen=self.screen()
    return screen if 'Trust this folder?' in screen or '│ >' in screen else None
@@ -117,29 +160,10 @@ display_name = "Fixture"
    for wire in self.kimi_home.glob('sessions/*/*/agents/main/wire.jsonl'):
     if '"interaction.request"' in wire.read_text() and 'esc cancel' in self.screen():return wire
   wire=self.wait_for(asked);self.conversation_id=wire.parent.parent.parent.name
-  start=subprocess.check_output(['ps','-p',str(pid),'-o','lstart='],env=dict(self.env,LC_ALL='C',TZ='UTC'),text=True).strip()
-  self.tmux('set-option','-t','='+self.name+':','@hgs_run',self.run_id)
-  self.record_path=self.state/(hashlib.sha256(self.name.encode()).hexdigest()+'.json')
   self.record=dict(version=1,name=self.name,agent='kimi',run_id=self.run_id,conversation_id=self.conversation_id,
-                   agent_home=str(self.kimi_home),pane=self.pane,pid=pid,process_start=start,activity='busy',phase='input',
+                   agent_home=str(self.kimi_home),pane=self.pane,pid=self.pid,process_start=self.start,activity='busy',phase='input',
                    active_tools={'call_fixture':{'name':'AskUserQuestion'}},subagents={},last_event_at=time.time(),created=time.time())
   self.write_record();self.wire=wire
- def retain(self):
-  """Keep this run's screens, logs and metadata before its home is removed."""
-  if not EVIDENCE:return
-  out=Path(EVIDENCE)/self.id().rsplit('.',1)[-1];out.mkdir(parents=True,exist_ok=True)
-  (out/'screen.txt').write_text(self.screen())
-  (out/'screen-styled.txt').write_text(self.tmux('capture-pane','-p','-e','-t',self.pane,check=False))
-  for source in [self.kimi_home/'logs',*self.kimi_home.glob('sessions/*/*/agents/main')]:
-   if source.is_dir():shutil.copytree(source,out/source.relative_to(self.kimi_home),dirs_exist_ok=True)
-  if getattr(self,'record_path',None) and self.record_path.exists():shutil.copy2(self.record_path,out/'record.json')
-  (out/'metadata.json').write_text(json.dumps(dict(pinned=KIMI,pinned_sha256=KIMI_SHA256,copy=str(self.kimi),copy_sha256=sha256(self.kimi),
-   guarded={str(path):sha256(path) for path in GUARDED},height=self.tmux('display-message','-p','-t',self.pane,'#{window_height}',check=False).strip(),
-   requests=len(self.native_requests)),indent=1))
- def card(self):
-  state=self.inspect()
-  self.assertEqual(len(state['pending_questions']),1,state)
-  return state['pending_questions'][0]
  def payload(self,card,option):
   return dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id=self.conversation_id,
               question_id=card['question_id'],expected_question_hash=card['question_hash'],
@@ -164,10 +188,7 @@ display_name = "Fixture"
   self.wait_for(lambda:'Fixture complete.' in self.screen())
 
  def test_tall_question_with_an_attached_client_is_never_resized(self):
-  client=subprocess.Popen([fixtures.TMUX,'-S',str(self.socket),'-f','/dev/null','-C','attach','-t','='+self.name],
-                          stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=self.env)
-  self.addCleanup(lambda:(client.stdin.close(),client.wait(5)))
-  self.wait_for(lambda:self.tmux('display-message','-p','-t',self.pane,'#{session_attached}').strip()=='1')
+  self.attach_client()
   before=self.height()
   card=self.card()
   self.assertFalse(card['can_answer'])
@@ -182,5 +203,57 @@ display_name = "Fixture"
   receipt=self.answer(self.payload(card,'opt_0_0'),timeout=60)
   self.assertEqual(receipt['status'],'answered')
   self.assertEqual(self.resolved()['answers'],{'Which release should we prepare?':'Stable'})
+
+class NativeKimiTrust(NativeKimi):
+ """The startup folder trust prompt: shown whole, answered only as chosen."""
+ def setUp(self):
+  # A pane a client left at 12 rows: too short for the whole prompt.
+  self.launch('kimi/trust-native',rows=12,project=gated_project)
+  self.wait_for(lambda:any(label in self.screen() for labels in TRUST_LABELS for label in labels))
+  self.record=dict(version=1,name=self.name,agent='kimi',run_id=self.run_id,run_identity_version=1,supervisor={},
+                   conversation_id=None,launch_dir=str(self.work),agent_home=str(self.kimi_home),pane=self.pane,pid=self.pid,
+                   process_start=self.start,phase='unknown',activity='unknown',last_event_at=0,created=time.time())
+  self.write_record()
+ def payload(self,card,option):
+  return dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,expected_conversation_id='',
+              question_id=card['question_id'],expected_question_hash=card['question_hash'],
+              answers=[dict(question_id='trust',selected_option_ids=[option],text='')])
+ def trust_card(self):
+  card=self.card()
+  self.assertEqual(card['source'],'kimi_folder_trust',card)
+  item=card['questions'][0]
+  labels=[option['label'] for option in item['options']]
+  self.assertIn(labels,[list(labels) for labels in TRUST_LABELS])
+  # The whole disclosure: Kimi 2.1 lists every gated server, Kimi 2.2 counts
+  # them with their configuration files and adds the instructions.
+  shown=[f'{name} (stdio): command=/bin/true' for name in ['local','tracker0','tracker1','tracker2']] \
+   if labels==TRUST_LABELS[0] else ['Start 4 MCP servers automatically','.kimi-code/mcp.json, .mcp.json','AGENTS.md']
+  for text in [str(self.work),*shown]:self.assertIn(text,item['body'])
+  self.assertNotIn('page ·',item['body']);self.assertNotIn('…',item['body'])
+  return card
+
+ def test_a_short_unviewed_pane_grows_until_the_whole_prompt_shows_then_trusts_once(self):
+  self.assertEqual(self.height(),12)
+  card=self.trust_card()
+  self.assertGreater(self.height(),12)
+  self.assertEqual(self.tmux('show-options','-w','-v','-t',self.pane,'window-size').strip(),'')
+  receipt=self.answer(self.payload(card,'trust_0'),timeout=60)
+  self.assertEqual(receipt['status'],'answered')
+  self.wait_for(lambda:'│ >' in self.screen())
+  self.assertTrue(Path(f'/proc/{self.pid}').exists() or not Path('/proc').is_dir())
+
+ def test_declining_trust_exits_kimi(self):
+  card=self.trust_card()
+  receipt=self.answer(self.payload(card,'trust_1'),timeout=60)
+  self.assertEqual(receipt['status'],'answered')
+  self.wait_for(lambda:subprocess.run(['ps','-p',str(self.pid)],capture_output=True).returncode!=0)
+
+ def test_a_viewed_short_pane_is_never_resized_or_answered(self):
+  self.attach_client()
+  before=self.height()
+  cards=self.cards()
+  self.assertFalse([card for card in cards if card['source']=='kimi_folder_trust'],cards)
+  self.assertTrue(all(not card.get('can_answer') for card in cards),cards)
+  self.assertEqual(self.height(),before)
 
 if __name__=='__main__':unittest.main()
