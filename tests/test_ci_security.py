@@ -942,11 +942,20 @@ class WorkflowSecurityTests(unittest.TestCase):
         verified = scan.index("sha256sum --check")
         self.assertLess(scan.index("curl -fsSLO"), verified)
         self.assertLess(verified, scan.index("tar xzf"))
+        # A token generated in the job, committed with an allow comment and then
+        # deleted, must be reported with the distinct exit code before the real scan.
+        control = '"$scan_dir/gitleaks" git --no-banner --redact --ignore-gitleaks-allow --exit-code 3 control || status=$?'
+        self.assertIn(control, scan)
+        self.assertIn("import secrets", scan)
+        self.assertIn('# gitleaks:allow', scan)
+        self.assertIn("git -C control rm -q leak.py", scan)
+        self.assertIn('if [ "$status" != 3 ]; then', scan)
+        self.assertLess(verified, scan.index(control))
         # Public logs never show a finding's secret; inline allow comments do not count.
         for target in ("git", "dir"):
             command = f'"$scan_dir/gitleaks" {target} --no-banner --redact --ignore-gitleaks-allow --exit-code 1 .'
             self.assertIn(command, scan)
-            self.assertLess(verified, scan.index(command))
+            self.assertLess(scan.index(control), scan.index(command))
         # A target .gitleaks.toml or .gitleaksignore would replace the default rules
         # or hide findings; adding one is a reviewed change to this test.
         for name in (".gitleaks.toml", ".gitleaksignore"):
