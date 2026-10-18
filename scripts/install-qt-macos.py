@@ -24,9 +24,16 @@ REPOSITORY = qt_archives.MACOS_REPOSITORY
 # The prefix tools that this installer, the tray build and scripts/package-macos.py run.
 BUILD_TOOLS = ("bin/qmake", "bin/lrelease", "bin/macdeployqt", "libexec/moc", "libexec/rcc")
 # LC_LOAD_DYLIB, LC_REEXPORT_DYLIB and LC_LOAD_UPWARD_DYLIB name images dyld must
-# load; a weak one may be absent.
+# load; a weak (LC_LOAD_WEAK_DYLIB) one may be absent, but is checked when present.
 REQUIRED_DYLIBS = {0xC, 0x8000001F, 0x80000023}
+LC_LOAD_WEAK_DYLIB = 0x80000018
 LC_RPATH = 0x8000001C
+# dyld provides these from the system; any other absolute name must be inside the prefix.
+SYSTEM_ROOTS = ("/usr/lib/", "/System/Library/")
+# The pinned build tools need 16 image visits (8 images, 2 architectures); a far
+# larger graph stops the installation.
+VISIT_LIMIT = 1_000
+ARCHITECTURES = {(0x0100000C, 0): "arm64", (0x01000007, 3): "x86_64"}
 
 
 def validate_pin(pin):
@@ -34,52 +41,105 @@ def validate_pin(pin):
 
 
 def load_commands(data):
-    """(required dylib names, run paths) of each slice of a 64-bit thin or universal Mach-O image."""
-    offsets = [0]
-    if data[:4] == b"\xca\xfe\xba\xbe":
-        offsets = [struct.unpack_from(">5I", data, 8 + 20 * index)[2]
-                   for index in range(struct.unpack_from(">I", data, 4)[0])]
-    slices = []
-    for offset in offsets:
-        require(data[offset:offset + 4] == b"\xcf\xfa\xed\xfe", "Not a 64-bit Mach-O image.")
-        cursor, dylibs, rpaths = offset + 32, [], []
-        for _ in range(struct.unpack_from("<I", data, offset + 16)[0]):
-            command, size = struct.unpack_from("<II", data, cursor)
-            if command in REQUIRED_DYLIBS or command == LC_RPATH:
-                start = struct.unpack_from("<I", data, cursor + 8)[0]
-                name = data[cursor + start:cursor + size].split(b"\0", 1)[0].decode()
-                (rpaths if command == LC_RPATH else dylibs).append(name)
-            cursor += size
-        slices.append((dylibs, rpaths))
-    return slices
+    """{architecture: (dylibs, run paths)} of a 64-bit thin or universal Mach-O image.
+
+    An architecture is a CPU type and subtype, and each dylib a (name, weak) pair. Every
+    count, offset and size must lie inside the file, the slice and its command table;
+    anything else, including an empty or 64-bit universal header, is refused."""
+    try:
+        if data[:4] == b"\xca\xfe\xba\xbe":
+            count = struct.unpack_from(">I", data, 4)[0]
+            require(0 < count <= 16 and 8 + 20 * count <= len(data), "Malformed universal Mach-O header.")
+            slices = []
+            for index in range(count):
+                cputype, cpusubtype, offset, size, _ = struct.unpack_from(">5I", data, 8 + 20 * index)
+                require(8 + 20 * count <= offset and offset + size <= len(data), "Mach-O slice outside the file.")
+                slices.append(((cputype, cpusubtype & 0xFFFFFF), offset, size))
+        else:
+            slices = [(None, 0, len(data))]
+        images = {}
+        for declared, offset, size in slices:
+            require(size >= 32 and data[offset:offset + 4] == b"\xcf\xfa\xed\xfe", "Not a 64-bit Mach-O image.")
+            cputype, cpusubtype, _, count, table = struct.unpack_from("<5I", data, offset + 4)
+            architecture = (cputype, cpusubtype & 0xFFFFFF)
+            require(declared in (None, architecture) and architecture not in images,
+                    "Inconsistent Mach-O architectures.")
+            cursor, end, dylibs, rpaths = offset + 32, offset + 32 + table, [], []
+            require(end <= offset + size, "Mach-O load commands outside the image.")
+            for _ in range(count):
+                require(cursor + 8 <= end, "Mach-O load commands outside their table.")
+                command, length = struct.unpack_from("<II", data, cursor)
+                require(length >= 8 and length % 8 == 0 and cursor + length <= end, "Malformed Mach-O load command.")
+                if command in REQUIRED_DYLIBS or command in (LC_LOAD_WEAK_DYLIB, LC_RPATH):
+                    start = struct.unpack_from("<I", data, cursor + 8)[0]
+                    raw = data[cursor + start:cursor + length]
+                    require((12 if command == LC_RPATH else 24) <= start < length and b"\0" in raw,
+                            "Malformed Mach-O load command name.")
+                    name = raw.split(b"\0", 1)[0].decode()
+                    if command == LC_RPATH:
+                        rpaths.append(name)
+                    else:
+                        dylibs.append((name, command == LC_LOAD_WEAK_DYLIB))
+                cursor += length
+            require(cursor == end, "Mach-O load commands do not fill their table.")
+            images[architecture] = (dylibs, rpaths)
+        return images
+    except (struct.error, UnicodeDecodeError) as error:
+        raise ValueError(f"Malformed Mach-O image: {error}") from error
 
 
 def check_tools(prefix, tools):
-    """Find every Qt image the tools load inside the prefix, without running any of them.
+    """Find every image the tools load, for each of their architectures, without running any of them.
 
-    As dyld does, an @rpath name is searched in the run paths of the loading image,
-    then in those of the images that loaded it, and @loader_path is the directory of
-    the loading image. The official Qt uses no other @ names; an absolute name is a
-    system library."""
+    As dyld does, an @rpath name is searched in the run paths of the loading image, then
+    in those of the images that loaded it, and the first existing file is the one loaded;
+    @loader_path is the directory of the loading image. That file, and the file of any
+    absolute name outside the system roots, must be inside the prefix and provide the
+    loading architecture. A weak image may be absent but is checked when present. Other
+    load names and run paths are refused."""
     root = os.path.realpath(prefix)
-    pending, seen = [(tool, prefix / tool, ()) for tool in tools], set()
+
+    def inside(path):
+        return os.path.commonpath([root, os.path.realpath(path)]) == root
+
+    pending, seen, images = [], set(), {}
+    for tool in tools:
+        image = prefix / tool
+        require(image.is_file() and inside(image), f"The Qt prefix has no {tool}.")
+        images[image] = load_commands(image.read_bytes())
+        pending += [(tool, architecture, image, ()) for architecture in images[image]]
     while pending:
-        tool, image, inherited = pending.pop()
-        if (image, inherited) in seen:
+        tool, architecture, image, inherited = pending.pop()
+        if (architecture, image, inherited) in seen:
             continue
-        seen.add((image, inherited))
-        require(image.is_file(), f"The Qt prefix has no {tool}.")
-        for dylibs, rpaths in load_commands(image.read_bytes()):
-            paths = tuple(os.path.normpath(image.parent / rpath[len("@loader_path/"):])
-                          for rpath in rpaths if rpath.startswith("@loader_path/")) + inherited
-            for name in dylibs:
-                if not name.startswith("@"):
-                    continue
-                found = [Path(path, name[len("@rpath/"):]) for path in paths if name.startswith("@rpath/")]
-                found = [path for path in found if path.is_file() and
-                         os.path.commonpath([root, os.path.realpath(path)]) == root]
-                require(found, f"{tool}: {image.name} loads {name}, which the Qt prefix does not provide.")
-                pending.append((tool, found[0], paths))
+        seen.add((architecture, image, inherited))
+        require(len(seen) <= VISIT_LIMIT, f"{tool}: more than {VISIT_LIMIT} images to check.")
+        if image not in images:
+            images[image] = load_commands(image.read_bytes())
+        name = ARCHITECTURES.get(architecture, f"CPU {architecture[0]:#x}/{architecture[1]:#x}")
+        require(architecture in images[image], f"{tool}: {image.name} has no {name} code.")
+        dylibs, rpaths = images[image][architecture]
+        own = []
+        for rpath in rpaths:
+            require(rpath.startswith(("@loader_path/", "/")), f"{tool}: {image.name} has the run path {rpath}.")
+            own.append(os.path.normpath(os.path.join(image.parent, rpath[len("@loader_path/"):])
+                                        if rpath.startswith("@loader_path/") else rpath))
+        # A run path already searched earlier changes nothing, so cycles end.
+        paths = tuple(dict.fromkeys(own + list(inherited)))
+        for dylib, weak in dylibs:
+            if dylib.startswith("@rpath/"):
+                candidates = [Path(os.path.normpath(os.path.join(path, dylib[len("@rpath/"):]))) for path in paths]
+            elif dylib.startswith(SYSTEM_ROOTS) and os.path.normpath(dylib) == dylib:
+                continue
+            else:
+                require(dylib.startswith("/"), f"{tool}: {image.name} loads {dylib}, which is not supported.")
+                candidates = [Path(dylib)]
+            found = next((path for path in candidates if path.is_file()), None)
+            if found is None and weak:
+                continue
+            require(found is not None, f"{tool}: {image.name} loads {dylib}, which the Qt prefix does not provide.")
+            require(inside(found), f"{tool}: {image.name} loads {dylib} from {found}, outside the Qt prefix.")
+            pending.append((tool, architecture, found, paths))
 
 
 def install(pin, output, base=REPOSITORY, check_version=True):

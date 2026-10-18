@@ -129,7 +129,7 @@ class PinnedQt(unittest.TestCase):
         self.image(prefix, framework("QtQml"), "../../../", "QtCore", "QtNetwork", "QtQmlCore")
         with self.assertRaisesRegex(ValueError, r"QtQml loads @rpath/QtQmlCore\."):
             qt.check_tools(prefix, ["bin/lrelease"])
-        # A framework found only outside the prefix does not count.
+        # A framework found first outside the prefix is refused.
         self.image(self.root, framework("QtQmlCore"), "../../../", "QtCore")
         self.image(prefix, framework("QtQml"), "../../../../../lib", "QtCore", "QtNetwork", "QtQmlCore")
         with self.assertRaisesRegex(ValueError, r"QtQml loads @rpath/QtQmlCore\."):
@@ -139,6 +139,124 @@ class PinnedQt(unittest.TestCase):
         for tool in ("bin/lupdate", "bin/qmake"):
             with self.assertRaises(ValueError, msg=tool):
                 qt.check_tools(prefix, [tool])
+
+    def write(self, path, *images):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(universal(*images) if len(images) > 1 else images[0])
+
+    def test_each_architecture_needs_framework_code_of_its_own(self):
+        prefix = self.root / "qt"
+        commands = [(qt.LC_RPATH, "@loader_path/../lib"), (LOAD, "@rpath/" + framework("QtQml")[len("lib/"):])]
+        self.write(prefix / framework("QtQml"), macho(X86_64, []))
+        for tool in ([macho(ARM64, commands)], [macho(X86_64, commands), macho(ARM64, commands)]):
+            self.write(prefix / "bin/lrelease", *tool)
+            with self.assertRaisesRegex(ValueError, r"bin/lrelease: QtQml has no arm64 code\."):
+                qt.check_tools(prefix, ["bin/lrelease"])
+        self.write(prefix / framework("QtQml"), macho(X86_64, []), macho(ARM64, []))
+        qt.check_tools(prefix, ["bin/lrelease"])
+
+    def test_absolute_names_outside_the_system_must_be_inside_the_prefix(self):
+        prefix = self.root / "qt"
+        outside = self.root / "outside" / framework("QtQml")
+        self.write(outside, macho(ARM64, []))
+        refused = {str(outside): "outside the Qt prefix", "/usr/lib/../.." + str(outside): "outside the Qt prefix",
+                   str(self.root / "absent" / framework("QtQml")): "does not provide",
+                   framework("QtQml"): "not supported", "@executable_path/../" + framework("QtQml"): "not supported"}
+        for name, error in refused.items():
+            self.write(prefix / "bin/lrelease", macho(ARM64, [(LOAD, name)]))
+            with self.assertRaisesRegex(ValueError, error, msg=name):
+                qt.check_tools(prefix, ["bin/lrelease"])
+        # System libraries are accepted; an absolute name inside the prefix is checked in turn.
+        inner = prefix / framework("QtQml")
+        self.write(inner, macho(ARM64, [(LOAD, "@rpath/" + framework("QtCore")[len("lib/"):])]))
+        self.write(prefix / "bin/lrelease", macho(ARM64, [
+            (qt.LC_RPATH, "@loader_path/../lib"), (LOAD, "/usr/lib/libSystem.B.dylib"),
+            (LOAD, "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit"), (LOAD, str(inner))]))
+        with self.assertRaisesRegex(ValueError, r"QtQml loads @rpath/QtCore\."):
+            qt.check_tools(prefix, ["bin/lrelease"])
+        self.write(prefix / framework("QtCore"), macho(ARM64, []))
+        qt.check_tools(prefix, ["bin/lrelease"])
+
+    def test_the_first_existing_run_path_candidate_is_the_one_checked(self):
+        prefix = self.root / "qt"
+        qml = (LOAD, "@rpath/" + framework("QtQml")[len("lib/"):])
+        self.write(self.root / "outside" / framework("QtQml")[len("lib/"):], macho(ARM64, []))
+        self.write(prefix / framework("QtQml"), macho(ARM64, []))
+        self.write(prefix / "bin/lrelease", macho(ARM64, [
+            (qt.LC_RPATH, "@loader_path/../../outside"), (qt.LC_RPATH, "@loader_path/../lib"), qml]))
+        with self.assertRaisesRegex(ValueError, "outside the Qt prefix"):
+            qt.check_tools(prefix, ["bin/lrelease"])
+        # A run path without the image is passed over; an unsupported run path is refused.
+        self.write(prefix / "bin/lrelease", macho(ARM64, [
+            (qt.LC_RPATH, str(self.root / "absent")), (qt.LC_RPATH, "@loader_path/../lib"), qml]))
+        qt.check_tools(prefix, ["bin/lrelease"])
+        self.write(prefix / "bin/lrelease", macho(ARM64, [(qt.LC_RPATH, "@executable_path/../lib"), qml]))
+        with self.assertRaisesRegex(ValueError, "has the run path @executable_path/../lib"):
+            qt.check_tools(prefix, ["bin/lrelease"])
+
+    def test_dependency_cycles_end_and_the_graph_is_bounded(self):
+        prefix = self.root / "qt"
+        own = (qt.LC_RPATH, "@loader_path/../../../")
+        self.write(prefix / "bin/lrelease", macho(ARM64, [(qt.LC_RPATH, "@loader_path/../lib"),
+                                                          (LOAD, "@rpath/A.framework/Versions/A/A")]))
+        self.write(prefix / framework("A"), macho(ARM64, [own, (LOAD, "@rpath/B.framework/Versions/A/B")]))
+        self.write(prefix / framework("B"), macho(ARM64, [own, (LOAD, "@rpath/A.framework/Versions/A/A")]))
+        read = Path.read_bytes
+        with mock.patch.object(Path, "read_bytes", autospec=True, side_effect=read) as reads:
+            qt.check_tools(prefix, ["bin/lrelease"])
+        self.assertEqual(reads.call_count, 3)
+        with mock.patch.object(qt, "VISIT_LIMIT", 2), self.assertRaisesRegex(ValueError, "more than 2 images"):
+            qt.check_tools(prefix, ["bin/lrelease"])
+
+    def test_a_present_weak_image_is_checked(self):
+        prefix = self.root / "qt"
+        self.write(prefix / "bin/lrelease", macho(ARM64, [(qt.LC_RPATH, "@loader_path/../lib"),
+                                                          (WEAK, "@rpath/A.framework/Versions/A/A")]))
+        qt.check_tools(prefix, ["bin/lrelease"])
+        self.write(prefix / framework("A"), macho(ARM64, [(LOAD, "@rpath/Missing.framework/Versions/A/Missing")]))
+        with self.assertRaisesRegex(ValueError, r"A loads @rpath/Missing\."):
+            qt.check_tools(prefix, ["bin/lrelease"])
+
+    def test_malformed_images_are_refused(self):
+        good = macho(ARM64, [(qt.LC_RPATH, "@loader_path/../lib"), (WEAK, "/usr/lib/libSystem.B.dylib")])
+        fat = universal(macho(X86_64, []), good)
+        self.assertEqual(qt.load_commands(good), {(ARM64, 0): ([("/usr/lib/libSystem.B.dylib", True)],
+                                                               ["@loader_path/../lib"])})
+        self.assertEqual(set(qt.load_commands(fat)), {(ARM64, 0), (X86_64, 0)})
+
+        def patched(data, offset, value, form="<I"):
+            return data[:offset] + struct.pack(form, value) + data[offset + struct.calcsize(form):]
+
+        def thin(command):
+            return struct.pack("<IiiIIIII", 0xFEEDFACF, ARM64, 0, 2, 1, len(command), 0, 0) + command
+
+        table = struct.unpack_from("<I", good, 20)[0]
+        broken = {
+            "universal header without slices": struct.pack(">II", 0xCAFEBABE, 0),
+            "universal table beyond the file": struct.pack(">II", 0xCAFEBABE, 2),
+            "slice beyond the file": patched(fat, 20, len(fat), ">I"),
+            "slice of another architecture": patched(fat, 8, ARM64, ">i"),
+            "two slices of one architecture": universal(good, good),
+            "64-bit universal header": struct.pack(">II", 0xCAFEBABF, 1) + bytes(64),
+            "truncated header": good[:31],
+            "script": b"#!/bin/sh\n",
+            "command table beyond the image": patched(good, 20, len(good)),
+            "more commands than the table holds": patched(good, 16, 3),
+            "commands not filling the table": patched(good, 20, table + 8) + bytes(8),
+            "command shorter than its header": patched(good, 36, 4),
+            "unaligned command size": patched(good, 36, 36),
+            "name beyond its command": patched(good, 40, 64),
+            "name inside the command header": patched(good, 40, 8),
+            "unterminated name": thin(struct.pack("<III", qt.LC_RPATH, 16, 12) + b"/lib"),
+            "undecodable name": thin(struct.pack("<III", qt.LC_RPATH, 16, 12) + b"\xff\0\0\0"),
+        }
+        for case, data in broken.items():
+            with self.subTest(case), self.assertRaises(ValueError):
+                qt.load_commands(data)
+        # A tool without any slice is not a tool without dependencies.
+        self.write(self.root / "qt/bin/lrelease", broken["universal header without slices"])
+        with self.assertRaisesRegex(ValueError, "Malformed universal Mach-O header"):
+            qt.check_tools(self.root / "qt", ["bin/lrelease"])
 
     def source(self, name, payload):
         path = self.root / "repository" / name
