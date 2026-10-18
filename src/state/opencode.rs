@@ -700,25 +700,41 @@ fn observe(
 }
 /// At most this many of the newest user messages are looked up.
 const SENT_LOOKUPS: usize = 100;
+/// A receipt larger than this is not read for attribution.
+const RECEIPT_READ: u64 = 512 * 1024;
 /// The Zerus requests that sent the newest user messages of this session:
-/// queued ones first, then history newest first.
+/// queued ones first, then history newest first. A message is attributed
+/// only when its body is exactly the text its receipt sent, as `reconcile`
+/// requires; the same ID with another body stays unattributed.
 fn sent_requests(
     ledger: &Ledger,
     record: &Value,
     messages: &[Value],
     inbox: &Value,
 ) -> std::collections::HashMap<String, String> {
-    let queued = inbox["data"].as_array().into_iter().flatten();
+    let queued = inbox["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| (item, &item["payload"]["text"]));
     queued
-        .chain(messages.iter().rev())
-        .filter(|m| m["type"] == "user")
-        .map(|m| string(m, "id"))
-        .filter(|id| native_id(id, "msg_"))
+        .chain(messages.iter().rev().map(|message| (message, &message["text"])))
+        .filter(|(m, _)| m["type"] == "user")
+        .map(|(m, text)| (string(m, "id"), text))
+        .filter(|(id, _)| native_id(id, "msg_"))
         .take(SENT_LOOKUPS)
-        .filter_map(|id| {
+        .filter_map(|(id, text)| {
             let index = ledger.indexed(id)?;
-            (index["conversation_id"] == record["conversation_id"])
-                .then(|| (id.to_owned(), string(&index, "request_id").to_owned()))
+            if index["conversation_id"] != record["conversation_id"] {
+                return None;
+            }
+            let request = string(&index, "request_id");
+            let receipt = ledger.sent(request)?;
+            (receipt["native_message_id"] == id
+                && receipt["conversation_id"] == record["conversation_id"]
+                && text.is_string()
+                && receipt["text"] == *text)
+                .then(|| (id.to_owned(), request.to_owned()))
         })
         .collect()
 }
@@ -1071,6 +1087,20 @@ impl Ledger {
             &self.removals_path(),
             &json!({ "removals": entries }).to_string(),
         )
+    }
+    /// The receipt of one send, read within a bound; None when absent or
+    /// unreadable.
+    fn sent(&self, request_id: &str) -> Option<Value> {
+        let mut bytes = Vec::new();
+        fs::File::open(self.receipt(request_id))
+            .ok()?
+            .take(RECEIPT_READ + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > RECEIPT_READ {
+            return None;
+        }
+        serde_json::from_slice(&bytes).ok()
     }
     /// The request ID and session that sent a native message, if indexed.
     fn indexed(&self, message_id: &str) -> Option<Value> {
@@ -2995,10 +3025,22 @@ mod tests {
             )
             .unwrap()
         };
+        // Receipts with the exact bodies OpenCode shows.
+        let receipt = |id: &str, request: &str, text: &str| {
+            atomic(
+                &ledger.receipt(request),
+                &json!({"request_id": request, "conversation_id": "ses_A",
+                    "native_message_id": id, "text": text})
+                .to_string(),
+            )
+            .unwrap()
+        };
         let a = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a01";
         let b = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a02";
         index("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "ses_A");
         index("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "ses_A");
+        receipt("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "hello");
+        receipt("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "queued later");
         // User messages whose index names another session or no request.
         index("msg_otherSession00000000000000", a, "ses_B");
         index("msg_notARequest000000000000000", "not-a-uuid", "ses_A");
@@ -3015,16 +3057,53 @@ mod tests {
         assert_eq!(found, expected);
         // Only the newest user messages are looked up: the queued one first.
         let many: Vec<Value> = (0..SENT_LOOKUPS + 5)
-            .map(|n| json!({"id": format!("msg_{n:026}"), "type": "user"}))
+            .map(|n| json!({"id": format!("msg_{n:026}"), "type": "user", "text": format!("t{n}")}))
             .collect();
         for n in 0..SENT_LOOKUPS + 5 {
-            index(&format!("msg_{n:026}"), a, "ses_A");
+            let request = format!("6f0e3f43-4b4c-4f2d-9f43-{n:012}");
+            index(&format!("msg_{n:026}"), &request, "ses_A");
+            receipt(&format!("msg_{n:026}"), &request, &format!("t{n}"));
         }
         let found = sent_requests(&ledger, &status_record("ses_A"), &many, &observed.inbox);
         assert_eq!(found.len(), SENT_LOOKUPS);
         assert!(found.contains_key("msg_gVmstesSuU81H2vTHdmxp65tNI"));
         assert!(found.contains_key(&format!("msg_{:026}", SENT_LOOKUPS + 4)));
         assert!(!found.contains_key(&format!("msg_{:026}", 5)));
+    }
+    #[test]
+    fn a_request_is_attributed_only_to_its_exact_message_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let sent = |id: &str, request: &str, text: &str| {
+            atomic(
+                &ledger.index(id),
+                &json!({"request_id": request, "conversation_id": "ses_A"}).to_string(),
+            )
+            .unwrap();
+            atomic(
+                &ledger.receipt(request),
+                &json!({"request_id": request, "conversation_id": "ses_A",
+                    "native_message_id": id, "text": text, "status": "uncertain"})
+                .to_string(),
+            )
+            .unwrap();
+        };
+        let a = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a01";
+        let b = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a02";
+        // The same message ID with another body is not this request, as
+        // reconcile leaves it uncertain.
+        sent("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "not what OpenCode shows");
+        // A message dated by its late delivery, with the exact body, is.
+        sent("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "queued later");
+        let observed = observed("messages", true, opencode2("inbox_busy"));
+        let found = sent_requests(&ledger, &status_record("ses_A"), &observed.page.messages, &observed.inbox);
+        let expected: std::collections::HashMap<String, String> =
+            [("msg_gVmstesSuU81H2vTHdmxp65tNI".to_owned(), b.to_owned())].into();
+        assert_eq!(found, expected);
+        // The delivered copy of the same message, with its exact body, too.
+        let delivered = vec![json!({"id": "msg_gVmstesSuU81H2vTHdmxp65tNI", "type": "user", "text": "queued later"})];
+        let found = sent_requests(&ledger, &status_record("ses_A"), &delivered, &json!({"data": []}));
+        assert_eq!(found, expected);
     }
     #[test]
     fn after_stop_queued_messages_are_not_delivered_and_removable() {
