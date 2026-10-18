@@ -1,5 +1,6 @@
 #include "TaskBoard.h"
 #include <QJsonArray>
+#include <QObject>
 #include <algorithm>
 
 namespace {
@@ -70,11 +71,11 @@ const QStringList &TaskBoard::stages() {
 }
 
 QString TaskBoard::stageLabel(const QString &stage) {
-    if (stage == QLatin1String("review")) return QStringLiteral("In review");
-    if (stage == QLatin1String("active")) return QStringLiteral("In progress");
-    if (stage == QLatin1String("todo")) return QStringLiteral("To do");
-    if (stage == QLatin1String("backlog")) return QStringLiteral("Backlog");
-    return QStringLiteral("Done");
+    if (stage == QLatin1String("review")) return QObject::tr("In review");
+    if (stage == QLatin1String("active")) return QObject::tr("In progress");
+    if (stage == QLatin1String("todo")) return QObject::tr("To do");
+    if (stage == QLatin1String("backlog")) return QObject::tr("Backlog");
+    return QObject::tr("Done");
 }
 
 // A stage's icon is the icon of the action that moves a task there.
@@ -98,14 +99,14 @@ QList<TaskAction> TaskBoard::actions(const QString &stage) {
 
 QString TaskBoard::actionLabel(TaskAction action) {
     switch (action) {
-    case TaskAction::Edit: return QStringLiteral("Edit task");
-    case TaskAction::ToBacklog: return QStringLiteral("Move to Backlog");
-    case TaskAction::Top: return QStringLiteral("Move to the top of To do");
-    case TaskAction::SendNow: return QStringLiteral("Send now");
-    case TaskAction::ToTodo: return QStringLiteral("Move to To do");
-    case TaskAction::Cancel: return QStringLiteral("Cancel task…");
-    case TaskAction::BackToTodo: return QStringLiteral("Back to To do");
-    case TaskAction::Accept: return QStringLiteral("Accept");
+    case TaskAction::Edit: return QObject::tr("Edit task");
+    case TaskAction::ToBacklog: return QObject::tr("Move to Backlog");
+    case TaskAction::Top: return QObject::tr("Move to the top of To do");
+    case TaskAction::SendNow: return QObject::tr("Send now");
+    case TaskAction::ToTodo: return QObject::tr("Move to To do");
+    case TaskAction::Cancel: return QObject::tr("Cancel task…");
+    case TaskAction::BackToTodo: return QObject::tr("Back to To do");
+    case TaskAction::Accept: return QObject::tr("Accept");
     }
     return {};
 }

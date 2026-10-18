@@ -201,9 +201,17 @@ void TaskRow::enterEvent(QEnterEvent *event) { QWidget::enterEvent(event); m_hov
 
 void TaskRow::leaveEvent(QEvent *event) { QWidget::leaveEvent(event); m_hovered = false; updateActions(); update(); }
 
+// A click opens the task when it starts and ends on the row, outside its actions.
+void TaskRow::mousePressEvent(QMouseEvent *event) {
+    QWidget::mousePressEvent(event);
+    m_pressed = event->button() == Qt::LeftButton && !m_actions->geometry().translated(m_actions->parentWidget()->mapTo(this, QPoint()))
+                                                         .contains(event->position().toPoint());
+}
+
 void TaskRow::mouseReleaseEvent(QMouseEvent *event) {
     QWidget::mouseReleaseEvent(event);
-    if (event->button() == Qt::LeftButton && rect().contains(event->position().toPoint())) emit opened();
+    const bool click = std::exchange(m_pressed, false) && event->button() == Qt::LeftButton && rect().contains(event->position().toPoint());
+    if (click) emit opened();
 }
 
 void TaskRow::paintEvent(QPaintEvent *) {

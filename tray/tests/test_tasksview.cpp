@@ -51,6 +51,9 @@ private slots:
     void theTabBadgeCountsReviewAndTodo();
     void rowsWorkFromTheKeyboard();
     void leavingAProjectClearsItsCounts();
+    void aFailedListingBacksOffAndClearsItsCounts();
+    void unreadableTaskFilesAreNamed();
+    void aRowOpensOnlyOnAClickOnItself();
 };
 
 void TestTasksView::initTestCase() {
@@ -216,6 +219,7 @@ void TestTasksView::aSessionOutsideProjectsExplainsWhy() {
     auto *empty = view.findChild<QLabel *>("taskEmpty");
     QVERIFY(empty->isVisible()); QVERIFY(empty->text().startsWith("Tasks belong to a project"));
     QVERIFY(!view.composer()->findChild<QPushButton *>("sendMessage")->isEnabled());
+    QCOMPARE(view.composer()->findChild<QLabel *>("messageStatus")->text(), QString("This session is in no project; tasks belong to a project."));
     QTest::qWait(100); QVERIFY(FakeTasksCli::calls(dir.path()).isEmpty());
 }
 
@@ -252,6 +256,41 @@ void TestTasksView::leavingAProjectClearsItsCounts() {
     QTRY_VERIFY(!counts.isEmpty() && counts.last().value(1).toInt() == 1);
     view.setContext({}, {}, "", "codex/api", "\ncodex/api", sessions());
     QCOMPARE(counts.last().value(0).toInt(), 0); QCOMPARE(counts.last().value(1).toInt(), 0);
+}
+
+void TestTasksView::aFailedListingBacksOffAndClearsItsCounts() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
+    view.setRefreshIntervals(100, 3000); QSignalSpy counts(&view, &TasksView::countsChanged);
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    QTRY_COMPARE(tile(view, "todo")->property("count").toInt(), 1);
+    QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("list"); fail.close();
+    QTRY_VERIFY(view.findChild<QLabel *>("tasksError")->isVisible());
+    // The counts of a project that cannot be read are not shown as current.
+    QCOMPARE(tile(view, "todo")->property("count").toInt(), 0);
+    QCOMPARE(counts.last().value(0).toInt(), 0); QCOMPARE(counts.last().value(1).toInt(), 0);
+    // A refusal is retried at the slow pace, not every 100 ms.
+    const auto lists = [&] { int n = 0; for (const auto &call : FakeTasksCli::calls(dir.path())) n += call.value(1) == "list"; return n; };
+    const int failing = lists(); QTest::qWait(700); QVERIFY2(lists() - failing <= 1, qPrintable(QString::number(lists() - failing)));
+}
+
+void TestTasksView::unreadableTaskFilesAreNamed() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo")}, 2));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    auto *damaged = view.findChild<QLabel *>("tasksDamaged");
+    QTRY_VERIFY(damaged->isVisible()); QCOMPARE(damaged->text(), QString("2 task files of orchard could not be read."));
+}
+
+void TestTasksView::aRowOpensOnlyOnAClickOnItself() {
+    QWidget host; auto *taskRow = new TaskRow(&host); host.resize(600, 80); taskRow->resize(600, 80); host.show();
+    taskRow->setTask(TaskBoard::item(FakeTasksCli::task(1, "todo")), {}, TaskColors::of(true), 0);
+    QSignalSpy opened(taskRow, &TaskRow::opened);
+    QTest::mouseRelease(taskRow, Qt::LeftButton, {}, QPoint(100, 50)); QCOMPARE(opened.size(), 0);   // pressed elsewhere
+    auto *actions = taskRow->findChild<QWidget *>("taskActions");
+    const QPoint gap = actions->mapTo(taskRow, QPoint(actions->width() - 1, actions->height() / 2));
+    QTest::mouseClick(taskRow, Qt::LeftButton, {}, gap); QCOMPARE(opened.size(), 0);                // among the actions
+    QTest::mouseClick(taskRow, Qt::LeftButton, {}, QPoint(100, 50)); QCOMPARE(opened.size(), 1);
 }
 
 QTEST_MAIN(TestTasksView)

@@ -43,6 +43,7 @@ protected:
     void focusOutEvent(QFocusEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 private:
@@ -56,5 +57,5 @@ private:
     QLabel *m_glyph, *m_meta, *m_text, *m_summary;
     QWidget *m_actions;
     QHash<int, QToolButton *> m_buttons;
-    bool m_hovered = false;
+    bool m_hovered = false, m_pressed = false;
 };

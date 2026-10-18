@@ -4,6 +4,7 @@
 #include <QDialog>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <functional>
 #include <optional>
 
 class QButtonGroup;
@@ -37,8 +38,10 @@ struct TaskEdits {
 class TaskDialog : public QDialog {
     Q_OBJECT
 public:
-    // task: the `hgs task get` view, history included.
-    TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessions, const QString &sendBlocker, bool dark, QWidget *parent = nullptr);
+    // task: the `hgs task get` view, history included. sendBlocker: why Send now
+    // cannot paste into a session the task would go to (empty when it can).
+    TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessions, std::function<QString(const TaskTarget &)> sendBlocker,
+               bool dark, QWidget *parent = nullptr);
     TaskEdits edits() const;
     void setHistory(const QJsonArray &log);
     void clearComment();
@@ -49,9 +52,15 @@ signals:
     void commentRequested(const QString &text);
 private:
     void setBusy(bool busy);
+    // Each button's state: busy, an empty prompt, a newer task, and Send now's
+    // reason for the session chosen now.
+    void refreshButtons();
+    TaskTarget chosenTarget() const;
     TaskItem m_task;
     TaskTarget m_target;
+    std::function<QString(const TaskTarget &)> m_sendBlocker;
     QLabel *m_error;
+    bool m_busy = false;
     QPlainTextEdit *m_prompt;
     QButtonGroup *m_sessions = nullptr;
     QList<TaskTarget> m_choices;
@@ -65,7 +74,8 @@ private:
 class TaskCancelDialog : public QDialog {
     Q_OBJECT
 public:
-    TaskCancelDialog(const TaskItem &task, const QString &sessionStatus, bool running, QWidget *parent = nullptr);
+    // running: the session's agent runs; working: it is in a turn now.
+    TaskCancelDialog(const TaskItem &task, bool running, bool working, QWidget *parent = nullptr);
     QString reason() const;
 private:
     QLineEdit *m_reason;

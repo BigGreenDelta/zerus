@@ -24,6 +24,11 @@ struct TaskSession {
     QString status;       // its status label, such as "Working"
     QString blocker;      // why it takes no prompt now; empty when it does
     bool running = true;  // whether its agent runs, for the cancel dialog
+    bool working = false; // whether its agent is in a turn, for the cancel dialog
+    bool operator==(const TaskSession &other) const {
+        return host == other.host && name == other.name && status == other.status && blocker == other.blocker
+            && running == other.running && working == other.working;
+    }
 };
 
 struct TaskEdits;
@@ -101,7 +106,7 @@ private:
     QList<TaskSession> m_sessions;
     QHash<QString, TaskTile *> m_tiles;
     QToolButton *m_only, *m_settings;
-    QLabel *m_errorLabel, *m_empty;
+    QLabel *m_errorLabel, *m_damaged, *m_empty;
     QScrollArea *m_scroll;
     QWidget *m_listHost;
     QVBoxLayout *m_list;
@@ -112,5 +117,5 @@ private:
     QTimer m_timer;
     quint64 m_generation = 0, m_listing = 0;
     int m_visibleMs = 2500, m_hiddenMs = 15000;
-    bool m_polling = true, m_dark = true, m_showOlder = false, m_loaded = false;
+    bool m_polling = true, m_dark = true, m_showOlder = false, m_loaded = false, m_failing = false;
 };

@@ -3250,6 +3250,7 @@ void SessionsWindow::updateTasks(const Entry *entry)
         if (other.session.state == "archived" || m_organization.groupFor(other.identity) != projectId) continue;
         TaskSession session{other.host, other.session.name, status(other.session, other.online), {}, true};
         session.running = other.online && other.session.state == "running" && other.session.processState != "exited";
+        session.working = SessionPresentation::working(other.session, other.online);
         if (!session.running) session.blocker = tr("The agent is not running. Resume it before sending.");
         else if (other.session.needsAction()) session.blocker = tr("agent is waiting for input, approval, or has an unknown state; open Terminal");
         sessions << session;

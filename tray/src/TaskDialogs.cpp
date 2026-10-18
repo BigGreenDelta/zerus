@@ -29,7 +29,8 @@ QLabel *errorLabel(const QString &name) {
 }
 QString time(qint64 ms) { return QDateTime::fromMSecsSinceEpoch(ms).toString(QStringLiteral("d MMM HH:mm")); }
 QString actor(const QJsonObject &actor) {
-    return actor.value("kind").toString() == QLatin1String("agent") ? actor.value("session").toString() : QObject::tr("You");
+    return actor.value("kind").toString() == QLatin1String("agent") ? sessionLabel(actor.value("host").toString(), actor.value("session").toString())
+                                                                    : QObject::tr("You");
 }
 // One history line: who, when and what happened.
 QString historyLine(const QJsonObject &entry) {
@@ -51,8 +52,9 @@ QString historyLine(const QJsonObject &entry) {
 }
 }
 
-TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessions, const QString &sendBlocker, bool dark, QWidget *parent)
-    : QDialog(parent), m_task(TaskBoard::item(task)) {
+TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessions, std::function<QString(const TaskTarget &)> sendBlocker,
+                       bool dark, QWidget *parent)
+    : QDialog(parent), m_task(TaskBoard::item(task)), m_sendBlocker(std::move(sendBlocker)) {
     setObjectName("taskDialog"); setWindowTitle(tr("Task %1").arg(m_task.id)); resize(640, 640);
     m_editable = m_task.writable && (m_task.stage == QLatin1String("todo") || m_task.stage == QLatin1String("backlog"));
     m_target = {m_task.targetSession.isEmpty(), m_task.targetHost, m_task.targetSession};
@@ -95,6 +97,7 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
                 if (!choice.any && session.host == choice.host && session.name == choice.session) chip->setToolTip(session.status);
         }
         area->setWidget(choices); layout->addWidget(area);
+        connect(m_sessions, &QButtonGroup::idClicked, this, &TaskDialog::refreshButtons);
     } else {
         auto *fixed = new QLabel(m_task.sessionName.isEmpty() ? (m_task.targetSession.isEmpty() ? tr("Any session")
             : sessionLabel(m_task.targetHost, m_task.targetSession)) : sessionLabel(m_task.sessionHost, m_task.sessionName));
@@ -117,10 +120,8 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
         if (action == TaskAction::Edit) continue;
         auto *button = new QPushButton(workspaceIcon(TaskBoard::actionIcon(action), colors.muted), TaskBoard::actionLabel(action).remove(QChar(0x2026)));
         button->setObjectName(QStringLiteral("taskDialogAction:") + TaskRow::actionKey(action)); button->setAutoDefault(false);
-        const QString why = !m_task.writable ? tr("Update Zerus to edit this task") : action == TaskAction::SendNow ? sendBlocker : QString();
-        button->setEnabled(why.isEmpty()); button->setToolTip(why.isEmpty() ? TaskBoard::actionLabel(action) : why);
+        button->setProperty("taskAction", int(action));
         if (action == stageActions.last()) button->setStyleSheet(QStringLiteral("color:%1;").arg(colors.accent.name()));
-        button->setProperty("ready", why.isEmpty());
         connect(button, &QPushButton::clicked, this, [this, action] { setBusy(true); emit actionRequested(edits(), action); });
         actions->addWidget(button);
     }
@@ -129,22 +130,42 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
         auto *cancel = new QPushButton(tr("Cancel")); cancel->setObjectName("discardTaskEdits"); cancel->setAutoDefault(false);
         auto *save = new QPushButton(tr("Save")); save->setObjectName("saveTask"); save->setDefault(true);
         connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
-        save->setProperty("ready", true);
         connect(save, &QPushButton::clicked, this, [this] { setBusy(true); emit saveRequested(edits()); });
+        connect(m_prompt, &QPlainTextEdit::textChanged, this, &TaskDialog::refreshButtons);
         actions->addWidget(cancel); actions->addWidget(save);
     } else {
         auto *close = new QPushButton(tr("Close")); close->setObjectName("closeTask"); close->setDefault(true);
         connect(close, &QPushButton::clicked, this, &QDialog::reject); actions->addWidget(close);
     }
     layout->addLayout(actions);
+    refreshButtons();
+}
+
+TaskTarget TaskDialog::chosenTarget() const {
+    return m_sessions && m_sessions->checkedId() >= 0 ? m_choices.value(m_sessions->checkedId()) : m_target;
+}
+
+void TaskDialog::refreshButtons() {
+    const bool empty = m_editable && m_prompt->toPlainText().trimmed().isEmpty();
+    for (auto *button : findChildren<QPushButton *>()) {
+        QString why, label;
+        if (button->objectName() == QLatin1String("saveTask")) {
+            why = empty ? tr("The prompt is empty.") : QString(); label = tr("Save the prompt and the session");
+        } else if (button->property("taskAction").isValid()) {
+            const auto action = TaskAction(button->property("taskAction").toInt());
+            label = TaskBoard::actionLabel(action);
+            why = !m_task.writable ? tr("Update Zerus to edit this task") : empty ? tr("The prompt is empty.")
+                : action == TaskAction::SendNow && m_sendBlocker ? m_sendBlocker(chosenTarget()) : QString();
+        } else continue;
+        button->setEnabled(!m_busy && why.isEmpty()); button->setToolTip(why.isEmpty() ? label : why);
+    }
 }
 
 TaskEdits TaskDialog::edits() const {
     TaskEdits edits;
     if (!m_editable) return edits;
     if (const QString text = m_prompt->toPlainText(); text != m_task.text && !text.trimmed().isEmpty()) edits.text = text;
-    if (m_sessions && m_sessions->checkedId() >= 0)
-        if (const auto chosen = m_choices.value(m_sessions->checkedId()); !(chosen == m_target)) edits.target = chosen;
+    if (const auto chosen = chosenTarget(); !(chosen == m_target)) edits.target = chosen;
     return edits;
 }
 
@@ -158,14 +179,13 @@ void TaskDialog::clearComment() { m_comment->clear(); }
 
 // While hgs works the buttons wait; a refusal shows here and gives them back.
 void TaskDialog::setBusy(bool busy) {
-    for (auto *button : findChildren<QPushButton *>())
-        if (button->property("ready").isValid()) button->setEnabled(!busy && button->property("ready").toBool());
+    m_busy = busy; refreshButtons();
     if (busy) m_error->hide();
 }
 
 void TaskDialog::setError(const QString &error) { m_error->setText(error); m_error->show(); setBusy(false); }
 
-TaskCancelDialog::TaskCancelDialog(const TaskItem &task, const QString &sessionStatus, bool running, QWidget *parent) : QDialog(parent) {
+TaskCancelDialog::TaskCancelDialog(const TaskItem &task, bool running, bool working, QWidget *parent) : QDialog(parent) {
     setObjectName("taskCancelDialog"); setWindowTitle(tr("Cancel %1?").arg(task.id));
     auto *layout = new QVBoxLayout(this); layout->setSpacing(10);
     auto *title = new QLabel(QStringLiteral("<b>%1</b>").arg(tr("Cancel %1?").arg(task.id).toHtmlEscaped())); layout->addWidget(title);
@@ -174,7 +194,7 @@ TaskCancelDialog::TaskCancelDialog(const TaskItem &task, const QString &sessionS
     const QString session = sessionLabel(task.sessionHost, task.sessionName);
     QString what = tr("%1 moves to In review, and %2 gets the cancel message.").arg(task.id, session);
     if (!running) what += QLatin1Char(' ') + tr("The agent is not running, so hgs will refuse the message; the task is cancelled all the same.");
-    else if (sessionStatus == QLatin1String("Working")) what += QLatin1Char(' ') + tr("%1 is working; it reads the message when its turn ends.").arg(session);
+    else if (working) what += QLatin1Char(' ') + tr("%1 is working; it reads the message when its turn ends.").arg(session);
     auto *warning = new QLabel(what); warning->setObjectName("taskCancelWarning"); warning->setWordWrap(true); layout->addWidget(warning);
     layout->addWidget(section(tr("Reason (optional) — saved as a comment on the task, not sent to the agent")));
     m_reason = new QLineEdit; m_reason->setObjectName("taskCancelReason"); m_reason->setPlaceholderText(tr("Why it is cancelled"));

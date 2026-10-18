@@ -39,7 +39,7 @@ order=['review','active','todo','backlog','done']
 cmd=a[1]
 if cmd=='list':
     tasks=sorted(data['tasks'],key=lambda t: order.index(t['stage']))
-    out({'project':project,'tasks':[{k:v for k,v in t.items() if k!='log'} for t in tasks],'damaged':[]}); sys.exit(0)
+    out({'project':project,'tasks':[{k:v for k,v in t.items() if k!='log'} for t in tasks],'damaged':data.get('damaged',[])}); sys.exit(0)
 if cmd=='settings':
     if '--set' in a: data['settings'].update(json.loads(text)); save()
     out({'project':project,'settings':data['settings']}); sys.exit(0)
@@ -71,11 +71,14 @@ save(); out({'task':t})
 )PY";
 }
 
-// Installs the fake as dir/hgs, with `tasks` as its starting store.
-inline bool install(const QDir &dir, const QJsonArray &tasks = {}) {
+// Installs the fake as dir/hgs, with `tasks` as its starting store and `damaged`
+// task files it lists as unreadable.
+inline bool install(const QDir &dir, const QJsonArray &tasks = {}, int damaged = 0) {
     QFile state(dir.filePath("tasks.json"));
     if (!state.open(QIODevice::WriteOnly)) return false;
-    state.write(QJsonDocument(QJsonObject{{"tasks", tasks}, {"next", int(tasks.size()) + 1}}).toJson(QJsonDocument::Compact));
+    QJsonArray unreadable;
+    for (int i = 0; i < damaged; ++i) unreadable << QJsonObject{{"uuid", QString("damaged-%1").arg(i)}, {"error", "not loro"}};
+    state.write(QJsonDocument(QJsonObject{{"tasks", tasks}, {"next", int(tasks.size()) + 1}, {"damaged", unreadable}}).toJson(QJsonDocument::Compact));
     state.close();
     return FakeCli::install(dir.filePath("hgs"), script());
 }

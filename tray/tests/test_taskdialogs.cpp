@@ -44,6 +44,8 @@ private slots:
     void theTabOpensTheDialogsAndAppliesThem();
     void manySessionsWrapInTheDialog();
     void aRefusedSaveKeepsTheDialogAndItsEdits();
+    void sendNowFollowsTheChosenSession();
+    void anEmptyPromptCannotBeApplied();
 };
 
 void TestTaskDialogs::initTestCase() {
@@ -55,7 +57,8 @@ void TestTaskDialogs::initTestCase() {
 
 void TestTaskDialogs::theTaskDialogEditsAListedTaskAndShowsItsHistory() {
     const auto task = withLog(FakeTasksCli::task(7, "todo", {{"target", FakeTasksCli::pinned("codex/gone")}, {"text", "Old prompt"}}),
-        {entry("created"), entry("sent", {}, {{"session", QJsonObject{{"session", "codex/api"}, {"host", ""}}}}), entry("comment", "Use the config value.")});
+        {entry("created"), entry("sent", {}, {{"session", QJsonObject{{"session", "codex/api"}, {"host", ""}}}}), entry("comment", "Use the config value."),
+         entry("comment", "Seen on the Mac.", {{"actor", QJsonObject{{"kind", "agent"}, {"session", "codex/ios"}, {"host", "orchard-mac"}}}})});
     TaskDialog dialog(task, sessions(), {}, true); dialog.show();
     auto *prompt = dialog.findChild<QPlainTextEdit *>("taskPrompt"); QVERIFY(!prompt->isReadOnly());
     // Any session, the project's sessions, and the pinned session that no longer exists.
@@ -64,6 +67,7 @@ void TestTaskDialogs::theTaskDialogEditsAListedTaskAndShowsItsHistory() {
     QVERIFY(dialog.findChild<QPushButton *>("taskSession:/codex/gone")->isChecked());
     const auto history = dialog.findChild<QTextBrowser *>("taskHistory")->toPlainText();
     QVERIFY2(history.contains("created the task") && history.contains("sent it to codex/api") && history.contains("commented: Use the config value."), qPrintable(history));
+    QVERIFY2(history.contains("codex/ios @orchard-mac"), qPrintable(history));   // an agent on another computer
     for (const char *name : {"taskDialogAction:toBacklog", "taskDialogAction:top", "taskDialogAction:sendNow"}) QVERIFY2(dialog.findChild<QPushButton *>(name), name);
     QVERIFY(!dialog.findChild<QPushButton *>("taskDialogAction:edit"));
     QSignalSpy saved(&dialog, &TaskDialog::saveRequested);
@@ -94,12 +98,14 @@ void TestTaskDialogs::aReviewTaskIsReadOnlyWithItsActions() {
 
 void TestTaskDialogs::theCancelAndProjectSettingsDialogs() {
     auto item = TaskBoard::item(FakeTasksCli::task(9, "active", {{"session", FakeTasksCli::pinned("codex/web")}}));
-    TaskCancelDialog working(item, "Working", true);
+    TaskCancelDialog working(item, true, true);
     QCOMPARE(working.findChild<QLabel *>("taskCancelWarning")->text(),
              QString("T-000009 moves to In review, and codex/web gets the cancel message. codex/web is working; it reads the message when its turn ends."));
     QVERIFY(working.findChild<QPushButton *>("keepTaskRunning")->isDefault());
     working.findChild<QLineEdit *>("taskCancelReason")->setText("  Wrong approach  "); QCOMPARE(working.reason(), QString("Wrong approach"));
-    TaskCancelDialog stopped(item, "Stopped", false);
+    TaskCancelDialog stopped(item, false, false);
+    TaskCancelDialog idle(item, true, false);
+    QCOMPARE(idle.findChild<QLabel *>("taskCancelWarning")->text(), QString("T-000009 moves to In review, and codex/web gets the cancel message."));
     QVERIFY(stopped.findChild<QLabel *>("taskCancelWarning")->text().contains("The agent is not running, so hgs will refuse the message"));
     const QJsonObject settings{{"task_template", "[Zerus task {ref}]\n{prompt}"}, {"cancel_template", "[Zerus task {ref} cancelled]"},
                                {"agents_other", true}, {"agent_limit", 0}};
@@ -186,6 +192,27 @@ void TestTaskDialogs::aRefusedSaveKeepsTheDialogAndItsEdits() {
     settings->findChild<QSpinBox *>("agentLimit")->setValue(4); settings->findChild<QPushButton *>("saveTaskSettings")->click();
     QTRY_COMPARE(settings->findChild<QLabel *>("taskSettingsError")->text(), QString("hgs refused: settings"));
     QVERIFY(settings->isVisible()); QCOMPARE(settings->findChild<QSpinBox *>("agentLimit")->value(), 4);
+}
+
+void TestTaskDialogs::sendNowFollowsTheChosenSession() {
+    const auto blocker = [](const TaskTarget &target) {
+        return target.session == "codex/gone" ? QString("codex/gone no longer exists — choose another session")
+             : target.session == "codex/stopped" ? QString("The agent is not running. Resume it before sending.") : QString();
+    };
+    TaskDialog dialog(withLog(FakeTasksCli::task(1, "todo", {{"target", FakeTasksCli::pinned("codex/gone")}}), {}), sessions(), blocker, true);
+    dialog.show(); auto *send = dialog.findChild<QPushButton *>("taskDialogAction:sendNow");
+    QVERIFY(!send->isEnabled()); QCOMPARE(send->toolTip(), QString("codex/gone no longer exists — choose another session"));
+    dialog.findChild<QPushButton *>("taskSession:/codex/api")->click(); QVERIFY(send->isEnabled());
+    dialog.findChild<QPushButton *>("taskSession:/codex/stopped")->click(); QVERIFY(!send->isEnabled());
+    QCOMPARE(send->toolTip(), QString("The agent is not running. Resume it before sending."));
+}
+
+void TestTaskDialogs::anEmptyPromptCannotBeApplied() {
+    TaskDialog dialog(withLog(FakeTasksCli::task(1, "todo"), {}), sessions(), {}, true); dialog.show();
+    auto *prompt = dialog.findChild<QPlainTextEdit *>("taskPrompt"); auto *save = dialog.findChild<QPushButton *>("saveTask");
+    prompt->setPlainText("   \n "); QVERIFY(!save->isEnabled()); QCOMPARE(save->toolTip(), QString("The prompt is empty."));
+    QVERIFY(!dialog.findChild<QPushButton *>("taskDialogAction:sendNow")->isEnabled());
+    prompt->setPlainText("Back again"); QVERIFY(save->isEnabled()); QVERIFY(dialog.findChild<QPushButton *>("taskDialogAction:sendNow")->isEnabled());
 }
 
 QTEST_MAIN(TestTaskDialogs)

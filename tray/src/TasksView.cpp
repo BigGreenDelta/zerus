@@ -12,6 +12,7 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSet>
 #include <QSettings>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -119,6 +120,8 @@ TasksView::TasksView(HgsClient *client, QWidget *parent) : QWidget(parent), m_cl
     layout->addLayout(tiles); layout->addSpacing(14);
     m_errorLabel = new QLabel; m_errorLabel->setObjectName("tasksError"); m_errorLabel->setWordWrap(true); m_errorLabel->setTextFormat(Qt::PlainText);
     m_errorLabel->hide(); layout->addWidget(m_errorLabel);
+    m_damaged = new QLabel; m_damaged->setObjectName("tasksDamaged"); m_damaged->setWordWrap(true); m_damaged->setTextFormat(Qt::PlainText);
+    m_damaged->hide(); layout->addWidget(m_damaged);
     m_scroll = new QScrollArea; m_scroll->setObjectName("taskList"); m_scroll->setWidgetResizable(true); m_scroll->setFrameShape(QFrame::NoFrame);
     // The list's surface holds only its rows; the spare height below stays the page's.
     auto *page = new QWidget; page->setObjectName("taskListPage");
@@ -148,15 +151,19 @@ TasksView::TasksView(HgsClient *client, QWidget *parent) : QWidget(parent), m_cl
 void TasksView::setContext(const QString &projectId, const QString &projectName, const QString &host, const QString &session,
                            const QString &sessionKey, const QList<TaskSession> &sessions) {
     const bool project = projectId != m_projectId;
+    // The window passes the context on every update; only a change is drawn again.
+    if (!project && projectName == m_projectName && host == m_host && session == m_session && sessionKey == m_sessionKey && sessions == m_sessions) return;
     m_projectName = projectName; m_host = host; m_session = session; m_sessions = sessions;
     if (project) {
-        m_projectId = projectId; ++m_generation; m_board = {}; m_loaded = false; m_error.clear(); m_showOlder = false; m_stage = QStringLiteral("todo");
+        m_projectId = projectId; ++m_generation; m_board = {}; m_loaded = false; m_failing = false; m_error.clear(); m_showOlder = false;
+        m_stage = QStringLiteral("todo");
         for (auto *row : std::as_const(m_rows)) { row->hide(); row->setObjectName({}); row->deleteLater(); }
         m_rows.clear();
         emit countsChanged(0, 0);   // until the new project's listing arrives
     }
     m_sessionKey = sessionKey; applyComposerKey();
-    m_composer->setAvailability(!m_projectId.isEmpty() && !m_session.isEmpty(), tr("Open a session to add tasks for it."));
+    m_composer->setAvailability(!m_projectId.isEmpty() && !m_session.isEmpty(), m_session.isEmpty() ? tr("Open a session to add tasks for it.")
+        : tr("This session is in no project; tasks belong to a project."));
     render();
     if (project) refresh();
 }
@@ -179,8 +186,9 @@ void TasksView::applyComposerKey() {
     if (key != m_composer->sessionKey()) m_composer->setSessionKey(key);
 }
 
+// A project hgs cannot list is retried at the slow pace until a listing succeeds.
 void TasksView::schedule() {
-    if (m_polling && !m_projectId.isEmpty() && !m_listing) m_timer.start(isVisible() ? m_visibleMs : m_hiddenMs);
+    if (m_polling && !m_projectId.isEmpty() && !m_listing) m_timer.start(isVisible() && !m_failing ? m_visibleMs : m_hiddenMs);
 }
 
 QStringList TasksView::withProject(QStringList arguments) const { return arguments << QStringLiteral("--project") << m_projectId; }
@@ -200,13 +208,14 @@ void TasksView::refresh() {
         [this, generation](const QString &error) {
             m_listing = 0;
             if (generation != m_generation) return refresh();
-            m_error = error; render(); schedule();
+            // What is not readable now is not shown as current: no rows, no counts.
+            m_error = error; m_failing = true; m_board = {}; render(); emit countsChanged(0, 0); schedule();
         });
 }
 
 void TasksView::received(const QJsonObject &listing, quint64 generation) {
     if (generation != m_generation) return refresh();   // the project changed meanwhile
-    m_error.clear(); m_board = TaskBoard::fromListing(listing);
+    m_error.clear(); m_failing = false; m_board = TaskBoard::fromListing(listing);
     if (!m_loaded) { m_loaded = true; m_stage = m_board.count("review", view()) ? QStringLiteral("review") : QStringLiteral("todo"); }
     render();
     int review = 0, todo = 0;
@@ -245,6 +254,9 @@ void TasksView::render() {
         auto *tile = m_tiles.value(stage); tile->setCount(m_board.count(stage, v)); tile->setChecked(stage == m_stage);
     }
     m_errorLabel->setText(tr("Tasks could not be read: %1").arg(m_error)); m_errorLabel->setVisible(!m_error.isEmpty());
+    m_damaged->setText(m_board.damaged == 1 ? tr("1 task file of %1 could not be read.").arg(m_projectName)
+                                            : tr("%1 task files of %2 could not be read.").arg(m_board.damaged).arg(m_projectName));
+    m_damaged->setVisible(m_board.damaged > 0 && m_error.isEmpty());
     const bool done = m_stage == QLatin1String("done");
     QList<TaskItem> rows = m_error.isEmpty() ? m_board.rows(m_stage, v) : QList<TaskItem>();
     const auto older = done && m_error.isEmpty() ? m_board.rows(m_stage, v, true) : QList<TaskItem>();
@@ -292,7 +304,8 @@ void TasksView::updateComposer() {
     const QString session = sessionLabel(m_host, m_session);
     m_composer->setSendLabel(target);
     m_composer->setPlaceholder(m_session.isEmpty() ? tr("Task prompt…") : tr("Task prompt for %1 / %2…").arg(m_projectName, session));
-    m_composer->setSessionStatus(m_session.isEmpty() ? QString() : tr("Task for %1 · Enter adds to %2 · Shift+Enter for a new line").arg(session, target));
+    m_composer->setSessionStatus(m_session.isEmpty() || m_projectId.isEmpty() ? QString()
+        : tr("Task for %1 · Enter adds to %2 · Shift+Enter for a new line").arg(session, target));
 }
 
 QList<TasksView::Step> TasksView::steps(const TaskItem &task, TaskAction action) const {
@@ -357,7 +370,13 @@ void TasksView::addTask(const QString &key, const QString &text) {
 void TasksView::openTask(const TaskItem &task) {
     request(withProject({"get", task.uuid}), {}, [this, task](const QJsonObject &reply) {
         for (auto *open : findChildren<TaskDialog *>()) open->reject();
-        auto *dialog = new TaskDialog(reply.value("task").toObject(), m_sessions, sendBlocker(task), m_dark, this);
+        // Send now follows the session chosen in the dialog.
+        const auto blocker = [this, task](const TaskTarget &target) {
+            if (target == TaskTarget{task.targetSession.isEmpty(), task.targetHost, task.targetSession}) return sendBlocker(task);
+            auto chosen = task; chosen.targetSession = target.any ? QString() : target.session; chosen.targetHost = target.host; chosen.targetKnown = true;
+            return sendBlocker(chosen);
+        };
+        auto *dialog = new TaskDialog(reply.value("task").toObject(), m_sessions, blocker, m_dark, this);
         dialog->setAttribute(Qt::WA_DeleteOnClose);
         // The dialog closes once hgs took everything; a refusal keeps it, and the edits, open.
         QPointer<TaskDialog> guard(dialog);
@@ -383,7 +402,7 @@ void TasksView::openTask(const TaskItem &task) {
 
 void TasksView::confirmCancel(const TaskItem &task) {
     const auto *ran = session(task.sessionHost, task.sessionName);
-    auto *dialog = new TaskCancelDialog(task, ran ? ran->status : QString(), ran && ran->running, this);
+    auto *dialog = new TaskCancelDialog(task, ran && ran->running, ran && ran->working, this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     connect(dialog, &QDialog::accepted, this, [this, dialog, task] {
         QStringList arguments{"cancel", task.uuid};
@@ -428,6 +447,7 @@ void TasksView::setTheme(bool dark) {
     setWorkspaceStyle(m_listHost, QStringLiteral("#taskListHost{background:%1;border-radius:10px;}").arg(colors.surface.name()));
     setWorkspaceStyle(m_empty, QStringLiteral("color:%1;").arg(colors.muted.name()));
     setWorkspaceStyle(m_errorLabel, QStringLiteral("color:%1;padding:0 0 10px 0;").arg(dark ? "#f4ab9b" : "#a13224"));
+    setWorkspaceStyle(m_damaged, QStringLiteral("color:%1;padding:0 0 10px 0;").arg(colors.warn.name()));
     setWorkspaceStyle(m_older, QStringLiteral("QPushButton{border:0;color:%1;padding:6px 2px;font-size:12px;}").arg(colors.accent.name()));
     m_composer->setTheme(dark);
     render();
