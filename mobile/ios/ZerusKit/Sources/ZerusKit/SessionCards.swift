@@ -231,6 +231,15 @@ public enum QuestionPolicies {
         if case .string(let id)? = item["question_id"] { return id.hasPrefix("codex-async:") }
         return false
     }
+
+    /// Pending requests in one listing row that the agent cannot continue without: the connector's
+    /// `mobile_attention` items other than optional Codex questions or, without that list, the older
+    /// `pending_question_count`. As on the desktop and Android, optional questions are never attention;
+    /// a row whose only pending items are optional has none.
+    public static func blockingRequests(_ raw: JSONObject) -> Int {
+        guard let items = raw.array("mobile_attention") else { return raw.int("pending_question_count") }
+        return items.compactMap(\.object).filter { !optionalAttention($0) }.count
+    }
 }
 
 public struct SessionReferenceValue: Hashable, Sendable {

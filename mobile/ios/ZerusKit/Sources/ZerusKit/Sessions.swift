@@ -201,12 +201,11 @@ public enum NativeSessions {
             }
             let phase = raw.string("phase")
             let status = ["input", "approval", "error"].contains(phase) ? phase : raw.string("activity", "phase", "state")
-            let pending = raw.array("mobile_attention")?.count ?? raw.int("pending_question_count")
             return Session(target: Target(computerId: computerId, session: raw.string("name"), run: raw.string("run_id"),
                                           conversation: raw.string("conversation_id"), connectionId: connection.id, archiveId: archive),
                            title: raw.string("title", "label", "name"), agent: raw.string("agent", "cmd"), status: status,
                            project: raw.string("project", "cwd"), preview: SessionPreview.render(raw.string("last_message", "prompt")),
-                           pendingCount: pending, raw: raw)
+                           pendingCount: QuestionPolicies.blockingRequests(raw), raw: raw)
         }
     }
 }

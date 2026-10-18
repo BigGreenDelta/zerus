@@ -261,4 +261,23 @@ final class SessionCardsTests: XCTestCase {
         XCTAssertEqual(SessionFilters.scoped([item], [], [], "Proceed carefully").count, 1)
         XCTAssertTrue(SessionFilters.scoped([item], [], [], "questionItemId").isEmpty)
     }
+
+    func testPendingCountKeepsBlockingRequestsWithoutOptionalQuestions() {
+        let optional: JSON = ["question_id": "codex-async:c:0", "question_hash": "h0", "optional": true]
+        let olderOptional: JSON = ["question_id": "codex-async:c:1", "question_hash": "h1"]
+        let required: JSON = ["question_id": "request", "question_hash": "h2"]
+        func row(_ name: String, _ extra: JSONObject) -> JSON {
+            var raw: JSONObject = ["name": .string(name), "run_id": "r", "conversation_id": "c", "activity": "busy"]
+            for (key, value) in extra { raw[key] = value }
+            return .object(raw)
+        }
+        let machine: JSONObject = ["id": "machine", "snapshot": ["sessions": [
+            row("optional", ["mobile_attention": [optional, olderOptional]]),
+            row("required", ["mobile_attention": [optional, required]]),
+            row("empty", ["mobile_attention": [], "pending_question_count": 2]),
+            row("older", ["pending_question_count": 2]),
+        ]]]
+        let connection = Connection(id: "gateway", label: "Test", url: "https://gateway.example", token: "synthetic")
+        XCTAssertEqual(NativeSessions.sessions(connection, machine).map(\.pendingCount), [0, 1, 0, 2])
+    }
 }
