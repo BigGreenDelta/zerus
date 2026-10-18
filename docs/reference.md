@@ -1156,10 +1156,11 @@ larger Terminal.
 
 Claude keeps no scrollback for a question or approval panel taller than its
 pane, so a long question or command can lose its title and beginning
-everywhere. A session no client views keeps tmux's default 80x24 size. While a
+everywhere. A Kimi question dialog taller than its pane loses its heading the
+same way. A session no client views keeps tmux's default 80x24 size. While a
 recorded question or permission request waits and such a pane shows a clipped
 panel, Zerus makes that pane taller, doubling its height up to 192 rows without
-changing its width, until Claude redraws the complete panel. The exact request match still decides; the next
+changing its width, until the agent redraws the complete panel. The exact request match still decides; the next
 client that attaches sets the size again. A pane a client views keeps that
 client's size, so its clipped panel stays in Terminal. Only a question listing,
 such as `hgs inspect`, grows a pane, and never while an answer to that run

@@ -81,7 +81,7 @@ specific reason.
 | `claude_folder_trust`, `claude_permission_mode`, `claude_resume`, `claude_usage_limit`, terminal safety, auto-mode chooser | Claude | none known | only path |
 | `codex_async` | Codex | none on 0.160.1–0.162.1 (see Other agents) | only path, with A |
 | `codex_folder_trust`, `codex_hooks_trust`, `codex_update`, `codex_goal_resume` | Codex | none known | only path |
-| `kimi_wire` questions | Kimi | to investigate (wire protocol) | fallback |
+| `kimi_wire` questions | Kimi | none: the TUI resolves questions in process (`zerus-n88z`) | only path |
 | `kimi_folder_trust`, `kimi_cache_hint` | Kimi | none known | only path |
 | OpenCode, DeepSeek native requests | OpenCode, DeepSeek | already native APIs | not applicable |
 
@@ -393,7 +393,11 @@ version, like the Claude spike:
 - Codex: whether hooks or the app-server can answer `codex_async` questions,
   and approvals while the TUI runs.
 - Kimi: whether the wire protocol already observed for `kimi_wire` questions
-  can carry answers.
+  can carry answers. Kimi 2.1.1 answered no (`zerus-n88z`): its TUI runs the
+  agent engine in process and resolves questions and approvals only through its
+  own panels; hooks can only deny, `wire.jsonl` is output, and the local server
+  API belongs to a separate `kimi web` process. Kimi panels use screen delivery
+  with A.
 
 Until an adapter is qualified, these panels use screen delivery with A.
 
