@@ -1581,7 +1581,7 @@ and remote folders, including ordinary non-Git directories. The desktop folder
 browser offers **New folder** on the selected remote computer. Enter only the
 child folder name directly in the list and press **Create** or Enter; Escape
 cancels the inline entry. The list context menu and Ctrl+Shift+N (Command+Shift+N
-on macOS) open the same entry. The arrow beside **New folder** offers a separate
+on macOS) open the same entry. The **Dialog…** button beside **New folder** opens a separate
 name-only dialog with the parent shown above it. A missing path entered in the
 browser supplies that form's parent and initial name; the parent must already
 exist. Once
