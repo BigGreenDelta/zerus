@@ -492,7 +492,7 @@ class SpeechSmokeInstrumentation : Instrumentation() {
         complete.set(true)
         await("voice delivery") { model.speech.outgoing.single().state == "submitted" && model.speech.activeRequests.isEmpty() }
         check(main { model.draft(target).text } == "Edited while voice is processing.")
-        node("Sent to agent"); tap("Show recognized text"); node("Проверка голоса.")
+        node("Accepted by native app"); tap("Show recognized text"); node("Проверка голоса.")
         check(submitted.get() == 1 && statusReads.get() > 0)
         val first = main { model.speech.outgoing.single() }
         // Download without this phone's encrypted local ID to exercise another device's history playback.

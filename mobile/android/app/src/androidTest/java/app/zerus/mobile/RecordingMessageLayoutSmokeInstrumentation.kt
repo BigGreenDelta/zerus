@@ -156,7 +156,7 @@ class RecordingMessageLayoutSmokeInstrumentation : Instrumentation() {
                 await("private state") { main { model.storageReady && model.speech.ready } }
                 // Exercise the real Saved drafts destination with reloaded mixed receipts.
                 press("Drafts"); node("Saved drafts"); node("Transcribing…")
-                check(find("Sent to agent") == null) { "A submitted recording leaked into Saved drafts" }
+                check(find("Accepted by native app") == null) { "A submitted recording leaked into Saved drafts" }
                 check(store.voiceState() == persisted)
                 screenshot("saved-mixed.png")
                 val sample = mutableStateOf(entries[0].displayed())
@@ -233,7 +233,7 @@ class RecordingMessageLayoutSmokeInstrumentation : Instrumentation() {
                 await("reloaded private state") { main { restored.storageReady && restored.speech.ready } }
                 press("Drafts"); node("Saved drafts")
                 node("Pending"); node("Send voice message")
-                check(find("Sent to agent") == null && find("Remove local copy") == null && find(target.session) == null)
+                check(find("Accepted by native app") == null && find("Remove local copy") == null && find(target.session) == null)
                 val retained = main { VoiceHistory.merge(target, emptyList(), restored.speech.outgoing) }
                 check(retained.size == 2 && retained.all { it.voice?.state == "submitted" && it.text == sentAudio.message.transcript })
                 check(retained.single { it.voice?.id == videoId }.voice?.video == sentVideoMessage.video)
