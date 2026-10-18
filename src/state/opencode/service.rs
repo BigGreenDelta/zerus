@@ -357,6 +357,10 @@ pub(super) fn decode_response(bytes: &[u8]) -> Result<Response> {
     })
 }
 
+/// A registered service that does not answer. It is never restarted, and an
+/// OpenCode 2 session has no Resume that could reconnect it.
+const NOT_RESPONDING: &str = "OpenCode is not responding";
+
 pub(super) fn request(
     reg: &Registration,
     method: &str,
@@ -372,7 +376,7 @@ pub(super) fn request(
             .ok_or("Native HTTP deadline exceeded")?
             .min(Duration::from_secs(2)),
     )
-    .map_err(|_| "OpenCode host is unavailable; explicitly resume the session".to_owned())?;
+    .map_err(|_| NOT_RESPONDING.to_owned())?;
     socket
         .set_read_timeout(Some(Duration::from_secs(10)))
         .map_err(|e| e.to_string())?;
@@ -538,7 +542,7 @@ fn connect_from(read: RegistrationRead) -> std::result::Result<Service, Unavaila
         None,
         Instant::now() + Duration::from_secs(2),
     )
-    .map_err(|_| Unavailable::Unreachable("OpenCode is not responding".into()))?;
+    .map_err(|_| Unavailable::Unreachable(NOT_RESPONDING.into()))?;
     if info.status != 200 {
         return Err(Unavailable::Unreachable(
             "OpenCode is not responding correctly".into(),
@@ -1004,6 +1008,68 @@ mod tests {
         let missing = compatibility_in(&dir, &reg(), "d", || Ok(json!({"paths":{}}))).unwrap();
         assert!(!missing.is_empty());
         let _ = fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn a_service_that_stopped_answering_is_reported_without_opencode_1_wording() {
+        // A port that refuses connections: the registered service went away.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let gone = Registration { port, ..reg() };
+        let error = request(
+            &gone,
+            "GET",
+            "/api/session/active",
+            None,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, "OpenCode is not responding");
+        // OpenCode 2 sessions have no Resume to offer.
+        assert!(!error.to_lowercase().contains("resume"), "{error}");
+    }
+
+    /// The desktop's Start OpenCode banner keys on the "OpenCode is not
+    /// running on " prefix, and the documentation quotes both texts.
+    #[test]
+    fn not_running_and_not_responding_texts_are_pinned() {
+        assert_eq!(
+            Unavailable::NotRunning.reason("build-01"),
+            "OpenCode is not running on build-01"
+        );
+        assert!(Unavailable::NotRunning
+            .reason("fixture")
+            .starts_with("OpenCode is not running on "));
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        // A registration whose process is gone: not running.
+        let gone = Registration {
+            port,
+            pid: 0,
+            ..reg()
+        };
+        let Err(why) = connect_from(RegistrationRead::Present(gone)) else {
+            panic!("connected to a service that is gone");
+        };
+        assert_eq!(why.reason("build-01"), "OpenCode is not running on build-01");
+        // A live registered process that refuses connections: not responding.
+        let silent = Registration {
+            port,
+            pid: std::process::id(),
+            ..reg()
+        };
+        let Err(why) = connect_from(RegistrationRead::Present(silent)) else {
+            panic!("connected to a closed port");
+        };
+        assert!(matches!(&why, Unavailable::Unreachable(_)));
+        assert_eq!(why.reason("build-01"), "OpenCode is not responding");
     }
 
     #[test]

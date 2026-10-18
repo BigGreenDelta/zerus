@@ -371,8 +371,11 @@ pub(super) fn last_error(messages: &[Value]) -> Option<Value> {
     None
 }
 
-/// Inbox items waiting for this session; after Stop they are not delivered
-/// until something resumes the queue.
+/// Inbox items waiting for this session. After Stop OpenCode keeps them
+/// without running them (not delivered); when the session's next message
+/// starts a run, the waiting message runs first and that message after it
+/// (OpenCode 2.0.32, native `test_11`, one waiting message). Zerus never
+/// posts them again.
 pub(super) fn queued_rows(inbox: &Value, stopped: bool) -> Vec<Value> {
     inbox["data"]
         .as_array()
