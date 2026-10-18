@@ -106,9 +106,13 @@ public struct VoiceDraft: Codable, Hashable, Sendable {
     public var createdAt: Double
     public var profileRevision: Int64?
     public var video: VideoDraft?
+    /// A recording the computer refused before acceptance keeps its native message UUID and the refusal proof that
+    /// allows exactly one explicit resubmission of the same media to the same provider. Absent in older saved state.
+    public var resubmissionId: String?
+    public var rejection: String?
 
     public init(target: Target, machineId: String, profileId: String, audio: Attachment, durationMs: Int, createdAt: Double,
-                profileRevision: Int64? = nil, video: VideoDraft? = nil) {
+                profileRevision: Int64? = nil, video: VideoDraft? = nil, resubmissionId: String? = nil, rejection: String? = nil) {
         self.target = target
         self.machineId = machineId
         self.profileId = profileId
@@ -117,6 +121,8 @@ public struct VoiceDraft: Codable, Hashable, Sendable {
         self.createdAt = createdAt
         self.profileRevision = profileRevision
         self.video = video
+        self.resubmissionId = resubmissionId
+        self.rejection = rejection
     }
 
     public var selection: SpeechSelection {
@@ -139,9 +145,15 @@ public struct VoiceOutgoing: Codable, Hashable, Sendable {
     public var error: String
     public var profileRevision: Int64?
     public var video: VideoDraft?
+    /// The current refusal proof, the refusal generation a retry consumed, and that retry's operation request ID.
+    /// Absent in older saved state; the operation then is the message's own first submission.
+    public var rejection: String?
+    public var attemptedRejectionGeneration: Int64?
+    public var operationId: String?
 
     public init(id: String, target: Target, machineId: String, profileId: String, audio: Attachment?, durationMs: Int, createdAt: Double,
-                message: VoiceMessage? = nil, uploadState: String = "uploading", error: String = "", profileRevision: Int64? = nil, video: VideoDraft? = nil) {
+                message: VoiceMessage? = nil, uploadState: String = "uploading", error: String = "", profileRevision: Int64? = nil, video: VideoDraft? = nil,
+                rejection: String? = nil, attemptedRejectionGeneration: Int64? = nil, operationId: String? = nil) {
         self.id = id
         self.target = target
         self.machineId = machineId
@@ -154,7 +166,13 @@ public struct VoiceOutgoing: Codable, Hashable, Sendable {
         self.error = error
         self.profileRevision = profileRevision
         self.video = video
+        self.rejection = rejection
+        self.attemptedRejectionGeneration = attemptedRejectionGeneration
+        self.operationId = operationId
     }
+
+    /// The request ID of the latest upload attempt: the message UUID first, a fresh one for a resubmission.
+    public var operation: String { operationId ?? id }
 
     public var state: String { message?.state ?? uploadState }
     public var terminal: Bool { ["submitted", "failed", "cancelled", "uncertain"].contains(state) }
