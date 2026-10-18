@@ -187,6 +187,12 @@ fn lookup(config: &Config, id: &str) -> Result<(Profile, PathBuf, bool)> {
         .clone();
     Ok((profile, profile_home(config, id), false))
 }
+/// Resolve a hook health target without inspecting credentials or running a provider.
+pub(crate) fn hook_profile(config: &Config, id: &str) -> Result<(String, PathBuf)> {
+    let (profile, path, _) = lookup(config, id)?;
+    Ok((profile.provider, path))
+}
+
 fn default_label(provider: &str) -> &'static str {
     if provider=="opencode" {return "Native OpenCode configuration";}
     if provider == "dsh" {

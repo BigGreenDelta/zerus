@@ -440,6 +440,11 @@ fn validate(request: &LocalRequest) -> Result<()> {
             );
             read_mark(&request.payload)?;
         }
+        "hooks" => {
+            ensure!(rest.len()==2 && session(&rest[0]) && rest[1]=="--json", "hook health requires scoped JSON");
+            scoped(&request.payload)?;
+            ensure!(request.payload.as_ref().and_then(Value::as_object).is_some_and(|object| object.len()==3 && object.keys().all(|key| ["request_id","expected_run_id","expected_conversation_id"].contains(&key.as_str()))), "hook health is read-only");
+        }
         "history" | "terminal" | "session-action" | "send" | "send-now" | "settings" | "answer"
         | "interrupt" | "clear-context" | "compact-context" | "effort" | "file-read" => {
             ensure!(

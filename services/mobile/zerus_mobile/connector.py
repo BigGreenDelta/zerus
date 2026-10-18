@@ -29,7 +29,7 @@ from .managed_relay import transport, identity_url
 from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
 from . import speech, speech_config, voice
-from . import attachment_reads, file_reads, archives
+from . import attachment_reads, file_reads, archives, hook_health
 from .recovery import validate_recovery
 from .history import validate_history
 from .context import ATTACHMENT_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, COMPUTER_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read, validate_mobile_delivery
@@ -190,6 +190,7 @@ class Journal:
     def prune(self, *, now: float | None = None) -> None:
         now = time.time() if now is None else now
         with self.db:
+            self.db.execute("DELETE FROM requests WHERE operation='hooks_status' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute("DELETE FROM requests WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {speech_config.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {speech.READ_SQL} AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
@@ -303,6 +304,7 @@ class Connector:
         self.lifecycle_supported = False
         self.terminal_supported = False
         self.recovery_supported = False
+        self.hook_health_supported = False
         self.history_supported = False
         self.launch_supported = False
         self.project_launch_supported = False
@@ -519,7 +521,7 @@ class Connector:
             snapshot["mobile_projects"]={**groups,"projects":[{k:v for k,v in p.items() if k!="archives"} for p in groups.get("projects",[]) if isinstance(p,dict)]}
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if self.archive_supported else {"archive_list"})) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
+        operations = (OPERATIONS - (set() if getattr(self,"hook_health_supported",False) else {"hooks_status"})) - (set() if self.archive_supported else {"archive_list"}) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({voice.video.FEATURE} if self.voice_supported and self.video_supported else set()) | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -535,6 +537,7 @@ class Connector:
         self.lifecycle_supported = False
         self.terminal_supported = False
         self.recovery_supported = False
+        self.hook_health_supported = False
         self.history_supported = False
         self.launch_supported = False
         self.project_launch_supported = False
@@ -557,6 +560,7 @@ class Connector:
             self.terminal_supported = isinstance(help_text, str) and "terminal <session> --json" in help_text
             self.recovery_supported = isinstance(help_text,str) and "recovery action --scoped-json" in help_text
             self.history_supported = isinstance(help_text,str) and "history <session> --json" in help_text
+            self.hook_health_supported = isinstance(help_text,str) and hook_health.HELP_MARKER in help_text
             self.launch_supported = isinstance(help_text,str) and "--launch-id" in help_text
             self.project_launch_supported = isinstance(help_text,str) and "swarm assign-launch --json" in help_text
             self.worktree_supported = isinstance(help_text,str) and "Mobile worktree ABI: worktrees-v1" in help_text
@@ -735,6 +739,9 @@ class Connector:
             except ValueError as error: raise ConnectorError(str(error)) from None
         if operation in voice.OPERATIONS:
             try: voice.validate(operation, payload, request["request_id"])
+            except ValueError as error: raise ConnectorError(str(error)) from None
+        if operation == "hooks_status":
+            try: hook_health.validate(payload,request["request_id"])
             except ValueError as error: raise ConnectorError(str(error)) from None
         if operation == "history":
             try: validate_history(payload,request["request_id"])
@@ -944,6 +951,8 @@ class Connector:
                 await self.context_preflight(operation, session, payload)
             if operation == "send" and "agent_id" in payload:
                 await self.child_send_preflight(session, payload)
+            if operation == "hooks_status" and not getattr(self,"hook_health_supported",False):
+                raise ConnectorError(hook_health.UNAVAILABLE)
             if operation == "history" and not self.history_supported:
                 raise ConnectorError("native public history ABI is unavailable")
             if operation in LIFECYCLE_OPERATIONS and not self.lifecycle_supported:
@@ -1258,6 +1267,10 @@ class Connector:
                     raise ConnectorError("native speech acknowledgement did not match")
                 if operation in {"speech_submit", "speech_cancel"}:
                     result = {key: value for key, value in result.items() if key != "text"}
+            elif operation == "hooks_status":
+                result = await self.native(["hooks",session,"--json"],payload,timeout=5,max_output_bytes=16*1024)
+                if not hook_health.result_valid(result,payload,session):
+                    raise ConnectorError("native hook health acknowledgement did not match")
             elif operation == "set_mobile_delivery":
                 result = await self.native(["swarm", "preference", "set", "mobile_delivery", payload["value"], "--json"], timeout=10)
                 if not isinstance(result, dict) or result.get("ok") is not True or result.get("mobile_delivery") != payload["value"]:

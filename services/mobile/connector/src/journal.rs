@@ -54,7 +54,7 @@ pub const INDEXES: [(&str, &str); 8] = [
 ];
 
 // The Python connector's frozen predicates (operations.json `sql`).
-pub const READ_CLASS_SQL: &str = "('archive_list','attachment_read','catalog','dirs','file_read','history','inspect','mark_read','process_output','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
+pub const READ_CLASS_SQL: &str = "('archive_list','attachment_read','catalog','dirs','file_read','history','hooks_status','inspect','mark_read','process_output','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
 pub const READ_SQL: &str = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')";
 pub const SPEECH_READ_SQL: &str = "('speech_profiles','speech_stats','speech_status')";
 pub const SPEECH_CONFIG_READ_SQL: &str = "('speech_config','speech_config_status')";
@@ -245,7 +245,12 @@ impl Journal {
             &format!("DELETE FROM requests WHERE operation='terminal_snapshot' AND {delivered}"),
             [short],
         )?;
-        for set in [SPEECH_CONFIG_READ_SQL, SPEECH_READ_SQL, VOICE_READ_SQL] {
+        for set in [
+            SPEECH_CONFIG_READ_SQL,
+            SPEECH_READ_SQL,
+            VOICE_READ_SQL,
+            "('hooks_status')",
+        ] {
             tx.execute(
                 &format!("DELETE FROM requests WHERE operation IN {set} AND {delivered}"),
                 [short],

@@ -75,6 +75,7 @@ class Store:
         CREATE INDEX IF NOT EXISTS request_queue ON requests(node_id,state,created);
         CREATE INDEX IF NOT EXISTS request_expiry ON requests(state,created,claimed);
         CREATE INDEX IF NOT EXISTS request_history ON requests(updated) WHERE body!='' AND state IN ('completed','failed','uncertain');
+        CREATE INDEX IF NOT EXISTS hook_health_history ON requests(updated,id) WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain');
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,workspace_id TEXT NOT NULL,node_id TEXT NOT NULL,session TEXT NOT NULL,kind TEXT NOT NULL,created REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS event_workspace ON events(workspace_id,id);
         CREATE TABLE IF NOT EXISTS pushes(device_id TEXT PRIMARY KEY REFERENCES devices(id),provider TEXT NOT NULL,target TEXT NOT NULL);
@@ -240,6 +241,7 @@ class Store:
                 self.db.execute(f"UPDATE requests SET state='uncertain',error='node result timeout after claim',result_bytes=length('node result timeout after claim'),reserved_bytes=0,updated=? WHERE id IN (SELECT id FROM requests WHERE state='claimed' AND claimed<=? ORDER BY claimed LIMIT {batch_size})", (now, now - claim_ttl))
             # Read-only inspections can expire; mutations keep indefinite UUID
             # tombstones so an old command can never execute a second time.
+            self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests INDEXED BY hook_health_history WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now - min(retention, 3600),))
             self.db.execute(f"UPDATE requests SET body='',body_bytes=0,result=NULL,result_bytes=length('request history expired; delivery must not be retried'),reserved_bytes=0,error='request history expired; delivery must not be retried' WHERE id IN (SELECT id FROM requests WHERE state IN ('completed','failed','uncertain') AND updated<? AND body!='' ORDER BY updated LIMIT {batch_size})", (now - retention,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation IN {voice.READ_SQL} AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))

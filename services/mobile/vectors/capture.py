@@ -195,6 +195,7 @@ HELP_LINES = (
     ("terminal", "hgs terminal <session> --json"),
     ("recovery", "hgs recovery action --scoped-json"),
     ("history", "hgs history <session> --json"),
+    ("hook_health", "hooks-health-v1"),
     ("launch", "hgs <agent> <directory> --new --launch-id ID"),
     ("project_launch", "hgs swarm assign-launch --json"),
     ("worktree", "Mobile worktree ABI: worktrees-v1"),
@@ -1130,6 +1131,7 @@ def valid_payloads() -> dict:
         "restore": identity(archive_id=ARCHIVE), "forget": identity(archive_id=ARCHIVE),
         "terminal_snapshot": identity(),
         "terminal_input": identity(terminal_binding_id="d" * 64, text="ls", enter=True),
+        "hooks_status": identity(),
         "history": identity(limit=50), "recovery_action": identity(job_id=ident("job"), action="now"),
         "mark_read": {"run_id": RUN, "conversation_id": CONVERSATION, "reply_id": "7:100.5", "attention_signature": HASH_A},
         "attachment_read": identity(message_id=ident("message"), index=0, offset=0, length=1024),
@@ -1478,7 +1480,7 @@ def live_oracle(submission: dict) -> dict:
 
 VALIDATION_FAMILIES = {
     "conversation": {"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop",
-                     "compact_context", "clear_context", "mark_read", "attachment_read", "file_read"},
+                     "compact_context", "clear_context", "mark_read", "attachment_read", "file_read", "hooks_status"},
     "control": set(context.LIFECYCLE_OPERATIONS | context.TERMINAL_OPERATIONS | {"history", "recovery_action"}),
     "speech": set(voice.OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS),
     "launch": set(context.LAUNCH_OPERATIONS | context.COMPUTER_OPERATIONS),

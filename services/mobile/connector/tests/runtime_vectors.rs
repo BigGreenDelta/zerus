@@ -252,7 +252,7 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             checked += 1;
         }
     }
-    assert_eq!((checked, refused), (243, 2));
+    assert_eq!((checked, refused), (244, 2));
 }
 
 /// Python's `capable(node)`: every flag, the vectors' sessions and archive.
@@ -1124,4 +1124,46 @@ async fn voice_refusal_and_explicit_retry_keep_separate_operation_and_native_rec
         &upload["payload"]
     )
     .unwrap());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn hook_health_runs_only_the_read_once_and_refuses_scope_or_write_extensions() {
+    let harness = harness("hook-health-read");
+    let connector = &harness.connector;
+    capable(connector);
+    let mut flags = connector.flags.get();
+    flags.hook_health = true;
+    connector.flags.set(flags);
+    let id = "11111111-1111-4111-8111-111111111111";
+    let mut request = json!({"request_id":id,"operation":"hooks_status","session":"codex/example/session","payload":{"request_id":id,"expected_run_id":"run","expected_conversation_id":"conversation"}});
+    let response = json!({"schema":1,"provider":"codex","account_id":"native-codex","configuration":{"state":"missing","compatibility":{"state":"unknown"}},"effective":{"state":"unknown","reason":"Not verified"},"trust":{"state":"unknown","reason":"Not verified"},"observed":{"state":"unknown","events":[]},"running_agents_retrofitted":false,"request_id":id,"name":"codex/example/session","run_id":"run","conversation_id":"conversation"});
+    connector.native.answer(
+        vec![
+            "hooks".into(),
+            "codex/example/session".into(),
+            "--json".into(),
+        ],
+        response.clone(),
+    );
+    let Outcome::Finished(receipt) = connector.execute(request.clone()).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(receipt["state"], "completed");
+    assert_eq!(receipt["result"], response);
+    assert_eq!(
+        connector.execute(request.clone()).await.unwrap(),
+        Outcome::Replayed
+    );
+    assert_eq!(connector.native.calls.borrow().len(), 1);
+    let call = connector.native.calls.borrow()[0].clone();
+    assert_eq!(call["payload"], request["payload"]);
+    assert_eq!(call["options"]["timeout"], 5.0);
+    request["request_id"] = json!("22222222-2222-4222-8222-222222222222");
+    request["payload"]["request_id"] = request["request_id"].clone();
+    request["payload"]["action"] = json!("repair");
+    let Outcome::Finished(receipt) = connector.execute(request).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(receipt["state"], "failed");
+    assert_eq!(connector.native.calls.borrow().len(), 1);
 }

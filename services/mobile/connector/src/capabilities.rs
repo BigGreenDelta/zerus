@@ -27,6 +27,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "dirs",
     "file_read",
     "history",
+    "hooks_status",
     "inspect",
     "mark_read",
     "process_output",
@@ -118,6 +119,7 @@ pub struct Flags {
     pub terminal: bool,
     pub recovery: bool,
     pub history: bool,
+    pub hook_health: bool,
     pub launch: bool,
     pub project_launch: bool,
     pub worktree: bool,
@@ -146,6 +148,7 @@ impl Flags {
             terminal: has("terminal <session> --json"),
             recovery: has("recovery action --scoped-json"),
             history: has("history <session> --json"),
+            hook_health: has(crate::hook_health::HELP_MARKER),
             launch: has("--launch-id"),
             project_launch: has("swarm assign-launch --json"),
             worktree: has("Mobile worktree ABI: worktrees-v1"),
@@ -183,6 +186,7 @@ impl Flags {
             .collect();
         remove(self.launch, &launch);
         remove(self.history, &["history"]);
+        remove(self.hook_health, &["hooks_status"]);
         remove(self.recovery, &["recovery_action"]);
         remove(self.read, &["mark_read"]);
         remove(self.attachment_read, &["attachment_read"]);

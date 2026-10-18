@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import uuid
 
-from zerus_mobile import archives, file_reads, speech, speech_config, voice
+from zerus_mobile import archives, hook_health, file_reads, speech, speech_config, voice
 from zerus_mobile.attachments import validate_read, validate_send
 from zerus_mobile.context import (COMPUTER_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS,
                                   validate_context, validate_core, validate_inspect, validate_lifecycle,
@@ -112,6 +112,9 @@ def validate_request(value):
         return
     if op == "recovery_action":
         validate_recovery(payload,request_id)
+        return
+    if op == "hooks_status":
+        hook_health.validate(payload,request_id)
         return
     if op == "history":
         validate_history(payload,request_id)

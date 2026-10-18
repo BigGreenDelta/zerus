@@ -169,6 +169,51 @@ paused: launch the intended conversation with its explicit native ID to bind it.
 
 ### Tracking and durable state
 
+`hgs hooks --account native-claude --json` inspects the account's hook
+registration without running the agent. Use another exact account ID for an
+isolated profile. The report contains provider/account identifiers, configuration
+and path fingerprints, expected/present/missing/duplicate event names and cached version
+compatibility, never settings, commands, prompts or credentials. DeepSeek and
+OpenCode report `not_applicable`: they use their native APIs instead of tracking
+hooks. An unavailable or changed executable-version cache means compatibility
+`unknown`; inspection never runs `--version` or refreshes that cache.
+
+`hgs hooks SESSION --json` accepts a JSON object on stdin containing
+`request_id`, `expected_run_id` and `expected_conversation_id`. Only that exact
+bound conversation is inspected. Its `observed` field counts known main-agent
+callbacks recorded after this feature was enabled in that run/conversation;
+older bindings or silence report `unknown`, not broken hooks. The summary is
+bounded by the known event names and never scans native history. Registration,
+observed callbacks and provider-effective settings/trust are different evidence:
+`effective` and `trust` remain explicitly `unknown` in a file inspection. Project
+settings, policy, native trust or a running agent's already-loaded settings can
+make its effective hooks differ. Attaching does not retrofit them.
+
+Explicit configuration repair is native-only:
+`hgs hooks --account ID --repair --json`. Its stdin must contain a fresh UUID
+`request_id`, `expected_provider`, `expected_account_id`,
+`expected_config_sha256` and `expected_path_id` copied from the inspected account
+report. Repair refuses changed content, account/path/symlink identity, malformed
+or oversized files and unknown/incompatible native-version evidence. It merges
+only missing HGS tracking registrations under the existing hook lock and atomic backup
+rules, preserving personal settings/hooks and trusted legacy commands. It never
+trusts hooks, enables/widens answer channels, changes permissions, restarts a provider or retrofits running
+agents. If compatibility is unknown, explicit repair is unavailable. The current cache is
+normally populated for Claude's version-qualified hooks; Codex and Kimi can remain
+unknown even after launch. Their normal supervised launch retains the existing
+hook installer, but this diagnostic never invents version evidence. Review the returned configuration
+and any conditional matchers rather than treating a successful file edit as
+proof that hooks are effective. Existing partial Kimi blocks require manual review
+or a supervised launch: explicit repair refuses to rewrite them lossily.
+
+The additive mobile operation `hooks_status` exposes only the exact-session
+read, and only when the selected CLI advertises `hooks-health-v1`. Both outbound
+connectors preserve the request/run/conversation identity. The relay and gateway
+refuse account-wide, repair, archive and child extensions; no mobile hook write
+operation or client repair UI is advertised. Diagnostic receipts have short
+read-only retention and never authorize replay of a mutation.
+
+
 At launch, `hgs` adds handlers to Claude `settings.json`, Codex `hooks.json` and
 Kimi `config.toml`, preserving other hooks and making a `.pre-hgs` backup before the
 first edit. It respects `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `KIMI_CODE_HOME`.

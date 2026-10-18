@@ -424,6 +424,9 @@ impl<N: Native + 'static> Connector<N> {
         if operation == "archive_list" && !flags.archive {
             return Err(Failure::text(crate::archives::UNAVAILABLE));
         }
+        if operation == "hooks_status" && !flags.hook_health {
+            return Err(Failure::text(crate::hook_health::UNAVAILABLE));
+        }
         if operation == "history" && !flags.history {
             return Err(Failure::text("native public history ABI is unavailable"));
         }
@@ -473,6 +476,20 @@ impl<N: Native + 'static> Connector<N> {
                     .await?;
                 if !mark_read_result(&result, payload) {
                     return Err(Failure::text("native read acknowledgement did not match"));
+                }
+                Ok(result)
+            }
+            "hooks_status" => {
+                let payload = payload.expect("validated");
+                let mut call = Call::new(["hooks", session, "--json"])
+                    .payload(payload.clone())
+                    .timeout(5.0);
+                call.max_output_bytes = Some(16 * 1024);
+                let result = self.call(call).await?;
+                if !crate::hook_health::result_valid(&result, payload, session) {
+                    return Err(Failure::text(
+                        "native hook health acknowledgement did not match",
+                    ));
                 }
                 Ok(result)
             }

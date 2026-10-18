@@ -29,6 +29,7 @@ mod external_agents;
 mod fork;
 mod goals;
 mod hooks;
+pub(crate) mod hook_health;
 mod input;
 mod input_queue;
 mod journal;
