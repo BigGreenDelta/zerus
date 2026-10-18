@@ -158,6 +158,13 @@ impl TaskDoc {
         self.doc.get_map("fields")
     }
 
+    /// Writes a field as is, bypassing the rules, to build damaged documents.
+    #[cfg(test)]
+    pub(crate) fn set_raw_field(&mut self, key: &str, value: &str) {
+        self.fields().insert(key, value).unwrap();
+        self.doc.commit();
+    }
+
     pub fn id(&self) -> String {
         string(&self.meta(), "id").unwrap_or_default()
     }
@@ -200,16 +207,28 @@ impl TaskDoc {
         // A merge orders entries appended on two replicas by peer, not by time;
         // the history reads oldest first, keeping the order of equal times.
         log.sort_by_key(|entry| entry.at);
+        // A newer schema may encode a field differently: such a task is shown
+        // read-only with defaults. In this schema a field that does not decode
+        // is damage, and the store sets the task aside.
+        let writable = self.schema() <= SCHEMA;
+        let author = match decode(&meta, "author") {
+            Err(_) if !writable => Actor::Person,
+            author => author?,
+        };
+        let target = match decode(&fields, "target") {
+            Err(_) if !writable => Target::Any,
+            target => target?,
+        };
         Ok(TaskView {
             uuid: self.uuid.clone(),
             id: self.id(),
             project: string(&meta, "project").unwrap_or_default(),
             schema: self.schema(),
-            writable: self.schema() <= SCHEMA,
+            writable,
             created_at: integer(&meta, "created_at").unwrap_or(0),
-            author: decode(&meta, "author")?,
+            author,
             stage: self.stage()?,
-            target: decode(&fields, "target")?,
+            target,
             rank: self.rank(),
             session: string(&fields, "session").and_then(|s| serde_json::from_str(&s).ok()),
             summary: string(&fields, "summary").unwrap_or_default(),
@@ -635,5 +654,18 @@ mod tests {
             t.comment("x", &Actor::Person, 2).unwrap_err().to_string(),
             "Update Zerus to edit this task"
         );
+    }
+
+    #[test]
+    fn a_newer_task_shows_read_only_with_fields_it_cannot_read() {
+        let t = task(Stage::Todo);
+        t.meta().insert("schema", SCHEMA + 1).unwrap();
+        t.meta().insert("author", "{\"kind\":\"robot\"}").unwrap();
+        t.fields().insert("target", "{\"kind\":\"team\"}").unwrap();
+        t.doc.commit();
+        let t = TaskDoc::from_bytes(&t.snapshot().unwrap()).unwrap();
+        let view = t.view().unwrap();
+        assert!(!view.writable);
+        assert_eq!((view.author, view.target), (Actor::Person, Target::Any));
     }
 }

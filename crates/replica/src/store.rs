@@ -201,6 +201,8 @@ impl ProjectStore {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        // A task that cannot be shown is damaged: listed apart, never blocking the rest.
+        task.view()?;
         task.saved = Some(task.current_vv());
         task.saved_stage = Some(task.stage()?);
         Ok(task)
@@ -512,6 +514,24 @@ mod tests {
         assert!(other.tasks().unwrap().0.is_empty());
         assert!(store.find("T-zzzzzz").is_err());
         assert!(store.find("nonsense").is_err());
+    }
+
+    #[test]
+    fn a_task_that_cannot_be_shown_is_set_aside() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let mut good = new_task(&store, "V");
+        store.save(&mut good).unwrap();
+        let mut bad = new_task(&store, "W");
+        bad.set_raw_field("target", "{\"kind\":\"team\"}");
+        store.save(&mut bad).unwrap();
+        let (tasks, damaged) = store.tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(damaged.len(), 1);
+        assert_eq!(damaged[0].uuid, bad.uuid());
+        // Listing a stage and counting agent starts still work.
+        assert_eq!(store.ordered(Stage::Todo).unwrap().len(), 1);
+        assert_eq!(store.agent_starts_since(0).unwrap(), 0);
     }
 
     #[test]
