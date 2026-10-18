@@ -7,8 +7,8 @@
 #include <QAbstractButton>
 #include <QDateTime>
 #include <QDrag>
-#include <QFrame>
 #include <QDropEvent>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QLabel>
@@ -317,6 +317,11 @@ void TasksView::render() {
     m_only->setAccessibleName(m_only->toolTip());
     m_settings->setToolTip(tr("Task settings for %1").arg(m_projectName)); m_settings->setAccessibleName(m_settings->toolTip());
     updateComposer();
+    // A listing during a drag moves the rows under a resting pointer: the line
+    // follows them once they are laid out.
+    if (m_overList)
+        QMetaObject::invokeMethod(this, [this] { if (m_overList) followDrag(m_drag, m_listPage->mapFrom(m_scroll->viewport(), m_dragAt)); },
+                                  Qt::QueuedConnection);
 }
 
 void TasksView::updateComposer() {
@@ -409,7 +414,9 @@ void TasksView::startDrag(TaskRow *row, const QPoint &hotSpot) {
         source->setDragging(false);
         if (m_rows.value(source->task().uuid) != source) source->deleteLater();
     }
+    // The drag is over wherever it ended, whether or not a leave reached the target.
     endListDrag();
+    for (auto *tile : std::as_const(m_tiles)) tile->setDropTarget(false);
 }
 
 void TasksView::retire(TaskRow *row) {
@@ -445,7 +452,7 @@ int TasksView::dropGap(const QString &uuid, const QPoint &point) const {
 }
 
 void TasksView::followDrag(const TaskDrag &drag, const QPoint &point) {
-    m_drag = drag; m_dragAt = m_listPage->mapTo(m_scroll->viewport(), point);
+    m_drag = drag; m_dragAt = m_listPage->mapTo(m_scroll->viewport(), point); m_overList = true;
     const auto rows = shownRows(); const int gap = rows.isEmpty() ? -1 : dropGap(drag.uuid, point);
     if (gap < 0) m_dropLine->hide();
     else {
@@ -466,7 +473,7 @@ void TasksView::reorder(const TaskDrag &drag, const QPoint &point) {
                                         : QStringList{"move", drag.uuid, "--after", rows.last()->task().uuid}), {}}});
 }
 
-void TasksView::endListDrag() { m_autoScroll.stop(); m_scrollStep = 0; m_dropLine->hide(); }
+void TasksView::endListDrag() { m_autoScroll.stop(); m_scrollStep = 0; m_overList = false; m_dropLine->hide(); }
 
 bool TasksView::eventFilter(QObject *watched, QEvent *event) {
     const auto type = event->type();

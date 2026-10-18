@@ -378,6 +378,8 @@ void SessionList::dragLeaveEvent(QDragLeaveEvent *e)
 }
 void SessionList::dropEvent(QDropEvent *e)
 {
+    // The base drop, which would end Qt's edge scrolling, is not used.
+    stopAutoScroll();
     if (const auto task = TaskDrag::from(e->mimeData())) {
         const auto *item = taskDropItem(*task, e->position().toPoint());
         m_indicator = {}; m_onGroup = m_taskDrop = false; viewport()->update();

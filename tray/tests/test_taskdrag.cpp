@@ -6,10 +6,11 @@
 #include "TasksView.h"
 #include <QAbstractButton>
 #include <QApplication>
+#include <QCursor>
+#include <QDrag>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
-#include <QDrag>
 #include <QDropEvent>
 #include <QElapsedTimer>
 #include <QLabel>
@@ -56,6 +57,7 @@ bool drop(QWidget *target, const TaskDrag &drag, QPoint point = {}) {
 }
 void leave(QWidget *target) { QDragLeaveEvent event; QApplication::sendEvent(target, &event); }
 bool called(const QDir &dir, const QStringList &argv) { return FakeTasksCli::calls(dir).contains(argv); }
+class ListProbe : public SessionList { public: using SessionList::mimeData; };
 // The platform's drag loop runs events while the person drags; offscreen has
 // none, so this one runs `during` in its place.
 class LoopingTasksView : public TasksView {
@@ -91,6 +93,9 @@ private slots:
     void aDroppedSessionRepinsTheTask();
     void aRowAListingDropsLivesUntilItsDragEnds();
     void theHeaderLineAndTheReportStartDragsAndClicks();
+    void aDropOnTheSessionListEndsItsEdgeScrolling();
+    void theDropLineFollowsTheRowsOfANewListing();
+    void theTileOutlineEndsWithTheDrag();
 };
 
 void TestTaskDrag::initTestCase() {
@@ -330,6 +335,57 @@ void TestTaskDrag::theHeaderLineAndTheReportStartDragsAndClicks() {
     taskRow->setTask(item(2, "review", {{"session", FakeTasksCli::pinned("codex/api")}, {"summary", "Token bucket; 6 tests."}}), {}, TaskColors::of(true), 0);
     auto *summary = taskRow->findChild<QLabel *>("taskSummary"); QVERIFY(summary->isVisible());
     pressMoveRelease(summary, QPoint(20, summary->height() / 2), 0); QCOMPARE(opened.size(), 2);
+}
+
+void TestTaskDrag::aDropOnTheSessionListEndsItsEdgeScrolling() {
+    ListProbe list; list.resize(320, 300);
+    for (int n = 0; n < 30; ++n) {
+        auto *item = new QListWidgetItem(&list); item->setSizeHint(QSize(300, 60));
+        item->setData(SessionRoles::Group, "project-1"); item->setData(SessionRoles::Identity, QString("session-%1").arg(n));
+        item->setData(SessionRoles::TaskTarget, QStringList{"", QString("codex/s%1").arg(n)});
+        item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
+    }
+    list.show(); QVERIFY(QTest::qWaitForWindowExposed(&list));
+    auto *bar = list.verticalScrollBar(); QTRY_VERIFY(bar->maximum() > 0);
+    // The pointer rests at the bottom edge, where Qt scrolls a drag toward the end.
+    const QPoint edge(list.viewport()->width() / 2, list.viewport()->height() - 6);
+    QCursor::setPos(list.viewport()->mapToGlobal(edge));
+    QVERIFY(drop(list.viewport(), todo(1), edge));
+    int dropped = bar->value(); QTest::qWait(300); QCOMPARE(bar->value(), dropped);
+    // A session moved there ends it too.
+    std::unique_ptr<QMimeData> mime(list.mimeData({list.item(0)}));
+    QDragEnterEvent enter(edge, Qt::MoveAction, mime.get(), Qt::LeftButton, Qt::NoModifier); QApplication::sendEvent(list.viewport(), &enter);
+    QDragMoveEvent move(edge, Qt::MoveAction, mime.get(), Qt::LeftButton, Qt::NoModifier); QApplication::sendEvent(list.viewport(), &move);
+    QDropEvent event(QPointF(edge), Qt::MoveAction, mime.get(), Qt::LeftButton, Qt::NoModifier); QApplication::sendEvent(list.viewport(), &event);
+    QVERIFY(event.isAccepted());
+    dropped = bar->value(); QTest::qWait(300); QCOMPARE(bar->value(), dropped);
+}
+
+void TestTaskDrag::theDropLineFollowsTheRowsOfANewListing() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"), FakeTasksCli::task(2, "todo"), FakeTasksCli::task(3, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    QTRY_COMPARE(visibleRows(view).size(), 3);
+    auto *page = view.findChild<QWidget *>("taskListPage"); auto *line = view.findChild<QWidget *>("taskDropLine");
+    const auto bottom = [&](int n) { return row(view, n)->mapTo(page, QPoint(0, row(view, n)->height())).y(); };
+    // The pointer below the last row's middle: the line under the last row.
+    QVERIFY(dragOver(page, todo(1), row(view, 3)->mapTo(page, QPoint(40, row(view, 3)->height() * 3 / 4))));
+    QVERIFY(line->isVisible()); QVERIFY(qAbs(line->geometry().center().y() - bottom(3)) <= 1);
+    // A listing takes T-000002 away while the pointer rests: the line moves up with the last row.
+    QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"), FakeTasksCli::task(2, "active"), FakeTasksCli::task(3, "todo")}));
+    view.refresh(); QTRY_COMPARE(visibleRows(view), (QStringList{"T-000001", "T-000003"}));
+    QTRY_VERIFY(line->isVisible() && qAbs(line->geometry().center().y() - bottom(3)) <= 1);
+}
+
+void TestTaskDrag::theTileOutlineEndsWithTheDrag() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); LoopingTasksView view(&client); view.resize(760, 560); view.show();
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    QTRY_COMPARE(visibleRows(view).size(), 1);
+    // The drag ends over the Backlog tile without a leave reaching it.
+    view.during = [&] { QVERIFY(dragOver(tile(view, "backlog"), todo(1))); QVERIFY(tile(view, "backlog")->property("dropTarget").toBool()); };
+    pressMoveRelease(row(view, 1), QPoint(100, 50), QApplication::startDragDistance() + 2);
+    QVERIFY(!tile(view, "backlog")->property("dropTarget").toBool());
 }
 
 QTEST_MAIN(TestTaskDrag)
