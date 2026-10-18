@@ -496,6 +496,22 @@ mod tests {
     }
 
     #[test]
+    fn kimi_tool_approvals_are_never_answered_automatically() {
+        let mut q = question();
+        q["source"] = json!("kimi_tool_approval");
+        q["answer_transport"] = json!("kimi_tui");
+        q["questions"][0]["options"] = json!([{"id":"1","label":"Approve once","scope":"once"},
+            {"id":"2","label":"Approve for this session","scope":"broader"},{"id":"3","label":"Reject","scope":"once"}]);
+        assert!(answers(&q).is_none());
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = open(&directory.path().join("audit")).unwrap();
+        for provider in ["kimi", "claude"] {
+            let p = json!({"host":"desktop-a","session":"kimi/sample/review","provider":provider,"question":q});
+            assert_eq!(begin(&mut db, &p).unwrap()["eligible"], false);
+        }
+    }
+
+    #[test]
     fn refuses_wrong_provider_and_malformed_identities_without_a_reservation() {
         let directory = tempfile::tempdir().unwrap();
         let mut db = open(&directory.path().join("audit")).unwrap();

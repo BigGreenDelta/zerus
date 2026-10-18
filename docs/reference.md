@@ -1262,6 +1262,27 @@ Revise, pasting the feedback before Enter; Kimi's recorded decision, including
 the exact feedback, confirms delivery. A clipped or different chooser, or one
 already in Revise feedback mode, stays read-only with **Open Terminal**.
 
+Other Kimi tool approvals also appear in Activity, with the complete request from
+Kimi's wire. Kimi's hooks cannot approve, so Zerus answers only in Kimi's own
+panel, and only for a Bash command: the panel must draw that exact command,
+working directory, description and danger warning row by row, wrapped as Kimi
+wraps it, and the complete history of every agent of the conversation may hold
+no other unresolved Kimi request, however old: nothing proves that Kimi no
+longer shows one. A history longer than 8 MiB (4 MiB for another agent), a
+record Kimi is still writing, a line that is not a JSON object with one string
+type, an interaction record without its ID or of a kind Kimi does not write,
+or a repeated request ID keeps the approval read-only. Types and IDs are
+compared as decoded JSON. Every key and pasted feedback line first finds the same
+unresolved request, with its active tool call, in the same run, process and
+pane. The
+choices are Kimi's: **Approve once**, **Approve for this session**, **Reject** and
+**Reject with feedback**. The session choice asks for confirmation: Kimi then
+stops asking about that exact command and also approves every other request
+already waiting with the same action, which shows only a command's first 50
+characters. Kimi's recorded decision confirms delivery. Other tools, commands
+Zerus cannot draw exactly, a narrow or clipped panel, and an unverifiable history
+stay read-only with **Open Terminal**. Automatic approvals never answer Kimi.
+
 Claude Code can also ask its own questions without an agent tool call, such as
 whether to switch models after a safeguard stop. Activity shows the question and
 its options verbatim with **Open Terminal** while Terminal still shows them: no
