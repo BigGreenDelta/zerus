@@ -755,15 +755,26 @@ Windows and retains 0.160.1 (a resident-session regression boundary) on Linux on
 The Claude Code matrix pins 2.1.296 for all three targets. The OpenCode matrix pins
 its reviewed minimum, 2.0.32, for Linux and macOS; on x86_64 Linux it uses the
 `@opencode/cli-linux-x64-baseline` package, which runs without AVX2 on every x86_64
-host. macOS therefore runs Claude Code and OpenCode, and Windows, where Zerus has no
-OpenCode adapter, runs Codex and Claude Code. Only the native executable is
-extracted into a disposable directory (`claude.exe` and `codex.exe` on Windows,
-never Codex's sandbox setup program or its other helpers; OpenCode's `bin/opencode`);
-agent binaries are neither committed nor bundled. The runner treats
+host. The Kimi Code matrix pins 2.1.1 for Linux and macOS. Kimi Code publishes its
+native executable outside npm: its official installer downloads it from
+`code.kimi.com` and checks the SHA-256 that the release's manifest names, so each
+Kimi pin names that download and a SHA-256 integrity pin. macOS therefore runs
+Claude Code, OpenCode and Kimi Code, and Windows, where Zerus has no OpenCode
+adapter and Kimi has no reviewed pin, runs Codex and Claude Code. Only the native
+executable is extracted into a disposable directory (`claude.exe` and `codex.exe`
+on Windows, never Codex's sandbox setup program or its other helpers; OpenCode's
+`bin/opencode`), or kept as downloaded for Kimi; agent binaries are neither
+committed nor bundled. No agent may update itself: the suites run with
+`DISABLE_AUTOUPDATER` and `KIMI_CODE_NO_AUTO_UPDATE`, and each report row records
+the SHA-256 of the executable under test before and after its suites. A changed
+image fails the contract. Kimi's updater replaces the file it runs from whatever
+its home, so the Kimi suite also runs a copy of its own and checks that neither
+copy changed. The runner treats
 skipped or empty native suites as failures. It writes each suite's output to
 files rather than pipes, so a process a suite leaves behind cannot keep the run
 waiting, and a suite that times out still leaves its log. `--agent claude`,
-`--agent codex` or `--agent opencode` limits a local run to one matrix. `--hgs`
+`--agent codex`, `--agent opencode` or `--agent kimi` limits a local run to one
+matrix. `--hgs`
 names the build under test (default: `HGS_TEST_BIN`, else the debug build). The
 suites get a private home; of the caller's `HGS_` variables only
 `HGS_TEST_CONPTY_DIR` reaches them, and none of its `OPENCODE_` variables do. The
@@ -846,7 +857,10 @@ The separate **Agent upstream compatibility** workflow runs daily at 04:41 UTC
 and is also available manually on upstream main. It discovers published Codex,
 Claude Code, OpenCode, Kimi Code and DeepSeek Harness versions from their official
 package indexes, links their official release notes and tests the latest Codex,
-Claude Code and OpenCode as additional canaries. OpenCode follows a minimum version
+Claude Code, OpenCode and Kimi Code as additional canaries. Kimi Code versions come
+from `@moonshot-ai/kimi-code` on npm, which shares its release train (the archived
+Python `kimi-cli` on PyPI is not Kimi Code); its canary downloads the executable the
+newest release manifest names, with that manifest's SHA-256. OpenCode follows a minimum version
 policy: Zerus accepts any 2.x at or above the reviewed minimum whose service offers
 every operation it uses, so its pin is that minimum, and the canary qualifies the
 newest `@opencode/cli` release each day and reports an incompatibility without
@@ -862,11 +876,11 @@ missing coverage.
 Codex protocol schemas are generated separately with and without experimental
 APIs. The report compares the latest canary with the newest reviewed pin and
 lists added/removed methods and added/removed/changed schemas. Changes to Codex,
-Claude Code and OpenCode CLI help appear with a generated diff per agent. A detected
-addition is a review candidate, not evidence that Zerus supports it or that a
-signed-in account can use it. For Kimi this workflow currently discovers
-versions only. DeepSeek's existing pinned keyless contract fixture runs in full
-Linux CLI CI.
+Claude Code, OpenCode and Kimi Code CLI help appear with a generated diff per agent.
+A detected addition is a review candidate, not evidence that Zerus supports it or
+that a signed-in account can use it. DeepSeek's existing pinned keyless contract
+fixture runs in full Linux CLI CI. DeepSeek Harness has no canary contract yet: its
+package installs about 80 npm dependencies, which this runner does not install.
 
 To run the reviewed matrix or inspect current upstream changes locally:
 
@@ -875,6 +889,7 @@ cargo build --locked
 python3 scripts/ci/agent-compatibility.py
 python3 scripts/ci/agent-compatibility.py --agent claude
 python3 scripts/ci/agent-compatibility.py --agent opencode
+python3 scripts/ci/agent-compatibility.py --agent kimi
 python3 scripts/ci/agent-compatibility.py --latest
 ```
 

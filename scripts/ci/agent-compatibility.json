@@ -54,6 +54,20 @@
       "integrity": "sha512-wASwXBsWaOAYcZrh4ZLl4oaVxPCUAGVb7zZvXBBF8TjWE4uWgY0D2tj6gn80JfcO3b/s9woM6dP/gKqYKK2EdQ=="
     }
   ],
+  "kimi": [
+    {
+      "version": "2.1.1",
+      "target": "linux-x64",
+      "url": "https://code.kimi.com/kimi-code/binaries/2.1.1/kimi-code-linux-x64",
+      "integrity": "sha256-ZvR1NuQLArsdV3zdMkdo9z05uLlHLgyhQOc9jiJc194="
+    },
+    {
+      "version": "2.1.1",
+      "target": "darwin-arm64",
+      "url": "https://code.kimi.com/kimi-code/binaries/2.1.1/kimi-code-darwin-arm64",
+      "integrity": "sha256-S6tvlsLCiTaLfwWgT2ZzfFOlnOdA+TLY8UkkBYR1jvs="
+    }
+  ],
   "upstream": [
     {
       "name": "Codex",
@@ -79,10 +93,10 @@
     },
     {
       "name": "Kimi Code",
-      "url": "https://pypi.org/pypi/kimi-cli/json",
-      "version_path": ["info", "version"],
-      "notes": "https://github.com/MoonshotAI/kimi-cli/releases",
-      "reviewed_versions": []
+      "url": "https://registry.npmjs.org/@moonshot-ai/kimi-code/latest",
+      "version_path": ["version"],
+      "notes": "https://github.com/MoonshotAI/kimi-code/releases",
+      "reviewed_versions": ["2.1.1"]
     },
     {
       "name": "DeepSeek Harness",
