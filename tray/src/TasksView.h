@@ -66,6 +66,9 @@ public:
     void setPolling(bool polling);
     void setRefreshIntervals(int visibleMs, int hiddenMs);
     void refresh();
+    // Pins a task dragged onto a session (host "" for this computer), or makes it
+    // Any session for an empty session.
+    void retarget(const TaskDrag &task, const QString &host, const QString &session);
     const TaskBoard &board() const { return m_board; }
     QString selectedStage() const { return m_stage; }
     MessageComposer *composer() const { return m_composer; }
@@ -102,6 +105,8 @@ private:
     struct Step { QStringList arguments; QString input; std::function<void(const QJsonObject &)> then = {}; };
     QList<Step> steps(const TaskItem &task, TaskAction action) const;
     QList<Step> editSteps(const TaskItem &task, const TaskEdits &edits) const;
+    // `target REF SESSION|any [--host ALIAS]` without the project.
+    static QStringList targetArguments(const QString &uuid, const QString &host, const QString &session);
     // Runs the steps in order and refreshes after. `finished` follows the last
     // success; `failed` replaces the notice for the first refusal.
     void run(QList<Step> steps, std::function<void()> finished = {}, std::function<void(const QString &)> failed = {});

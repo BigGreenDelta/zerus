@@ -1906,6 +1906,9 @@ shows its actions on hover, and a click opens the task: its prompt and session
 task for the open session in To do, or in Backlog while Backlog is open. The tab
 label counts the tasks In review and in To do. Done lists the last 7 days, and
 Show older adds the rest. A session outside every project has no tasks.
+To do and Backlog rows can be dragged: onto the other list's tile to move them
+there, within To do to reorder it, onto a session of the project in the session
+list to pin them to it, or onto the project's header to make them Any session.
 
 ## Machines and accounts
 

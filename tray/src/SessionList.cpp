@@ -341,12 +341,30 @@ SessionList::Placement SessionList::placement(const QPoint &point, bool movingGr
     return target;
 }
 
+const QListWidgetItem *SessionList::taskDropItem(const TaskDrag &task, const QPoint &point) const
+{
+    const auto *over = itemAt(point);
+    if (!over || over->isHidden() || over->data(SessionRoles::Group).toString() != task.projectId) return nullptr;
+    if (over->data(SessionRoles::Header).toBool()) return task.targetSession.isEmpty() ? nullptr : over;
+    const auto target = over->data(SessionRoles::TaskTarget).toStringList();
+    if (target.size() != 2) return nullptr;
+    const bool already = task.targetKnown && task.targetHost == target[0] && task.targetSession == target[1];
+    return already ? nullptr : over;
+}
+
 void SessionList::dragEnterEvent(QDragEnterEvent *e)
 {
-    if (validDrop(e->mimeData())) { e->setDropAction(Qt::MoveAction); e->accept(); } else e->ignore();
+    if (validDrop(e->mimeData()) || TaskDrag::from(e->mimeData())) { e->setDropAction(Qt::MoveAction); e->accept(); } else e->ignore();
 }
 void SessionList::dragMoveEvent(QDragMoveEvent *e)
 {
+    if (const auto task = TaskDrag::from(e->mimeData())) {
+        QListWidget::dragMoveEvent(e);   // Qt's edge auto-scroll
+        const auto *item = taskDropItem(*task, e->position().toPoint());
+        m_indicator = item ? visualItemRect(item).adjusted(3, 1, -3, -1) : QRect(); m_onGroup = m_taskDrop = item; viewport()->update();
+        if (item) { e->setDropAction(Qt::MoveAction); e->accept(); } else e->ignore();
+        return;
+    }
     if (!validDrop(e->mimeData())) { e->ignore(); return; }
     // Retain Qt's edge auto-scroll; the base drop mutation is deliberately unused.
     QListWidget::dragMoveEvent(e);
@@ -356,10 +374,19 @@ void SessionList::dragMoveEvent(QDragMoveEvent *e)
 }
 void SessionList::dragLeaveEvent(QDragLeaveEvent *e)
 {
-    m_indicator = {}; viewport()->update(); QListWidget::dragLeaveEvent(e);
+    m_indicator = {}; m_taskDrop = false; viewport()->update(); QListWidget::dragLeaveEvent(e);
 }
 void SessionList::dropEvent(QDropEvent *e)
 {
+    if (const auto task = TaskDrag::from(e->mimeData())) {
+        const auto *item = taskDropItem(*task, e->position().toPoint());
+        m_indicator = {}; m_onGroup = m_taskDrop = false; viewport()->update();
+        if (!item) { e->ignore(); return; }
+        const auto target = item->data(SessionRoles::TaskTarget).toStringList();
+        e->setDropAction(Qt::MoveAction); e->accept();
+        emit taskDropped(*task, target.value(0), target.value(1));
+        return;
+    }
     if (!validDrop(e->mimeData())) { e->ignore(); return; }
     const auto data = QJsonDocument::fromJson(e->mimeData()->data(Mime)).object();
     const auto target = placement(e->position().toPoint(), data.value("group").toBool());
@@ -404,6 +431,7 @@ void SessionList::paintEvent(QPaintEvent *e)
     QPainter p(viewport()); p.setRenderHint(QPainter::Antialiasing);
     const QColor accent(property("hgsDark").toBool() ? "#8bdfc0" : "#167357");
     p.setPen(QPen(accent, 2));
+    if (m_taskDrop) p.setPen(QPen(accent, 2, Qt::DashLine));
     if (m_onGroup) { p.setBrush(Qt::NoBrush); p.drawRoundedRect(m_indicator, 5, 5); }
     else p.drawLine(m_indicator.topLeft(), m_indicator.topRight());
 }

@@ -1,5 +1,6 @@
 #include "FakeTasksCli.h"
 #include "HgsClient.h"
+#include "SessionList.h"
 #include "TaskDrag.h"
 #include "TaskRow.h"
 #include "TasksView.h"
@@ -9,6 +10,7 @@
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
 #include <QDropEvent>
+#include <QLabel>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QScrollArea>
@@ -66,12 +68,15 @@ class TestTaskDrag : public QObject {
     QTemporaryDir m_settings;
 private slots:
     void initTestCase();
+    void init() { QSettings().remove("tasks"); }
     void thePayloadNamesTheTaskAndItsProject();
     void toDoAndBacklogRowsStartADrag();
     void theOtherListsTileTakesADroppedTask();
     void toDoRowsAreReorderedByDropping();
     void theFunnelReordersAmongTheRowsItShows();
     void aLongToDoListScrollsAtItsEdgesWhileDragging();
+    void theSessionListTakesTasksOfItsProject();
+    void aDroppedSessionRepinsTheTask();
 };
 
 void TestTaskDrag::initTestCase() {
@@ -226,6 +231,54 @@ void TestTaskDrag::aLongToDoListScrollsAtItsEdgesWhileDragging() {
     QVERIFY(dragOver(page, todo(1), viewport(6))); QTRY_VERIFY(bar->value() < still);
     leave(page); still = bar->value(); QTest::qWait(150); QCOMPARE(bar->value(), still);
     QVERIFY(!view.findChild<QWidget *>("taskDropLine")->isVisible());
+}
+
+void TestTaskDrag::theSessionListTakesTasksOfItsProject() {
+    SessionList list; list.resize(320, 500);
+    const auto add = [&](const QString &group, bool header, const QStringList &target = {}, const QString &child = {}) {
+        auto *item = new QListWidgetItem(&list); item->setSizeHint(QSize(300, header ? 34 : 60));
+        item->setData(SessionRoles::Header, header); item->setData(SessionRoles::Group, group);
+        item->setData(SessionRoles::TaskTarget, target); item->setData(SessionRoles::ChildId, child);
+        item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable); return item;
+    };
+    auto *orchard = add("project-1", true); auto *api = add("project-1", false, {"", "codex/api"});
+    auto *ios = add("project-1", false, {"orchard-mac", "codex/ios"}); auto *subagent = add("project-1", false, {}, "agent-1");
+    auto *other = add("project-2", true); auto *docs = add("project-2", false, {"", "codex/docs"});
+    list.show(); QVERIFY(QTest::qWaitForWindowExposed(&list)); QVERIFY(list.acceptDrops());
+    QSignalSpy dropped(&list, &SessionList::taskDropped);
+    const auto over = [&](const TaskDrag &task, QListWidgetItem *item) { return dragOver(list.viewport(), task, list.visualItemRect(item).center()); };
+    const auto any = todo(1); auto pinned = todo(2); pinned.targetSession = "codex/api";
+    // An Any session task goes to a session of its project, not to its header or a subagent.
+    QVERIFY(over(any, api)); QVERIFY(over(any, ios)); QVERIFY(!over(any, orchard)); QVERIFY(!over(any, subagent));
+    // Another project's sessions and header refuse it.
+    QVERIFY(!over(any, other)); QVERIFY(!over(any, docs));
+    // A pinned task goes to another session, or to the header, which makes it Any session.
+    QVERIFY(!over(pinned, api)); QVERIFY(over(pinned, ios)); QVERIFY(over(pinned, orchard));
+    // A session on a computer this one has not verified is not this computer's session.
+    auto unverified = pinned; unverified.targetKnown = false; QVERIFY(over(unverified, api));
+    leave(list.viewport());
+    QVERIFY(drop(list.viewport(), any, list.visualItemRect(ios).center()));
+    QCOMPARE(dropped.size(), 1); QCOMPARE(dropped[0][0].value<TaskDrag>().uuid, QString("uuid-1"));
+    QCOMPARE(dropped[0][1].toString(), QString("orchard-mac")); QCOMPARE(dropped[0][2].toString(), QString("codex/ios"));
+    QVERIFY(drop(list.viewport(), pinned, list.visualItemRect(orchard).center()));
+    QCOMPARE(dropped.size(), 2); QCOMPARE(dropped[1][1].toString(), QString()); QCOMPARE(dropped[1][2].toString(), QString());
+    QVERIFY(!drop(list.viewport(), any, list.visualItemRect(docs).center())); QCOMPARE(dropped.size(), 2);
+}
+
+void TestTaskDrag::aDroppedSessionRepinsTheTask() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"),
+        FakeTasksCli::task(2, "todo", {{"target", FakeTasksCli::pinned("codex/api")}})}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    QTRY_COMPARE(visibleRows(view).size(), 2);
+    view.retarget(todo(1), "orchard-mac", "codex/ios");
+    QTRY_VERIFY(called(dir.path(), {"task", "target", "uuid-1", "codex/ios", "--host", "orchard-mac", "--project", "project-1"}));
+    view.retarget(todo(2), "", "");
+    QTRY_VERIFY(called(dir.path(), {"task", "target", "uuid-2", "any", "--project", "project-1"}));
+    view.retarget(todo(1), "", "codex/web");
+    QTRY_VERIFY(called(dir.path(), {"task", "target", "uuid-1", "codex/web", "--project", "project-1"}));
+    // The row names its new session once hgs took it.
+    QTRY_VERIFY(row(view, 1) && row(view, 1)->findChild<QLabel *>("taskMeta")->text().contains("codex/web"));
 }
 
 QTEST_MAIN(TestTaskDrag)

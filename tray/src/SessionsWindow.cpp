@@ -507,6 +507,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_organization.moveGroup(id, before); saveOrganization(); rebuild();
     });
     connect(m_sessions, &SessionList::dragFinished, this, &SessionsWindow::rebuild);
+    connect(m_sessions, &SessionList::taskDropped, this, [this](const TaskDrag &task, const QString &host, const QString &session) {
+        m_tasks->retarget(task, host, session);
+    });
     connect(m_sessions, &QListWidget::currentRowChanged, this, [this]() { if (!m_rebuilding) selectSession(); });
     connect(m_sessions, &QListWidget::itemActivated, this, &SessionsWindow::jumpToLatestActivity);
 
@@ -2848,6 +2851,9 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
         item->setData(Qt::AccessibleDescriptionRole, QString());
         item->setData(SessionRoles::Header, row.entry < 0 && row.launch.isEmpty()); item->setHidden(row.hidden);
+        // A live session takes tasks of its project dragged onto it.
+        const bool live = row.entry >= 0 && row.child.isEmpty() && row.launch.isEmpty() && visible[row.entry].session.state != "archived";
+        item->setData(SessionRoles::TaskTarget, live ? QStringList{visible[row.entry].host, visible[row.entry].session.name} : QStringList());
         if (!row.launch.isEmpty()) {
             const auto launch = m_pendingLaunches.value(row.launch).toObject();
             const QString name = launch.value("tag").toString(), host = launch.value("host").toString();

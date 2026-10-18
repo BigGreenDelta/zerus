@@ -94,6 +94,8 @@
 #include "PopupMouse.h"
 #include "AccountsPage.h"
 #include "FakeCli.h"
+#include "FakeTasksCli.h"
+#include "TaskDrag.h"
 #include "LaunchWarnings.h"
 #include "LocalSessionHost.h"
 #include "ProcessRunner.h"
@@ -324,6 +326,7 @@ private slots:
     void subagentGroupsAndUnavailableActivity();
     void inspectorPreservesWorkspaceAndReportsTasks();
     void tasksTabFollowsTheOpenSessionsProject();
+    void tasksDropOnTheirProjectsSessionsAndHeader();
     void detailsPollingPreservesReadingPosition();
     void nativeGoalIsIndependentOfTurnState();
     void fileReferencesKeepMachineAndWorkspace();
@@ -486,6 +489,9 @@ private:
     // A copy of the base fixture whose inspect answers with these details, so
     // polls that arrive while a test waits cannot replace them.
     QString programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child = {}, const QJsonObject &usage = {}) const;
+    // A copy of the base fixture, named `name`, whose `hgs task …` calls answer with
+    // this listing of project "Work"; each call's argv is appended to <fixture>.tasks.
+    QString tasksFixture(const QString &name, const QJsonArray &tasks) const;
     // Created by initTestCase(): listing the data rows (-datatags, as
     // RunQtShard.cmake does) exits without destroying the test object. That
     // listing calls every *_data() function first, so none may use m_dir.
@@ -978,11 +984,7 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
             {"session",QJsonValue()},{"rank","V"}};
         tasks<<task;
     }
-    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
-    const QByteArray answer = "elif c=='task':\n open(__file__+'.tasks','a').write(json.dumps(a)+'\\n')\n print(json.dumps({'project':{'id':a[a.index('--project')+1],'name':'Work'},'tasks':json.loads("
-        + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(tasks).toJson(QJsonDocument::Compact))) + "),'damaged':[]}))\n";
-    const QString fixture = m_dir->filePath("tasks-hgs");
-    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    const QString fixture = tasksFixture("tasks-hgs", tasks); QVERIFY(!fixture.isEmpty());
     SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
     window.showSession({}, "codex/hgs/dashboard");
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>();
@@ -1009,6 +1011,61 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
     window.showSession({}, "codex/website/navigation");
     QTRY_VERIFY(view->findChild<QLabel *>("taskEmpty")->text().startsWith("Tasks belong to a project"));
     QCOMPARE(badge->property("todo").toInt(), 0); QVERIFY(!badge->isVisible());
+}
+
+QString TestSessionsWindow::tasksFixture(const QString &name, const QJsonArray &tasks) const
+{
+    QFile original(script()); if (!original.open(QIODevice::ReadOnly)) return {};
+    const QByteArray answer = "elif c=='task':\n open(__file__+'.tasks','a').write(json.dumps(a)+'\\n')\n print(json.dumps({'project':{'id':a[a.index('--project')+1],'name':'Work'},'tasks':json.loads("
+        + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(tasks).toJson(QJsonDocument::Compact))) + "),'damaged':[]}))\n";
+    const QString fixture = m_dir->filePath(name);
+    return FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)) ? fixture : QString();
+}
+
+void TestSessionsWindow::tasksDropOnTheirProjectsSessionsAndHeader()
+{
+    SessionOrganization org; const auto work=org.createGroup("Work"), docs=org.createGroup("Docs");
+    org.moveSession(org.observe("arch","codex/hgs/dashboard",""),work); org.moveSession(org.observe("arch","kimi/docs/research",""),work);
+    org.moveSession(org.observe("mac","claude/infra/review",""),docs);
+    QSettings().setValue("workspace/organization",QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    const auto any=FakeTasksCli::task(1,"todo"), pinned=FakeTasksCli::task(2,"todo",{{"target",FakeTasksCli::pinned("kimi/docs/research")}});
+    const QString fixture=tasksFixture("tasks-drop-hgs",{any,pinned}); QVERIFY(!fixture.isEmpty());
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
+    window.showSession({}, "codex/hgs/dashboard");
+    auto *list=window.findChild<SessionList *>("sessionList"); QVERIFY(list);
+    const auto find=[&](const QString &group, const QString &session) -> QListWidgetItem * {
+        for(int i=0;i<list->count();++i) {
+            auto *item=list->item(i); if(item->data(SessionRoles::Group)!=group) continue;
+            if(session.isEmpty() ? item->data(SessionRoles::Header).toBool() : item->data(SessionRoles::TaskTarget).toStringList().value(1)==session) return item;
+        }
+        return nullptr;
+    };
+    // Live sessions name where a task dropped on them goes; a project header names none.
+    QTRY_VERIFY(find(work,"kimi/docs/research") && find(docs,"claude/infra/review") && find(work,{}));
+    QCOMPARE(find(work,"kimi/docs/research")->data(SessionRoles::TaskTarget).toStringList(), QStringList({"", "kimi/docs/research"}));
+    QCOMPARE(find(docs,"claude/infra/review")->data(SessionRoles::TaskTarget).toStringList(), QStringList({"mac", "claude/infra/review"}));
+    QVERIFY(find(work,{})->data(SessionRoles::TaskTarget).toStringList().isEmpty());
+    const auto drop=[&](const QJsonObject &task, QListWidgetItem *item) {
+        list->scrollToItem(item); const QPoint point=list->visualItemRect(item).center();
+        std::unique_ptr<QMimeData> mime(TaskDrag::of(work, TaskBoard::item(task)).mimeData());
+        QDragEnterEvent enter(point,Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier); QApplication::sendEvent(list->viewport(),&enter);
+        QDragMoveEvent move(point,Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier); QApplication::sendEvent(list->viewport(),&move);
+        if(!move.isAccepted()) return false;
+        QDropEvent event(QPointF(point),Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier); QApplication::sendEvent(list->viewport(),&event);
+        return event.isAccepted();
+    };
+    const auto called=[&](const QJsonArray &argv) {
+        QFile calls(fixture+".tasks"); if(!calls.open(QIODevice::ReadOnly)) return false;
+        while(!calls.atEnd()) if(QJsonDocument::fromJson(calls.readLine()).array()==argv) return true;
+        return false;
+    };
+    // Another project's session refuses the task; a session of its project pins it there.
+    QVERIFY(!drop(any, find(docs,"claude/infra/review")));
+    QVERIFY(drop(any, find(work,"kimi/docs/research")));
+    QTRY_VERIFY(called({"task","target","uuid-1","kimi/docs/research","--project",work}));
+    // The project's header makes a pinned task Any session.
+    QVERIFY(drop(pinned, find(work,{})));
+    QTRY_VERIFY(called({"task","target","uuid-2","any","--project",work}));
 }
 
 void TestSessionsWindow::projectHeaderFiltersOnlyThisProject()

@@ -1,4 +1,5 @@
 #pragma once
+#include "TaskDrag.h"
 #include "WorkspaceList.h"
 #include <QTimer>
 #include <QElapsedTimer>
@@ -9,10 +10,14 @@ namespace SessionRoles {
 enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Children,
             Group, Header, Identity, Collapsed, Total, Attention, Working, Model, Effort, MachineColor, MachineName, Unread,
             ChildId, ParentKey, HasChildren, Expanded, ProjectColor, ProjectVivid, LaunchId, WorkingSince, ReviewLater, Draft, Failure,
-            GitStatus, GitHost, GitPath, MetaIcon, Scheduled, OptionalQuestions, ModifiedAt, CoordinationWait, Waiting };
+            GitStatus, GitHost, GitPath, MetaIcon, Scheduled, OptionalQuestions, ModifiedAt, CoordinationWait, Waiting,
+            // {host, name} of a live session a dragged task can be pinned to; empty for other rows.
+            TaskTarget };
 }
 
 // Drops express placement relative to an identity, never a filtered row number.
+// A task dragged from the Tasks tab drops on a live session of its project, or on
+// the project's header for Any session.
 class SessionList : public WorkspaceList {
     Q_OBJECT
 public:
@@ -35,6 +40,9 @@ signals:
     void sessionMoved(const QString &identity, const QString &group, const QString &before);
     void groupMoved(const QString &group, const QString &before);
     void dragFinished();
+    // A task was dropped on a session (host "" for this computer) or, with an empty
+    // session, on its project's header.
+    void taskDropped(const TaskDrag &task, const QString &host, const QString &session);
 protected:
     QStringList mimeTypes() const override { return {QStringLiteral("application/x-hgs-session-placement")}; }
     QMimeData *mimeData(const QList<QListWidgetItem *> &) const override;
@@ -62,6 +70,9 @@ private:
     QElapsedTimer m_activityClock;
     bool m_animateActivity = true;
     bool validDrop(const QMimeData *) const;
+    // The row a dragged task would change: a live session of its project other than
+    // its own, or the project's header for a pinned task; null elsewhere.
+    const QListWidgetItem *taskDropItem(const TaskDrag &task, const QPoint &point) const;
     struct Placement { QString group, before; QRect indicator; bool onGroup = false; };
     Placement placement(const QPoint &point, bool group) const;
     QPoint m_press;
@@ -69,7 +80,7 @@ private:
     QString m_pressedParent;
     bool m_dragging = false;
     QRect m_indicator;
-    bool m_onGroup = false;
+    bool m_onGroup = false, m_taskDrop = false;
     QString m_token;
     bool m_bulkSelecting = false, m_togglePress = false;
     QWidget *m_selectionBar = nullptr;

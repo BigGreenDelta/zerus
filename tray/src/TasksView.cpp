@@ -348,12 +348,19 @@ QList<TasksView::Step> TasksView::steps(const TaskItem &task, TaskAction action)
 QList<TasksView::Step> TasksView::editSteps(const TaskItem &task, const TaskEdits &edits) const {
     QList<Step> out;
     if (edits.text) out << Step{withProject({"edit", task.uuid}), *edits.text};
-    if (edits.target) {
-        QStringList arguments{"target", task.uuid, edits.target->any ? QStringLiteral("any") : edits.target->session};
-        if (!edits.target->any && !edits.target->host.isEmpty()) arguments << "--host" << edits.target->host;
-        out << Step{withProject(arguments), {}};
-    }
+    if (edits.target)
+        out << Step{withProject(targetArguments(task.uuid, edits.target->host, edits.target->any ? QString() : edits.target->session)), {}};
     return out;
+}
+
+QStringList TasksView::targetArguments(const QString &uuid, const QString &host, const QString &session) {
+    QStringList arguments{"target", uuid, session.isEmpty() ? QStringLiteral("any") : session};
+    if (!session.isEmpty() && !host.isEmpty()) arguments << "--host" << host;
+    return arguments;
+}
+
+void TasksView::retarget(const TaskDrag &task, const QString &host, const QString &session) {
+    run({{targetArguments(task.uuid, host, session) << QStringLiteral("--project") << task.projectId, {}}});
 }
 
 void TasksView::run(QList<Step> steps, std::function<void()> finished, std::function<void(const QString &)> failed) {
