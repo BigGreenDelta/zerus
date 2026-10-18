@@ -462,6 +462,18 @@ public enum SharedReadPolicies {
         return !signature.isEmpty && mark(row)?.string("attention_signature") == signature
     }
 
+    /// Whether a `mark_read` receipt shows the computer applied every field this phone sent. A completed request can
+    /// apply nothing: the value is no longer current, or the computer's question index is not ready. That needs a newer
+    /// snapshot, so the same mark waits.
+    public static func applied(_ receipt: JSONObject, payload: JSONObject) -> Bool {
+        guard receipt.string("state") == "completed", let result = receipt.object("result"), result["ok"] == .bool(true),
+              let applied = result.object("applied") else { return false }
+        return ["reply_id", "attention_signature"].allSatisfy { field in (payload[field] ?? .null) == .null || applied[field] == .bool(true) }
+    }
+
+    /// Delay before the same unapplied mark may be sent again: two minutes, doubling up to 16.
+    public static func retryDelay(_ unapplied: Int) -> Duration { .seconds(120 << min(max(unapplied, 0), 3)) }
+
     /// The `mark_read` payload once this phone has shown the current reply; nil when nothing is new.
     public static func payload(_ row: Session, freshHead: Bool, localUnread: Int?, acknowledge: Bool = true) -> JSONObject? {
         let target = row.target

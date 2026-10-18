@@ -226,11 +226,31 @@ extension ConversationModel {
         return SharedReadRequest(connection: connection, target: target, payload: payload, key: target.key + "\n" + JSON.object(payload).compact)
     }
 
+    /// A mark counts as shared only when the computer applied every field sent; a failed submission is forgotten so the
+    /// next view retries.
     func sendSharedRead(_ request: SharedReadRequest) async {
-        let completed: Bool
-        do { completed = try await app.client.markRead(request.connection, target: request.target, payload: request.payload).string("state") == "completed" }
-        catch { completed = false }
-        if !completed { sharedReadsSent.remove(request.key) }
+        let receipt: JSONObject
+        do { receipt = try await app.client.markRead(request.connection, target: request.target, payload: request.payload) }
+        catch {
+            sharedReadsSent.remove(request.key)
+            return
+        }
+        guard receipt.string("state") == "completed" else {
+            sharedReadsSent.remove(request.key)
+            return
+        }
+        if SharedReadPolicies.applied(receipt, payload: request.payload) {
+            sharedReadsUnapplied[request.key] = nil
+            return
+        }
+        // Completed without applying: the same mark may go again only after a delay, without holding Read all.
+        let unapplied = sharedReadsUnapplied[request.key] ?? 0
+        sharedReadsUnapplied[request.key] = unapplied + 1
+        let key = request.key
+        Task { [weak self] in
+            try? await Task.sleep(for: SharedReadPolicies.retryDelay(unapplied))
+            self?.sharedReadsSent.remove(key)
+        }
     }
 
     /// Tells the session's computer that this phone showed its current reply.

@@ -213,6 +213,8 @@ final class ConversationModel {
     @ObservationIgnored var historySnapshotHints: [String: String] = [:]
     @ObservationIgnored let historyHeadScheduler = HistoryHeadScheduler()
     @ObservationIgnored var sharedReadsSent: Set<String> = []
+    /// How often each mark completed without being applied; its next attempt waits longer.
+    @ObservationIgnored var sharedReadsUnapplied: [String: Int] = [:]
     @ObservationIgnored var readAllShares: Task<Void, Never>?
     @ObservationIgnored var readWriter: OrderedStatePersistence<ConversationReadState>?
     @ObservationIgnored var emptyDrafts: [String: Draft] = [:]
