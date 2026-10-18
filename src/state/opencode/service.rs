@@ -480,25 +480,54 @@ impl Unavailable {
     }
 }
 
-/// The registration file's bytes, read with the same bound the parser
-/// enforces, or None when there is no readable file.
-fn read_registration() -> Option<Vec<u8>> {
-    let file = fs::File::open(registration_path()).ok()?;
+const UNREADABLE_REGISTRATION: &str = "The OpenCode service registration cannot be read";
+
+/// The registration file as read now. Only a file that does not exist is
+/// `Missing`; any other open or read failure, an oversized file or one that
+/// does not parse is `Unreadable`, never "no service".
+pub(super) enum RegistrationRead {
+    Missing,
+    Unreadable(String),
+    Present(Registration),
+}
+
+fn read_registration() -> RegistrationRead {
+    read_registration_at(&registration_path())
+}
+
+/// Read with the same bound the parser enforces.
+fn read_registration_at(path: &Path) -> RegistrationRead {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RegistrationRead::Missing,
+        Err(_) => return RegistrationRead::Unreadable(UNREADABLE_REGISTRATION.into()),
+    };
     let mut bytes = Vec::new();
-    file.take(16385).read_to_end(&mut bytes).ok()?;
-    Some(bytes)
+    if file.take(16385).read_to_end(&mut bytes).is_err() {
+        return RegistrationRead::Unreadable(UNREADABLE_REGISTRATION.into());
+    }
+    match parse_registration(&bytes) {
+        Ok(reg) => RegistrationRead::Present(reg),
+        Err(why) => RegistrationRead::Unreadable(why),
+    }
 }
 
 pub(super) fn connect() -> std::result::Result<Service, Unavailable> {
-    let bytes = read_registration();
-    let Some(bytes) = bytes else {
-        return Err(if service_disabled() {
-            Unavailable::Disabled
-        } else {
-            Unavailable::NotRunning
-        });
+    connect_from(read_registration())
+}
+
+fn connect_from(read: RegistrationRead) -> std::result::Result<Service, Unavailable> {
+    let reg = match read {
+        RegistrationRead::Missing => {
+            return Err(if service_disabled() {
+                Unavailable::Disabled
+            } else {
+                Unavailable::NotRunning
+            })
+        }
+        RegistrationRead::Unreadable(why) => return Err(Unavailable::Unreachable(why)),
+        RegistrationRead::Present(reg) => reg,
     };
-    let reg = parse_registration(&bytes).map_err(Unavailable::Unreachable)?;
     if !crate::platform::process_alive(reg.pid) {
         return Err(Unavailable::NotRunning);
     }
@@ -609,15 +638,18 @@ pub(super) enum StartDecision {
     Refuse(String),
 }
 
-/// Start runs only when no registration exists or its process is gone; it
-/// never runs while a registered process lives, however slow.
+/// Start runs only when no registration file exists or its process is gone;
+/// it never runs while a registered process lives, however slow, nor when
+/// the registration cannot be read.
 pub(super) fn start_decision(
-    registration: Option<&Registration>,
+    registration: &RegistrationRead,
     pid_alive: bool,
     disabled: bool,
 ) -> StartDecision {
-    if registration.is_some() && pid_alive {
-        return StartDecision::AlreadyRunning;
+    match registration {
+        RegistrationRead::Present(_) if pid_alive => return StartDecision::AlreadyRunning,
+        RegistrationRead::Unreadable(why) => return StartDecision::Refuse(why.clone()),
+        _ => {}
     }
     if disabled {
         return StartDecision::Refuse(
@@ -668,11 +700,10 @@ pub(super) fn ensure_started() -> Result<Service> {
         Err(Unavailable::NotRunning | Unavailable::Disabled) => {}
         Err(other) => return Err(other.reason(&crate::platform::hostname())),
     }
-    let reg = read_registration().and_then(|b| parse_registration(&b).ok());
-    let alive = reg
-        .as_ref()
-        .is_some_and(|r| crate::platform::process_alive(r.pid));
-    match start_decision(reg.as_ref(), alive, service_disabled()) {
+    let read = read_registration();
+    let alive =
+        matches!(&read, RegistrationRead::Present(r) if crate::platform::process_alive(r.pid));
+    match start_decision(&read, alive, service_disabled()) {
         StartDecision::AlreadyRunning => {
             return Err("OpenCode is starting; try again shortly".into())
         }
@@ -995,30 +1026,99 @@ mod tests {
 
     #[test]
     fn start_is_refused_while_any_registered_process_lives() {
-        let reg = parse_registration(include_bytes!(
-            "../../../tests/fixtures/opencode2/registration.json"
-        ))
-        .unwrap();
+        let present = || {
+            RegistrationRead::Present(
+                parse_registration(include_bytes!(
+                    "../../../tests/fixtures/opencode2/registration.json"
+                ))
+                .unwrap(),
+            )
+        };
         assert!(matches!(
-            start_decision(Some(&reg), true, false),
+            start_decision(&present(), true, false),
             StartDecision::AlreadyRunning
         ));
         assert!(matches!(
-            start_decision(Some(&reg), true, true),
+            start_decision(&present(), true, true),
             StartDecision::AlreadyRunning
         ));
         assert!(matches!(
-            start_decision(Some(&reg), false, false),
+            start_decision(&present(), false, false),
             StartDecision::Start
         ));
         assert!(matches!(
-            start_decision(None, false, false),
+            start_decision(&RegistrationRead::Missing, false, false),
             StartDecision::Start
         ));
         assert!(matches!(
-            start_decision(None, false, true),
+            start_decision(&RegistrationRead::Missing, false, true),
             StartDecision::Refuse(_)
         ));
+    }
+
+    /// Only a missing registration file counts as "no service"; one that
+    /// exists but cannot be read or parsed refuses both connect and start.
+    #[test]
+    fn only_a_missing_registration_allows_a_start() {
+        let dir = temp_dir("registration-read");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("service.json");
+        let fixture: &[u8] = include_bytes!("../../../tests/fixtures/opencode2/registration.json");
+        let missing = read_registration_at(&path);
+        assert!(matches!(missing, RegistrationRead::Missing));
+        assert!(matches!(
+            start_decision(&missing, false, false),
+            StartDecision::Start
+        ));
+        fs::write(&path, fixture).unwrap();
+        let present = read_registration_at(&path);
+        assert!(matches!(&present, RegistrationRead::Present(r) if r.id == "svc_fixture"));
+        assert!(matches!(
+            start_decision(&present, true, false),
+            StartDecision::AlreadyRunning
+        ));
+        assert!(matches!(
+            start_decision(&present, false, false),
+            StartDecision::Start
+        ));
+        let mut oversized = fixture.to_vec();
+        oversized.extend(std::iter::repeat_n(b' ', 20000));
+        for bytes in [&fixture[..fixture.len() / 2], b"not json", &oversized[..]] {
+            fs::write(&path, bytes).unwrap();
+            let read = read_registration_at(&path);
+            assert!(matches!(read, RegistrationRead::Unreadable(_)));
+            assert!(matches!(
+                start_decision(&read, false, false),
+                StartDecision::Refuse(_)
+            ));
+            assert!(matches!(
+                connect_from(read),
+                Err(Unavailable::Unreachable(_))
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(&path, fixture).unwrap();
+            if unsafe { libc::geteuid() } == 0 {
+                eprintln!("skipped the mode 000 registration check: root reads any file");
+            } else {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+                let read = read_registration_at(&path);
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                assert!(
+                    matches!(&read, RegistrationRead::Unreadable(why) if why == UNREADABLE_REGISTRATION)
+                );
+                assert!(
+                    matches!(start_decision(&read, false, false), StartDecision::Refuse(why) if why == UNREADABLE_REGISTRATION)
+                );
+                assert!(matches!(
+                    connect_from(read),
+                    Err(Unavailable::Unreachable(why)) if why == UNREADABLE_REGISTRATION
+                ));
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

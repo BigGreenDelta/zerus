@@ -148,7 +148,9 @@ ensures the service, see Service lifecycle); a Node sidecar using
    `service-<channel>.json` for the channel the installed CLI reports.
 2. Parse `id`, `version`, `url`, `pid` and optional `password`. Require a
    loopback HTTP `url` and a live `pid`. Never log or forward the password,
-   URL or file contents.
+   URL or file contents. Only a file that does not exist means no service; a
+   registration that exists but cannot be read, is oversized or does not
+   parse makes the service unavailable.
 3. `GET /api/info` with basic authentication within 2 seconds. Readiness is
    HTTP 200 with a version at or above `OPENCODE_MINIMUM` (2.0.32).
 4. Fetch `/openapi.json` once per service identity (`id`, `pid`, `version`,
@@ -175,7 +177,8 @@ ensures the service, see Service lifecycle); a Node sidecar using
 - `Start OpenCode` is an explicit action (Accounts, New session, a session's
   unavailable banner) and launch implicitly starts it. Start runs only when no
   registration file exists or its `pid` is not alive; it never runs while a
-  registered process is alive, however slow. It starts
+  registered process is alive, however slow, nor while an existing
+  registration cannot be read. It starts
   `opencode service start` with the environment `hgs` uses for new tmux
   servers, additionally without `HGS_*`, `SSH_*`, `OPENCODE_SERVER_*` and
   the connector's own variables, detached from `hgs`, and on Linux in its own
