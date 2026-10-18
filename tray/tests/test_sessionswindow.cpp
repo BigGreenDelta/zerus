@@ -231,6 +231,7 @@ private slots:
     void activitySurfaceRemainsOpaque();
     void settingsSlidersResetToDefaults();
     void projectSwarmFollowsWorkspaceTheme();
+    void followSystemAppearanceFollowsARuntimePaletteChange();
     void alwaysOnTopSettingKeepsWindowAbove();
     void railPinTogglesAlwaysOnTop();
     void windowLayerControlsKeepFocusAndLayout_data();
@@ -1264,6 +1265,23 @@ void TestSessionsWindow::projectSwarmFollowsWorkspaceTheme()
         QTimer timeout;timeout.setSingleShot(true);connect(&timeout,&QTimer::timeout,&window,[]{if(auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()))dialog->reject();});timeout.start(5000);
         showSwarmDialog(&client,&controller,fleet,&window,[]{});QVERIFY(checked);
     }
+}
+
+void TestSessionsWindow::followSystemAppearanceFollowsARuntimePaletteChange()
+{
+    // A system light/dark switch changes the application palette while Zerus runs.
+    const auto restore=qScopeGuard([]{QApplication::setPalette(QPalette());QSettings().remove("workspace/theme");});
+    QPalette light;light.setColor(QPalette::Window,QColor("#f0f0f0"));light.setColor(QPalette::WindowText,Qt::black);
+    QPalette dark;dark.setColor(QPalette::Window,QColor("#202020"));dark.setColor(QPalette::WindowText,Qt::white);
+    QApplication::setPalette(light);QSettings().setValue("workspace/theme","system");
+    SessionsWindow window(program());window.setFleet(fleet());window.show();
+    auto *list=window.findChild<QWidget*>("sessionList");QVERIFY(list);
+    QVERIFY(!list->property("hgsDark").toBool());
+    QApplication::setPalette(dark);QTRY_VERIFY(list->property("hgsDark").toBool());
+    QApplication::setPalette(light);QTRY_VERIFY(!list->property("hgsDark").toBool());
+    // An explicit theme ignores the system appearance.
+    QSettings().setValue("workspace/theme","light");QApplication::setPalette(dark);
+    QTest::qWait(50);QVERIFY(!list->property("hgsDark").toBool());
 }
 
 void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()

@@ -5192,7 +5192,15 @@ void SessionsWindow::changeEvent(QEvent *event)
 {
     QWidget::changeEvent(event);
     if (event->type() == QEvent::WindowStateChange && m_brand) m_brand->syncAnimation();
-    if (event->type() == QEvent::ApplicationPaletteChange && m_activityView) applyTheme();
+    // A runtime light/dark switch of the system reaches a window only as PaletteChange:
+    // QWidget::event() consumes ApplicationPaletteChange. The window's own stylesheet
+    // also sends PaletteChange, so re-theme later and only when Follow system appearance
+    // now picks the other theme.
+    if (event->type() == QEvent::PaletteChange && m_activityView)
+        QTimer::singleShot(0, this, [this] {
+            if (QSettings().value("workspace/theme", "system").toString() != "system") return;
+            if ((qApp->palette().color(QPalette::Window).lightness() < 128) != m_dark) applyTheme();
+        });
 }
 
 void SessionsWindow::updateWorktrees()
