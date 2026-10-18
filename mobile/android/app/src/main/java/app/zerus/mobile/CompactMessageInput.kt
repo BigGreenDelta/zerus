@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
     focusRequester: FocusRequester,
     onFocusChanged: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    sharedPreviewSpace: Boolean = false,
     recordingContent: (@Composable () -> Unit)? = null,
     leading: @Composable () -> Unit,
     action: @Composable () -> Unit,
@@ -106,10 +107,14 @@ import androidx.compose.ui.unit.dp
         }, modifier = Modifier.fillMaxWidth()) { children, constraints ->
             val width = constraints.maxWidth
             val controlWidth = 48.dp.roundToPx()
+            // Under an open IME a retained preview also needs a usable viewport.
+            // Keep every action at 48dp by sharing one row when two stacked
+            // controls cannot fit; the editor and its input session stay mounted.
+            val inlineExpand = sharedPreviewSpace && children.size > 4 && constraints.maxHeight < controlWidth * 2
             val controlConstraints = Constraints(minWidth = controlWidth, maxWidth = controlWidth,
                 maxHeight = constraints.maxHeight)
             val attachment = children[0].measure(controlConstraints)
-            val editorWidth = (width - controlWidth * 2).coerceAtLeast(0)
+            val editorWidth = (width - controlWidth * (if (inlineExpand) 3 else 2)).coerceAtLeast(0)
             val editor = children[1].measure(Constraints(minWidth = editorWidth, maxWidth = editorWidth,
                 maxHeight = constraints.maxHeight))
             val send = children[2].measure(controlConstraints)
@@ -117,13 +122,13 @@ import androidx.compose.ui.unit.dp
                 maxWidth = (width - controlWidth).coerceAtLeast(0), maxHeight = constraints.maxHeight))
             val expand = children.getOrNull(4)?.measure(controlConstraints)
             val height = constraints.constrainHeight(if (recording) maxOf(send.height, recordingRow.height) else maxOf(attachment.height, editor.height, send.height,
-                if (expand == null) 0 else expand.height + send.height))
+                if (expand == null) 0 else if (inlineExpand) expand.height else expand.height + send.height))
             layout(width, height) {
                 attachment.placeRelative(0, height - attachment.height)
-                editor.placeRelative(controlWidth, (height - editor.height) / 2)
+                editor.placeRelative(controlWidth * (if (inlineExpand) 2 else 1), (height - editor.height) / 2)
                 send.placeRelative(width - controlWidth, height - send.height)
                 if (recording) recordingRow.placeRelative(0, (height - recordingRow.height) / 2)
-                expand?.placeRelative(width - controlWidth, 0)
+                expand?.placeRelative(if (inlineExpand) controlWidth else width - controlWidth, if (inlineExpand) height - expand.height else 0)
             }
         }
     }

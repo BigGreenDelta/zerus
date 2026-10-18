@@ -72,6 +72,8 @@ def main():
     install(ROOT / "tray/vendor/libvterm/LICENSE", licenses / "libvterm-LICENSE")
     install(ROOT / "tray/vendor/md4c/LICENSE.md", licenses / "md4c-LICENSE")
     install(ROOT / "tray/vendor/qrcodegen/LICENSE", licenses / "qrcodegen-LICENSE")
+    # hgs embeds the Codex greeting and idle-logo data (THIRD_PARTY_NOTICES.md).
+    install(ROOT / "docs/licenses/codex-LICENSE.txt", licenses / "codex-LICENSE.txt")
     if not (args.licenses / "inventory.json").is_file():
         parser.error("collect dependency license texts first")
     shutil.copytree(args.licenses, licenses / "rust", dirs_exist_ok=True)

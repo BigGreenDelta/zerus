@@ -1,5 +1,7 @@
 package app.zerus.mobile
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -152,5 +154,40 @@ class NotificationCatalogTest {
         assertTrue(NotificationCatalogParser.presenceAlerts(JSONObject().put("features", JSONArray(listOf("inspect_after", "presence_alerts")))))
         assertFalse(NotificationCatalogParser.presenceAlerts(JSONObject().put("features", JSONArray(listOf("inspect_after")))))
         assertFalse(NotificationCatalogParser.presenceAlerts(JSONObject()))
+    }
+
+    @Test fun optionalPresenceModeUsesOnlyTheAdvertisedCapability() = runBlocking {
+        assertEquals(true, notificationPresenceMode { JSONObject().put("features", JSONArray(listOf("presence_alerts"))) })
+        assertEquals(false, notificationPresenceMode { JSONObject().put("features", JSONArray(listOf("inspect_after"))) })
+        assertEquals(false, notificationPresenceMode { JSONObject() })
+    }
+
+    @Test fun missingCapabilitiesEndpointDisablesPresenceMode() = runBlocking {
+        var calls = 0
+        assertEquals(false, notificationPresenceMode { calls++; throw RelayException(404, "Synthetic endpoint absent") })
+        assertEquals(1, calls)
+    }
+
+    @Test fun optionalPresenceAuthenticationAndCancellationPropagate() {
+        for (status in listOf(401, 403)) {
+            val failure = RelayException(status, "Synthetic authentication refusal")
+            assertSame(failure, assertThrows(RelayException::class.java) {
+                runBlocking { notificationPresenceMode { throw failure } }
+            })
+        }
+        val cancelled = CancellationException("Synthetic cancellation")
+        assertSame(cancelled, assertThrows(CancellationException::class.java) {
+            runBlocking { notificationPresenceMode { throw cancelled } }
+        })
+    }
+
+    @Test fun otherOptionalPresenceFailuresPreserveTheLastKnownMode() = runBlocking {
+        val failures = listOf(400, 408, 409, 410, 429, 500, 502, 503, 504).map { RelayException(it, "Synthetic read failure") } +
+            listOf(java.io.IOException("Synthetic connection failure"), IllegalStateException("Synthetic invalid response"))
+        for (failure in failures) {
+            var calls = 0
+            assertNull(notificationPresenceMode { calls++; throw failure })
+            assertEquals(1, calls)
+        }
     }
 }

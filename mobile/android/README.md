@@ -324,7 +324,12 @@ When the computer advertises `mark_read`, reaching the newest reply (a fresh
 complete head read through on this phone), Mark read and Read all also send the
 exact run, conversation, reply and attention signature to the session's
 computer, which shares them with every desktop and phone. A reply or request read
-elsewhere is shown as read here. Review later stays on this phone.
+elsewhere can be adopted here for the exact verified selected reply. Automatic
+adoption for a nonselected conversation is deferred: fleet hints do not prove
+which canonical incoming prefix belongs to that shared reply. Its unread indicator
+may stay stale until a verified selection or explicit Mark read / Read all.
+Review later stays on this phone. This interim guard does not add native prefix
+proof or change explicit reading and Read all.
 Bounded background metadata probes can prepare canonical heads for live sessions
 with reported reply evidence, without opening their conversations or fetching
 full history. Previously unvisited sessions with unknown evidence are not
@@ -469,8 +474,10 @@ or sends automatically. The conversation must have a confirmed run and conversat
 identity before recording.
 The composer preview scrolls within a bounded area while the software keyboard is
 open, keeping the typed draft visible and editable after capture stops.
-With a narrow screen, large system text and an expanded editor, you may need to
-close the keyboard to reach the preview controls.
+The retained preview and expanded editor share that available height; when two
+stacked controls cannot fit, Collapse moves beside Attach with its 48 dp target.
+The 280 dp / 180% system-text native fixture reaches playback, seeking, Discard
+and Send with the IME open, preserving the editor object, text and selection.
 
 Video mode records up to 60 seconds and 10 MiB with CameraX, with an owned circular
 preview and a camera switch. The phone extracts mono 16 kHz speech audio on a
@@ -611,6 +618,25 @@ checksum. Dependencies come from Google Maven and Maven Central. The debug APK
 uses the local Android debug signing key; public distribution requires an
 owner-controlled release key. Generated APKs and local configuration are ignored.
 
+Third-party notices list every library of the published Firebase release build.
+After a dependency change, regenerate them from that configuration (a synthetic
+`google-services.json` like CI's is enough) and commit the changed assets:
+
+```sh
+./gradlew -q --init-script ../../scripts/android-resolved-artifacts.gradle -PzerusFirebase=true :app:zerusResolvedNotices
+python3 ../../scripts/android-notices.py
+```
+
+The init script only records the resolved `releaseRuntimeClasspath`, with the exact
+artifact files Gradle resolved, in `app/build/zerus-notices/resolved.json`; it
+changes no build setting. `--check` compares instead of writing; CI runs it after
+the unit tests and release lint. The script
+writes nothing when a shipped library has no artifact, when a library declares no
+recognized license or needs a license text that has not been reviewed into
+`app/src/main/assets/licenses`.
+`ThirdPartyNoticesTest` also fails locally when a declared library or platform
+version is missing from the generated list.
+
 For distribution and device performance validation, run
 `./gradlew assembleRelease lintRelease`. It produces
 `app/build/outputs/apk/release/app-release.apk` with R8 and resource shrinking,
@@ -629,7 +655,9 @@ The main toolbar places New session, Refresh and Settings in that order.
 Settings opens a full screen with Privacy, About Zerus and Updates, including
 before pairing. About shows the installed version and build beside its heading,
 wrapping onto the next line when needed, and a GitHub-marked `ufna/zerus` link.
-Offline bundled Third-party notices include selectable license text.
+Offline bundled Third-party notices include selectable license text, every
+shipped library by license and, in Firebase builds, the open source notices
+that Google Play services and Firebase embed; long texts open on request.
 Back returns to the same app content; notification and push controls stay in Machines.
 Anonymous checks follow the selected channel: Dev uses
 `https://zerus.dev/updates/v2/android/dev.json` with a fifteen-minute interval;
