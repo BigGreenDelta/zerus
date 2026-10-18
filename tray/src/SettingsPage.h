@@ -11,6 +11,7 @@
 #include "AutomaticApprovalSettings.h"
 #include "speech/SpeechSettings.h"
 #include "KeyboardSettings.h"
+#include "AnalyticsSettings.h"
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -35,7 +36,7 @@ public:
     explicit SettingsPage(const QString &executable,QWidget *parent=nullptr):QWidget(parent){
         setObjectName("settingsPage");auto *outer=new QVBoxLayout(this);outer->setContentsMargins(24,20,24,20);outer->setSpacing(20);
         auto *title=new QLabel(tr("Settings"));title->setObjectName("heading");outer->addWidget(title);
-        auto *body=new QHBoxLayout;body->setSpacing(24);nav=new QListWidget;nav->setObjectName("settingsSections");nav->setFixedWidth(180);nav->addItems({tr("Appearance"),tr("Sessions"),tr("Automatic recovery"),tr("Processes"),tr("Updates"),tr("Mobile connection"),tr("Files"),tr("Automatic approvals"),tr("Voice input"),tr("Keyboard"),tr("About")});body->addWidget(nav);
+        auto *body=new QHBoxLayout;body->setSpacing(24);nav=new QListWidget;nav->setObjectName("settingsSections");nav->setFixedWidth(180);nav->addItems({tr("Appearance"),tr("Sessions"),tr("Automatic recovery"),tr("Processes"),tr("Updates"),tr("Mobile connection"),tr("Files"),tr("Automatic approvals"),tr("Voice input"),tr("Keyboard"),tr("Private analytics"),tr("About")});body->addWidget(nav);
         pages=new QStackedWidget;pages->setMinimumWidth(0);body->addWidget(pages,1);outer->addLayout(body,1);
         auto makePage=[&](const QString &heading){auto *content=new QWidget;content->setMaximumWidth(850);auto *layout=new QVBoxLayout(content);layout->setContentsMargins(0,0,12,0);layout->setSpacing(18);auto *h=new QLabel(heading);h->setObjectName("heading");layout->addWidget(h);addPage(content);return layout;};
         auto *appearance=makePage(tr("Appearance"));auto *theme=new QComboBox;theme->setObjectName("workspaceTheme");theme->addItem(tr("Follow system appearance"),"system");theme->addItem(tr("Dark"),"dark");theme->addItem(tr("Light"),"light");theme->setCurrentIndex(qMax(0,theme->findData(QSettings().value("workspace/theme","system"))));appearance->addWidget(new QLabel(tr("Theme")));appearance->addWidget(theme);
@@ -122,6 +123,7 @@ public:
         approvalSection=pages->count();approvals=new AutomaticApprovalSettings(executable);addPage(approvals);
         speechSection=pages->count();speech=new SpeechSettings(executable);speech->setMaximumWidth(850);addPage(speech);
         keyboardSection=pages->count();keyboard=new KeyboardSettings(ShortcutRegistry::instance());keyboard->setMaximumWidth(850);addPage(keyboard);
+        analyticsSection=pages->count();analytics=new AnalyticsSettings(executable);addPage(analytics);
         aboutSection=pages->count();
         auto *about=makePage(tr("About"));auto *installedVersion=new QLabel(tr("Zerus %1").arg(UpdateController::installedVersion()));installedVersion->setObjectName("aboutZerusVersion");installedVersion->setTextInteractionFlags(Qt::TextSelectableByMouse);about->addWidget(installedVersion);
         cliVersion=new QLabel(tr("hgs CLI version unavailable"));cliVersion->setObjectName("aboutHgsVersion");
@@ -134,9 +136,9 @@ public:
         connect(repository,&QPushButton::clicked,this,[]{QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/ufna/zerus")));});
         about->addWidget(repository,0,Qt::AlignLeft);about->addStretch();
         connect(nav,&QListWidget::currentRowChanged,pages,&QStackedWidget::setCurrentIndex);nav->setCurrentRow(0);
-        connect(nav,&QListWidget::currentRowChanged,this,[this](int row){if(row==aboutSection)refreshCliVersion();if(row==speechSection)speech->refresh();if(row==6)files->refresh();if(row==approvalSection)approvals->refresh();});
+        connect(nav,&QListWidget::currentRowChanged,this,[this](int row){if(row==aboutSection)refreshCliVersion();if(row==speechSection)speech->refresh();if(row==6)files->refresh();if(row==approvalSection)approvals->refresh();if(row==analyticsSection)analytics->refresh();});
     }
-    void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);}
+    void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);analytics->setPeers(peers);}
     // A control-only computer keeps no recovery policy of its own.
     void setLocalSessions(bool enabled,bool offered=false){sync->setLocalSessions(enabled);sync->setLocalSessionsOffered(offered);}
     // Neither a control-only computer nor Windows is a mobile gateway: the Mobile
@@ -150,7 +152,7 @@ public:
     void openKeyboard(){nav->setCurrentRow(keyboardSection);}
     void openRecovery(){nav->setCurrentRow(2);sync->refresh();}
     void setWindowLayerState(bool on,bool enabled,const QString &hint){const QSignalBlocker block(onTop);onTop->setChecked(on);onTop->setEnabled(enabled);onTopHint->setText(hint);}
-    void refresh(){sync->refresh();mobileDelivery->refresh();if(nav->currentRow()==aboutSection)refreshCliVersion();if(nav->currentRow()==speechSection)speech->refresh();}
+    void refresh(){sync->refresh();mobileDelivery->refresh();if(nav->currentRow()==aboutSection)refreshCliVersion();if(nav->currentRow()==speechSection)speech->refresh();if(nav->currentRow()==analyticsSection)analytics->refresh();}
     void setSwarmSnapshot(const QJsonObject &snapshot){mobileDelivery->setSwarmSnapshot(snapshot);}
     // Activity's column edges and menu change the same preference.
     void syncActivityWidth(){
@@ -173,7 +175,8 @@ private:
     DownloadCacheSettings *files;
     AutomaticApprovalSettings *approvals;
     KeyboardSettings *keyboard;
-    int speechSection=-1,keyboardSection=-1,aboutSection=-1,approvalSection=-1;
+    AnalyticsSettings *analytics;
+    int speechSection=-1,keyboardSection=-1,aboutSection=-1,approvalSection=-1,analyticsSection=-1;
     // An icon button restoring a slider's default, shown only after a change.
     // It keeps its space while hidden, so the rows below do not move. Focus
     // moves to the slider first: a focused button that hides itself would

@@ -32,6 +32,8 @@ private slots:
     void cleanup() { ProcessRunner::setLaunchObserver({}); }
     void launchesOnWorkerAndReportsOnOwnerThread();
     void capturesOutputErrorAndExitCode();
+    void capsCombinedOutputWhileDraining();
+    void outputCapKillsOnlyTheDirectChild();
     void writesInputThenClosesStdin();
     void timeoutKillsChildAndReportsOnce();
     void missingProgramFailsToStart();
@@ -108,6 +110,59 @@ QList<int> descriptors(const QByteArray &listing)
     QList<int> open; for (const auto &name : listing.simplified().split(' ')) if (!name.isEmpty()) open << name.toInt();
     return open;
 }
+#endif
+}
+
+void TestProcessRunner::capsCombinedOutputWhileDraining()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid()); const auto path = dir.filePath("flood");
+    QVERIFY(FakeCli::install(path,R"PY(#!/usr/bin/env python3
+import sys
+for n in range(256):
+    sys.stdout.buffer.write(b'o'*4096);sys.stdout.flush()
+    sys.stderr.buffer.write(b'e'*4096);sys.stderr.flush()
+)PY"));
+    ProcessRunner::Request request; request.program=FakeCli::program(path);request.input=QByteArray();request.timeoutMs=10000;request.maximumOutputBytes=8192;
+    const auto bounded=runAndWait(request);
+    QCOMPARE(bounded.standardOutput.size()+bounded.standardError.size(),8192);
+    QCOMPARE(bounded.outcome,ProcessRunner::Result::OutputLimitExceeded);
+    QVERIFY(bounded.outputLimitExceeded);
+    // The opt-in cap must not change existing callers or falsely reject output
+    // exactly at the combined boundary.
+    auto exact=child(QStringLiteral("printf hello; printf test >&2"),{"out","hello","err","test"});exact.maximumOutputBytes=9;
+    const auto small=runAndWait(exact);QVERIFY(!small.outputLimitExceeded);QCOMPARE(small.standardOutput,QByteArray("hello"));QCOMPARE(small.standardError,QByteArray("test"));
+    request.maximumOutputBytes=0;const auto original=runAndWait(request);QVERIFY(!original.outputLimitExceeded);
+    QCOMPARE(original.standardOutput.size()+original.standardError.size(),2*1024*1024);
+}
+
+void TestProcessRunner::outputCapKillsOnlyTheDirectChild()
+{
+#ifdef Q_OS_WIN
+    QSKIP("The Windows synthetic Python shim deliberately owns a kill-on-close Job Object; it cannot prove independent descendant survival. The native runner output-cap test still runs.");
+#else
+    QTemporaryDir dir;QVERIFY(dir.isValid());const auto path=dir.filePath("overflow");
+    QVERIFY(FakeCli::install(path,R"PY(#!/usr/bin/env python3
+from pathlib import Path
+import os, subprocess, sys, time
+p=Path(__file__)
+if len(sys.argv)>1:
+    Path(str(p)+'.grandchild').write_text(str(os.getpid()))
+    time.sleep(0.5)
+    Path(str(p)+'.survived').write_text('not signalled')
+else:
+    subprocess.Popen([sys.executable,__file__,'grandchild'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    while not Path(str(p)+'.grandchild').exists():time.sleep(0.01)
+    Path(str(p)+'.direct').write_text(str(os.getpid()))
+    while True:os.write(1,b'x'*65536)
+)PY"));
+    ProcessRunner::Request request;request.program=FakeCli::program(path);request.input=QByteArray();request.timeoutMs=10000;request.maximumOutputBytes=8192;
+    QObject owner;int count=0;ProcessRunner::Result result;
+    ProcessRunner::run(request,&owner,[&](const auto &reply){++count;result=reply;});
+    QTRY_COMPARE_WITH_TIMEOUT(count,1,5000);QCOMPARE(result.outcome,ProcessRunner::Result::OutputLimitExceeded);
+    const auto direct=readPid(path+".direct");QVERIFY(direct>0);
+    QTRY_VERIFY_WITH_TIMEOUT(!alive(direct),5000);
+    QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(path+".survived"),5000);
+    QTest::qWait(50);QCOMPARE(count,1);
 #endif
 }
 

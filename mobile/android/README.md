@@ -842,6 +842,39 @@ identity in private metadata. Do not publish mapping files or configuration.
 
 ## Local validation
 
+Settings > Computer analytics reads private, content-free agent summaries through
+the capability-gated `analytics_read` operation and the existing authorized
+computer route. It requests 7, 30 or 90 inclusive UTC days; each reply is limited
+to 1 MiB and 1,080 daily buckets. The page retains at most 32 computers and tries
+at most three configured routes per computer, with two reads in flight. Extra
+computers are explicitly excluded. Reads and parsing run away from the UI thread;
+daily rows use a lazy list. Leaving the page cancels pending reads. The bounded
+cache is memory-only and disappears with the application process.
+
+Stable computer UUIDs deduplicate multiple gateway routes. Newer source snapshots
+replace earlier revisions, including an epoch reset after purge; repeated reads
+never add the same totals. Each computer shows freshness, coverage gaps,
+unsupported measures and collection state. Offline or rejected reads retain
+explicitly marked last-known data for the same range. Unknown measures stay
+unknown. Main and child turns have separate filters. Known work/wait durations
+are distinct from elapsed session age, and token counts do not imply costs.
+Collection enablement, retention and purge remain local computer controls.
+
+Voice statistics use the existing `speech_stats` read separately, filtered to the
+same UTC interval and replaced once per processing computer. Profile identifiers
+are discarded. Accepted audio minutes, job outcomes and recorded queue/processing
+totals stay separate from agent turns; the phone does not count a recording a
+second time. The existing speech contract provides neither full coverage nor
+latency percentiles, so the page does not claim either.
+
+Review diagnostics builds a separate allowlisted report of the Android build
+number, date range, fixed read states and coverage codes. It excludes machine
+names/IDs, connection addresses, account details, source epochs, aggregate usage
+values, prompts, code, paths, recordings and transcripts. The user must review
+the exact report and tap Share reviewed report before Android's share chooser
+opens. Nothing is automatically written or uploaded, and these features do not
+change the independent Firebase Usage analytics or Crash reports controls.
+
 Unit tests cover exact destination identity, interrupted-delivery recovery,
 HTTPS validation, one mutation attempt on a dropped connection, read-only receipt
 polling, bounded responses, native user/assistant message merging, attention phases,

@@ -513,8 +513,9 @@ void TestSessionsWindow::nativeSettingsNavigationOnExplicitSpeechHost()
     SettingsPage page(executable); page.setPeers({host}); page.show();
     auto *sections=page.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
     QCOMPARE(sections->item(sections->count()-1)->text(),"About");
-    QCOMPARE(sections->item(sections->count()-2)->text(),"Keyboard");
-    const int voice=sections->count()-3; QCOMPARE(sections->item(voice)->text(),"Voice input");
+    QCOMPARE(sections->item(sections->count()-2)->text(),"Private analytics");
+    QCOMPARE(sections->item(sections->count()-3)->text(),"Keyboard");
+    const int voice=sections->count()-4; QCOMPARE(sections->item(voice)->text(),"Voice input");
     sections->setCurrentRow(sections->count()-1);
     auto *version=page.findChild<QLabel *>("aboutHgsVersion"); QVERIFY(version);
     QTRY_VERIFY_WITH_TIMEOUT(version->text().startsWith("hgs CLI 1."),10000);
@@ -10200,8 +10201,9 @@ void TestSessionsWindow::fileCacheSettingsNavigation(){
     auto *sections = window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
     QCOMPARE(sections->item(6)->text(), QString("Files"));
     QCOMPARE(sections->item(sections->count()-1)->text(), QString("About"));
-    QCOMPARE(sections->item(sections->count()-2)->text(), QString("Keyboard"));
-    QCOMPARE(sections->item(sections->count()-3)->text(), QString("Voice input"));
+    QCOMPARE(sections->item(sections->count()-2)->text(), QString("Private analytics"));
+    QCOMPARE(sections->item(sections->count()-3)->text(), QString("Keyboard"));
+    QCOMPARE(sections->item(sections->count()-4)->text(), QString("Voice input"));
     sections->setCurrentRow(6);
     auto *files = window.findChild<DownloadCacheSettings *>("downloadCacheSettings"); QVERIFY(files); QVERIFY(files->isVisible());
     QCOMPARE(files->findChild<QComboBox *>("downloadCachePolicy")->currentText(), QString("Never clear"));

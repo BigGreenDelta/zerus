@@ -554,8 +554,10 @@ Clients recover interrupted requests by the original message UUID without blindl
 uploading or sending again. Hiding the composer stops unsubmitted capture.
 See [persistent voice messages](voice-messages.md) for storage and delivery details.
 Voice settings also show the selected computer's
-90-day counters; [analytics](analytics.md) documents their meaning and the planned
-cross-computer agent statistics.
+90-day counters. Desktop Settings > Private analytics and Android Settings > Computer analytics
+show bounded per-computer and fleet summaries with explicit coverage. Agent collection
+starts disabled; local desktop controls distinguish enablement, retention and purge.
+See [analytics](analytics.md) for the private storage and read contracts.
 
 If microphone access is denied, Voice shows a permission explanation with
 **Open microphone settings** on macOS and Windows. On macOS this opens
