@@ -890,14 +890,21 @@ fn receipt(job: &Value) -> Result<Option<Value>> {
     }
     Ok(Some(value))
 }
-/// A definite refusal, stored or found while reconciling, is an answer for
-/// settle, not an identity error.
+/// A definite refusal or explicit native delivery uncertainty is an answer
+/// for settle. Unknown failures and identity errors still propagate.
 fn reconciled_opencode_receipt(
     value: &mut Value,
     reconcile: impl FnOnce(&mut Value) -> Result<bool>,
 ) -> Result<()> {
     if let Err(error) = reconcile(value) {
-        if value["status"] != "refused" {
+        // These are the pinned native adapter's uncertainty classifications,
+        // not arbitrary errors containing "uncertain". A pending receipt is
+        // retained after an ambiguous POST/DELETE; it is never retry authority.
+        let uncertain = matches!(string(value, "status"), "pending" | "uncertain")
+            && matches!(error.as_str(),
+                "Native delivery state is uncertain"
+                | "Delivery uncertain; this request will not be replayed. Inspect native history before creating a new request");
+        if value["status"] != "refused" && !uncertain {
             return Err(error);
         }
     }
@@ -1594,6 +1601,42 @@ mod tests {
         );
         let mut submitted = json!({"status":"submitted"});
         assert!(reconciled_opencode_receipt(&mut submitted, |_| Ok(true)).is_ok());
+    }
+    #[test]
+    fn explicit_opencode_uncertainty_reaches_settle_without_becoming_refusal_proof() {
+        for status in ["pending", "uncertain"] {
+            for error in ["Native delivery state is uncertain", "Delivery uncertain; this request will not be replayed. Inspect native history before creating a new request"] {
+                let mut native = json!({"status":status,"submitted_at":2.});
+                assert!(reconciled_opencode_receipt(&mut native, |_| Err(error.into())).is_ok());
+                assert_eq!(native["status"],status);
+                let mut voice=job();voice["agent"]=json!("opencode");
+                settle(&mut voice,Some(&native),true);
+                assert_eq!(voice["state"],"uncertain");
+                assert_eq!(voice["error_code"],"delivery_uncertain");
+                assert_eq!(voice["native_receipt_status"],status);
+                assert_ne!(voice["error_code"],"delivery_refused");
+                assert!(voice["native_binding"].is_null());
+            }
+            for error in [
+                "Native receipt identity changed",
+                "Native request UUID conflicts with this voice message",
+                "unreachable",
+            ] {
+                let mut native = json!({"status":status});
+                assert_eq!(
+                    reconciled_opencode_receipt(&mut native, |_| Err(error.into())).unwrap_err(),
+                    error
+                );
+                assert_eq!(native["status"], status);
+            }
+        }
+        for status in ["submitted", "unknown"] {
+            let mut native = json!({"status":status});
+            assert!(reconciled_opencode_receipt(&mut native, |_| Err(
+                "Native delivery state is uncertain".into()
+            ))
+            .is_err());
+        }
     }
     #[test]
     fn a_submitted_opencode_voice_job_is_bound_to_its_native_message() {
