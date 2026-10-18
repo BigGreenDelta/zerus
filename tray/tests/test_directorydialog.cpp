@@ -1,5 +1,7 @@
 #include <QtTest>
 #include <QAction>
+#include <QCheckBox>
+#include <QClipboard>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
@@ -10,8 +12,10 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QRegularExpression>
+#include <QScreen>
+#include <QStyleOptionFrame>
 #include <QTimer>
-#include <QToolButton>
 #include <QUuid>
 #include "DirectoryDialog.h"
 #include "FakeCli.h"
@@ -21,6 +25,60 @@ class TestDirectoryDialog : public QObject {
     QTemporaryDir m_fixture;
     QFont m_originalFont;
     QString program() const { return FakeCli::program(m_fixture.filePath("hgs")); }
+    QString workspaceStyle(bool dark, double fontScale) const {
+        // Use the actual ancestor rules, including item padding. A reduced
+        // imitation can fit the outer widgets while clipping all editor ink.
+        QFile source(QFINDTESTDATA("../src/SessionsWindow.cpp"));
+        if (!source.open(QIODevice::ReadOnly)) return {};
+        const auto contents = QString::fromUtf8(source.readAll());
+        const QString begin = "setStyleSheet(QString(R\"(";
+        const int start = contents.indexOf(begin);
+        const int end = contents.indexOf(")\").arg(bg, m_fg", start);
+        if (start < 0 || end < 0) return {};
+        auto css = contents.mid(start + begin.size(), end - start - begin.size());
+        const QStringList colors = dark
+            ? QStringList{"#161b21", "#e8edf4", "#1c2229", "#333c47", "#8bdfc0", "#a2adbc", "#2b3540", "#12372b", "#aae9d2", "#233d35", "#151b21", "#f4ab9b"}
+            : QStringList{"#f5f7f9", "#1a2733", "#ffffff", "#dce2e8", "#167357", "#627082", "#edf2f5", "#ffffff", "#115d46", "#e0f0e9", "#f3f6f8", "#a13224"};
+        for (int i = colors.size(); i > 0; --i) css.replace('%' + QString::number(i), colors[i - 1]);
+        // ContentScale deliberately leaves chooser chrome alone. Also exercise
+        // enlarged system text without changing control padding or geometry.
+        const QRegularExpression sizes("font-size:(\\d+)px");
+        const auto original = css; qsizetype copied = 0; QString scaled;
+        for (auto matches = sizes.globalMatch(original); matches.hasNext();) {
+            const auto match = matches.next();
+            scaled += original.mid(copied, match.capturedStart() - copied)
+                + "font-size:" + QString::number(qRound(match.captured(1).toInt() * fontScale)) + "px";
+            copied = match.capturedEnd();
+        }
+        return scaled + original.mid(copied);
+    }
+    QRect editorContents(QLineEdit *editor) const {
+        QStyleOptionFrame option; option.initFrom(editor); option.rect = editor->rect();
+        option.lineWidth = editor->hasFrame() ? editor->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, &option, editor) : 0;
+        auto rect = editor->style()->subElementRect(QStyle::SE_LineEditContents, &option, editor);
+        return rect.marginsRemoved(editor->textMargins());
+    }
+    int editorInk(QLineEdit *editor) const {
+        const auto image = editor->grab().toImage();
+        const qreal dpr = image.devicePixelRatio();
+        const auto contents = editorContents(editor);
+        const QRect pixels(qRound(contents.x() * dpr), qRound(contents.y() * dpr),
+                           qRound(contents.width() * dpr), qRound(contents.height() * dpr));
+        const auto text = editor->palette().color(QPalette::Text);
+        int ink = 0;
+        for (int y = qMax(0, pixels.top()); y <= qMin(image.height() - 1, pixels.bottom()); ++y)
+            for (int x = qMax(0, pixels.left()); x <= qMin(image.width() - 1, pixels.right()); ++x) {
+                const auto color = image.pixelColor(x, y);
+                if (qMax(qAbs(color.red() - text.red()), qMax(qAbs(color.green() - text.green()), qAbs(color.blue() - text.blue()))) < 60) ++ink;
+            }
+        return qRound(ink / (dpr * dpr));
+    }
+    void captureEditor(DirectoryDialog &browser, const QString &stage) const {
+        const auto output = QString::fromLocal8Bit(qgetenv("ZERUS_DIRECTORY_QA_DIR"));
+        if (output.isEmpty()) return;
+        QVERIFY(QDir().mkpath(output));
+        QVERIFY(browser.grab().save(output + "/inline-" + QTest::currentDataTag() + '-' + stage + ".png"));
+    }
     void flag(const QString &name, bool enabled = true) {
         QFile file(m_fixture.filePath(name));
         if (enabled) { QVERIFY(file.open(QIODevice::WriteOnly)); }
@@ -260,8 +318,98 @@ sys.exit(1)
         QVERIFY(browser.findChild<QPushButton *>("chooseFolder")->isEnabled());
         newFolder->click(); browser.findChild<QPushButton *>("folderGo")->click();
         QTRY_VERIFY(newFolder->isEnabled()); QCOMPARE(list->count(), 1); QCOMPARE(mutations(), 0);
-        newFolder->click(); browser.findChild<QToolButton *>("cancelInlineFolder")->click();
+        newFolder->click(); browser.findChild<QPushButton *>("cancelInlineFolder")->click();
         QCOMPARE(list->count(), 1); QCOMPARE(mutations(), 0);
+    }
+    void inlineNameHasVisibleGlyphsAndKeyboardInput_data() {
+        QTest::addColumn<bool>("dark"); QTest::addColumn<double>("fontScale");
+        for (bool dark : {false, true}) for (double scale : {1.0, 2.0})
+            QTest::newRow(qPrintable(QString("%1-font%2").arg(dark ? "dark" : "light").arg(scale))) << dark << scale;
+    }
+    void inlineNameHasVisibleGlyphsAndKeyboardInput() {
+        QFETCH(bool, dark); QFETCH(double, fontScale);
+        QWidget workspace; const auto css = workspaceStyle(dark, fontScale); QVERIFY(!css.isEmpty());
+        workspace.setStyleSheet(css);
+        DirectoryDialog browser(program(), "arch", "~", &workspace); browser.resize(500, 540);
+        browser.show(); browser.activateWindow(); QApplication::setActiveWindow(&browser);
+        auto *open = browser.findChild<QPushButton *>("newFolder"); QTRY_VERIFY(open->isEnabled());
+        const auto minimum = browser.minimumSize();
+        auto *list = browser.findChild<QListWidget *>("folderList"); const int listMinimum = list->minimumHeight();
+        open->click();
+        auto *name = browser.findChild<QLineEdit *>("inlineFolderName"); QVERIFY(name);
+        QTRY_VERIFY(name->hasFocus()); QTest::keyClicks(name, "Wgj9-folder");
+        QCOMPARE(name->text(), QString("Wgj9-folder"));
+        captureEditor(browser, "typed");
+        const auto contents = editorContents(name);
+        QVERIFY2(contents.height() >= name->fontMetrics().height(), qPrintable(QString("Editor %1, contents %2, font height %3, hint %4")
+            .arg(name->height()).arg(contents.height()).arg(name->fontMetrics().height()).arg(name->sizeHint().height())));
+        QVERIFY2(editorInk(name) > name->fontMetrics().height() * 3, "Typed glyphs must paint inside the real styled editor, beyond a cursor alone");
+        auto *create = browser.findChild<QPushButton *>("createInlineFolder");
+        auto *cancel = browser.findChild<QPushButton *>("cancelInlineFolder"); QVERIFY(cancel);
+        for (auto *control : QList<QWidget *>{name, create, cancel}) {
+            const QRect rect(control->mapTo(list->viewport(), QPoint()), control->size());
+            QVERIFY2(list->viewport()->rect().contains(rect), "The entire styled input and its actions must remain visible in the list viewport");
+        }
+        QVERIFY(!name->geometry().intersects(create->geometry()));
+        QVERIFY(!create->geometry().intersects(cancel->geometry()));
+        const QRect listRect(list->mapTo(&browser, QPoint()), list->size());
+        for (auto *control : QList<QWidget *>{open, browser.findChild<QPushButton *>("newFolderOptions"),
+                                             browser.findChild<QCheckBox *>(), browser.findChild<QPushButton *>("chooseFolder")}) {
+            const QRect rect(control->mapTo(&browser, QPoint()), control->size());
+            QVERIFY(browser.rect().contains(rect)); QVERIFY(!listRect.intersects(rect));
+            QVERIFY(control->width() >= control->minimumSizeHint().width());
+        }
+        QVERIFY(browser.width() <= browser.screen()->availableGeometry().width());
+        QVERIFY(browser.height() <= browser.screen()->availableGeometry().height());
+        QTest::keyClick(name, Qt::Key_Backspace); QTest::keyClicks(name, "x");
+        QCOMPARE(name->text(), QString("Wgj9-foldex"));
+        QTest::keyClick(name, Qt::Key_Escape); QVERIFY(browser.isVisible()); QCOMPARE(mutations(), 0);
+        QCOMPARE(browser.minimumSize(), minimum); QCOMPARE(list->minimumHeight(), listMinimum);
+    }
+    void inlinePasteAndEnterKeepExactName_data() {
+        QTest::addColumn<QString>("host");
+        QTest::newRow("local-fake") << QString(); QTest::newRow("remote-fake") << QString("arch");
+    }
+    void inlinePasteAndEnterKeepExactName() {
+        // The offscreen clipboard belongs only to this private test process.
+        // Do not read or overwrite a person's Cocoa/X11/Wayland clipboard.
+        if (QGuiApplication::platformName() != "offscreen") QSKIP("Private clipboard interaction uses the offscreen platform only");
+        QFETCH(QString, host);
+        QWidget workspace; workspace.setStyleSheet(workspaceStyle(true, 1.0));
+        DirectoryDialog browser(program(), host, "~", &workspace); browser.show(); browser.activateWindow(); QApplication::setActiveWindow(&browser);
+        auto *open = browser.findChild<QPushButton *>("newFolder"); QTRY_VERIFY(open->isEnabled()); open->click();
+        auto *name = browser.findChild<QLineEdit *>("inlineFolderName"); QVERIFY(name); QTRY_VERIFY(name->hasFocus());
+        const auto leaf = QString::fromUtf8("новая ' $(literal)");
+        QApplication::clipboard()->setText(leaf); QTest::keySequence(name, QKeySequence(QKeySequence::Paste));
+        QCOMPARE(name->text(), leaf); QVERIFY(editorInk(name) > name->fontMetrics().height() * 3);
+        QTest::keyClick(name, Qt::Key_Return);
+        QTRY_COMPARE(browser.directory(), "/fixture/projects/" + leaf); QCOMPARE(mutations(), 1); QVERIFY(browser.isVisible());
+        for (const auto &call : calls()) if (call.toObject()["args"].toArray().contains("--create")) {
+            QCOMPARE(call.toObject()["host"].toString(), host);
+            QCOMPARE(call.toObject()["args"].toArray().at(2).toString(), "/fixture/projects/" + leaf);
+        }
+        QApplication::clipboard()->clear();
+    }
+    void styledCreationControlsPreserveTheAlternateDialogAndCancel() {
+        QWidget workspace; workspace.setStyleSheet(workspaceStyle(true, 1.0));
+        DirectoryDialog browser(program(), "arch", "~", &workspace); browser.show();
+        auto *open = browser.findChild<QPushButton *>("newFolder"); QTRY_VERIFY(open->isEnabled());
+        auto *alternate = browser.findChild<QPushButton *>("newFolderOptions"); QVERIFY(alternate);
+        QCOMPARE(alternate->accessibleName(), QString("New folder dialog…")); QVERIFY(!alternate->text().isEmpty());
+        QTest::mouseClick(open, Qt::LeftButton);
+        auto *name = browser.findChild<QLineEdit *>("inlineFolderName"); QVERIFY(name);
+        QTest::keyClicks(name, "kept-name");
+        bool checked = false;
+        QTimer::singleShot(0, &browser, [&] {
+            auto *dialog = browser.findChild<QDialog *>("createFolderDialog"); QVERIFY(dialog);
+            QCOMPARE(dialog->findChild<QLineEdit *>("newFolderName")->text(), QString("kept-name"));
+            checked = true; dialog->reject();
+        });
+        QTest::mouseClick(alternate, Qt::LeftButton); QVERIFY(checked); QCOMPARE(mutations(), 0);
+        QTest::mouseClick(open, Qt::LeftButton);
+        auto *cancel = browser.findChild<QPushButton *>("cancelInlineFolder"); QVERIFY(cancel);
+        QTest::mouseClick(cancel, Qt::LeftButton);
+        QTRY_VERIFY(!browser.findChild<QLineEdit *>("inlineFolderName")); QCOMPARE(mutations(), 0);
     }
     void chooserAndCreateFormKeepControlsInside_data() {
         QTest::addColumn<int>("width"); QTest::addColumn<double>("fontScale");
