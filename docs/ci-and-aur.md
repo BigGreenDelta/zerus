@@ -680,13 +680,16 @@ accounts in private configuration.
    reachable from the PC, for example through a loopback-only tunnel.
 2. **Isolation on the PC.** Use the executables from the extracted zip and point
    `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `HGS_CONFIG_DIR`
-   and `HGS_STATE_DIR` at a scratch folder. That isolates `hgs.exe` and the desktop
-   app's `tray.conf`, not the rest of `hgs-tray.exe`: Qt finds its settings,
-   drafts and single-instance lock through the Windows known folders, which ignore
-   `APPDATA` and `LOCALAPPDATA`, and names its single-instance pipe after the
-   account's profile folder, whatever `USERPROFILE` says. No other Zerus tray may
-   run during the desktop part (a second tray only activates the running one);
-   otherwise run that part under a separate Windows test account. Before changing
+   and `HGS_STATE_DIR` at a scratch folder. Verify the resolved CLI state, desktop
+   `tray.conf`, Qt settings, drafts, single-instance lock and pipe identities before
+   launching the desktop. In the Windows 0.45.0 qualification, a per-process
+   `USERPROFILE` override placed Qt settings and the lock below the scratch profile
+   while the corresponding real files stayed unchanged. That observation does not
+   establish full-account isolation or how every Windows/Qt build resolves known
+   folders; verify the actual paths instead of assuming environment overrides are
+   always honored or ignored. Use a separate Windows test account if those desktop
+   identities cannot be verified private; an unisolated second tray may only
+   activate the running one. Before changing
    the variables, back up `hgdev\hgs-tray.ini` and the `hgs-tray.ini.drafts`
    folder next to it in the real Roaming AppData folder, and `hgdev\hgs-tray` in
    the real Local AppData folder, when they exist

@@ -211,11 +211,17 @@ warns before launching into a host that runs in another Windows session (for exa
 one started over SSH; implemented 2026-10-14): when the local machine is Windows
 (D16), its `local_host` runs and reports a `windows_session` other than the GUI's
 own (`ProcessIdToSessionId`), New session, Resume, Restore, Resume all, Start fresh,
-starting a stopped session to send, Fork and opening a saved session's terminal on
-this computer ask "Launch anyway?" first. Cancel leaves drafts and dialogs as they
-were. Remote machines, Linux and macOS GUIs, no running host (the launch starts one
+starting a stopped session to send and Fork on this computer ask "Launch anyway?"
+first. Cancel preserves drafts and dialogs. Remote machines, Linux and macOS GUIs,
+no running host (the launch starts one
 in this session) and the same session never ask (`tray/src/LocalSessionHost.h`,
 `LocalLaunchWarning.h`). Elevated SSH testing uses an isolated `HGS_STATE_DIR`.
+
+Terminal attachment requires a supported adapter's verified live pane and running
+process. A saved paused or stopped binding without that pane, or an archived
+binding, cannot be opened directly in Terminal. Use the explicit Resume or Restore
+action first; these actions retain the confirmation above. Opening Terminal never
+resumes or restores a saved session implicitly.
 
 **Security.** The first instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE` and
 `PIPE_REJECT_REMOTE_CLIENTS` and a protected DACL granting access only to the user SID.
