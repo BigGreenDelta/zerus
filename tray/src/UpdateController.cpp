@@ -19,11 +19,17 @@
 #include <QXmlStreamReader>
 #include <cmath>
 #include <memory>
+#ifdef Q_OS_MACOS
+#include <mach/mach.h>
+#include <mach/thread_info.h>
+#endif
 
 namespace {
 const QStringList packages={"zerus","zerus-git","zerus-ade-bin","zerus-ade-nightly-bin"};
 const QStringList casks={"zerus","zerus@nightly","zerus@dev"};
 int g_testCommandTimeoutMs=0; // 0: the 5 s deadline
+int g_testMaxPriority=-1; // -1: this process
+QString g_testService;
 const char *stableVersion="\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z";
 const char *nightlyVersion="\\A[0-9]+\\.[0-9]+\\.[0-9]+\\.r[0-9]+\\.g[a-f0-9]{7}\\.n([0-9]{1,15})\\z";
 const char *devVersion="\\A[0-9]+\\.[0-9]+\\.[0-9]+-dev\\.([1-9][0-9]{0,14})\\z";
@@ -444,6 +450,9 @@ UpdateController::UpdateController(QObject *parent,QString executable,std::funct
     m_executable=executable;
 #ifdef Q_OS_MACOS
     m_startedRelease=bundleRelease(QFileInfo(executable).absoluteDir().absoluteFilePath("../Info.plist"));
+    // Once, on the main thread at startup: App Nap may lower a hidden app's threads later.
+    m_loginItemDeprioritized=g_testMaxPriority>=0?launchedDeprioritized(g_testMaxPriority,g_testService)
+        :launchedDeprioritized(threadMaxPriority(),qEnvironmentVariable("XPC_SERVICE_NAME"));
 #endif
     QTimer::singleShot(0,this,[this,executable]{detectInstallation(executable);refreshBundleState();});
     connect(this,&UpdateController::changed,this,[this]{if(m_startCheck&&m_installation.kind!="checking"){m_startCheck=false;checkAutomatically();}});
@@ -464,7 +473,7 @@ void UpdateController::checkAutomatically(){
 }
 QString UpdateController::lastChecked() const{return m_lastSuccess>0?QLocale().toString(QDateTime::fromSecsSinceEpoch(m_lastSuccess).toLocalTime(),QLocale::ShortFormat):tr("Never");}
 QString UpdateController::updateToken() const{return m_available&&m_feed.valid?(channel()=="dev"?"zerus-update:v2:":"zerus-update:v1:")+channel()+":"+QString::number(m_feed.releaseId):QString();}
-void UpdateController::run(const QString &program,const QStringList &arguments,std::function<void(bool,QString)> done){
+void UpdateController::run(const QString &program,const QStringList &arguments,std::function<void(bool,QString)> done,int timeoutMs,bool withErrors){
     auto *process=new QProcess(this);auto *deadline=new QTimer(process);deadline->setSingleShot(true);auto data=std::make_shared<QByteArray>();auto failed=std::make_shared<bool>(false);auto settled=std::make_shared<bool>(false);
     auto finish=[process,done,data,failed,settled](bool okay){if(*settled)return;*settled=true;done(okay&&!*failed,QString::fromUtf8(*data).trimmed());process->deleteLater();};
     connect(process,&QProcess::readyReadStandardOutput,this,[process,data,failed]{auto bytes=process->readAllStandardOutput();if(data->size()+bytes.size()>32768){*failed=true;process->kill();}else *data+=bytes;});
@@ -473,9 +482,40 @@ void UpdateController::run(const QString &program,const QStringList &arguments,s
     connect(process,&QProcess::errorOccurred,this,[finish](QProcess::ProcessError error){if(error==QProcess::FailedToStart)finish(false);});
     connect(deadline,&QTimer::timeout,this,[process,failed]{*failed=true;process->kill();});
     // Like every child of the GUI, pacman and vercmp inherit only stdio (ChildProcess.h).
-    process->setProgram(program);process->setArguments(arguments);ChildProcess::inheritStdioOnly(*process);process->start();deadline->start(g_testCommandTimeoutMs>0?g_testCommandTimeoutMs:5000);
+    if(withErrors)process->setProcessChannelMode(QProcess::MergedChannels);
+    process->setProgram(program);process->setArguments(arguments);ChildProcess::inheritStdioOnly(*process);process->start();deadline->start(g_testCommandTimeoutMs>0?g_testCommandTimeoutMs:timeoutMs>0?timeoutMs:5000);
 }
 void UpdateController::setCommandTimeoutForTests(int ms){g_testCommandTimeoutMs=ms;}
+bool UpdateController::launchedDeprioritized(int maxPriority,const QString &service){
+    // Ordinary threads run at 31; only a clamped job cannot reach it.
+    return service==QLatin1String("com.hgdev.hgs-tray")&&maxPriority>=0&&maxPriority<31;
+}
+int UpdateController::threadMaxPriority(){
+#ifdef Q_OS_MACOS
+    thread_extended_info_data_t info;mach_msg_type_number_t count=THREAD_EXTENDED_INFO_COUNT;
+    const mach_port_t thread=mach_thread_self();
+    const kern_return_t result=thread_info(thread,THREAD_EXTENDED_INFO,reinterpret_cast<thread_info_t>(&info),&count);
+    mach_port_deallocate(mach_task_self(),thread);
+    return result==KERN_SUCCESS?info.pth_maxpriority:-1;
+#else
+    return -1;
+#endif
+}
+void UpdateController::setLaunchForTests(int maxPriority,const QString &service){g_testMaxPriority=maxPriority;g_testService=service;}
+QString UpdateController::loginItemSetup() const{
+    QDir contents=QFileInfo(m_executable).absoluteDir();
+    if(contents.dirName()!="MacOS"||!contents.cdUp())return {};
+    const QString setup=contents.absoluteFilePath("Resources/bin/zerus-setup");
+    return QFileInfo(setup).isExecutable()?setup:QString();
+}
+void UpdateController::updateLoginItem(std::function<void(const QString &)> done){
+    const QString setup=loginItemSetup();
+    if(setup.isEmpty()){done(tr("This Zerus cannot update its login item itself. For a source installation, run tray/install.sh again; the change applies at your next login."));return;}
+    // It also checks the rest of the per-user setup and refuses a conflict without changes.
+    run(setup,{QStringLiteral("--autostart")},[done](bool okay,QString output){
+        done(okay?QString():output.isEmpty()?tr("The login item could not be updated."):output);
+    },60000,true);
+}
 void UpdateController::sourceInstallation(const QString &executable){
     m_installation.kind="unknown";QDir directory=QFileInfo(executable).absoluteDir();
 #ifdef Q_OS_WIN

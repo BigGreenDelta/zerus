@@ -204,9 +204,14 @@ zerus-setup --workers     # recovery and swarm background workers
 
 Through 0.42.2, `--autostart` wrote a LaunchAgent that launchd runs as a background
 daemon: whenever other programs keep every core busy, the Zerus window stops
-responding and is restarted after 30 seconds. Run `zerus-setup --autostart` again
-after upgrading to update it. It applies at your next login; to apply it now, quit
-Zerus from its menu and reload the agent:
+responding and is restarted after 30 seconds. A Zerus that its login item started at
+background priority shows **Fix login item** in the Sessions window's status bar.
+Nothing changes until you choose: **Update Only** (the default) runs
+`zerus-setup --autostart` and applies at your next login while Zerus keeps running;
+**Update and Restart** also quits and reopens Zerus now. Saved drafts, sessions and
+agents stay; a voice or video message that is still recording stops and is not
+kept. You can also run `zerus-setup --autostart` again yourself. It applies at your
+next login; to apply it now, quit Zerus from its menu and reload the agent:
 
 ```sh
 launchctl bootout "gui/$(id -u)/com.hgdev.hgs-tray"

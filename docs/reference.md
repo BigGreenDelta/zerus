@@ -2572,6 +2572,9 @@ starts a daemon and clamps all its threads below ordinary CPU load, niced load
 included: a busy machine then starves the whole window until the main-thread
 watchdog aborts it, and no QoS request from inside the process lifts the clamp.
 `launchctl print "gui/$(id -u)/com.hgdev.hgs-tray"` shows `spawn type = interactive`.
+At startup the GUI reads the highest priority its main thread may reach: a login item
+(`XPC_SERVICE_NAME` `com.hgdev.hgs-tray`) limited below 31 offers **Fix login item**,
+which runs the bundled `zerus-setup --autostart` only after confirmation.
 Finder, the Dock and Spotlight start the bundle without the LaunchAgent's `--hgs`
 and with PATH `/usr/bin:/bin:/usr/sbin:/sbin`; the desktop then finds the CLI in
 the standard install directories listed under **Desktop option** below.

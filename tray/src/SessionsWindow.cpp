@@ -1445,6 +1445,57 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(updates, &UpdateController::changed, this, restartEntryState);
     connect(restartEntry, &QPushButton::clicked, updates, &UpdateController::restartIntoInstalledBundle);
     restartEntryState();
+    // A login item without ProcessType Interactive starts the GUI as a daemon, which any
+    // CPU load starves. Nothing changes until the person chooses to update it.
+    auto *loginItemEntry = new QPushButton(tr("Fix login item"));
+    loginItemEntry->setObjectName("fixLoginItem");
+    loginItemEntry->setProperty("glyph", "zerus");
+    loginItemEntry->setIconSize(QSize(14, 14));
+    loginItemEntry->setAttribute(Qt::WA_LayoutUsesWidgetRect);
+    loginItemEntry->setToolTip(tr("macOS starts Zerus at background priority, so it can stop responding while the computer is busy."));
+    loginItemEntry->setAccessibleName(loginItemEntry->toolTip());
+    loginItemEntry->setVisible(updates->loginItemDeprioritized());
+    statusLayout->addWidget(loginItemEntry);
+    connect(loginItemEntry, &QPushButton::clicked, this, [this, updates, loginItemEntry] {
+        QMessageBox dialog(this);
+        dialog.setIcon(QMessageBox::Warning);
+        dialog.setWindowTitle(tr("Fix the Zerus login item"));
+        dialog.setText(tr("macOS runs Zerus at background priority."));
+        dialog.setInformativeText(tr("Zerus was started by its login item, which macOS runs at background priority, so "
+                                     "Zerus can stop responding while other programs keep the computer busy. Updating "
+                                     "the login item makes macOS start Zerus like other apps.\n\n"
+                                     "Update Only applies this at your next login; Zerus keeps running.\n"
+                                     "Update and Restart applies it now: Zerus quits and opens again. Saved drafts, "
+                                     "sessions and agents stay; a voice or video message that is still recording "
+                                     "stops and is not kept."));
+        auto *only = dialog.addButton(tr("Update Only"), QMessageBox::AcceptRole);
+        auto *restart = dialog.addButton(tr("Update and Restart"), QMessageBox::ActionRole);
+        auto *cancel = dialog.addButton(QMessageBox::Cancel);
+        dialog.setDefaultButton(only);
+        dialog.setEscapeButton(cancel);
+        dialog.exec();
+        if (dialog.clickedButton() != restart && dialog.clickedButton() != only)
+            return;
+        const bool restartNow = dialog.clickedButton() == restart;
+        loginItemEntry->setEnabled(false);
+        updates->updateLoginItem([self = QPointer<SessionsWindow>(this), entry = QPointer<QPushButton>(loginItemEntry),
+                                  updates, restartNow](const QString &error) {
+            if (entry)
+                entry->setEnabled(true);
+            if (!error.isEmpty()) {
+                if (self)
+                    QMessageBox::warning(self, tr("Fix the Zerus login item"),
+                                         tr("The login item was not changed.\n\n%1").arg(error));
+                return;
+            }
+            if (entry)
+                entry->hide();
+            if (restartNow)
+                updates->restartIntoInstalledBundle();
+            else if (self)
+                self->showNotice(tr("The Zerus login item is updated; it applies at your next login."));
+        });
+    });
     m_connectionRetry = new QPushButton(tr("Retry now")); m_connectionRetry->setObjectName("connectionRetry");
     m_connectionRetry->setFlat(true); m_connectionRetry->hide(); statusLayout->addWidget(m_connectionRetry);
     connect(m_connectionRetry, &QPushButton::clicked, this, &SessionsWindow::refreshRequested);
