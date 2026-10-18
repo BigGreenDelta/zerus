@@ -81,7 +81,14 @@ counter; `default_option_ids` start selected, and length and `min_items`/`max_it
 bounds are checked before Send; an item that is not `required` may stay empty.
 A card with `can_answer: false` is read-only and shows its `unavailable_reason`,
 such as **Answer this form in OpenCode**, and no Send, also when the computer
-omitted its items.
+omitted its items. Form text may start with `/` or `!`: the computer sends it
+through the OpenCode form reply, never to a terminal. Other cards, approvals
+included, still ask for such answers on the computer.
+An OpenCode permission card offers **Reject**, which rejects every pending
+request in that session, and **Allow once** after the approval review. When the
+request offers it, **Always allow…** asks for a separate confirmation and sends
+nothing if the request changed or can no longer be answered meanwhile. Other
+approvals without Allow and Deny remain answerable only on the computer.
 
 Conversation messages use 16 sp text and a 20 sp baseline; the editor uses 18 sp
 text and a 22 sp baseline. Both keep natural character spacing. Compact Markdown
