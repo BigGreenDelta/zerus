@@ -114,9 +114,10 @@ The recording-screen behavior was inspected in Telegram Android's
 and its [opening/closing animation](https://github.com/DrKLO/Telegram/blob/f32ffeec763f0bdbf4bec25b52d654f77bff733d/TMessagesProj/src/main/java/org/telegram/ui/Components/InstantCameraView.java#L881-L943).
 The Compose implementation is original Zerus code; no Telegram source is copied.
 
-With a narrow screen, large system text and an expanded editor, the open keyboard
-can leave no space for the retained preview. Close the keyboard to reach its
-controls; the editor's text, selection and expanded state remain saved.
+A retained preview shares the available height with the editor above the open
+keyboard. Scroll the preview to reach playback, Discard and Send. In a short
+expanded editor, Collapse moves beside Attach so each action keeps its 48 dp
+target. The text, selection, expanded state and input session remain in place.
 
 Haptic feedback is scoped to one capture. A confirmed microphone start and an
 explicit stop or cancellation each request a short `KEYBOARD_TAP`; duplicate and

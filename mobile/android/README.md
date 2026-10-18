@@ -469,8 +469,10 @@ or sends automatically. The conversation must have a confirmed run and conversat
 identity before recording.
 The composer preview scrolls within a bounded area while the software keyboard is
 open, keeping the typed draft visible and editable after capture stops.
-With a narrow screen, large system text and an expanded editor, you may need to
-close the keyboard to reach the preview controls.
+The retained preview and expanded editor share that available height; when two
+stacked controls cannot fit, Collapse moves beside Attach with its 48 dp target.
+The 280 dp / 180% system-text native fixture reaches playback, seeking, Discard
+and Send with the IME open, preserving the editor object, text and selection.
 
 Video mode records up to 60 seconds and 10 MiB with CameraX, with an owned circular
 preview and a camera switch. The phone extracts mono 16 kHz speech audio on a

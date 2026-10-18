@@ -1207,10 +1207,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         model.sendingBlocked(target) -> "Preparing your message. You can write the next message."
         else -> ""
     }
+    val retainedPreview = !recording && !model.speech.savingRecording && model.speech.draft != null
     Column(Modifier.fillMaxWidth().background(Background).padding(horizontal = 4.dp, vertical = 4.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        // Measure the editor and its controls first. A voice preview uses only the
-        // remaining height, with its controls reachable by scrolling.
+        // A retained preview shares the constrained height with the editor instead
+        // of receiving only what the expanded editor leaves below the open IME.
         if (model.speech.recording && (!model.speech.touchRecording || model.speech.videoRecorder != null) || model.speech.savingRecording || model.speech.draft != null) {
             Box(Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 280.dp)
                 .verticalScroll(rememberScrollState())) { SpeechComposerStatus(model) }
@@ -1240,6 +1241,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             "outgoing:${previous.requestId}" in model.receiptFlights,
             { model.checkOutgoing(previous) }, { onReviewOutgoing(previous) })
         CompactMessageInput(state = editor, placeholder = "Message",
+            modifier = if (retainedPreview) Modifier.weight(1f, fill = false) else Modifier,
+            sharedPreviewSpace = retainedPreview,
             recordingContent = if (recording) ({ SpeechRecordingRow(model.speech) }) else null,
             // Keep an already-open IME session in place during capture. The hidden
             // editor remains locked by the synchronous text-and-selection filter.
