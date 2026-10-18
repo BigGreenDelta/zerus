@@ -62,7 +62,8 @@ not relicense its dependencies.
 The Windows portable zip is different: it bundles Qt 6 for MSVC, including Qt
 Multimedia with its audio runtime, next to the application. It contains no Qt
 WebEngine or Chromium. These are separate, replaceable DLLs. Qt is used under the GNU LGPL
-version 3; its third-party components retain their own licenses. The zip carries
+version 3; its third-party components retain their own licenses, and the zip's
+`README.txt` names the exact Qt source archive and Git tag. The zip carries
 the SPDX documents supplied
 with the exact Qt installation, which name the license and copyright of each Qt
 module and of the third-party code inside it (libjpeg-turbo, FreeType, HarfBuzz,
@@ -114,3 +115,26 @@ and contributors. Their exact upstream license texts are retained in
 application's third-party notices. Sources: [CommonMark Java](
 https://github.com/commonmark/commonmark-java/tree/commonmark-parent-0.30.0) and
 [autolink-java](https://github.com/robinst/autolink-java/tree/autolink-0.12.0).
+
+## Android libraries
+
+The Android application also contains AndroidX, Jetpack Compose, Kotlin,
+kotlinx, OkHttp, Okio, CameraX, ZXing, Guava and other libraries, almost all
+under Apache-2.0, and in the published build Firebase and Google Play services.
+`scripts/android-notices.py` generates the list of every library in the
+published release configuration with its license from Gradle's resolution of that
+configuration, the exact artifacts it resolved and the libraries' POM files:
+`mobile/android/app/src/main/assets/licenses/libraries.tsv`.
+Libraries under BSD or MIT licenses point to reviewed texts with their copyright
+notices in the same folder, including Checker Framework qualifiers (MIT) and the
+Protocol Buffers code that DataStore repackages (BSD-3-Clause, from the
+[protobuf `LICENSE`](https://github.com/protocolbuffers/protobuf/blob/v28.2/LICENSE),
+unchanged across releases). `library-notices.txt` keeps the NOTICE files the
+libraries ship, among them OkHttp's note that its public suffix data comes from
+the Public Suffix List under MPL-2.0. Google Play services and the Firebase
+analytics libraries are provided under the
+[Android Software Development Kit License](https://developer.android.com/studio/terms);
+`google-notices.txt` keeps, verbatim, the notices of the open source code they
+embed. The application shows all of these in Third-party notices. Apache-2.0
+text: `mobile/android/app/src/main/assets/licenses/Apache-2.0.txt`, from SPDX
+license-list-data `v3.29.0` like the Windows texts.

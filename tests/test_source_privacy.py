@@ -40,6 +40,15 @@ class BeadsAttributionTest(unittest.TestCase):
         self.assertEqual(privacy.findings("packaging/windows/README.txt", text), [(1, "non-example email address")])
         self.assertEqual(privacy.findings("packaging/windows/licenses/notes.txt", "See /home/" + "someone/notes"),
                          [(1, "non-example absolute home path")])
+        # Only the generated verbatim Google notices, not their neighbors.
+        google = "mobile/android/app/src/main/assets/licenses/google-notices.txt"
+        self.assertEqual(privacy.findings(google, text), [])
+        self.assertEqual(privacy.findings(google, "See /home/" + "someone/notes"), [(1, "non-example absolute home path")])
+        for name in ("mobile/android/app/src/main/assets/licenses/libraries.tsv",
+                     "mobile/android/app/src/main/assets/licenses/google-notices.txt.orig",
+                     "mobile/android/app/src/main/assets/licenses/library-notices.txt"):
+            with self.subTest(name=name):
+                self.assertEqual(privacy.findings(name, text), [(1, "non-example email address")])
 
     def test_attribution_does_not_hide_paths(self):
         line = issue(owner=WORK, description="See /home/" + "someone/notes")

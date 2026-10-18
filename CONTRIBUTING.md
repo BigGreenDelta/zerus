@@ -157,9 +157,12 @@ Beads issues, history and memories must contain only information suitable for pu
 source collaboration. An ignored local database still becomes remote data when
 `bd dolt push` is run. Review the exported issues and memory before synchronizing.
 
-For release preparation, run Gitleaks on both the working tree and all Git history,
-and review binary assets and dependency notices. The local privacy script catches
-common accidental machine paths and keys; it is not a complete secret scanner.
+Quick checks run Gitleaks with its default rules on the working tree and all Git
+history of every push and pull request; findings are redacted from the public log
+and `gitleaks:allow` comments do not hide them. For release preparation, also run
+Gitleaks on the candidate source archive and Beads data, and review binary assets
+and dependency notices. The local privacy script catches common accidental machine
+paths and keys; it is not a complete secret scanner.
 
 <a id="windows"></a>
 

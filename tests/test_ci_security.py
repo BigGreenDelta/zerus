@@ -367,6 +367,15 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("        working-directory: mobile/android\n"
                       "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true\n", listed[gradle])
         self.assertIn("-PzerusFirebase=true", signed)
+        # The notices must list exactly the resolved release classpath, with its artifacts,
+        # of the same Firebase build; the generator downloads only missing POM files.
+        notices = names.index("Android library notices match the release classpath")
+        self.assertLess(gradle, notices)
+        self.assertLess(notices, names.index("Save Gradle cache"))
+        self.assertIn("        working-directory: mobile/android\n        run: |\n"
+                      "          ./gradlew --no-daemon -q --init-script ../../scripts/android-resolved-artifacts.gradle"
+                      " -PzerusFirebase=true :app:zerusResolvedNotices\n"
+                      "          python3 -I ../../scripts/android-notices.py --check\n", listed[notices])
         config = re.search(r"(?s)cat > mobile/android/app/google-services\.json <<'JSON'\n(.*?)\n          JSON\n",
                            listed[configure])[1]
         self.assertEqual(json.loads(textwrap.dedent(config)), {
@@ -926,6 +935,40 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertLess(install.index("curl -fsSLO"), verified)
         self.assertLess(windows.index(install), windows.index("key: windows-ccache-v1-"))
         self.assertLess(windows.index("key: windows-ccache-v1-"), windows.index("bash scripts/ci/gui.sh build"))
+
+    def test_quick_checks_scan_all_history_for_secrets_with_a_verified_gitleaks(self):
+        checks = (ROOT / ".github/workflows/checks.yml").read_text()
+        quick = job(checks, "quick")
+        self.assertEqual(quick.count("gitleaks/releases/download"), 1)
+        self.assertNotIn("gitleaks-action", checks)
+        # Every branch and tag, not only the tested commit.
+        self.assertIn("          ref: ${{ needs.source.outputs.commit }}\n          fetch-depth: 0\n", quick)
+        scan = next(step for step in self.checks_steps("quick") if "gitleaks/releases/download" in step)
+        version = re.search(r"\n          curl -fsSLO https://github\.com/gitleaks/gitleaks/releases/download/"
+                            r"v(\d+\.\d+\.\d+)/gitleaks_\1_linux_x64\.tar\.gz\n", scan)[1]
+        archive = re.escape(f"gitleaks_{version}_linux_x64.tar.gz")
+        self.assertRegex(scan, rf"\n          echo '[0-9a-f]{{64}}  {archive}' \| sha256sum --check --strict\n")
+        verified = scan.index("sha256sum --check")
+        self.assertLess(scan.index("curl -fsSLO"), verified)
+        self.assertLess(verified, scan.index("tar xzf"))
+        # A token generated in the job, committed with an allow comment and then
+        # deleted, must be reported with the distinct exit code before the real scan.
+        control = '"$scan_dir/gitleaks" git --no-banner --redact --ignore-gitleaks-allow --exit-code 3 control || status=$?'
+        self.assertIn(control, scan)
+        self.assertIn("import secrets", scan)
+        self.assertIn('# gitleaks:allow', scan)
+        self.assertIn("git -C control rm -q leak.py", scan)
+        self.assertIn('if [ "$status" != 3 ]; then', scan)
+        self.assertLess(verified, scan.index(control))
+        # Public logs never show a finding's secret; inline allow comments do not count.
+        for target in ("git", "dir"):
+            command = f'"$scan_dir/gitleaks" {target} --no-banner --redact --ignore-gitleaks-allow --exit-code 1 .'
+            self.assertIn(command, scan)
+            self.assertLess(scan.index(control), scan.index(command))
+        # A target .gitleaks.toml or .gitleaksignore would replace the default rules
+        # or hide findings; adding one is a reviewed change to this test.
+        for name in (".gitleaks.toml", ".gitleaksignore"):
+            self.assertFalse((ROOT / name).exists(), name)
 
     def test_cache_directories_stay_outside_uploaded_paths(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()

@@ -204,6 +204,7 @@ def main():
         readme = (ROOT / "packaging/windows/README.txt").read_text(encoding="utf-8")
         for key in ("version", "cli_version", "qt_version", "source_commit"):
             readme = readme.replace(f"@{key.upper()}@", manifest[key])
+        readme = readme.replace("@QT_SERIES@", ".".join(manifest["qt_version"].split(".")[:2]))
         readme = readme.replace("@CONPTY_VERSION@", conpty_pair.PIN["version"])
         require(not re.search(r"@[A-Z_]+@", readme), "Unreplaced placeholder in the Windows README.")
         # Notepad and other Windows tools expect CRLF in a plain-text README.

@@ -18,8 +18,9 @@ EMAIL = re.compile(r'(?<![\w.+-])[\w.+-]+@(?:[\w-]+\.)+[A-Za-z]{2,}')
 # The owner explicitly approved this public maintainer address for AUR/Git.
 PUBLIC_CONTACTS = {'ufna@ufna.dev'}
 # Vendored third-party code and verbatim license texts keep their authors'
-# contact addresses.
+# contact addresses, as do the notices Google libraries embed, copied verbatim.
 THIRD_PARTY = ('tray/vendor/', 'packaging/windows/licenses/')
+THIRD_PARTY_FILES = {'mobile/android/app/src/main/assets/licenses/google-notices.txt'}
 # Beads attributes records to the Git identities the team works with; the owner
 # accepted those addresses there. Free text in the same records is still checked.
 BEADS_ATTRIBUTION = {'owner', 'created_by', 'assignee', 'author'}
@@ -54,7 +55,7 @@ def findings(name, text):
                 problems.append((line_no, 'non-example absolute home path'))
         if re.search(r'(?<![A-Za-z0-9])/' + 'w/', line):
             problems.append((line_no, 'absolute workspace path'))
-        if not name.startswith(THIRD_PARTY):
+        if not name.startswith(THIRD_PARTY) and name not in THIRD_PARTY_FILES:
             for address in EMAIL.findall(addresses):
                 domain = address.rsplit('@', 1)[1].lower()
                 if address in PUBLIC_CONTACTS | {'git@github.com', 'aur@aur.archlinux.org'} or domain.endswith(('.png', '.svg', '.icns', '.rb', '.rb.in')):
