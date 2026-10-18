@@ -32,7 +32,15 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
+
+/** null keeps the last known mode when optional capability discovery fails. */
+internal suspend fun notificationPresenceMode(capabilities: suspend () -> JSONObject): Boolean? = try {
+    NotificationCatalogParser.presenceAlerts(capabilities())
+} catch (e: kotlinx.coroutines.CancellationException) { throw e }
+catch (e: RelayException) { if (e.status in listOf(401, 403)) throw e else if (e.status == 404) false else null }
+catch (_: Exception) { null }
 
 object SessionNotifications {
     internal const val ALERTS = "zerus_session_alerts"
@@ -99,12 +107,8 @@ object SessionNotifications {
         it.id == connection.id && it.url == connection.url && it.token == connection.token
     }
 
-    /** null keeps the last known mode when optional capability discovery fails. */
-    private suspend fun presenceAlerts(connection: Connection): Boolean? = try {
-        NotificationCatalogParser.presenceAlerts(api.capabilities(connection))
-    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-    catch (e: RelayException) { if (e.status in listOf(401, 403)) throw e else null }
-    catch (_: Exception) { null }
+    private suspend fun presenceAlerts(connection: Connection): Boolean? =
+        notificationPresenceMode { api.capabilities(connection) }
 
     /** true means durable work remains; the worker retries instead of replacing itself. */
     suspend fun sync(context: Context, connection: Connection, wait: Int = 0, forceCatalog: Boolean = false): Boolean =
