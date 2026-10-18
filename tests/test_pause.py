@@ -18,9 +18,15 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 import uuid
 
 REPO = Path(__file__).resolve().parents[1]
+# The bounds of the report a missed stop deadline adds to its failure.
+STOP_REPORT_SECONDS = 20
+STOP_REPORT_CHARS = 16000
+STOP_REPORT_PANES, STOP_REPORT_PROCESSES, STOP_REPORT_AGENTS = 8, 12, 4
+STOP_REPORT_NATIVE, STOP_REPORT_THREADS = 6, 8
 HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "hgs")).resolve()
 # Set only when verifying the archived Bash/Python implementation before migration.
 LEGACY_STATE = os.environ.get("HGS_TEST_LEGACY_STATE")
@@ -223,61 +229,132 @@ class Harness(unittest.TestCase):
     def stop_report(self):
         """What still runs once a stop has missed its deadline, and where: the
         saved stop evidence, each process of the private panes, the fake
-        agents' Python stacks and, natively, what each process waits in."""
-        panes = subprocess.run([str(self.bin / "tmux"), "list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid} #{pane_dead}"],
-                               env=self.env, capture_output=True, text=True).stdout
-        rows = [line.split(None, 4) for line in subprocess.run(["ps", "-axo", "pid=,ppid=,stat=,etime=,command="],
-                capture_output=True, text=True).stdout.splitlines()]
-        rows = [row for row in rows if len(row) == 5]
-        children = {}
-        for row in rows:
-            children.setdefault(row[1], []).append(row[0])
-        owned, pending = set(), [line.split()[2] for line in panes.splitlines() if len(line.split()) == 4]
-        while pending:
-            pid = pending.pop()
-            if pid not in owned:
-                owned.add(pid)
-                pending += children.get(pid, [])
-        owned |= {row[0] for row in rows if str(self.root) in row[4]}
-        processes = [row for row in rows if row[0] in owned][:12]
-        report = ["", "Stop diagnostics:", "panes: " + panes.strip()]
-        for path in sorted((self.root / "state").glob("*.json"))[:3]:
+        agents' Python stacks and, natively, what each process waits in.
+
+        Collection is bounded: each command has a timeout, the whole report a
+        deadline and a size, and a step that fails says so instead of
+        replacing the failure the report explains. Only exact fake agents in
+        the private panes, whose start identity still matches, are signalled."""
+        deadline = time.monotonic() + STOP_REPORT_SECONDS
+        lines = ["", "Stop diagnostics:"]
+        state = {"panes": [], "rows": [], "owned": [], "signalled": False}
+
+        def run(argv, limit, **options):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("report deadline reached")
+            return subprocess.run(argv, capture_output=True, text=True, errors="replace",
+                                  timeout=min(limit, remaining), **options)
+
+        def step(name, action):
             try:
-                record = json.loads(path.read_text())
-            except (OSError, ValueError):
-                continue
-            report.append("record: " + json.dumps({key: record.get(key) for key in (
-                "name", "pid", "supervisor", "activity", "pausing", "session_end", "exited_at", "completion_reason")}))
-        report += ["process: " + " ".join(row[:4]) + " " + row[4][:200] for row in processes]
-        agents = [row[0] for row in processes if str(self.bin) in row[4] and "python" in row[4].lower()]
-        for pid in agents:
-            try:
-                os.kill(int(pid), signal.SIGUSR1)
-            except ProcessLookupError:
-                pass
-        if agents:
-            time.sleep(0.3)
-        for line in panes.splitlines():
-            if len(line.split()) == 4:
-                screen = subprocess.run([str(self.bin / "tmux"), "capture-pane", "-p", "-J", "-S", "-200", "-t", line.split()[1]],
-                                        env=self.env, capture_output=True, text=True).stdout.splitlines()
+                action()
+            except Exception as error:  # A diagnostic step never replaces the failure.
+                lines.append(f"unavailable: {name}: {type(error).__name__}: {str(error)[:200]}")
+
+        def bounded(path, limit):
+            with open(path, "rb") as file:
+                return file.read(limit).decode(errors="replace")
+
+        def panes():
+            output = run([str(self.bin / "tmux"), "list-panes", "-a", "-F",
+                          "#{session_name} #{pane_id} #{pane_pid} #{pane_dead}"], 3, env=self.env).stdout
+            found = [line.split() for line in output.splitlines() if len(line.split()) == 4]
+            state["panes"] = found[:STOP_REPORT_PANES]
+            lines.append("panes: " + "; ".join(" ".join(pane) for pane in state["panes"])
+                         + (f" (+{len(found) - STOP_REPORT_PANES} more)" if len(found) > STOP_REPORT_PANES else ""))
+
+        def records():
+            for path in sorted((self.root / "state").glob("*.json"))[:3]:
+                record = json.loads(bounded(path, 1 << 20))
+                lines.append("record: " + json.dumps({key: record.get(key) for key in (
+                    "name", "pid", "supervisor", "activity", "pausing", "session_end", "exited_at", "completion_reason")})[:600])
+
+        def processes():
+            output = run(["ps", "-axo", "pid=,ppid=,lstart=,stat=,etime=,command="], 5,
+                         env=dict(self.env, LC_ALL="C", TZ="UTC")).stdout
+            rows = {}
+            for line in output.splitlines():
+                fields = line.split(None, 9)
+                if len(fields) == 10:
+                    rows[fields[0]] = dict(pid=fields[0], ppid=fields[1], start=" ".join(fields[2:7]),
+                                           stat=fields[7], etime=fields[8], command=fields[9])
+            children = {}
+            for row in rows.values():
+                children.setdefault(row["ppid"], []).append(row["pid"])
+            descendants, pending = [], [pane[2] for pane in state["panes"]]
+            while pending:
+                pid = pending.pop(0)
+                if pid in rows and pid not in descendants:
+                    descendants.append(pid)
+                    pending += children.get(pid, [])
+            listed = descendants + [pid for pid, row in rows.items() if str(self.root) in row["command"] and pid not in descendants]
+            state["rows"], state["descendants"] = rows, set(descendants)
+            state["owned"] = [rows[pid] for pid in listed[:STOP_REPORT_PROCESSES]]
+            lines.extend(f"process: {row['pid']} {row['ppid']} {row['stat']} {row['etime']} {row['command'][:200]}" for row in state["owned"])
+            if len(listed) > STOP_REPORT_PROCESSES:
+                lines.append(f"process: +{len(listed) - STOP_REPORT_PROCESSES} more not listed")
+
+        def fake_agent(row):
+            interpreter, _, rest = row["command"].partition(" ")
+            scripts = [str(self.bin / name) for name in ("claude", "codex", "kimi")]
+            return ("python" in os.path.basename(interpreter).lower()
+                    and any(rest == script or rest.startswith(script + " ") for script in scripts))
+
+        def signal_agents():
+            agents = [row for row in state["owned"] if row["pid"] in state.get("descendants", ()) and fake_agent(row)]
+            for row in agents[:STOP_REPORT_AGENTS]:
+                # The PID must still name the same process: same parent, start and command.
+                current = run(["ps", "-p", row["pid"], "-o", "ppid=,lstart=,command="], 3,
+                              env=dict(self.env, LC_ALL="C", TZ="UTC")).stdout.split(None, 6)
+                if len(current) != 7 or current[0] != row["ppid"] or " ".join(current[1:6]) != row["start"] \
+                        or current[6].strip() != row["command"]:
+                    lines.append(f"python {row['pid']}: not signalled, its process identity changed")
+                    continue
+                os.kill(int(row["pid"]), signal.SIGUSR1)
+                state["signalled"] = True
+
+        def python_stacks():
+            if not state["signalled"]:
+                return
+            time.sleep(max(0, min(0.3, deadline - time.monotonic())))
+            for pane in state["panes"]:
+                screen = run([str(self.bin / "tmux"), "capture-pane", "-p", "-J", "-S", "-200", "-t", pane[1]], 3,
+                             env=self.env).stdout[-65536:].splitlines()
                 starts = [i for i, text in enumerate(screen) if re.match(r"(Current thread|Thread) 0x", text)]
                 if starts:
-                    report.append("python in " + line.split()[1] + ": " + " | ".join(text.strip() for text in screen[starts[0]:] if text.strip())[:1500])
-        for row in processes[:6]:
-            if sys.platform == "darwin":
-                sampled = subprocess.run(["sample", row[0], "1", "-mayDie"], capture_output=True, text=True).stdout
-                graph = sampled.split("Call graph:", 1)[-1].split("Total number in stack", 1)[0].splitlines()
-                threads = [i for i, text in enumerate(graph) if text.startswith("    ") and text[4:5] != " " and "Thread_" in text]
-                for start, end in zip(threads, threads[1:] + [len(graph)]):
-                    frames = [text.strip() for text in graph[start + 1:end] if text.strip()]
-                    report.append(f"stack {row[0]} {graph[start].strip()[:60]}: " + " <- ".join(frames[-1:-7:-1])[:600])
-            else:
-                try:
-                    report.append(f"wchan {row[0]}: " + Path(f"/proc/{row[0]}/wchan").read_text())
-                except OSError:
-                    pass
-        return "\n".join(report)
+                    lines.append(f"python in {pane[1]}: " + " | ".join(text.strip() for text in screen[starts[0]:] if text.strip())[:1500])
+                else:
+                    lines.append(f"python in {pane[1]}: no stack on its terminal")
+
+        def native(row):
+            if sys.platform != "darwin":
+                lines.append(f"wchan {row['pid']}: " + bounded(f"/proc/{row['pid']}/wchan", 256).strip())
+                return
+            output = self.root / f"stop-sample-{row['pid']}.txt"
+            run(["sample", row["pid"], "1", "-mayDie", "-file", str(output)], 5)
+            graph = bounded(output, 256 * 1024).split("Call graph:", 1)[-1].split("Total number in stack", 1)[0].splitlines()
+            threads = [i for i, text in enumerate(graph) if text.startswith("    ") and text[4:5] != " " and "Thread_" in text]
+            for start, end in list(zip(threads, threads[1:] + [len(graph)]))[:STOP_REPORT_THREADS]:
+                frames = [text.strip() for text in graph[start + 1:end] if text.strip()]
+                lines.append(f"stack {row['pid']} {graph[start].strip()[:60]}: " + " <- ".join(frames[-1:-7:-1])[:600])
+            if len(threads) > STOP_REPORT_THREADS:
+                lines.append(f"stack {row['pid']}: +{len(threads) - STOP_REPORT_THREADS} threads omitted")
+
+        try:
+            step("panes", panes)
+            step("records", records)
+            step("processes", processes)
+            step("signals", signal_agents)
+            step("python stacks", python_stacks)
+            for row in state["owned"][:STOP_REPORT_NATIVE]:
+                step(f"native stack {row['pid']}", lambda row=row: native(row))
+        except Exception as error:  # Even a broken report keeps the original failure.
+            lines.append(f"unavailable: report: {type(error).__name__}")
+        report = "\n".join(lines)
+        if len(report) > STOP_REPORT_CHARS:
+            report = report[:STOP_REPORT_CHARS] + f"\n[stop report truncated at {STOP_REPORT_CHARS} characters]"
+        return report
 
     def t(self, *args):
         return subprocess.run([str(self.bin / "tmux"), *args], env=self.env,
@@ -3157,6 +3234,102 @@ class Migration(Harness):
         self.resume(name)
         launches = [json.loads(line)["argv"] for line in (self.root / "argv.jsonl").read_text().splitlines()]
         self.assertTrue(all("--dangerously-bypass-hook-trust" not in argv for argv in launches))
+
+
+
+class StopReportControls(unittest.TestCase):
+    """The stop report with mocked commands and signals: it stays within its
+    deadline and size, signals only exact fake agents of its own panes whose
+    identity still matches, and never replaces the failure it explains."""
+    hgs = Harness.hgs
+    stop_report = Harness.stop_report
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="hgs-stop-report-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.bin = self.root / ".local/bin"
+        self.bin.mkdir(parents=True)
+        (self.root / "state").mkdir()
+        self.env = {}
+        self.started = "Sun Oct 18 00:00:00 2026"
+        python = "/usr/bin/python3"
+        # pid: (ppid, command). 999 has a fake agent's exact command line but
+        # belongs to no private pane; 502 and 503 merely mention the root or
+        # run Python inside the pane.
+        self.table = {"500": ("1", "/fixture/hgs --run 0 claude"),
+                      "501": ("500", f"{python} {self.bin / 'claude'} --settings {{}}"),
+                      "502": ("500", f"/bin/sh -c {self.bin / 'claude'}-helper"),
+                      "503": ("500", f"{python} -c pass"),
+                      "999": ("1", f"{python} {self.bin / 'claude'}")}
+        self.identity, self.threads, self.kills = {}, 2, []
+        kill = mock.patch.object(os, "kill", side_effect=lambda pid, number: self.kills.append((pid, number)))
+        kill.start()
+        self.addCleanup(kill.stop)
+
+    def commands(self, argv, **options):
+        argv = [str(part) for part in argv]
+        output = ""
+        if argv[0] == str(self.bin / "tmux") and argv[1] == "list-panes":
+            output = "claude/p/one %0 500 0\n"
+        elif argv[:2] == ["ps", "-axo"]:
+            output = "".join(f"{pid:>6} {ppid:>6} {self.started} S 00:10 {command}\n" for pid, (ppid, command) in self.table.items())
+        elif argv[:2] == ["ps", "-p"]:
+            ppid, command = self.table[argv[2]]
+            output = f"{ppid} {self.identity.get(argv[2], self.started)} {command}\n"
+        elif argv[0] == str(self.bin / "tmux") and argv[1] == "capture-pane":
+            output = 'Current thread 0x1 (most recent call first):\n  File "claude", line 73 in <module>\n'
+        elif argv[0] == "sample":
+            threads = "".join(f"    9 Thread_{index}   DispatchQueue_1: fixture\n"
+                              + "".join(f"      9 frame_{frame}  (in fixture) + 8\n" for frame in range(40))
+                              for index in range(self.threads))
+            Path(argv[argv.index("-file") + 1]).write_text("Call graph:\n" + threads + "Total number in stack\n")
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    def report(self):
+        with mock.patch.object(subprocess, "run", side_effect=self.commands), \
+                mock.patch.object(sys, "platform", "darwin"), mock.patch.object(time, "sleep"):
+            return self.stop_report()
+
+    def test_hung_commands_keep_the_original_failure_within_the_deadline(self):
+        def hung(argv, timeout=None, **options):
+            if argv[0] == str(HGS):
+                return subprocess.CompletedProcess(argv, 1, "", "hgs: claude/p/one: agent did not exit after SIGTERM (no forced kill was sent)\n")
+            time.sleep(timeout)
+            raise subprocess.TimeoutExpired(argv, timeout)
+        started = time.monotonic()
+        with mock.patch.dict(globals(), STOP_REPORT_SECONDS=1.0), mock.patch.object(subprocess, "run", side_effect=hung), \
+                self.assertRaises(AssertionError) as caught:
+            self.hgs("pause", "claude/p/one")
+        self.assertLess(time.monotonic() - started, 3)
+        message = str(caught.exception)
+        self.assertIn("agent did not exit after SIGTERM", message)
+        self.assertIn("unavailable: panes: TimeoutExpired", message)
+        self.assertIn("report deadline reached", message)
+        self.assertEqual(self.kills, [])
+
+    def test_only_exact_fake_agents_of_the_private_panes_are_signalled(self):
+        report = self.report()
+        self.assertEqual(self.kills, [(501, signal.SIGUSR1)])
+        self.assertIn('python in %0: Current thread 0x1 (most recent call first): | File "claude", line 73 in <module>', report)
+        for pid in self.table:
+            self.assertRegex(report, rf"(?m)^process: {pid} ")
+
+    def test_a_reused_pid_is_not_signalled(self):
+        self.identity["501"] = "Sun Oct 18 00:00:09 2026"
+        report = self.report()
+        self.assertEqual(self.kills, [])
+        self.assertIn("python 501: not signalled, its process identity changed", report)
+
+    def test_flooded_native_output_and_many_processes_stay_bounded(self):
+        self.threads = 2000
+        self.table.update({str(pid): ("500", f"/fixture/child {pid}") for pid in range(600, 650)})
+        report = self.report()
+        self.assertLessEqual(len(report), STOP_REPORT_CHARS + 60)
+        self.assertIn("process: +43 more not listed", report)
+        self.assertIn("threads omitted", report)
+        self.assertIn("python in %0: Current thread 0x1", report)
+        self.assertEqual(self.kills, [(501, signal.SIGUSR1)])
 
 
 if __name__ == "__main__":
