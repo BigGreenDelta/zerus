@@ -151,27 +151,54 @@ fn valid(message: &Value) -> bool {
 /// Reads the newest window of `/message` with the cache, within 20 seconds.
 pub(super) fn fetch(native: &dyn Native, record: &Value) -> Result<Page> {
     let cache = cache_path(record);
-    let page = fetch_at(native, record, &cache);
-    // A Forget that ran meanwhile removed the binding first: drop the cache
-    // this read may have saved after Forget removed it.
-    drop_unbound(&cache, &super::binding_path(string(record, "name")));
-    page
+    fetch_with(native, record, &cache, |page| publish(record, &cache, page))
 }
-fn drop_unbound(cache: &Path, binding: &Path) {
-    if !binding.is_file() {
-        let _ = std::fs::remove_file(cache);
-    }
-}
+/// `fetch` with a cache path of the caller's own, saved without a binding.
+#[cfg(test)]
 pub(super) fn fetch_at(native: &dyn Native, record: &Value, cache: &Path) -> Result<Page> {
+    fetch_with(native, record, cache, |page| save_at(cache, record, page))
+}
+fn fetch_with(
+    native: &dyn Native,
+    record: &Value,
+    cache: &Path,
+    save: impl FnOnce(&Page),
+) -> Result<Page> {
     let cached = load_at(cache, record);
     let deadline = Instant::now() + Duration::from_secs(20);
     let (page, changed) = scan(native, record, cached.as_ref(), Bounds::default(), deadline)?;
     if changed {
-        save_at(cache, record, &page);
+        save(&page);
     } else if cached.is_some() {
         touch(cache);
     }
     Ok(page)
+}
+/// How long a read waits for the bindings lock before it skips its save.
+const PUBLISH_WAIT: Duration = Duration::from_millis(200);
+/// Saves the cache only under the bindings lock, which Forget holds while it
+/// removes a binding and its cache, and only while this exact binding (run
+/// and conversation) is still the one under its name. A Forget, rename or
+/// re-creation that ran during the read wins: nothing is saved and this
+/// conversation's cache is removed. Without the lock the save is skipped.
+fn publish(record: &Value, cache: &Path, page: &Page) {
+    let lock = root().join("opencode/bindings.lock");
+    let Ok(Some(_guard)) = lock_until(&lock, Instant::now() + PUBLISH_WAIT) else {
+        return;
+    };
+    let current = super::binding(string(record, "name")).ok();
+    publish_locked(record, cache, page, current.as_ref());
+}
+fn publish_locked(record: &Value, cache: &Path, page: &Page, current: Option<&Value>) {
+    let same = current.is_some_and(|binding| {
+        binding["run_id"] == record["run_id"]
+            && binding["conversation_id"] == record["conversation_id"]
+    });
+    if same {
+        save_at(cache, record, page);
+    } else {
+        let _ = std::fs::remove_file(cache);
+    }
 }
 
 /// Pages newest first until the end, a budget or a page that reaches back
@@ -924,18 +951,28 @@ mod tests {
     }
 
     #[test]
-    fn a_cache_without_its_binding_is_dropped() {
+    fn a_read_publishes_its_cache_only_for_the_exact_current_binding() {
         let dir = tempfile::tempdir().unwrap();
-        let (cache, binding) = (
-            dir.path().join("cache.json"),
-            dir.path().join("binding.json"),
-        );
-        std::fs::write(&cache, b"{}").unwrap();
-        std::fs::write(&binding, b"{}").unwrap();
-        drop_unbound(&cache, &binding);
-        assert!(cache.exists());
-        std::fs::remove_file(&binding).unwrap();
-        drop_unbound(&cache, &binding);
+        let cache = dir.path().join("cache.json");
+        let page = Page {
+            messages: vec![message("msg_1", "x")],
+            truncated: false,
+        };
+        let a = json!({"name": "opencode/p/t", "run_id": "run-a", "conversation_id": "ses_A"});
+        // Same identity: saved.
+        publish_locked(&a, &cache, &page, Some(&a));
+        assert!(load_at(&cache, &a).is_some());
+        // Forget of A, then the same name re-created as B: A's late read
+        // publishes nothing and removes A's cache.
+        let b = json!({"name": "opencode/p/t", "run_id": "run-b", "conversation_id": "ses_B"});
+        publish_locked(&a, &cache, &page, Some(&b));
+        assert!(!cache.exists());
+        // Same conversation under a new run is another binding too.
+        let rerun = json!({"name": "opencode/p/t", "run_id": "run-c", "conversation_id": "ses_A"});
+        publish_locked(&a, &cache, &page, Some(&rerun));
+        assert!(!cache.exists());
+        // Forgotten (no binding): nothing saved.
+        publish_locked(&a, &cache, &page, None);
         assert!(!cache.exists());
     }
 
