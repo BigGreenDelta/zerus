@@ -128,7 +128,7 @@ const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d
   -n tag   separate session <cmd>/<project>/<tag>
   --account ID   use a named native agent profile for this session
   --model PROVIDER/MODEL   OpenCode native model for a new session
-  --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (empty or omitted: its default)
+  --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (omit for the model's default)
   --new    always create a separate session; generate a name unless -n is given
   -d       start detached (do not attach)      --fresh  explicitly replace a saved conversation
   --rc     claude --remote-control (phone)     --bare   ignore a project run_<cmd>.sh launcher
@@ -2367,10 +2367,10 @@ mod tests {
     #[test]
     fn usage_lists_opencode_effort_and_the_explicit_service_start() {
         let usage = usage_text(true);
-        // `--effort` is an OpenCode launch option that `opencode` refuses
-        // without `--model`; an empty value keeps the model's default.
+        // `--effort` is an OpenCode launch option that hgs refuses without
+        // `--model` or with an empty value; omitting it keeps the model's default.
         assert!(usage.contains(
-            "\n  --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (empty or omitted: its default)\n"
+            "\n  --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (omit for the model's default)\n"
         ), "{usage}");
         // The only explicit start of the shared service; inspection never starts it.
         assert!(usage.contains(
