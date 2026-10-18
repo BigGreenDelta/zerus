@@ -1,7 +1,9 @@
 # Agent instructions
 
 Zerus provides a desktop UI and the `hgs` CLI for persistent local and remote
-agent sessions. The CLI lives in `src/`; the Qt GUI lives in `tray/src/`.
+agent sessions. The CLI lives in `src/`; the Qt GUI lives in `tray/src/`;
+replicated documents (Loro) live in `crates/replica/`, the only code that
+imports Loro.
 The Rust mobile relay lives in `services/mobile/relay/` and the Rust outbound
 connector in `services/mobile/connector/`; the legacy Python connector remains in
 `services/mobile/zerus_mobile/` until every gateway has moved. Keep API v1, durable

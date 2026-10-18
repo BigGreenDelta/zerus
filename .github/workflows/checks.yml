@@ -113,6 +113,15 @@ jobs:
           key: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - run: cargo +1.99.1 test --locked
+      - name: Replica crate (format, lints, tests, golden vectors)
+        run: |
+          rustup component add --toolchain 1.99.1 rustfmt clippy
+          cargo +1.99.1 fmt --check --manifest-path crates/replica/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/replica/Cargo.toml --target-dir target/replica --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml --target-dir target/replica
+      # Packages fail without a notice for every shipped crate; find out here.
+      - name: Rust license notices
+        run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"
       - name: Save Rust 1.99 cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

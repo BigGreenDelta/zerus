@@ -37,6 +37,9 @@ job durations live in ignored `artifacts/test-results/`. Set
 stable Rust: `rust-version` and the toolchain pinned in CI follow the latest
 stable release, and raising them is routine maintenance. Run
 `cargo +1.99.1 test --locked` for that pinned toolchain.
+The replica crate has its own lockfile: run
+`cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml`; its
+golden vectors must keep decoding, and `ZERUS_BLESS=1` only adds new ones.
 
 `check-source.py` keeps the desktop's Unix children from inheriting its descriptors
 ([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects

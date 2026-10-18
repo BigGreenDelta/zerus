@@ -472,7 +472,9 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(field(quick, "name"), "Quick checks (source and Rust 1.99)")
         for line in ("run: python3 scripts/ci/check-source.py", "-p 'test_*publication.py'", "-p test_ci_security.py",
                      "sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt",
-                     "run: cargo +1.99.1 test --locked"):
+                     "run: cargo +1.99.1 test --locked",
+                     "cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml --target-dir target/replica",
+                     'run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"'):
             self.assertIn(line, quick)
         for name in ("quick", "relay", "connector", "connector-macos", "android", "cli", "arch", "arch-package",
                      "mac-desktop", "windows-desktop", "windows-host"):

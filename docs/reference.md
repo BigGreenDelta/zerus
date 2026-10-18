@@ -1851,6 +1851,44 @@ The CLI is `hgs [@host] worktrees review --path PATH
 --common-dir DIR [--file RELATIVE_PATH [--offset N]] --json`. Machines with an
 older `hgs` must be updated before cleanup is available there.
 
+## Project tasks
+
+`hgs task` keeps a project's task list on this computer: prompts that wait in
+Backlog or To do until someone sends them to a session. Every command prints
+JSON. Tasks belong to a catalog project, named by its ID or name; a task is
+`T-` plus six characters, and `PROJECT/T-xxxxxx` names it anywhere.
+
+```sh
+hgs task add --project orchard [--backlog] [--target codex/api|any] [--position N] < prompt.txt
+hgs task list --project orchard [--stage todo]
+hgs task get orchard/T-a1b2c3
+hgs task send orchard/T-a1b2c3 [--session codex/api]
+hgs task report orchard/T-a1b2c3 < summary.txt
+hgs task cancel orchard/T-a1b2c3 [--reason "Wrong approach"]
+hgs task stage orchard/T-a1b2c3 backlog|todo|done
+hgs task move orchard/T-a1b2c3 --top|--before REF|--after REF
+hgs task edit orchard/T-a1b2c3 < prompt.txt
+hgs task comment orchard/T-a1b2c3 < comment.txt
+hgs task target orchard/T-a1b2c3 codex/api|any
+hgs task settings --project orchard [--set < settings.json]
+```
+
+Send pastes the task prompt into a session on this computer through the same
+input path as `hgs send`; the task becomes In progress, and Zerus does not
+check that the agent received it. The prompt asks the agent to report with
+`hgs task report`, which moves the task to In review. Cancel moves a task In
+progress to In review and pastes the cancel message without stopping the turn;
+its reason is kept as a comment and never pasted. A task this computer already
+shows In progress is not sent again. Run inside a session (`HGS_SESSION` and
+`HGS_RUN_ID`), `hgs task` acts as that session's agent: `add` files the task
+for that session, and the project settings can keep agents to their own
+session or limit how many tasks they start per hour.
+
+Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
+project; a task file that fails to load is listed under `damaged` and left in
+place. Replication between computers, the Tasks view and the MCP tools come in
+later releases.
+
 ## Machines and accounts
 
 **Machines** edits local SSH aliases and overrides in
