@@ -811,10 +811,12 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     })();
     cleanup();
     if let Err(error) = result {
+        crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Uncertain);
         return Err(format!(
             "delivery uncertain: {error}; inspect Terminal before retrying"
         ));
     }
+    crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Submitted);
     Ok(receipt)
 }
 
