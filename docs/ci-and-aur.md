@@ -857,7 +857,8 @@ The separate **Agent upstream compatibility** workflow runs daily at 04:41 UTC
 and is also available manually on upstream main. It discovers published Codex,
 Claude Code, OpenCode, Kimi Code and DeepSeek Harness versions from their official
 package indexes, links their official release notes and tests the latest Codex,
-Claude Code, OpenCode and Kimi Code as additional canaries. Kimi Code versions come
+Claude Code, OpenCode and Kimi Code as additional canaries, and DeepSeek Harness once
+a release is newer than its reviewed one. Kimi Code versions come
 from `@moonshot-ai/kimi-code` on npm, which shares its release train (the archived
 Python `kimi-cli` on PyPI is not Kimi Code); its canary downloads the executable the
 newest release manifest names, with that manifest's SHA-256. OpenCode follows a minimum version
@@ -879,8 +880,13 @@ lists added/removed methods and added/removed/changed schemas. Changes to Codex,
 Claude Code, OpenCode and Kimi Code CLI help appear with a generated diff per agent.
 A detected addition is a review candidate, not evidence that Zerus supports it or
 that a signed-in account can use it. DeepSeek's existing pinned keyless contract
-fixture runs in full Linux CLI CI. DeepSeek Harness has no canary contract yet: its
-package installs about 80 npm dependencies, which this runner does not install.
+fixture runs in full Linux CLI CI, so the reviewed matrix has no DeepSeek pin. Its
+package installs about 80 npm dependencies rather than one executable: the canary
+downloads a newer release's tarball, checks its npm integrity and installs it with
+`npm install --ignore-scripts` into the fixture, with no user npm configuration or
+cache. It then runs `tests/test_dsh_native.py` against that installation
+(`HGS_DSH_TEST_BIN`, `HGS_DSH_TEST_VERSION`) and records a SHA-256 of the whole
+installed tree before and after.
 
 To run the reviewed matrix or inspect current upstream changes locally:
 

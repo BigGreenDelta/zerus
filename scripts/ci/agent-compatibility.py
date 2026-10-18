@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Keyless released Codex, Claude Code, OpenCode and Kimi Code contracts and read-only upstream capability reports."""
+"""Keyless released Codex, Claude Code, OpenCode, Kimi Code and DeepSeek Harness contracts and read-only upstream
+capability reports."""
 import argparse
 import base64
 import datetime
@@ -91,6 +92,21 @@ AGENTS = {
                  'an unchanged executable',
         timeout=600,
         suites=['test_kimi_native']),
+    # DeepSeek Harness is an npm package with about 80 dependencies, not one
+    # executable. Its reviewed release runs as full Linux CI's keyless fixture
+    # (checks.yml), so it has no pin here and only the canary qualifies it: a
+    # newer release is installed from its verified tarball into the fixture,
+    # without install scripts, and its whole tree must keep its bytes.
+    'dsh': dict(
+        name='DeepSeek Harness', variable='HGS_DSH_TEST_BIN', version_variable='HGS_DSH_TEST_VERSION',
+        version_output='{}', canary_only=True, npm_install=True,
+        tarball='https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-{version}.tgz',
+        metadata='https://registry.npmjs.org/@deepseek-ai/dsh/{version}', published='{version}',
+        members={'linux-x64': 'dsh', 'darwin-arm64': 'dsh'},
+        coverage='the keyless contract fixture of full Linux CI against its local model: native API sessions, '
+                 'permissions, forks, history, schedules and refusals',
+        timeout=1800,
+        suites=['test_dsh_native']),
 }
 # Suite inputs taken from the caller; every other HGS_ variable is dropped.
 FORWARDED = ('HGS_TEST_CONPTY_DIR',)
@@ -127,6 +143,10 @@ def check_manifest(manifest):
     reason as `retained`, may cover fewer targets; the newest version never does.
     """
     for agent, spec in AGENTS.items():
+        if spec.get('canary_only'):
+            if agent in manifest:
+                raise ValueError(spec['name'] + ' is qualified by its canary only and has no pin')
+            continue
         pins = manifest[agent]
         versions = list(dict.fromkeys(package['version'] for package in pins))
         if not versions:
@@ -290,6 +310,8 @@ def install_native(agent, package, destination):
     try:
         if download(url, archive) != expected:
             raise ValueError('Native package integrity mismatch')
+        if spec.get('npm_install'):
+            return npm_install(archive, destination, name)
         with tarfile.open(archive, 'r:gz') as tar:
             member = tar.getmember(name)
             if not member.isfile() or not 0 < member.size <= MAX_PACKAGE_BYTES:
@@ -303,11 +325,47 @@ def install_native(agent, package, destination):
         archive.unlink(missing_ok=True)
 
 
+def npm_install(archive, destination, name):
+    """Install a verified package tarball with its dependencies into destination
+    and return its executable. No install script runs, and npm reads no user
+    configuration or cache, so no token, registry or cached package of the
+    caller takes part."""
+    private = destination / 'npm'
+    private.mkdir(exist_ok=True)
+    (private / 'npmrc').write_text('')
+    env = {key: value for key, value in os.environ.items() if not key.lower().startswith('npm_')}
+    env.update(npm_config_cache=str(private / 'cache'), npm_config_userconfig=str(private / 'npmrc'),
+               npm_config_registry='https://registry.npmjs.org/')
+    subprocess.run(['npm', 'install', '--prefix', str(destination), '--no-audit', '--no-fund', '--ignore-scripts',
+                    '--no-package-lock', str(archive)], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   check=True, timeout=600)
+    native = destination / 'node_modules' / '.bin' / name
+    if not native.exists():
+        raise ValueError('The installed package has no ' + name + ' executable')
+    return native
+
+
 def file_digest(path):
     digest = hashlib.sha256()
     with path.open('rb') as file:
         while chunk := file.read(1024 * 1024):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def image_digest(agent, native):
+    """SHA-256 of what an agent runs: its executable, or for an installed npm
+    package every file and link of its node_modules tree."""
+    if not AGENTS[agent].get('npm_install'):
+        return file_digest(native)
+    tree = native.parents[1]
+    digest = hashlib.sha256()
+    for path in sorted(tree.rglob('*')):
+        digest.update(path.relative_to(tree).as_posix().encode() + b'\0')
+        if path.is_symlink():
+            digest.update(b'link\0' + os.readlink(path).encode() + b'\0')
+        elif path.is_file():
+            digest.update(file_digest(path).encode() + b'\0')
     return digest.hexdigest()
 
 
@@ -427,7 +485,7 @@ def qualify(agent, package, work, results, hgs):
         native = install_native(agent, package, work / agent / version)
         # The executable under test keeps its verified bytes: a changed image
         # means an agent updated or rewrote itself during its contract.
-        row['image_sha256'] = file_digest(native)
+        row['image_sha256'] = image_digest(agent, native)
         home = work / agent / version / 'home'
         env = fixture_environment(home)
         # The runner's own probes get a private Windows profile too. The suites keep
@@ -458,6 +516,8 @@ def qualify(agent, package, work, results, hgs):
         for case, settings in cases.items():
             test_env = dict(env, HGS_TEST_BIN=str(hgs), **{spec['variable']: str(native)},
                             **spec.get('environment', {}), **settings)
+            if 'version_variable' in spec:
+                test_env[spec['version_variable']] = version
             status, stdout = run_suites(spec['suites'], test_env, spec['timeout'], work / agent / version,
                                         directory / (case + '.log'))
             marker = next((line.removeprefix('ZERUS_NATIVE_RESULT=') for line in stdout.splitlines()
@@ -466,7 +526,7 @@ def qualify(agent, package, work, results, hgs):
                 row['cases'][case] = json.loads(marker)
             if status or marker is None:
                 raise ValueError('Native contract failed at ' + case)
-            if file_digest(native) != row['image_sha256']:
+            if image_digest(agent, native) != row['image_sha256']:
                 raise ValueError('The native executable changed during ' + case)
         row['status'] = 'passed'
     except Exception as error:
@@ -474,7 +534,7 @@ def qualify(agent, package, work, results, hgs):
         print(spec['name'], version, 'failed:', error, flush=True)
     finally:
         if native is not None and native.exists():
-            row['image_sha256_after'] = file_digest(native)
+            row['image_sha256_after'] = image_digest(agent, native)
     return row
 
 
@@ -492,6 +552,10 @@ def write_report(report, results):
             lines.extend(['', '## Real ' + spec['name'] + ' contracts', ''])
             lines.extend(f"- `{row['version']}` ({row['target']}): {row['status']}; "
                          f"{target_spec(agent, row['target'])['coverage']}." for row in rows)
+        elif spec.get('canary_only') and agent in report.get('canary_versions', {}):
+            lines.extend(['', '## Real ' + spec['name'] + ' contracts', '',
+                          f"- `{report['canary_versions'][agent]}` is the reviewed release: full Linux CI runs its "
+                          "keyless contract fixture."])
     for label, changes in report.get('capability_changes', {}).items():
         lines.extend(['', '## ' + label + ' protocol changes', '', 'Experimental methods remain separate from supported APIs.'])
         for kind in ('added_methods', 'removed_methods', 'added_schemas', 'removed_schemas', 'changed_schemas'):
@@ -513,7 +577,8 @@ def write_report(report, results):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--latest', action='store_true',
-                        help='Discover agent releases and qualify latest Codex, Claude Code, OpenCode and Kimi Code as canaries')
+                        help='Discover agent releases and qualify latest Codex, Claude Code, OpenCode and Kimi Code, and a '
+                             'DeepSeek Harness newer than its reviewed release, as canaries')
     parser.add_argument('--agent', choices=sorted(AGENTS), action='append',
                         help='Qualify only this agent (repeatable); default: every agent pinned for this host')
     parser.add_argument('--results', type=Path, default=ROOT / 'artifacts/test-results/agent-compatibility')
@@ -529,13 +594,17 @@ def main():
     results = args.results.resolve()
     results.mkdir(parents=True, exist_ok=True)
     target = host_target()
-    agents = args.agent or [agent for agent, spec in AGENTS.items() if agent_target(agent, target) in spec['members']]
+    agents = args.agent or [agent for agent, spec in AGENTS.items() if agent_target(agent, target) in spec['members']
+                            and (args.latest or not spec.get('canary_only'))]
     unsupported = [agent for agent in agents if agent_target(agent, target) not in AGENTS[agent]['members']]
     if not agents or unsupported:
         parser.error('No reviewed native packages for ' + str(target) + ': ' + ', '.join(unsupported or AGENTS))
+    canaries = [agent for agent in agents if AGENTS[agent].get('canary_only')]
+    if canaries and not args.latest:
+        parser.error(', '.join(AGENTS[agent]['name'] for agent in canaries) + ' is qualified by --latest only')
     report = {'checked_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'target': target,
               'contracts': [], 'errors': []}
-    packages = {agent: [package for package in manifest[agent] if package['target'] == agent_target(agent, target)]
+    packages = {agent: [package for package in manifest.get(agent, []) if package['target'] == agent_target(agent, target)]
                 for agent in agents}
     if args.latest:
         report['upstream'] = discover_upstream(manifest)
@@ -544,8 +613,13 @@ def main():
         for agent in agents:
             spec = AGENTS[agent]
             try:
-                latest = next(row['version'] for row in report['upstream'] if row['name'] == spec['name'])
-                if latest not in {package['version'] for package in packages[agent]}:
+                upstream = next(row for row in report['upstream'] if row['name'] == spec['name'])
+                latest = upstream['version']
+                reviewed = {package['version'] for package in packages[agent]}
+                # A canary-only agent's reviewed release is qualified by its own fixture.
+                if spec.get('canary_only'):
+                    reviewed |= set(upstream['reviewed_versions'])
+                if latest not in reviewed:
                     packages[agent].append(candidate(agent, latest, agent_target(agent, target)))
                 report['canary_versions'][agent] = latest
             except Exception as error:
@@ -557,7 +631,7 @@ def main():
                 report['contracts'].append(qualify(agent, package, Path(temporary), results, args.hgs.resolve()))
     for agent in agents:
         rows = {row['version']: row for row in report['contracts'] if row['agent'] == agent}
-        current = rows.get(next((package['version'] for package in reversed(manifest[agent])
+        current = rows.get(next((package['version'] for package in reversed(manifest.get(agent, []))
                                  if package['target'] == agent_target(agent, target)), None))
         latest = rows.get(report.get('canary_versions', {}).get(agent))
         if not (current and latest):

@@ -21,7 +21,9 @@ import urllib.request
 import http.cookiejar
 
 REPO = Path(__file__).resolve().parents[1]
-DSH = shutil.which('dsh')
+DSH = os.environ.get('HGS_DSH_TEST_BIN') or shutil.which('dsh')
+# The reviewed release; the upstream canary names a newer candidate instead.
+VERSION = os.environ.get('HGS_DSH_TEST_VERSION', '0.2.0-rc.2')
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs'))
 
 
@@ -30,8 +32,8 @@ class NativeHarness(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         version = subprocess.check_output([DSH, '--version'], text=True).strip()
-        if version != '0.2.0-rc.2':
-            raise unittest.SkipTest('contract is pinned to official 0.2.0-rc.2')
+        if version != VERSION:
+            raise unittest.SkipTest('contract is pinned to official ' + VERSION)
         cls.temp = tempfile.TemporaryDirectory(prefix='hgs-dsh-', dir='/tmp')
         cls.root = Path(cls.temp.name)
         cls.home = cls.root / 'native'

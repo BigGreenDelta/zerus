@@ -44,8 +44,8 @@ class AgentCompatibility(unittest.TestCase):
                 'integrity': algorithm + '-' + base64.b64encode(hashlib.new(algorithm, payload).digest()).decode()}
 
     def test_verified_archive_extracts_only_the_expected_executable(self):
-        for agent, target in [(agent, target) for agent, spec in compat.AGENTS.items() if 'tarball' in spec
-                              for target in spec['members']]:
+        for agent, target in [(agent, target) for agent, spec in compat.AGENTS.items()
+                              if 'tarball' in spec and not spec.get('npm_install') for target in spec['members']]:
             payload = self.archive(name=compat.AGENTS[agent]['members'][target])
             with self.subTest(agent=agent, target=target), tempfile.TemporaryDirectory() as temporary, patch.object(
                     compat.urllib.request, 'urlopen', return_value=io.BytesIO(payload)):
@@ -77,6 +77,44 @@ class AgentCompatibility(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     compat.install_native('kimi', package, Path(temporary))
                 self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_an_npm_package_installs_from_its_verified_tarball_without_scripts_or_user_npm(self):
+        payload = b'synthetic-package-tarball'
+        package = self.package(payload, 'dsh')
+        self.assertEqual(package['url'], 'https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-1.2.3.tgz')
+        calls = []
+
+        def npm(argv, **options):
+            destination = Path(argv[argv.index('--prefix') + 1])
+            calls.append((argv, options['env'], Path(argv[-1]).read_bytes()))
+            (destination / 'node_modules/.bin').mkdir(parents=True)
+            (destination / 'node_modules/.bin/dsh').write_text('synthetic')
+            return SimpleNamespace(returncode=0)
+
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+                compat.urllib.request, 'urlopen', return_value=io.BytesIO(payload)), \
+                patch.object(compat.subprocess, 'run', side_effect=npm), \
+                patch.dict(compat.os.environ, {'NPM_CONFIG_USERCONFIG': '/fixture-live-npmrc',
+                                               'npm_config__authToken': 'fixture-token'}):
+            native = compat.install_native('dsh', package, Path(temporary))
+            self.assertEqual(native, Path(temporary) / 'node_modules/.bin/dsh')
+            [(argv, env, archive)] = calls
+            # npm installs exactly the verified bytes, runs no install script and
+            # reads neither the caller's npm configuration nor its cache.
+            self.assertEqual(archive, payload)
+            self.assertEqual(argv[:3], ['npm', 'install', '--prefix'])
+            self.assertIn('--ignore-scripts', argv)
+            self.assertNotIn('NPM_CONFIG_USERCONFIG', env)
+            self.assertNotIn('npm_config__authToken', env)
+            self.assertTrue(Path(env['npm_config_cache']).is_relative_to(temporary))
+            self.assertEqual(Path(env['npm_config_userconfig']).read_text(), '')
+            self.assertFalse((Path(temporary) / 'native.tgz').exists())
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+                compat.urllib.request, 'urlopen', return_value=io.BytesIO(payload + b'changed')), \
+                patch.object(compat.subprocess, 'run', side_effect=npm) as run:
+            with self.assertRaisesRegex(ValueError, 'integrity mismatch'):
+                compat.install_native('dsh', package, Path(temporary))
+            run.assert_not_called()
 
     def test_windows_codex_helpers_are_never_extracted(self):
         # The sandbox setup program must never run; nothing but the CLI leaves the archive.
@@ -119,6 +157,11 @@ class AgentCompatibility(unittest.TestCase):
         reviewed = {row['name']: row['reviewed_versions'] for row in manifest['upstream']}
         compat.check_manifest(manifest)
         for agent, spec in compat.AGENTS.items():
+            if spec.get('canary_only'):
+                # Its reviewed release runs as another fixture; only its canary runs here.
+                self.assertNotIn(agent, manifest)
+                self.assertEqual(reviewed[spec['name']], ['0.2.0-rc.2'])
+                continue
             pins = manifest[agent]
             versions = list(dict.fromkeys(package['version'] for package in pins))
             self.assertTrue(pins, agent)
@@ -433,6 +476,9 @@ class AgentCompatibility(unittest.TestCase):
         work, results = Path(temporary.name) / 'work', Path(temporary.name) / 'results'
         (work / agent / '1.2.3').mkdir(parents=True)
         native = work / agent / '1.2.3' / 'native'
+        if compat.AGENTS[agent].get('npm_install'):
+            native = work / agent / '1.2.3' / 'node_modules/.bin' / compat.AGENTS[agent]['members'][target]
+            native.parent.mkdir(parents=True)
         native.write_bytes(b'synthetic-native-executable')
         package = {'version': '1.2.3', 'target': target, 'integrity': 'sha512-fixture'}
         with patch.object(compat, 'install_native', return_value=native), \
@@ -557,6 +603,60 @@ class AgentCompatibility(unittest.TestCase):
             self.assertEqual([row['version'] for row in report['contracts']], ['2.1.1'])
             self.assertTrue(any(error.startswith('Kimi Code canary discovery:') for error in report['errors']))
 
+    def test_a_changed_npm_tree_fails_its_contract(self):
+        row, runs, directory, profiles = self.qualify_fixture('dsh', 'linux-x64')
+        self.assertEqual(row['status'], 'passed', row.get('error'))
+        [(suites, env, timeout)] = runs
+        self.assertEqual((suites, timeout), (['test_dsh_native'], compat.AGENTS['dsh']['timeout']))
+        # The suite tests exactly the installed candidate and its version.
+        self.assertEqual((Path(env['HGS_DSH_TEST_BIN']).name, env['HGS_DSH_TEST_VERSION']), ('dsh', '1.2.3'))
+        row, runs, directory, profiles = self.qualify_fixture('dsh', 'linux-x64', rewrites=True)
+        self.assertEqual(row['error'], 'The native executable changed during default')
+
+    def test_deepseek_canary_qualifies_only_a_release_newer_than_its_fixture(self):
+        manifest = json.loads(compat.MANIFEST.read_text())
+        reviewed = next(row for row in manifest['upstream'] if row['name'] == 'DeepSeek Harness')['reviewed_versions'][-1]
+        qualified = []
+
+        def qualify(agent, package, work, results, hgs):
+            qualified.append((agent, package['version'], package['url'], package['integrity']))
+            return {'agent': agent, 'version': package['version'], 'target': package['target'], 'status': 'passed'}
+
+        def canary(latest, *arguments):
+            def published(source):
+                value = latest if source['name'] == 'DeepSeek Harness' else (source['reviewed_versions'] or ['0.0.1'])[-1]
+                for key in reversed(source['version_path']):
+                    value = {key: value}
+                return value
+            responses = {source['url']: published(source) for source in manifest['upstream']}
+            responses[compat.AGENTS['dsh']['metadata'].format(version=latest)] = {'version': latest, 'dist': {
+                'tarball': compat.AGENTS['dsh']['tarball'].format(version=latest), 'integrity': 'sha512-fixture'}}
+            qualified.clear()
+            with tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(compat, 'fetch_json', side_effect=lambda url: responses[url]), \
+                    patch.object(compat, 'qualify', side_effect=qualify), \
+                    patch.object(compat, 'host_target', return_value='linux-x64'), \
+                    patch.object(compat.sys, 'argv', ['agent-compatibility.py', '--results', temporary, *arguments]), \
+                    patch('sys.stderr', io.StringIO()):
+                compat.main()
+                return json.loads((Path(temporary) / 'report.json').read_text()), (Path(temporary) / 'summary.md').read_text()
+
+        report, summary = canary('0.2.1', '--latest', '--agent', 'dsh')
+        self.assertEqual(qualified, [('dsh', '0.2.1', 'https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-0.2.1.tgz',
+                                      'sha512-fixture')])
+        self.assertEqual(report['canary_versions'], {'dsh': '0.2.1'})
+        # The reviewed release is the full CI fixture's; nothing else is installed.
+        report, summary = canary(reviewed, '--latest', '--agent', 'dsh')
+        self.assertEqual(qualified, [])
+        self.assertIn(f'`{reviewed}` is the reviewed release: full Linux CI runs its keyless contract fixture.', summary)
+        # The canary is part of --latest only; the reviewed matrix never installs it.
+        canary(reviewed, '--latest')
+        self.assertNotIn('dsh', {agent for agent, *_ in qualified})
+        canary('0.2.1')
+        self.assertNotIn('dsh', {agent for agent, *_ in qualified})
+        with self.assertRaises(SystemExit):
+            canary('0.2.1', '--agent', 'dsh')
+
     def test_a_suite_that_times_out_keeps_its_log(self):
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / 'default.log'
@@ -576,6 +676,9 @@ class AgentCompatibility(unittest.TestCase):
         import os
         import subprocess
         env = dict(os.environ, PYTHONPATH=str(ROOT / 'tests'))
+        # Full Linux CI puts its DeepSeek fixture on the PATH, which that suite also finds.
+        env['PATH'] = os.pathsep.join(folder for folder in env.get('PATH', '').split(os.pathsep)
+                                      if not (Path(folder) / 'dsh').exists())
         for spec in compat.AGENTS.values():
             env.pop(spec['variable'], None)
             for key in spec.get('environment', {}):
