@@ -66,20 +66,25 @@ public struct EffortOption: Hashable, Sendable {
         }
     }
 
-    /// Native variant IDs the relay admits (`variant_id`): 1–40 ASCII letters, digits, `-`, `_` or `.`.
+    /// The native catalog's variant ID shape, shared by every layer (tests/fixtures/opencode-effort-ids.json): non-empty,
+    /// at most 40 UTF-8 bytes, without Unicode whitespace, control characters or "/". Model membership is checked separately.
     public static func valid(_ value: String) -> Bool {
-        (1...40).contains(value.utf8.count) && value.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "-_.".contains($0)) }
+        !value.isEmpty && value.utf8.count <= 40 &&
+            !value.unicodeScalars.contains { $0 == "/" || $0.properties.isWhitespace || $0.properties.generalCategory == .control }
     }
 
     /// `effort_labels` names `effort_options` by position; a missing or unusable label keeps the familiar name.
-    /// At most the first 16 variants are offered, never malformed or repeated ones.
+    /// At most the first 16 well-formed variants are offered, never malformed or repeated ones.
     public static func options(_ values: [String], labels: [String]) -> [EffortOption] {
         let named = labels.count == values.count
         var seen = Set<String>()
-        return values.prefix(16).enumerated().compactMap { index, value in
-            guard valid(value), seen.insert(value).inserted else { return nil }
-            return EffortOption(value: value, label: named && LaunchPresentation.usableLabel(labels[index]) ? labels[index] : text(value))
+        var result: [EffortOption] = []
+        for (index, value) in values.enumerated() {
+            if result.count == 16 { break }
+            guard valid(value), seen.insert(value).inserted else { continue }
+            result.append(EffortOption(value: value, label: named && LaunchPresentation.usableLabel(labels[index]) ? labels[index] : text(value)))
         }
+        return result
     }
 }
 

@@ -302,34 +302,72 @@ final class OpenCodeTests: XCTestCase {
         XCTAssertNil(QuestionPolicies.queue(NativeEvents.questions(["pending_questions": [.object(answerable)]]), target, chosen: "").selected)
     }
 
-    func testEffortVariantIdsFollowTheRelayRule() throws {
-        let long = String(repeating: "a", count: 41), longest = String(repeating: "a", count: 40)
-        let values = ["thinking-8k_v1.2", "think:deep", long, longest, "dé", "a+b"]
-        XCTAssertEqual(EffortOption.options(values, labels: values).map(\.value), ["thinking-8k_v1.2", longest])
-        XCTAssertEqual(EffortOption.options(values, labels: values).first?.label, "thinking-8k_v1.2", "labels stay aligned with their variants")
-        var raw = catalog
-        raw["accounts"] = [["id": "native-opencode", "provider": "opencode", "label": "OpenCode", "model_options": [
-            ["id": "fixture/local", "value": "fixture/local", "label": "Local", "effort_options": ["thinking-8k_v1.2", "think:deep", .string(long)]]]]]
-        let sanitized = LaunchPresentation.sanitizeCatalog(raw)
-        XCTAssertEqual(LaunchPresentation.efforts(sanitized, provider: "opencode", accountId: "native-opencode", model: "fixture/local", supported: true)
-            .map(\.value), ["thinking-8k_v1.2"])
+    func testEffortIdFixtureIsSharedByteForByte() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../../../../tests/fixtures/opencode-effort-ids.json").standardized
+        XCTAssertEqual(try Data(contentsOf: SharedFixture.url("opencode-effort-ids.json")), try Data(contentsOf: root))
+    }
+
+    /// Every layer shares the native catalog's shape rule (opencode-effort-ids.json); the model's effort_options decide membership.
+    func testEffortIdsFollowTheSharedNativeRule() throws {
+        let fixture = try SharedFixture.json("opencode-effort-ids.json")
+        let accept = fixture.strings("accept"), reject = fixture.strings("reject")
+        XCTAssertEqual(accept.count, 10)
+        XCTAssertEqual(reject.count, 13)
+        XCTAssertTrue(accept.contains("think:deep"))
         func launch(_ effort: String) throws -> JSONObject {
             try SessionActionPolicies.arguments("launch", ["agent": "opencode", "directory": "/example/project", "tag": "work", "account_id": "native-opencode",
                                                            "model": "fixture/local", "effort": .string(effort)])
         }
-        XCTAssertNoThrow(try launch("thinking-8k_v1.2"))
-        XCTAssertThrowsError(try launch("think:deep"))
-        XCTAssertThrowsError(try launch(long))
         func settings(_ effort: String) throws -> JSONObject {
             try SessionActionPolicies.arguments("settings", ["model": "fixture/local", "effort": .string(effort)], effortVariants: true)
         }
-        XCTAssertNoThrow(try settings("thinking-8k_v1.2"))
-        for refused in ["think:deep", long] {
-            XCTAssertThrowsError(try settings(refused)) { XCTAssertEqual(($0 as? ZerusError)?.message, "Invalid effort.") }
+        for id in accept {
+            XCTAssertTrue(EffortOption.valid(id), id)
+            XCTAssertEqual(EffortOption.options([id], labels: []).map(\.value), [id], id)
+            XCTAssertNoThrow(try launch(id), id)
+            XCTAssertNoThrow(try settings(id), id)
         }
-        // The sheet never offers what the relay would refuse.
-        let sheet = SessionDetailsPresentation.settings(["agent": "opencode", "model_options": [["id": "m/x", "effort_options": ["thinking-8k_v1.2", "think:deep"]]]])
-        XCTAssertEqual(sheet.effortOptions("m/x", effortFeature: true).map(\.value), ["", "thinking-8k_v1.2"])
+        for id in reject {
+            XCTAssertFalse(EffortOption.valid(id), id.debugDescription)
+            XCTAssertEqual(EffortOption.options([id], labels: []), [], id.debugDescription)
+            XCTAssertThrowsError(try launch(id), id.debugDescription)
+            // In a model change "" is not a variant but the request for the model's default.
+            if id.isEmpty { XCTAssertNoThrow(try settings(id)); continue }
+            XCTAssertThrowsError(try settings(id), id.debugDescription) { XCTAssertEqual(($0 as? ZerusError)?.message, "Invalid effort.") }
+        }
+        // Accepted ids reach the launch form and the sheet only when the model offers them, still at most 16.
+        let offered = accept + ["v12", "v13", "v14", "v15", "v16", "v17", "v18"]
+        var raw = catalog
+        raw["accounts"] = [["id": "native-opencode", "provider": "opencode", "label": "OpenCode", "model_options": [
+            ["id": "fixture/local", "value": "fixture/local", "label": "Local", "effort_options": JSON(reject + offered)]]]]
+        let sanitized = LaunchPresentation.sanitizeCatalog(raw)
+        let launchable = LaunchPresentation.efforts(sanitized, provider: "opencode", accountId: "native-opencode", model: "fixture/local", supported: true)
+        XCTAssertEqual(launchable.map(\.value), Array(offered.prefix(16)), "malformed ids never take one of the 16 places")
+        let sheet = SessionDetailsPresentation.settings(["agent": "opencode", "model_options": [["id": "m/x", "effort_options": JSON(accept)]]])
+        XCTAssertEqual(sheet.effortOptions("m/x", effortFeature: true).map(\.value), [""] + accept)
+        XCTAssertEqual(try launch("think:deep")["effort"], "think:deep")
+    }
+
+    /// A well-formed variant the model no longer offers is refused here, at launch and in a model change.
+    func testWithdrawnEffortIsRefusedLocally() throws {
+        let before: JSONObject = ["agent": "opencode", "settings_model": "fixture/local", "settings_change_supported": true,
+                                  "model_options": [["id": "fixture/local", "effort_options": ["low", "think:deep"]]]]
+        let after = before.putting("model_options", [["id": "fixture/local", "effort_options": ["low"]]])
+        let args: JSONObject = ["model": "fixture/local", "effort": "think:deep"]
+        XCTAssertNoThrow(try SessionActionPolicies.arguments("settings", args, effortVariants: true))
+        XCTAssertEqual(SessionActionPolicies.inspectReason(target, "settings", args, before), "")
+        XCTAssertEqual(SessionActionPolicies.inspectReason(target, "settings", args, after), "The selected effort is unavailable for this model.")
+        XCTAssertEqual(SessionDetailsPresentation.settings(after).keptEffort("think:deep", model: "fixture/local", effortFeature: true), "")
+        func catalog(_ efforts: [String]) -> JSONObject {
+            LaunchPresentation.sanitizeCatalog(["agents": ["opencode"], "accounts": [["id": "native-opencode", "provider": "opencode", "label": "OpenCode",
+                                                                                     "model_options": [["id": "fixture/local", "effort_options": JSON(efforts)]]]]])
+        }
+        func launch(_ raw: JSONObject) throws -> JSONObject {
+            try LaunchPresentation.arguments(raw, agent: "opencode", directory: "/example/project", tag: "work", accountId: "native-opencode", projectId: "",
+                                             worktrees: nil, model: "fixture/local", effort: "think:deep", effortSupported: true)
+        }
+        XCTAssertNoThrow(try launch(catalog(["low", "think:deep"])))
+        XCTAssertThrowsError(try launch(catalog(["low"]))) { XCTAssertEqual(($0 as? ZerusError)?.message, "The native effort changed. Review the current choices.") }
     }
 
     func testOpenCodeTextDefaultSeedsOnlyAQuestionWithoutASavedDraft() throws {
