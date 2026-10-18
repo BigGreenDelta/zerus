@@ -340,24 +340,24 @@ final class QuestionPoliciesTests: XCTestCase {
         XCTAssertTrue(QuestionPolicies.approvalSupported(allowDeny))
         XCTAssertTrue(QuestionPolicies.openCodePermission(permission))
         let confirmation = try XCTUnwrap(PermissionConfirmation(permission))
-        for question in [allowDeny, permission] {
+        for (label, question) in [("Claude allow/deny", allowDeny), ("OpenCode permission", permission)] {
             let key = ApprovalReview.key(target, question)
             func reviewed(_ review: ApprovalReview, _ now: Double) -> Bool { review.secondsRemaining(now: now, card: key) == 0 }
             var review = ApprovalReview().observe(eligible: true, now: 1, card: key)
             for now in [1.2, 2.5, 4.0] { review = review.tick(now: now, card: key) }
-            XCTAssertTrue(reviewed(review, 4), question.id)
+            XCTAssertTrue(reviewed(review, 4), label)
             // The card leaves; the clock that stops may still deliver one more tick.
             review = review.observe(eligible: false, now: 5, card: key).tick(now: 5.2, card: key)
-            XCTAssertFalse(reviewed(review, 9), "\(question.id): time away is not review time")
+            XCTAssertFalse(reviewed(review, 9), "\(label): time away is not review time")
             // Back after four seconds away: three new eligible seconds before any approving button.
             review = review.observe(eligible: true, now: 9, card: key)
             for now in [9.0, 9.2, 10.4, 11.8] {
                 review = review.tick(now: now, card: key)
-                XCTAssertFalse(reviewed(review, now), "\(question.id) at \(now)")
-                XCTAssertFalse(PermissionAction.allowOnce.enabled(answerable: true, reviewed: reviewed(review, now)), "\(question.id) at \(now)")
+                XCTAssertFalse(reviewed(review, now), "\(label) at \(now)")
+                XCTAssertFalse(PermissionAction.allowOnce.enabled(answerable: true, reviewed: reviewed(review, now)), "\(label) at \(now)")
             }
             review = review.tick(now: 12, card: key)
-            XCTAssertTrue(reviewed(review, 12), question.id)
+            XCTAssertTrue(reviewed(review, 12), label)
             if question == permission {
                 XCTAssertNil(confirmation.confirm(permission, target: target, editing: true, available: true, foreground: true, visible: true,
                                                   review: review, now: 11.9))
