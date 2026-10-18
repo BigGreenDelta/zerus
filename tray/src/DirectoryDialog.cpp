@@ -1,4 +1,5 @@
 #include "DirectoryDialog.h"
+#include <QAction>
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -13,7 +14,10 @@
 #include <QMenu>
 #include <QPushButton>
 #include <QShortcut>
-#include <QToolButton>
+#include <QScrollBar>
+#include <QScreen>
+#include <QStyle>
+#include <QStyleOptionViewItem>
 #include <QVBoxLayout>
 #include <algorithm>
 
@@ -66,13 +70,13 @@ DirectoryDialog::DirectoryDialog(const QString &hgsPath, const QString &host,
     folderActions->addStretch();
     m_newFolder = new QPushButton(tr("New folder")); m_newFolder->setObjectName("newFolder");
     folderActions->addWidget(m_newFolder);
-    m_newFolderOptions = new QToolButton; m_newFolderOptions->setObjectName("newFolderOptions");
-    m_newFolderOptions->setArrowType(Qt::DownArrow); m_newFolderOptions->setPopupMode(QToolButton::InstantPopup);
-    m_newFolderOptions->setAccessibleName(tr("More folder creation options"));
-    m_newFolderOptions->setToolTip(tr("More folder creation options"));
-    auto *creationMenu = new QMenu(m_newFolderOptions);
-    auto *dialogAction = creationMenu->addAction(tr("New folder dialog…"), this, &DirectoryDialog::newFolderDialog);
-    dialogAction->setObjectName("newFolderDialog"); m_newFolderOptions->setMenu(creationMenu);
+    m_newFolderOptions = new QPushButton(tr("Dialog…")); m_newFolderOptions->setObjectName("newFolderOptions");
+    m_newFolderOptions->setAccessibleName(tr("New folder dialog…"));
+    m_newFolderOptions->setToolTip(tr("New folder dialog…"));
+    auto *dialogAction = new QAction(tr("New folder dialog…"), this);
+    dialogAction->setObjectName("newFolderDialog");
+    connect(dialogAction, &QAction::triggered, this, &DirectoryDialog::newFolderDialog);
+    connect(m_newFolderOptions, &QPushButton::clicked, dialogAction, &QAction::trigger);
     folderActions->addWidget(m_newFolderOptions); layout->addLayout(folderActions);
     m_status = new QLabel; m_status->setWordWrap(true); m_status->setTextFormat(Qt::PlainText); m_status->setObjectName("muted"); layout->addWidget(m_status);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
@@ -161,6 +165,9 @@ DirectoryDialog::DirectoryDialog(const QString &hgsPath, const QString &host,
 
 bool DirectoryDialog::eventFilter(QObject *watched, QEvent *event)
 {
+    if (m_inlineItem && watched == m_list->itemWidget(m_inlineItem)
+        && (event->type() == QEvent::LayoutRequest || event->type() == QEvent::StyleChange || event->type() == QEvent::FontChange))
+        sizeInlineFolder();
     if (watched == m_inlineName && event->type() == QEvent::KeyPress
         && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
         cancelInlineFolder(); m_list->setFocus(); return true;
@@ -204,6 +211,8 @@ void DirectoryDialog::newFolder()
     if (m_current.isEmpty() || m_path->text() != m_current) { newFolderDialog(); return; }
     if (m_inlineName) { m_inlineName->setFocus(); return; }
     const auto parent = m_current;
+    m_inlineListMinimumHeight = m_list->minimumHeight();
+    m_inlineDialogMinimumSize = minimumSize();
     m_filter->clear(); m_list->clearSelection();
     m_inlineItem = new QListWidgetItem;
     m_list->insertItem(0, m_inlineItem);
@@ -214,12 +223,11 @@ void DirectoryDialog::newFolder()
     m_inlineName->installEventFilter(this); layout->addWidget(m_inlineName, 1);
     auto *create = new QPushButton(tr("Create")); create->setObjectName("createInlineFolder");
     create->setAutoDefault(false); create->setEnabled(false); layout->addWidget(create);
-    auto *cancel = new QToolButton; cancel->setText(QString::fromUtf8("×"));
+    auto *cancel = new QPushButton(tr("Cancel")); cancel->setAutoDefault(false);
     cancel->setObjectName("cancelInlineFolder"); cancel->setAccessibleName(tr("Cancel new folder"));
     cancel->setToolTip(tr("Cancel new folder")); layout->addWidget(cancel);
     m_list->setItemWidget(m_inlineItem, row);
-    row->ensurePolished(); layout->activate();
-    m_inlineItem->setSizeHint(row->sizeHint());
+    row->installEventFilter(this); sizeInlineFolder();
     m_list->setCurrentItem(m_inlineItem); m_choose->setEnabled(false);
     connect(m_inlineName, &QLineEdit::textChanged, row, [this, parent, create](const QString &name) {
         create->setEnabled(validFolderName(name, parent));
@@ -229,14 +237,46 @@ void DirectoryDialog::newFolder()
         if (!m_inlineName || !validFolderName(m_inlineName->text(), parent)) return;
         createFolder(childPath(parent, m_inlineName->text()));
     });
-    connect(cancel, &QToolButton::clicked, this, &DirectoryDialog::cancelInlineFolder);
+    connect(cancel, &QPushButton::clicked, this, &DirectoryDialog::cancelInlineFolder);
     m_list->scrollToItem(m_inlineItem); m_inlineName->setFocus();
+}
+
+void DirectoryDialog::sizeInlineFolder()
+{
+    if (!m_inlineItem) return;
+    auto *row = m_list->itemWidget(m_inlineItem);
+    if (!row) return;
+    row->ensurePolished();
+    for (auto *child : row->findChildren<QWidget *>()) child->ensurePolished();
+    row->layout()->activate();
+    // The index widget occupies the styled item's content box. Reserve its
+    // padding too, or the list clips the editor below its styled size hint.
+    QStyleOptionViewItem option; option.initFrom(m_list);
+    option.index = m_list->indexFromItem(m_inlineItem);
+    option.rect = QRect(QPoint(), row->sizeHint());
+    const auto contents = m_list->style()->subElementRect(QStyle::SE_ItemViewItemText, &option, m_list);
+    // Do not force the editor's preferred width onto the entire list: the
+    // layout can shrink the name field while keeping its buttons available.
+    const QSize size(0, row->sizeHint().height() + qMax(0, option.rect.height() - contents.height()));
+    if (m_inlineItem->sizeHint() != size) m_inlineItem->setSizeHint(size);
+    m_list->setMinimumHeight(qMax(m_inlineListMinimumHeight,
+        size.height() + 2 * m_list->frameWidth() + m_list->horizontalScrollBar()->sizeHint().height()));
+    // Large system text can need more room than the normal 500x400 floor.
+    // Respect the whole layout too, so later controls cannot cover the row.
+    layout()->invalidate(); layout()->activate();
+    auto minimum = minimumSizeHint();
+    minimum.setHeight(qMax(minimum.height(), layout()->totalHeightForWidth(minimum.width())));
+    if (screen()) minimum = minimum.boundedTo(screen()->availableGeometry().size());
+    setMinimumSize(m_inlineDialogMinimumSize.expandedTo(minimum));
+    layout()->activate();
 }
 
 void DirectoryDialog::cancelInlineFolder()
 {
     if (!m_inlineItem) return;
     auto *item = m_inlineItem; m_inlineItem = nullptr; m_inlineName = nullptr;
+    m_list->setMinimumHeight(m_inlineListMinimumHeight);
+    setMinimumSize(m_inlineDialogMinimumSize);
     delete m_list->takeItem(m_list->row(item));
     m_list->setCurrentRow(-1); m_list->clearSelection();
     m_choose->setText(tr("Use this folder"));
