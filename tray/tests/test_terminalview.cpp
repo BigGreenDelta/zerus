@@ -185,6 +185,25 @@ private slots:
     screen.viewport()->removeEventFilter(&paints);
   }
 
+  void unfocusedCursorOutlineStaysInsideItsCell() {
+    // Above a device pixel ratio of 1 a stroked outline is centred on the cell edge,
+    // so part of it lands in the row above, which a cursor move never repaints.
+    TerminalScreen screen;screen.resize(640,400);screen.show();QTest::qWait(20);
+    screen.clearFocus();QVERIFY(!screen.hasFocus());
+    screen.feed("\x1b[?12l\x1b[5;5H");QCoreApplication::sendPostedEvents(nullptr,QEvent::UpdateRequest);QApplication::processEvents();
+    const auto image=[&]{QImage frame(screen.viewport()->size()*2,QImage::Format_ARGB32_Premultiplied);frame.setDevicePixelRatio(2);frame.fill(Qt::transparent);return frame;};
+    QImage incremental=image();screen.viewport()->render(&incremental,{},QRegion(),QWidget::DrawWindowBackground);
+    PaintRegions paints;screen.viewport()->installEventFilter(&paints);
+    for(const char *move:{"\x1b[6;9H","\x1b[6;10H","\x1b[5;5H","\x1b[12;30H"}){
+      paints.region={};screen.feed(move);QCoreApplication::sendPostedEvents(nullptr,QEvent::UpdateRequest);QApplication::processEvents();
+      const auto dirty=paints.region;QVERIFY2(!dirty.isEmpty(),move+2);
+      screen.viewport()->render(&incremental,dirty.boundingRect().topLeft(),dirty,QWidget::DrawWindowBackground);
+      QImage full=image();screen.viewport()->render(&full,{},QRegion(),QWidget::DrawWindowBackground);
+      QVERIFY2(incremental==full,qPrintable(QStringLiteral("stale outline after %1").arg(QString::fromLatin1(move+2))));
+    }
+    screen.viewport()->removeEventFilter(&paints);
+  }
+
   void alternateScreenRestoresMainBuffer() {
     TerminalScreen screen;
     screen.feed("main\x1b[?1049h\x1b[Halternate");
