@@ -8832,6 +8832,8 @@ void TestSessionsWindow::nativeLaunchStaysInWorkspace()
     const auto bounds = [&] { return QRect(list->mapTo(&window, QPoint()), list->size()); };
     const auto originalBounds = bounds();
     auto *statusBar = window.findChild<QFrame *>("workspaceStatus"); QVERIFY(statusBar); QCOMPARE(statusBar->height(), 28);
+    // Only a Zerus that its login item started at background priority offers the fix.
+    auto *loginItem = statusBar->findChild<QPushButton *>("fixLoginItem"); QVERIFY(loginItem); QVERIFY(loginItem->isHidden());
     window.showNotificationNotice(QString(2000, 'x') + "\nRefreshing…"); QCoreApplication::processEvents();
     QCOMPARE(bounds(), originalBounds);
     // A native failure must stay visible after the previous success notice expires.
