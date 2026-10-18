@@ -529,6 +529,12 @@ signed Nightly recipe. The defaults retain the public 0.43.0 and 0.44.0 Stable
 recipes; after publishing 0.45.0, repeat with the exact 0.44.0 and 0.45.0 commits.
 The Nightly commit must also be supplied explicitly.
 
+The existing ephemeral `contents: read` job token is used only for exact official
+GitHub REST tap-commit and release-tag metadata GETs, avoiding the shared anonymous
+rate limit. The requester rejects redirects and every other host, route or method.
+The script removes the token from its environment before starting any subprocess;
+raw casks and release payloads remain anonymous, and evidence never includes it.
+
 Before Homebrew evaluates a cask, the script checks its complete bytes against
 the current or retained pre-connector template, public release metadata and
 seals, bounded ZIP paths and the native Developer ID signature, Gatekeeper and

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Post-publication cask lifecycle qualification, only on a disposable Mac runner.
 
-No signing key, API token, publication credential, cached artifact or deployment
-environment is used. This does not qualify interactive Terminal/TCC consent.
+No signing key, publication credential, cached artifact or deployment environment
+is used. The ephemeral read-only job token is confined to allowlisted public REST
+metadata GETs. This does not qualify interactive Terminal/TCC consent.
 """
 import argparse
 import hashlib
@@ -21,6 +22,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 import zipfile
 import posixpath
 import stat
@@ -36,6 +38,11 @@ DOMAIN = "com.hgdev.hgs-tray"
 SETTINGS = {"workspace/activityWidth": "736", "workspace/theme": "dark"}
 ALLOWED_HOSTS = {"api.github.com", "raw.githubusercontent.com", "github.com",
                  "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
+METADATA_TOKEN_ENV = "GH_PUBLIC_METADATA_TOKEN"
+METADATA_URL = re.compile(
+    r"https://api\.github\.com/repos/ufna/(?:homebrew-zerus/commits/[0-9a-f]{40}"
+    r"|zerus/releases/tags/(?:v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"|nightly-[1-9][0-9]*))")
 
 
 def require(condition, message):
@@ -68,6 +75,42 @@ def fetch(url, limit=1024 * 1024):
         data = response.read(limit + 1)
     require(len(data) <= limit, "Public response exceeds its byte limit.")
     return data
+
+
+class MetadataRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        raise ValueError("Public REST metadata redirects are refused.")
+
+
+class PublicMetadata:
+    def __init__(self, token):
+        require(isinstance(token, str) and len(token) <= 1024
+                and all(33 <= ord(char) <= 126 for char in token), "Invalid metadata token.")
+        self._token = token
+
+    def fetch(self, url, limit=1024 * 1024, *, method="GET"):
+        require(method == "GET" and isinstance(url, str) and METADATA_URL.fullmatch(url),
+                "Unexpected public REST metadata route or method.")
+        headers = {"User-Agent": "Zerus-public-cask-qualification", "Accept": "application/vnd.github+json"}
+        if self._token:
+            headers["Authorization"] = "Bearer " + self._token
+        request = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.build_opener(MetadataRedirects()).open(request, timeout=60) as response:
+                require(response.url == url, "Public REST metadata origin changed.")
+                data = response.read(limit + 1)
+        except urllib.error.HTTPError as error:
+            raise ValueError(f"Public REST metadata GET failed with HTTP {error.code}.") from None
+        except urllib.error.URLError:
+            raise ValueError("Public REST metadata GET failed.") from None
+        require(len(data) <= limit, "Public REST metadata exceeds its byte limit.")
+        return data
+
+
+def consume_metadata_token():
+    # Never leave the job token in the environment inherited by brew, the app,
+    # native fixtures or their subprocesses. It is not written into evidence.
+    return PublicMetadata(os.environ.pop(METADATA_TOKEN_ENV, ""))
 
 
 def accepted_cask(text, channel):
@@ -188,16 +231,16 @@ def account_identity():
     return uid, euid, pwd.getpwuid(uid)
 
 
-def prepare_public(commit, channel, output):
+def prepare_public(commit, channel, output, metadata_fetch=fetch):
     commit = exact_commit(commit)
     output.mkdir(parents=True)
     # Only the real public tap repository supplies executable cask code.
-    tap_api = json.loads(fetch("https://api.github.com/repos/ufna/homebrew-zerus/commits/" + commit))
+    tap_api = json.loads(metadata_fetch("https://api.github.com/repos/ufna/homebrew-zerus/commits/" + commit))
     require(tap_api.get("sha") == commit, "Tap commit lookup differs.")
     name = cask_for(channel)
     raw = fetch(f"https://raw.githubusercontent.com/ufna/homebrew-zerus/{commit}/Casks/{name}.rb")
     cask = accepted_cask(raw.decode("utf-8"), channel)
-    release = json.loads(fetch("https://api.github.com/repos/ufna/zerus/releases/tags/" + cask["tag"]))
+    release = json.loads(metadata_fetch("https://api.github.com/repos/ufna/zerus/releases/tags/" + cask["tag"]))
     origin = "https://github.com/ufna/zerus/releases/download/" + cask["tag"] + "/"
     info = fetch(origin + "release-info.json")
     sums = fetch(origin + "SHA256SUMS")
@@ -455,6 +498,7 @@ class Qualification:
 
 
 def main():
+    metadata = consume_metadata_token()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -468,9 +512,9 @@ def main():
                "interactive_terminal": "NOT_QUALIFIED", "owner_account_install": False,
                "cleanup_passed": False, "completed": False}
     try:
-        old = prepare_public(os.environ["OLD_STABLE_TAP_COMMIT"], "stable", output / "old-stable")
-        new = prepare_public(os.environ["NEW_STABLE_TAP_COMMIT"], "stable", output / "new-stable")
-        nightly = prepare_public(os.environ["NIGHTLY_TAP_COMMIT"], "nightly", output / "nightly")
+        old = prepare_public(os.environ["OLD_STABLE_TAP_COMMIT"], "stable", output / "old-stable", metadata.fetch)
+        new = prepare_public(os.environ["NEW_STABLE_TAP_COMMIT"], "stable", output / "new-stable", metadata.fetch)
+        nightly = prepare_public(os.environ["NIGHTLY_TAP_COMMIT"], "nightly", output / "nightly", metadata.fetch)
         q.lifecycle(old, new, nightly)
         receipt.update(public_tap_install=True, cask_upgrade=True, channel_switch=True,
                        phases=q.phases, sources=[p["source_commit"] for p in (old, new, nightly)])

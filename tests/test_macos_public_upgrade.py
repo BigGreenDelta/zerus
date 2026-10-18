@@ -1,9 +1,14 @@
-"""Credential-free public cask qualification boundaries; no Homebrew side effects."""
+"""Public cask qualification boundaries; no Homebrew side effects or real tokens."""
+from email.message import Message
 import hashlib
 import importlib.util
+import io
 import json
+import os
 from pathlib import Path
 import stat
+import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -49,6 +54,141 @@ class PublicCaskBoundaries(unittest.TestCase):
                       credential_url, "https://github.com:8443/asset"]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 upgrade.safe_url(value)
+
+    def test_metadata_token_is_confined_to_exact_official_get_routes(self):
+        token = "synthetic_metadata_fixture"
+        metadata = upgrade.PublicMetadata(token)
+        urls = ["https://api.github.com/repos/ufna/homebrew-zerus/commits/" + "a" * 40,
+                "https://api.github.com/repos/ufna/zerus/releases/tags/v0.44.0",
+                "https://api.github.com/repos/ufna/zerus/releases/tags/nightly-39002487144"]
+        requests = []
+        def open_request(request, timeout):
+            requests.append(request)
+            response = io.BytesIO(b"{}")
+            response.url = request.full_url
+            return response
+        with patch.object(upgrade.urllib.request, "build_opener",
+                          return_value=types.SimpleNamespace(open=open_request)) as opener:
+            for url in urls:
+                self.assertEqual(metadata.fetch(url), b"{}")
+            self.assertTrue(all(isinstance(call.args[0], upgrade.MetadataRedirects) for call in opener.call_args_list))
+        self.assertEqual([request.full_url for request in requests], urls)
+        for request in requests:
+            self.assertEqual(request.get_method(), "GET")
+            self.assertEqual(request.get_header("Authorization"), "Bearer " + token)
+        bad_urls = ["http://api.github.com/repos/ufna/zerus/releases/tags/v0.44.0",
+                    "https://api.github.com:443/repos/ufna/zerus/releases/tags/v0.44.0",
+                    "https://api.github.com/repos/other/zerus/releases/tags/v0.44.0",
+                    "https://api.github.com/repos/ufna/zerus/contents/VERSION",
+                    "https://api.github.com/repos/ufna/zerus/releases/tags/v0.44.0?fixture=1",
+                    "https://api.github.com/repos/ufna/zerus/releases/tags/v0.44.0#fixture",
+                    "https://api.github.com/repos/ufna/zerus/releases/tags/../latest",
+                    "https://api.github.com/repos/ufna/homebrew-zerus/commits/main",
+                    "https://raw.githubusercontent.com/ufna/zerus/main/VERSION",
+                    "https://github.com/ufna/zerus/releases/download/v0.44.0/release-info.json",
+                    "https://release-assets.githubusercontent.com/fixture",
+                    "https://example.org/repos/ufna/zerus/releases/tags/v0.44.0"]
+        with patch.object(upgrade.urllib.request, "build_opener") as opener:
+            for url in bad_urls:
+                with self.subTest(url=url), self.assertRaises(ValueError):
+                    metadata.fetch(url)
+            for method in ("POST", "PUT", "PATCH", "DELETE", "HEAD", "get"):
+                with self.subTest(method=method), self.assertRaises(ValueError):
+                    metadata.fetch(urls[0], method=method)
+            opener.assert_not_called()
+
+    def test_authenticated_metadata_redirects_never_open_another_request(self):
+        url = "https://api.github.com/repos/ufna/zerus/releases/tags/v0.44.0"
+        request = upgrade.urllib.request.Request(url, headers={"Authorization": "Bearer synthetic_fixture"})
+        handler = upgrade.MetadataRedirects()
+        with patch.object(upgrade.urllib.request, "urlopen") as urlopen:
+            for destination in [url, "https://api.github.com/repos/ufna/zerus/releases/tags/v0.45.0",
+                                "https://raw.githubusercontent.com/ufna/zerus/main/VERSION",
+                                "https://github.com/ufna/zerus/releases/download/v0.44.0/release-info.json",
+                                "https://release-assets.githubusercontent.com/fixture", "https://example.org/fixture"]:
+                for code in (301, 302, 303, 307, 308):
+                    headers = Message()
+                    headers["Location"] = destination
+                    with self.subTest(destination=destination, code=code), self.assertRaises(ValueError):
+                        handler.http_error_302(request, io.BytesIO(), code, "Fixture redirect", headers)
+            urlopen.assert_not_called()
+
+    def test_metadata_errors_do_not_expose_token_and_responses_are_bounded(self):
+        token = "synthetic_metadata_fixture"
+        metadata = upgrade.PublicMetadata(token)
+        url = "https://api.github.com/repos/ufna/zerus/releases/tags/v0.44.0"
+        for error in (upgrade.urllib.error.URLError(token),
+                      upgrade.urllib.error.HTTPError(url, 403, token, {}, io.BytesIO())):
+            with patch.object(upgrade.urllib.request, "build_opener",
+                              return_value=types.SimpleNamespace(open=lambda *args, **kwargs: (_ for _ in ()).throw(error))):
+                with self.assertRaises(ValueError) as raised:
+                    metadata.fetch(url)
+                self.assertNotIn(token, str(raised.exception))
+                self.assertTrue(raised.exception.__suppress_context__)
+            if isinstance(error, upgrade.urllib.error.HTTPError):
+                error.close()
+        def response(*args, **kwargs):
+            body = io.BytesIO(b"12345")
+            body.url = url
+            return body
+        with patch.object(upgrade.urllib.request, "build_opener", return_value=types.SimpleNamespace(open=response)):
+            with self.assertRaises(ValueError):
+                metadata.fetch(url, limit=4)
+
+    def test_raw_and_payload_downloads_remain_anonymous(self):
+        requests = []
+        def open_request(request, timeout):
+            requests.append(request)
+            response = io.BytesIO(b"Public fixture bytes")
+            response.url = request.full_url
+            return response
+        with patch.dict(os.environ, {upgrade.METADATA_TOKEN_ENV: "synthetic_metadata_fixture"}), \
+                patch.object(upgrade.urllib.request, "build_opener", return_value=types.SimpleNamespace(open=open_request)):
+            for url in ("https://raw.githubusercontent.com/ufna/homebrew-zerus/" + "a" * 40 + "/Casks/zerus.rb",
+                        "https://github.com/ufna/zerus/releases/download/v0.44.0/zerus-0.44.0-macos-arm64.zip"):
+                self.assertEqual(upgrade.fetch(url), b"Public fixture bytes")
+        self.assertTrue(all(request.get_header("Authorization") is None for request in requests))
+
+    def test_prepare_public_authenticates_only_the_two_metadata_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cask, release, info, sums = self.proof_inputs()
+            payload = b"Public synthetic ZIP"
+            digest = hashlib.sha256(payload).hexdigest()
+            raw = self.cask().replace("a" * 64, digest).encode()
+            sums = sums.replace(b"a" * 64, digest.encode())
+            release["assets"][-1]["size"] = len(payload)
+            prefix = "https://github.com/ufna/zerus/releases/download/v0.44.0/"
+            raw_url = "https://raw.githubusercontent.com/ufna/homebrew-zerus/" + "a" * 40 + "/Casks/zerus.rb"
+            public = {raw_url: raw, prefix + "release-info.json": info, prefix + "SHA256SUMS": sums,
+                      prefix + "zerus-0.44.0-macos-arm64.zip": payload}
+            api = {"https://api.github.com/repos/ufna/homebrew-zerus/commits/" + "a" * 40: json.dumps({"sha": "a" * 40}).encode(),
+                   "https://api.github.com/repos/ufna/zerus/releases/tags/v0.44.0": json.dumps(release).encode()}
+            with patch.object(upgrade, "fetch", side_effect=lambda url, *args: public[url]) as anonymous:
+                calls = []
+                def metadata_fetch(url):
+                    calls.append(url)
+                    return api[url]
+                upgrade.prepare_public("a" * 40, "stable", Path(tmp) / "public", metadata_fetch)
+            self.assertEqual(calls, list(api))
+            self.assertEqual([call.args[0] for call in anonymous.call_args_list], list(public))
+
+    def test_main_removes_metadata_token_before_guards_and_child_processes(self):
+        token = "synthetic_metadata_fixture"
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {upgrade.METADATA_TOKEN_ENV: token}), \
+                patch.object(sys, "argv", ["macos-public-upgrade.py", "--output", tmp]), \
+                patch.object(upgrade.sys, "version_info", (3, 11)), \
+                patch.object(upgrade, "disposable_mac", side_effect=RuntimeError("Private fixture boundary")):
+            with self.assertRaisesRegex(RuntimeError, "Private fixture boundary"):
+                upgrade.main()
+            self.assertNotIn(upgrade.METADATA_TOKEN_ENV, os.environ)
+            q = upgrade.Qualification(Path(tmp))
+            args = [sys.executable, "-c", "import os; print(os.getenv('GH_PUBLIC_METADATA_TOKEN', 'ABSENT'))"]
+            self.assertEqual(q.run(args).strip(), "ABSENT")
+            with subprocess.Popen(args, stdout=subprocess.PIPE, text=True) as child:
+                stdout, _ = child.communicate(timeout=10)
+                self.assertEqual(child.returncode, 0)
+                self.assertEqual(stdout.strip(), "ABSENT")
+            self.assertTrue(all(token not in path.read_text() for path in Path(tmp).glob("*.json")))
 
     def test_only_literal_current_or_retained_casks_are_accepted(self):
         for channel in ("stable", "nightly"):

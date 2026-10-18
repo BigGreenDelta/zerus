@@ -44,6 +44,7 @@ jobs:
           OLD_STABLE_TAP_COMMIT: ${{ inputs.old_stable_tap_commit }}
           NEW_STABLE_TAP_COMMIT: ${{ inputs.new_stable_tap_commit }}
           NIGHTLY_TAP_COMMIT: ${{ inputs.nightly_tap_commit }}
+          GH_PUBLIC_METADATA_TOKEN: ${{ github.token }}
         run: python3 scripts/ci/macos-public-upgrade.py --output artifacts/macos-public-upgrade
       - name: Retain qualification evidence
         if: always()
