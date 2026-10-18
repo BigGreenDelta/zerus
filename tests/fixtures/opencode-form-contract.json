@@ -1,6 +1,6 @@
 {
  "version": 1,
- "description": "Shared OpenCode 2 form and permission contract. Each case has 'form' (the native OpenCode form or permission), 'card' (the fields a client asserts on the Zerus card built from it; 'card.item' holds the expected fields of its first question item and 'card.question_count' the item count), 'answers' (Zerus answers: question_id, selected_option_ids, text) and the outcome 'reply' (the native reply body) or 'error' (the exact refusal text). Cases that cannot be answered have no answers.",
+ "description": "Shared OpenCode 2 form and permission contract. Each case has 'form' (the native OpenCode form or permission), 'card' (the fields a client asserts on the Zerus card built from it; 'card.item' holds the expected fields of its first question item and 'card.question_count' the item count), 'answers' (Zerus answers: question_id, selected_option_ids, text) and the outcome 'reply' (the native reply body) or 'error' (the exact refusal text). Cases that cannot be answered have no answers. Permission cards carry approval_choices and a scope per option: 'once' for a decision that grants nothing beyond this request (Reject still rejects every pending request of the session), 'broader' for a grant a client must confirm separately; Always allow's description names the patterns it saves.",
  "cases": [
   {
    "name": "question-single",
@@ -807,6 +807,167 @@
    }
   },
   {
+   "name": "plain-string-slash",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "k",
+      "title": "Path",
+      "type": "string"
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "question_count": 1,
+    "item": {
+     "id": "k",
+     "header": "Path",
+     "options": [],
+     "allow_other": true,
+     "multi_select": false,
+     "required": true,
+     "input_kind": "text",
+     "prompt": "Path"
+    }
+   },
+   "answers": [
+    {
+     "question_id": "k",
+     "selected_option_ids": [],
+     "text": "/tmp/report.txt"
+    }
+   ],
+   "reply": {
+    "answer": {
+     "k": "/tmp/report.txt"
+    }
+   }
+  },
+  {
+   "name": "plain-string-bang",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "k",
+      "title": "Note",
+      "type": "string"
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "question_count": 1,
+    "item": {
+     "id": "k",
+     "header": "Note",
+     "options": [],
+     "allow_other": true,
+     "multi_select": false,
+     "required": true,
+     "input_kind": "text",
+     "prompt": "Note"
+    }
+   },
+   "answers": [
+    {
+     "question_id": "k",
+     "selected_option_ids": [],
+     "text": "!important"
+    }
+   ],
+   "reply": {
+    "answer": {
+     "k": "!important"
+    }
+   }
+  },
+  {
+   "name": "plain-string-optional",
+   "form": {
+    "id": "frm_1",
+    "sessionID": "ses_A",
+    "title": "Questions",
+    "metadata": {
+     "kind": "question"
+    },
+    "fields": [
+     {
+      "key": "k",
+      "title": "Note",
+      "type": "string",
+      "required": false
+     }
+    ]
+   },
+   "card": {
+    "question_id": "frm_1",
+    "kind": "opencode_form",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": false,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "question_count": 1,
+    "item": {
+     "id": "k",
+     "header": "Note",
+     "options": [],
+     "allow_other": true,
+     "multi_select": false,
+     "required": false,
+     "input_kind": "text",
+     "prompt": "Note"
+    }
+   },
+   "answers": [
+    {
+     "question_id": "k",
+     "selected_option_ids": [],
+     "text": ""
+    }
+   ],
+   "reply": {
+    "answer": {}
+   }
+  },
+  {
    "name": "permission",
    "form": {
     "id": "per_1",
@@ -836,6 +997,7 @@
     "source": "opencode_native",
     "run_id": "run",
     "conversation_id": "ses_A",
+    "approval_choices": true,
     "question_count": 1,
     "item": {
      "id": "permission",
@@ -847,16 +1009,20 @@
      "options": [
       {
        "id": "once",
-       "label": "Allow once"
+       "label": "Allow once",
+       "scope": "once"
       },
       {
        "id": "always",
-       "label": "Always allow"
+       "label": "Always allow",
+       "description": "Allows without asking again: printf *",
+       "scope": "broader"
       },
       {
        "id": "reject",
        "label": "Reject",
-       "description": "Rejects every pending request in this session"
+       "description": "Rejects every pending request in this session",
+       "scope": "once"
       }
      ]
     }
@@ -873,6 +1039,223 @@
    "reply": {
     "decision": "always"
    }
+  },
+  {
+   "name": "permission-once",
+   "form": {
+    "id": "per_1",
+    "sessionID": "ses_A",
+    "action": "shell",
+    "resources": [
+     "printf native-tool-output"
+    ],
+    "save": [
+     "printf *"
+    ],
+    "source": {
+     "type": "tool",
+     "messageID": "msg_1",
+     "id": "call_1"
+    }
+   },
+   "card": {
+    "question_id": "per_1",
+    "kind": "opencode_permission",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": true,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "approval_choices": true,
+    "question_count": 1,
+    "item": {
+     "id": "permission",
+     "header": "Permission",
+     "prompt": "shell\nprintf native-tool-output",
+     "multi_select": false,
+     "allow_other": false,
+     "required": true,
+     "options": [
+      {
+       "id": "once",
+       "label": "Allow once",
+       "scope": "once"
+      },
+      {
+       "id": "always",
+       "label": "Always allow",
+       "description": "Allows without asking again: printf *",
+       "scope": "broader"
+      },
+      {
+       "id": "reject",
+       "label": "Reject",
+       "description": "Rejects every pending request in this session",
+       "scope": "once"
+      }
+     ]
+    }
+   },
+   "answers": [
+    {
+     "question_id": "permission",
+     "selected_option_ids": [
+      "once"
+     ],
+     "text": ""
+    }
+   ],
+   "reply": {
+    "decision": "once"
+   }
+  },
+  {
+   "name": "permission-reject",
+   "form": {
+    "id": "per_1",
+    "sessionID": "ses_A",
+    "action": "shell",
+    "resources": [
+     "printf native-tool-output"
+    ],
+    "save": [
+     "printf *"
+    ],
+    "source": {
+     "type": "tool",
+     "messageID": "msg_1",
+     "id": "call_1"
+    }
+   },
+   "card": {
+    "question_id": "per_1",
+    "kind": "opencode_permission",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": true,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "approval_choices": true,
+    "question_count": 1,
+    "item": {
+     "id": "permission",
+     "header": "Permission",
+     "prompt": "shell\nprintf native-tool-output",
+     "multi_select": false,
+     "allow_other": false,
+     "required": true,
+     "options": [
+      {
+       "id": "once",
+       "label": "Allow once",
+       "scope": "once"
+      },
+      {
+       "id": "always",
+       "label": "Always allow",
+       "description": "Allows without asking again: printf *",
+       "scope": "broader"
+      },
+      {
+       "id": "reject",
+       "label": "Reject",
+       "description": "Rejects every pending request in this session",
+       "scope": "once"
+      }
+     ]
+    }
+   },
+   "answers": [
+    {
+     "question_id": "permission",
+     "selected_option_ids": [
+      "reject"
+     ],
+     "text": ""
+    }
+   ],
+   "reply": {
+    "decision": "reject"
+   }
+  },
+  {
+   "name": "permission-allow-refused",
+   "form": {
+    "id": "per_1",
+    "sessionID": "ses_A",
+    "action": "shell",
+    "resources": [
+     "printf native-tool-output"
+    ],
+    "save": [
+     "printf *"
+    ],
+    "source": {
+     "type": "tool",
+     "messageID": "msg_1",
+     "id": "call_1"
+    }
+   },
+   "card": {
+    "question_id": "per_1",
+    "kind": "opencode_permission",
+    "status": "pending",
+    "answerable": true,
+    "can_answer": true,
+    "approval": true,
+    "answer_transport": "native_opencode",
+    "agent_id": "main",
+    "source": "opencode_native",
+    "run_id": "run",
+    "conversation_id": "ses_A",
+    "approval_choices": true,
+    "question_count": 1,
+    "item": {
+     "id": "permission",
+     "header": "Permission",
+     "prompt": "shell\nprintf native-tool-output",
+     "multi_select": false,
+     "allow_other": false,
+     "required": true,
+     "options": [
+      {
+       "id": "once",
+       "label": "Allow once",
+       "scope": "once"
+      },
+      {
+       "id": "always",
+       "label": "Always allow",
+       "description": "Allows without asking again: printf *",
+       "scope": "broader"
+      },
+      {
+       "id": "reject",
+       "label": "Reject",
+       "description": "Rejects every pending request in this session",
+       "scope": "once"
+      }
+     ]
+    }
+   },
+   "answers": [
+    {
+     "question_id": "permission",
+     "selected_option_ids": [
+      "allow"
+     ],
+     "text": ""
+    }
+   ],
+   "error": "Unknown answer option"
   }
  ]
 }

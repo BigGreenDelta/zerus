@@ -487,6 +487,7 @@ set_tests_properties(composertoolbar PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=off
 add_executable(test_questioncard test_questioncard.cpp)
 target_include_directories(test_questioncard PRIVATE ../src)
 target_link_libraries(test_questioncard PRIVATE Qt6::Test Qt6::Widgets hgs-markdown hgs-tray-ui)
+target_compile_definitions(test_questioncard PRIVATE ZERUS_OPENCODE_FORM_CONTRACT="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-form-contract.json")
 zerus_add_test(questioncard test_questioncard)
 set_tests_properties(questioncard PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

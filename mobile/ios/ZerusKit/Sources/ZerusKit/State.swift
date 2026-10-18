@@ -205,6 +205,8 @@ public struct OutgoingMessage: Codable, Hashable, Sendable {
 
     public func belongs(to current: Target) -> Bool { target == current || target.resolves(to: current) }
     public var blocksSending: Bool { status == "sending" || status == "uncertain" }
+    /// Its delivery needs review: the message offers Review, and Check delivery while uncertain.
+    public var recoverable: Bool { status == "failed" || status == "uncertain" }
 }
 
 /// One automatic receipt lookup for the current navigation, never a message submission.

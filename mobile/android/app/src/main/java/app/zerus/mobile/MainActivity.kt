@@ -877,7 +877,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     LaunchedEffect(target.key, events, questions, ownSendId, model.activityVerified, warning, boundedNotice,
         queueVisible, unreadBoundary, readReady, model.hasNewer, model.olderLoading) {
         if (events.isEmpty() && questions.isEmpty() && raw == null && !model.demo) return@LaunchedEffect
-        val own = events.lastOrNull { it.outgoingId == ownSendId || it.requestId == ownSendId }
+        val own = ConversationViewport.own(events, ownSendId)
         // With no cards below the message, align its bottom to the composer.
         val ownKey = if (own == null) null else if (questions.isEmpty() && !queueVisible) "history:tail" else "event:" + own.id
         val explicitSend = ownSendId.isNotBlank() && ownSendId != follow.ownSendId && ownKey != null

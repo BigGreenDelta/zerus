@@ -64,6 +64,7 @@ struct QuestionCard: View {
     @State private var review = ApprovalReview()
     @State private var now = ProcessInfo.processInfo.systemUptime
     @State private var visible = false
+    @State private var confirmation: PermissionConfirmation?
 
     private var model: ConversationModel { app.conversation }
 
@@ -71,20 +72,33 @@ struct QuestionCard: View {
         let draft = model.draft(target, question)
         let native = QuestionPolicies.submitted(question, target)
         let identity = "\(target.key)|\(QuestionPolicies.key(question))|\(native?.requestId ?? "")|\(draft.generation)"
-        let editing = draft.status == "editing" && native == nil && model.pendingQuestionSend == nil
+        let editing = isEditing(draft, native)
         // A card that cannot be answered here is read-only, so no draft is written that could never be sent.
         let inputs = editing && question.canAnswer
-        let page = min(max(display.page(question), 0), max(question.prompts.count - 1, 0))
+        // Only the final step sends; Next moves on once this part's answer is valid.
+        let step = QuestionSteps.current(question.prompts, page: display.page(question), options: options, texts: texts)
+        let page = step.page
         let prompts = question.prompts.indices.contains(page) ? [question.prompts[page]] : []
         let otherPrompts = prompts.filter { $0.other && !question.approval }
         let error = QuestionPolicies.answerError(question.prompts, options: options, texts: texts)
         let complete = QuestionPolicies.complete(question.prompts, options: options, texts: texts)
         let sendEnabled = question.canAnswer && editing && complete && available && !submitting
+        let actionEnabled = step.nextPage != nil ? editing && !submitting && step.canAdvance : sendEnabled
         // A card that cannot be answered here shows its reason and no Submit.
         let showsSubmit = QuestionPolicies.showsSubmit(question)
         let approvalSupported = QuestionPolicies.approvalSupported(question)
-        let eligible = visible && scenePhase == .active && available && editing && question.canAnswer && approvalSupported
-        let remaining = review.secondsRemaining(now: now)
+        let permission = QuestionPolicies.openCodePermission(question)
+        let eligible = visible && scenePhase == .active && available && editing && question.canAnswer && (approvalSupported || permission)
+        // The review belongs to this card: another card shown here starts its own three seconds.
+        let reviewCard = ApprovalReview.key(target, question)
+        let remaining = review.secondsRemaining(now: now, card: reviewCard)
+        let reviewed = eligible && remaining == 0
+        let answerable = question.canAnswer && editing && available
+        // The Always allow dialog is shown only while confirming would send; one that cannot send (including in the
+        // background or out of view) is dropped.
+        let alwaysSendable = confirmation?.confirm(question, target: target, editing: editing, available: available, foreground: scenePhase == .active,
+                                                   visible: visible, review: review, now: now) != nil
+        let staleConfirmation = confirmation != nil && !alwaysSendable
 
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -119,9 +133,9 @@ struct QuestionCard: View {
                     }))
                     .textFieldStyle(.roundedBorder)
                     .disabled(!inputs)
-                    .submitLabel(.send)
-                    .onSubmit { submit(editing: editing) }
-                    if index == otherPrompts.count - 1 && showsSubmit { sendButton(enabled: sendEnabled, multiple: question.prompts.count > 1, editing: editing) }
+                    .submitLabel(step.nextPage != nil ? .next : .send)
+                    .onSubmit { primaryAction(step, editing: editing) }
+                    if index == otherPrompts.count - 1 && showsSubmit { actionButton(step, enabled: actionEnabled, editing: editing) }
                 }
                 if !QuestionPolicies.textHint(prompt).isEmpty {
                     Text(QuestionPolicies.textHint(prompt)).font(.footnote).foregroundStyle(Theme.muted)
@@ -131,14 +145,31 @@ struct QuestionCard: View {
             if !error.isEmpty { Text(error).font(.footnote).foregroundStyle(Theme.amber) }
             let notice = model.questionSendNotice(target, question)
             if !notice.isEmpty { Text(notice).font(.footnote).foregroundStyle(Theme.amber) }
-            if question.approval {
+            if question.approval && permission {
+                let reject = PermissionAction.reject, once = PermissionAction.allowOnce, always = PermissionAction.alwaysAllow
+                HStack(spacing: 8) {
+                    Button(reject.label(remaining: remaining)) { approve(reject.option) }
+                        .buttonStyle(.bordered)
+                        .disabled(!reject.enabled(answerable: answerable, reviewed: reviewed))
+                    Button(once.label(remaining: remaining)) { approve(once.option) }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!once.enabled(answerable: answerable, reviewed: reviewed))
+                }
+                // Always allow reaches beyond this request, so it opens its own confirmation.
+                if PermissionAction.actions(question).contains(always) {
+                    Button(always.label(remaining: remaining)) { confirmation = PermissionConfirmation(question) }
+                        .buttonStyle(.bordered)
+                        .disabled(!always.enabled(answerable: answerable, reviewed: reviewed))
+                }
+                Text("Reject rejects every pending request in this session.").font(.footnote).foregroundStyle(Theme.muted)
+            } else if question.approval {
                 HStack(spacing: 8) {
                     Button("Deny") { approve("deny") }
                         .buttonStyle(.bordered)
                         .disabled(!(approvalSupported && question.canAnswer && editing && available))
                     Button(remaining > 0 ? "Approve once (\(remaining))" : "Approve once") { approve("allow") }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!(eligible && remaining == 0))
+                        .disabled(!reviewed)
                 }
                 Text("Approval applies only to this command. Review it before continuing.").font(.footnote).foregroundStyle(Theme.muted)
             } else if question.prompts.count > 1 || question.canSkip || otherPrompts.isEmpty {
@@ -146,7 +177,7 @@ struct QuestionCard: View {
                     if question.prompts.count > 1 {
                         Button { display = display.withPage(question, page - 1) } label: { Image(systemName: "chevron.left") }
                             .disabled(page == 0).accessibilityLabel("Previous part")
-                        Text("\(page + 1)/\(question.prompts.count)").font(.caption.weight(.semibold))
+                        Text("Question \(page + 1)/\(question.prompts.count)").font(.caption.weight(.semibold))
                         Button { display = display.withPage(question, page + 1) } label: { Image(systemName: "chevron.right") }
                             .disabled(page + 1 >= question.prompts.count).accessibilityLabel("Next part")
                     }
@@ -154,7 +185,7 @@ struct QuestionCard: View {
                     if question.canSkip {
                         Button("Skip") { skip() }.disabled(!(editing && available))
                     }
-                    if otherPrompts.isEmpty && showsSubmit { sendButton(enabled: sendEnabled, multiple: question.prompts.count > 1, editing: editing) }
+                    if otherPrompts.isEmpty && showsSubmit { actionButton(step, enabled: actionEnabled, editing: editing) }
                 }
             }
             if !available {
@@ -163,24 +194,34 @@ struct QuestionCard: View {
                 Text(question.unavailableReason.isEmpty ? "Complete this request on your machine." : question.unavailableReason)
                     .font(.footnote).foregroundStyle(Theme.muted).textSelection(.enabled)
             }
-            if question.approval && !approvalSupported {
+            if question.approval && !approvalSupported && !permission {
                 Text("This approval cannot be answered here. Continue on your machine.").font(.footnote).foregroundStyle(Theme.muted)
             }
         }
         .padding(12)
         .background(Color(hex: 0x2B2923), in: RoundedRectangle(cornerRadius: 14))
+        .confirmationDialog("Always allow?", isPresented: Binding(get: { alwaysSendable }, set: { if !$0 { confirmation = nil } }),
+                            titleVisibility: .visible, presenting: confirmation) { pending in
+            Button("Always allow", role: .destructive) { confirmAlways(pending) }
+            Button("Cancel", role: .cancel) { confirmation = nil }
+        } message: { pending in
+            Text(verbatim: pending.message)
+        }
+        // A confirmation that cannot send (its card changed, can no longer be answered or edited here, left the foreground or
+        // view, or needs a new review) closes without sending.
+        .onChange(of: staleConfirmation) { _, stale in if stale { confirmation = nil } }
         .onAppear { load(identity: identity, draft: draft, native: native) }
         .onChange(of: identity) { load(identity: identity, draft: draft, native: native) }
-        .onChange(of: eligible, initial: true) {
-            now = ProcessInfo.processInfo.systemUptime
-            review = review.observe(eligible: eligible, now: now)
-        }
-        .task(id: eligible && question.approval) {
+        .onChange(of: eligible, initial: true) { observeReview(eligible: eligible, card: reviewCard) }
+        .onChange(of: reviewCard) { observeReview(eligible: eligible, card: reviewCard) }
+        // The countdown clock only advances a review that eligibility started; once cancelled it stops without another tick.
+        .task(id: "\(eligible && question.approval)|\(reviewCard)") {
             guard eligible && question.approval else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(200))
+            while true {
+                do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                guard !Task.isCancelled else { return }
                 now = ProcessInfo.processInfo.systemUptime
-                review = review.observe(eligible: true, now: now)
+                review = review.tick(now: now, card: reviewCard)
             }
         }
     }
@@ -261,15 +302,32 @@ struct QuestionCard: View {
         }
     }
 
-    private func sendButton(enabled: Bool, multiple: Bool, editing: Bool) -> some View {
-        Button { submit(editing: editing) } label: {
-            Image(systemName: "arrow.up").font(.body.weight(.semibold)).frame(width: 36, height: 36)
+    /// Next, Review answers, Send all or Send, as on Android: one action per step.
+    private func actionButton(_ step: QuestionStep, enabled: Bool, editing: Bool) -> some View {
+        let label = step.reviewing ? "Review answers" : step.nextPage != nil ? "Next" : step.count > 1 ? "Send all" : "Send"
+        let description = step.reviewing ? "Review unanswered questions" : step.nextPage != nil ? "Next question" : step.count > 1 ? "Send all" : "Send answer"
+        return Button { primaryAction(step, editing: editing) } label: {
+            HStack(spacing: 6) {
+                Text(label)
+                Image(systemName: step.nextPage != nil ? "chevron.right" : "arrow.up")
+            }
+            .font(.footnote.weight(.semibold))
+            .padding(.horizontal, 12)
+            .frame(minHeight: 44)
         }
         .buttonStyle(.plain)
         .foregroundStyle(enabled ? Theme.background : Theme.muted)
-        .background(enabled ? Theme.mint : Color(hex: 0x2B3B3B), in: Circle())
+        .background(enabled ? Theme.mint : Color(hex: 0x2B3B3B), in: Capsule())
         .disabled(!enabled)
-        .accessibilityLabel(multiple ? "Send all" : "Send answer")
+        .accessibilityLabel(description)
+    }
+
+    /// Moves to the step's next page after saving the answer, or sends from the final step through the unchanged send.
+    private func primaryAction(_ step: QuestionStep, editing: Bool) {
+        guard let next = step.nextPage else { return submit(editing: editing) }
+        guard editing && !submitting && step.canAdvance else { return }
+        persist()
+        display = display.withPage(question, next)
     }
 
     private func otherLabel(_ prompt: Prompt) -> String {
@@ -285,6 +343,7 @@ struct QuestionCard: View {
         loadedIdentity = identity
         gate = QuestionSubmitGate()
         submitting = false
+        confirmation = nil
         // This question's saved draft wins; form defaults and default_text only seed an unsaved one and are never sent by themselves.
         let opening = QuestionPolicies.opening(question.prompts, draftAnswers: draft.answers, native: native)
         options = opening.options
@@ -313,9 +372,28 @@ struct QuestionCard: View {
     }
 
     private func approve(_ option: String) {
-        guard let prompt = question.prompts.first else { return }
-        let payload = JSON.array([["question_id": .string(prompt.id), "selected_option_ids": [.string(option)], "text": ""]]).compact
+        guard let payload = QuestionPolicies.approvalAnswers(question, option)?.compact else { return }
         Task { await model.sendQuestion(target, question, answers: payload) }
+    }
+
+    /// Sends Always allow only for the card that offered it, while it is answerable, editable, in the foreground, visible
+    /// and still reviewed; all of it is checked again now.
+    private func confirmAlways(_ pending: PermissionConfirmation) {
+        confirmation = nil
+        let editing = isEditing(model.draft(target, question), QuestionPolicies.submitted(question, target))
+        guard let payload = pending.confirm(question, target: target, editing: editing, available: available, foreground: scenePhase == .active,
+                                            visible: visible, review: review, now: ProcessInfo.processInfo.systemUptime)?.compact else { return }
+        Task { await model.sendQuestion(target, question, answers: payload) }
+    }
+
+    /// The answer can still be edited and sent: no attempt, native submission or pending send confirmation holds it.
+    private func isEditing(_ draft: Draft, _ native: NativeQuestionDelivery?) -> Bool {
+        draft.status == "editing" && native == nil && model.pendingQuestionSend == nil
+    }
+
+    private func observeReview(eligible: Bool, card: String) {
+        now = ProcessInfo.processInfo.systemUptime
+        review = review.observe(eligible: eligible, now: now, card: card)
     }
 
     private func skip() {

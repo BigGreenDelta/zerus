@@ -403,6 +403,12 @@ private slots:
     void openCodeRemovesUndeliveredMessageOnlyAfterConfirmation();
     void openCodeForgetsOnlyItsBindingWhileRunning();
     void openCodeForgetWithoutRunIdentityUsesKill();
+    void openCodeSelectionForgetsEachBinding();
+    void openCodeSelectionForgetRechecksEachRow_data();
+    void openCodeSelectionForgetRechecksEachRow();
+    void openCodeSelectionForgetsStoppedAndRemoteBindings();
+    void openCodeForgetFinishesWhenTheCliCannotStart_data();
+    void openCodeForgetFinishesWhenTheCliCannotStart();
     void openCodeOversizedFormShowsItsReason();
     void openCodeStoppedServiceOffersExplicitStart();
     void machineBatchCountsExcludeNativeOpenCodeSessions();
@@ -478,6 +484,12 @@ private slots:
     void controlConsolePreview();
 private:
     FleetState fleet() const;
+    // Two running OpenCode 2 sessions, each with its own run and conversation,
+    // and a stopped Codex session, for Forget of a multi-selection.
+    FleetState openCodeSelectionFleet() const;
+    // A copy of the base fixture that records each session-action and kill
+    // call. A <fixture>.outcome file "<name>\n<status>" refuses that session.
+    QString openCodeSelectionFixture(const QString &name) const;
     // The base fixture's script; tests start program(), see FakeCli.h.
     QString script() const { return m_dir->filePath("hgs"); }
     QString program() const { return FakeCli::program(script()); }
@@ -559,6 +571,38 @@ QString TestSessionsWindow::programInspecting(const QString &name, const QJsonOb
     if (!usage.isEmpty()) answer += "elif c=='account' and a[1:2]==['inspect']:print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(usage).toJson(QJsonDocument::Compact))) + ")\n";
     const QString fixture = m_dir->filePath(name);
     return FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)) ? FakeCli::program(fixture) : QString();
+}
+
+FleetState TestSessionsWindow::openCodeSelectionFleet() const
+{
+    SessionInfo opencode; opencode.cmd = "opencode"; opencode.project = "project"; opencode.tracked = true;
+    opencode.state = "running"; opencode.activity = "idle"; opencode.phase = "idle"; opencode.processState = "running";
+    opencode.runtimeState = "live"; opencode.terminalSupported = false;
+    opencode.actionsReported = true; opencode.allowedActions = {"rename", "forget"};
+    auto first = opencode; first.name = "opencode/project/first"; first.tag = "first";
+    first.runId = "run-first"; first.conversationId = "ses_first";
+    auto second = opencode; second.name = "opencode/project/second"; second.tag = "second";
+    second.runId = "run-second"; second.conversationId = "ses_second";
+    SessionInfo stopped; stopped.name = "codex/project/stopped"; stopped.cmd = "codex"; stopped.project = "project"; stopped.tag = "stopped";
+    stopped.tracked = true; stopped.resumable = true; stopped.state = "stopped"; stopped.activity = "idle"; stopped.phase = "idle";
+    auto result = fleet(); auto box = result.local(); box.sessions = {first, second, stopped};
+    result.setLocal(box, QDateTime::currentMSecsSinceEpoch()); return result;
+}
+
+QString TestSessionsWindow::openCodeSelectionFixture(const QString &name) const
+{
+    QFile original(script()); if (!original.open(QIODevice::ReadOnly)) return {};
+    const QByteArray answer = "elif c=='session-action':\n"
+        " import pathlib;p=json.load(sys.stdin)\n"
+        " open(__file__+'.forget','a').write(json.dumps({'args':sys.argv[1:],'payload':p})+'\\n')\n"
+        " r={'request_id':p['request_id'],'name':a[1],'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],'status':'completed'}\n"
+        " outcome=pathlib.Path(__file__+'.outcome')\n"
+        " refused=outcome.read_text().split('\\n') if outcome.exists() else []\n"
+        " if refused[:1]==[a[1]]:r.update(status=refused[1],error='This action is unavailable for the exact OpenCode session')\n"
+        " print(json.dumps(r))\n"
+        "elif c in ('kill','terminate'):open(__file__+'.ended','a').write(json.dumps(sys.argv[1:])+'\\n')\n";
+    const QString fixture = m_dir->filePath(name);
+    return FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)) ? fixture : QString();
 }
 
 FleetState TestSessionsWindow::fleet() const
@@ -8743,6 +8787,265 @@ void TestSessionsWindow::openCodeForgetWithoutRunIdentityUsesKill()
     QFile calls(ended);QVERIFY(calls.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(calls.readAll().trimmed()).array(),QJsonArray({"kill",name}));
     QVERIFY(!QFileInfo::exists(fixture+".scoped"));
+}
+
+// A multi-selection forgets running OpenCode 2 sessions like a single Forget:
+// after one confirmation, each forgets only its own Zerus binding with its own
+// run and conversation, never through kill. Other rows keep their own Forget,
+// and an OpenCode row without both identities is left as it is.
+void TestSessionsWindow::openCodeSelectionForgetsEachBinding()
+{
+    auto state=openCodeSelectionFleet();auto box=state.local();
+    const QString first=box.sessions[0].name,second=box.sessions[1].name,stopped=box.sessions[2].name;
+    auto unknownRun=box.sessions[0];unknownRun.name="opencode/project/legacy";unknownRun.tag="legacy";unknownRun.runId.clear();
+    auto unknownConversation=box.sessions[1];unknownConversation.name="opencode/project/unbound";unknownConversation.tag="unbound";unknownConversation.conversationId.clear();
+    box.sessions<<unknownRun<<unknownConversation;state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    const auto fixture=openCodeSelectionFixture("opencode-selection-forget");QVERIFY(!fixture.isEmpty());
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.resize(1100,850);window.setFleet(state);window.show();
+    window.showSession({},stopped);
+    auto *list=window.findChild<SessionList *>("sessionList");auto *client=window.findChild<HgsClient *>();QVERIFY(list);QVERIFY(client);
+    const auto toggle=[&](const QString &name){
+        QListWidgetItem *item=nullptr;
+        for(int i=0;i<list->count();++i)if(list->item(i)->data(SessionRoles::Key).toString()=='\n'+name){item=list->item(i);break;}
+        QVERIFY(item);list->scrollToItem(item);QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::ControlModifier,list->visualItemRect(item).center());
+    };
+    const auto chosen=[&]{QSet<QString> result;for(const auto *item:list->selectedItems())result.insert(item->data(SessionRoles::Key).toString().section('\n',1,1));return result;};
+    toggle(first);toggle(second);toggle(stopped);QCOMPARE(chosen(),(QSet<QString>{first,second}));
+    auto *forget=window.findChild<QAction *>("selectiontrash"),*terminate=window.findChild<QAction *>("selectionstop");QVERIFY(forget);QVERIFY(terminate);
+    QTRY_COMPARE(forget->text(),QString("Forget (2)"));QVERIFY(forget->isEnabled());QVERIFY(!terminate->isVisible());
+    // OpenCode sessions alone: the question is only about their bindings.
+    int asked=0;QString question;
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());if(!dialog)return;++asked;
+        question=dialog->text();dialog->button(QMessageBox::Cancel)->click();
+    });
+    forget->trigger();QCOMPARE(asked,1);
+    QCOMPARE(question,QString("Forget 2 selected sessions?\n\nOpenCode sessions: only Zerus forgets them; their conversations stay in OpenCode."));
+    toggle(stopped);toggle(unknownRun.name);toggle(unknownConversation.name);
+    QCOMPARE(chosen(),(QSet<QString>{first,second,stopped,unknownRun.name,unknownConversation.name}));
+    const auto control=[&](const char *name){auto *action=window.findChild<QAction *>(name);return action?action->text():QString();};
+    QTRY_COMPARE(forget->text(),QString("Forget (3)"));QVERIFY(forget->isEnabled());
+    // OpenCode rows never terminate; the other actions keep their counts.
+    QCOMPARE(terminate->text(),QString("Terminate (0)"));QVERIFY(!terminate->isVisible());
+    QCOMPARE(control("selectionpause"),QString("Pause (0)"));QCOMPARE(control("selectionplay"),QString("Resume / restore (1)"));
+    QCOMPARE(control("selectionarchived"),QString("Move to archive (1)"));
+    const auto calls=[&](const QString &suffix){
+        QList<QJsonValue> result;QFile file(fixture+suffix);
+        if(file.open(QIODevice::ReadOnly))for(const auto &line:file.readAll().split('\n'))if(!line.isEmpty()) {
+            const auto document=QJsonDocument::fromJson(line);result<<(document.isArray()?QJsonValue(document.array()):QJsonValue(document.object()));
+        }
+        return result;
+    };
+    auto *notice=window.findChild<QLabel *>("notice");QVERIFY(notice);
+    QSignalSpy finished(client,&HgsClient::sessionActionFinished);QSignalSpy writes(client,&HgsClient::writeDone);
+    // Escape cancels the only confirmation, and nothing is sent. The dialog
+    // closes before the checks, so a failed check cannot leave it open.
+    asked=0;QString objectName,text,detailed;bool cancelDefault=false,cancelEscape=false;QStringList destructive;
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());if(!dialog)return;++asked;
+        objectName=dialog->objectName();text=dialog->text();detailed=dialog->detailedText();
+        cancelDefault=dialog->defaultButton()==dialog->button(QMessageBox::Cancel);cancelEscape=dialog->escapeButton()==dialog->button(QMessageBox::Cancel);
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole)destructive<<button->text();
+        QTest::keyClick(dialog,Qt::Key_Escape);
+    });
+    forget->trigger();QCOMPARE(asked,1);QTest::qWait(150);
+    QCOMPARE(objectName,QString("confirmSelectionAction"));
+    QVERIFY2(text.startsWith("Forget 3 selected sessions?"),qPrintable(text));
+    QVERIFY2(text.contains("OpenCode sessions: only Zerus forgets them; their conversations stay in OpenCode."),qPrintable(text));
+    QVERIFY2(text.contains("These saved or archived entries are removed. Other live sessions and native conversation history are kept."),qPrintable(text));
+    QVERIFY2(!text.contains("Only these"),qPrintable(text));
+    QVERIFY2(!text.contains("Live sessions and native"),qPrintable(text));
+    QVERIFY2(text.contains("2 unavailable or inapplicable sessions will be left as they are."),qPrintable(text));
+    QStringList listed=detailed.split('\n');for(auto &row:listed)row=row.section(" / ",1);
+    QCOMPARE(QSet<QString>(listed.cbegin(),listed.cend()),(QSet<QString>{first,second,stopped}));
+    QVERIFY(cancelDefault);QVERIFY(cancelEscape);QCOMPARE(destructive,QStringList{"Forget 3 sessions"});
+    QVERIFY(calls(".forget").isEmpty());QVERIFY(calls(".ended").isEmpty());QCOMPARE(finished.size(),0);QCOMPARE(writes.size(),0);
+    // Confirmed once, each binding goes with its own identity and request.
+    int dialogs=0;QTimer confirmations;confirmations.setInterval(10);
+    connect(&confirmations,&QTimer::timeout,&window,[&]{
+        auto *dialog=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());if(!dialog)return;++dialogs;
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();return;}
+        dialog->reject();
+    });
+    QTRY_VERIFY(forget->isEnabled());confirmations.start();forget->trigger();
+    QTRY_VERIFY_WITH_TIMEOUT(notice->text().contains("Forget: 3 of 3 completed."),10000);confirmations.stop();
+    QCOMPARE(dialogs,1);QVERIFY2(!notice->text().contains("failed"),qPrintable(notice->text()));
+    QVERIFY(!notice->text().contains("Zerus forgot"));
+    const auto forgotten=calls(".forget");QCOMPARE(forgotten.size(),2);
+    const QMap<QString,QPair<QString,QString>> identities{{first,{"run-first","ses_first"}},{second,{"run-second","ses_second"}}};
+    QSet<QString> names,requests;
+    for(const auto &value:forgotten) {
+        const auto call=value.toObject();const auto name=call["args"].toArray().at(1).toString();names.insert(name);
+        QCOMPARE(call["args"].toArray(),QJsonArray({"session-action",name,"--json"}));
+        const auto payload=call["payload"].toObject();
+        QCOMPARE(payload.keys(),QStringList({"action","expected_conversation_id","expected_run_id","request_id"}));
+        QCOMPARE(payload["action"].toString(),QString("forget"));
+        QVERIFY(identities.contains(name));
+        QCOMPARE(payload["expected_run_id"].toString(),identities[name].first);
+        QCOMPARE(payload["expected_conversation_id"].toString(),identities[name].second);
+        QVERIFY(!payload["request_id"].toString().isEmpty());requests.insert(payload["request_id"].toString());
+    }
+    QCOMPARE(names,(QSet<QString>{first,second}));QCOMPARE(requests.size(),2);
+    const auto ended=calls(".ended");QCOMPARE(ended.size(),1);QCOMPARE(ended[0].toArray(),QJsonArray({"kill",stopped}));
+    QCOMPARE(finished.size(),2);for(const auto &row:finished)QVERIFY2(row[1].toBool(),qPrintable(row[3].toString()));
+}
+
+void TestSessionsWindow::openCodeSelectionForgetRechecksEachRow_data()
+{
+    QTest::addColumn<QString>("change");
+    for(const auto *change:{"changed-run","failed","uncertain"})QTest::newRow(change)<<QString::fromLatin1(change);
+}
+// Each row is checked again just before it goes: a row whose run changed after
+// the confirmation is skipped as changed. A refused or unconfirmed receipt
+// counts as failed with its reason, and nothing is retried.
+void TestSessionsWindow::openCodeSelectionForgetRechecksEachRow()
+{
+    QFETCH(QString,change);
+    auto state=openCodeSelectionFleet();auto box=state.local();
+    const QString first=box.sessions[0].name,second=box.sessions[1].name,stopped=box.sessions[2].name;
+    const auto fixture=openCodeSelectionFixture("opencode-selection-"+change);QVERIFY(!fixture.isEmpty());
+    if(change!="changed-run")QVERIFY(FakeCli::replace(fixture+".outcome",(second+'\n'+change).toUtf8()));
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.resize(1100,850);window.setFleet(state);window.show();
+    window.showSession({},stopped);
+    auto *list=window.findChild<SessionList *>("sessionList");auto *client=window.findChild<HgsClient *>();QVERIFY(list);QVERIFY(client);
+    for(const auto &name:{first,second}) {
+        QListWidgetItem *item=nullptr;
+        for(int i=0;i<list->count();++i)if(list->item(i)->data(SessionRoles::Key).toString()=='\n'+name){item=list->item(i);break;}
+        QVERIFY(item);list->scrollToItem(item);QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::ControlModifier,list->visualItemRect(item).center());
+    }
+    QCOMPARE(list->selectedItems().size(),3);
+    auto *forget=window.findChild<QAction *>("selectiontrash");QVERIFY(forget);QTRY_COMPARE(forget->text(),QString("Forget (3)"));QVERIFY(forget->isEnabled());
+    auto *notice=window.findChild<QLabel *>("notice");QVERIFY(notice);
+    QSignalSpy finished(client,&HgsClient::sessionActionFinished);
+    bool asked=false;
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());QVERIFY(dialog);asked=true;
+        // OpenCode replaced the second session's run while the question was open.
+        if(change=="changed-run"){box.sessions[1].runId="run-replacement";state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);}
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();break;}
+    });
+    forget->trigger();QVERIFY(asked);
+    QTRY_VERIFY_WITH_TIMEOUT(notice->text().contains("Forget: 2 of 3 completed. 1 failed or changed; refresh before retrying."),10000);
+    QVERIFY(notice->property("error").toBool());
+    if(change=="changed-run")QVERIFY2(notice->text().contains(second+": session changed or is unavailable"),qPrintable(notice->text()));
+    else QVERIFY2(notice->text().contains("forget "+second+": ")&&notice->text().contains("This action is unavailable for the exact OpenCode session"),qPrintable(notice->text()));
+    QTest::qWait(200);
+    QFile file(fixture+".forget");QVERIFY(file.open(QIODevice::ReadOnly));
+    QStringList forgotten;for(const auto &line:file.readAll().split('\n'))if(!line.isEmpty()) {
+        const auto call=QJsonDocument::fromJson(line).object();forgotten<<call["args"].toArray().at(1).toString();
+        QCOMPARE(call["payload"].toObject()["expected_run_id"].toString(),call["args"].toArray().at(1).toString()==first?QString("run-first"):QString("run-second"));
+    }
+    forgotten.sort();
+    // Exactly one request per row that went; a refused one is not sent again.
+    QCOMPARE(forgotten,(change=="changed-run"?QStringList{first}:QStringList{first,second}));
+    QCOMPARE(finished.size(),forgotten.size());
+    QFile ended(fixture+".ended");QVERIFY(ended.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(ended.readAll().trimmed()).array(),QJsonArray({"kill",stopped}));
+}
+
+// The binding-only Forget of a batch also covers a stopped OpenCode session
+// with a known identity (never kill) and a session on another machine, whose
+// request goes to that machine.
+void TestSessionsWindow::openCodeSelectionForgetsStoppedAndRemoteBindings()
+{
+    auto state=openCodeSelectionFleet();auto box=state.local();
+    auto stopped=box.sessions[0];stopped.name="opencode/project/stopped";stopped.tag="stopped";stopped.runId="run-stopped";stopped.conversationId="ses_stopped";
+    stopped.state="stopped";stopped.processState="exited";stopped.runtimeState="stopped";stopped.allowedActions={"forget"};
+    box.sessions={stopped};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    auto peer=*state.peer("mac");auto remote=openCodeSelectionFleet().local().sessions[1];
+    remote.name="opencode/infra/remote";remote.project="infra";remote.tag="remote";remote.runId="run-remote";remote.conversationId="ses_remote";
+    peer.sessions<<remote;state.setPeer(peer,QDateTime::currentMSecsSinceEpoch());
+    const auto fixture=openCodeSelectionFixture("opencode-selection-stopped-remote");QVERIFY(!fixture.isEmpty());
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.resize(1100,850);window.setFleet(state);window.show();
+    window.showSession({},stopped.name);
+    auto *list=window.findChild<SessionList *>("sessionList");QVERIFY(list);
+    QListWidgetItem *item=nullptr;
+    for(int i=0;i<list->count();++i)if(list->item(i)->data(SessionRoles::Key).toString()=="mac\n"+remote.name){item=list->item(i);break;}
+    QVERIFY(item);list->scrollToItem(item);QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::ControlModifier,list->visualItemRect(item).center());
+    QCOMPARE(list->selectedItems().size(),2);
+    auto *forget=window.findChild<QAction *>("selectiontrash");QVERIFY(forget);QTRY_COMPARE(forget->text(),QString("Forget (2)"));QVERIFY(forget->isEnabled());
+    QCOMPARE(window.findChild<QAction *>("selectionstop")->text(),QString("Terminate (0)"));
+    bool asked=false;QString question;
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());if(!dialog)return;asked=true;question=dialog->text();
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();break;}
+    });
+    forget->trigger();QVERIFY(asked);
+    QCOMPARE(question,QString("Forget 2 selected sessions?\n\nOpenCode sessions: only Zerus forgets them; their conversations stay in OpenCode."));
+    auto *notice=window.findChild<QLabel *>("notice");QVERIFY(notice);
+    QTRY_VERIFY_WITH_TIMEOUT(notice->text().contains("Forget: 2 of 2 completed."),10000);QVERIFY2(!notice->text().contains("failed"),qPrintable(notice->text()));
+    QFile file(fixture+".forget");QVERIFY(file.open(QIODevice::ReadOnly));
+    QMap<QString,QJsonObject> calls;
+    for(const auto &line:file.readAll().split('\n'))if(!line.isEmpty()) {
+        const auto call=QJsonDocument::fromJson(line).object();const auto args=call["args"].toArray();
+        QVERIFY(!calls.contains(args.at(args.size()-2).toString()));calls.insert(args.at(args.size()-2).toString(),call);
+    }
+    QCOMPARE(calls.keys(),QStringList({remote.name,stopped.name}));
+    QCOMPARE(calls[stopped.name]["args"].toArray(),QJsonArray({"session-action",stopped.name,"--json"}));
+    QCOMPARE(calls[remote.name]["args"].toArray(),QJsonArray({"@mac","session-action",remote.name,"--json"}));
+    for(const auto &session:{stopped,remote}) {
+        const auto payload=calls[session.name]["payload"].toObject();
+        QCOMPARE(payload["action"].toString(),QString("forget"));
+        QCOMPARE(payload["expected_run_id"].toString(),session.runId);QCOMPARE(payload["expected_conversation_id"].toString(),session.conversationId);
+    }
+    QVERIFY(!QFileInfo::exists(fixture+".ended"));
+}
+
+void TestSessionsWindow::openCodeForgetFinishesWhenTheCliCannotStart_data()
+{
+    QTest::addColumn<bool>("refusedAtStart");
+    // QProcess refuses an empty program inside start() on every platform, as
+    // Windows does for a missing executable; elsewhere a missing file fails later.
+    QTest::newRow("refused-at-start")<<true;QTest::newRow("missing")<<false;
+}
+// An hgs that cannot start still finishes the request: a batch counts the
+// failure and becomes available again, and a single Forget ends its pending state.
+void TestSessionsWindow::openCodeForgetFinishesWhenTheCliCannotStart()
+{
+    QFETCH(bool,refusedAtStart);
+    auto state=openCodeSelectionFleet();auto box=state.local();
+    const QString first=box.sessions[0].name,second=box.sessions[1].name,stopped=box.sessions[2].name;
+    const auto fixture=openCodeSelectionFixture(QStringLiteral("opencode-unstartable-%1").arg(refusedAtStart));QVERIFY(!fixture.isEmpty());
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.resize(1100,850);window.setFleet(state);window.show();
+    window.showSession({},stopped);
+    auto *list=window.findChild<SessionList *>("sessionList");auto *client=window.findChild<HgsClient *>();QVERIFY(list);QVERIFY(client);
+    for(const auto &name:{first,second}) {
+        QListWidgetItem *item=nullptr;
+        for(int i=0;i<list->count();++i)if(list->item(i)->data(SessionRoles::Key).toString()=='\n'+name){item=list->item(i);break;}
+        QVERIFY(item);list->scrollToItem(item);QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::ControlModifier,list->visualItemRect(item).center());
+    }
+    auto *forget=window.findChild<QAction *>("selectiontrash");QVERIFY(forget);QTRY_COMPARE(forget->text(),QString("Forget (3)"));QVERIFY(forget->isEnabled());
+    auto *notice=window.findChild<QLabel *>("notice");QVERIFY(notice);
+    client->setExecutableForTests(refusedAtStart?QString():m_dir->filePath("missing-hgs"));
+    QSignalSpy finished(client,&HgsClient::sessionActionFinished);
+    bool asked=false;
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());QVERIFY(dialog);asked=true;
+        for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();break;}
+    });
+    forget->trigger();QVERIFY(asked);
+    QTRY_VERIFY2_WITH_TIMEOUT(notice->text().contains("Forget: 0 of 3 completed. 3 failed or changed; refresh before retrying."),qPrintable(notice->text()),10000);
+    QCOMPARE(finished.size(),2);for(const auto &row:finished)QVERIFY(!row[1].toBool());
+    QTRY_VERIFY(forget->isEnabled());QCOMPARE(forget->text(),QString("Forget (3)"));
+    // The single Forget of one of them ends its pending state with the error.
+    list->clearBulkSelection();window.showSession({},first);
+    auto *single=window.findChild<QAction *>("forgetSessionAction");QVERIFY(single);
+    QTRY_COMPARE(single->text(),QString("Forget saved session…"));QTRY_VERIFY(single->isEnabled());
+    finished.clear();asked=false;
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=window.findChild<QMessageBox *>("terminateSessionConfirm");QVERIFY(dialog);asked=true;dialog->button(QMessageBox::Yes)->click();
+    });
+    single->trigger();QVERIFY(asked);
+    QTRY_COMPARE(finished.size(),1);QVERIFY(!finished[0][1].toBool());
+    QTRY_VERIFY(single->isEnabled());QVERIFY(notice->property("error").toBool());
+    QVERIFY2(!notice->text().contains("Zerus forgot"),qPrintable(notice->text()));
+    // Nothing is still outstanding: Forget asks again.
+    asked=false;
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=window.findChild<QMessageBox *>("terminateSessionConfirm");QVERIFY(dialog);asked=true;dialog->button(QMessageBox::Cancel)->click();
+    });
+    single->trigger();QVERIFY(asked);
+    QVERIFY(!QFileInfo::exists(fixture+".forget"));QVERIFY(!QFileInfo::exists(fixture+".ended"));
 }
 
 // hgs empties an OpenCode form that is too large to show. Its card still
