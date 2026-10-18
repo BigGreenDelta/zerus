@@ -176,7 +176,6 @@ public struct RelayClient: Sendable {
 
     static let mismatchedReceipt = ZerusError.mismatch("Gateway returned a mismatched receipt. Delivery remains unconfirmed.")
 
-    /// Reads the original receipt; it never creates a replacement request.
     /// The status-only check of an unconfirmed request: its original receipt, polled until it settles, within `limit`.
     /// It never submits anything; on expiry the read or poll in progress is cancelled.
     public func boundedReceipt(_ connection: Connection, id: String, limit: Duration = .seconds(45),
@@ -186,6 +185,7 @@ public struct RelayClient: Sendable {
         }
     }
 
+    /// Reads the original receipt; it never creates a replacement request.
     public func receipt(_ connection: Connection, id: String) async throws -> JSONObject {
         guard let escaped = id.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-_"))) else {
             throw ZerusError.invalid("Invalid request identity.")
