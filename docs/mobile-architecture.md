@@ -969,6 +969,7 @@ question disclosures and other control metadata remain intact.
 OpenCode events keep `delivery_state` (`queued` or `not_delivered`, with
 `message_id`) and `streaming`, and its question cards keep `input_kind`,
 `min_length`, `max_length`, `min_items`, `max_items`, `default_option_ids`,
+`default_text` (prefilled for OpenCode text items unless a saved draft exists),
 `can_answer`, `answerable` and `unavailable_reason` unchanged.
 
 Mutations carry the corresponding existing `hgs --json` input, with the same

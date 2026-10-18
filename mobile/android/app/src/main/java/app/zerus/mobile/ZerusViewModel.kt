@@ -1145,7 +1145,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** The relay and this computer's connector accept an OpenCode model variant as `effort`; older ones never receive one. */
     fun launchEffortSupported(machine:MachineKey)=LaunchPresentation.effortSupported(relayFeatures[machine.connectionId].orEmpty(),machineFeatures[machine].orEmpty())
-    fun nativeEffortsSupported(target:Target)=launchEffortSupported(MachineKey(target.connectionId,target.computerId))
+    /** OpenCode variant names for this exact inspected session; every other provider keeps the fixed effort names. */
+    fun nativeEffortsSupported(target:Target,inspected:JSONObject?)=SessionActionPolicies.nativeEfforts(target,inspected,launchEffortSupported(MachineKey(target.connectionId,target.computerId)))
     fun worktreeOperationsSupported(machine:MachineKey)=listOf("worktrees","worktree_create").all { it in relayOperations[machine.connectionId].orEmpty() && it in machineOperations[machine].orEmpty() }
     fun worktreeReason(machine:MachineKey):String {
         if(launchReason(machine).isNotBlank()) return launchReason(machine)
@@ -1529,8 +1530,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private fun submitSessionAction(target:Target,operation:String,args:JSONObject,authorized:SessionAction?=null,frame:Frame?=null,terminalBuffer:TerminalBuffer?=null) {
         val inspected=frame?.raw ?: activity ?: JSONObject()
         val reason = if(authorized == null) actionReason(target,operation) else authorizedSettingsReason(target,args,authorized,frame); if(reason.isNotBlank()) { error=reason; return }
-        val arguments = try { SessionActionPolicies.arguments(operation,args) } catch(e:Exception) { error=e.message.orEmpty(); return }
-        SessionActionPolicies.effortReason(operation,arguments,nativeEffortsSupported(target)).takeIf { it.isNotBlank() }?.let { error=it; return }
+        val nativeEfforts = nativeEffortsSupported(target,inspected)
+        SessionActionPolicies.effortReason(operation,args,nativeEfforts).takeIf { it.isNotBlank() }?.let { error=it; return }
+        val arguments = try { SessionActionPolicies.arguments(operation,args,nativeEfforts) } catch(e:Exception) { error=e.message.orEmpty(); return }
         val eligibility = SessionActionPolicies.inspectReason(target,operation,arguments,inspected)
         if(eligibility.isNotBlank()) { error=eligibility; return }
         val connection = connections.find { it.id == target.connectionId } ?: return
@@ -2118,7 +2120,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun draft(target: Target, question: Question? = null): Draft {
         val questionId = question?.id.orEmpty(); val hash = question?.hash.orEmpty()
-        return drafts.find { it.target == target && it.questionId == questionId && it.questionHash == hash && it.detachedId.isBlank() }
+        return QuestionPolicies.savedDraft(drafts, target, question)
             ?: emptyDrafts.getOrPut(Triple(target, questionId, hash)) { Draft(target, "", questionId = questionId, questionHash = hash) }
     }
     private fun save(draft: Draft) { editState { state -> MessageChanges.draft(state, draft) } }

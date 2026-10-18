@@ -17,8 +17,11 @@ data class NativeEffort(val value:String,val label:String?)
 /** The one reader of `effort_options`/`effort_labels` for New session and the model sheet. */
 object NativeEfforts {
     const val MAX=16
-    /** Bounded, one token, no path separator. Membership is checked against the model's own list. */
-    fun valid(value:String) = value.isNotEmpty() && value.toByteArray(Charsets.UTF_8).size<=64 && value.none { it.isWhitespace() || it.isISOControl() || it=='/' }
+    /**
+     * The native catalog rule every layer shares (tests/fixtures/opencode-effort-ids.json): non-empty, at most
+     * 40 UTF-8 bytes, no whitespace, control character or `/`. Membership in the model's own list stays authoritative.
+     */
+    fun valid(value:String) = value.isNotEmpty() && value.toByteArray(Charsets.UTF_8).size<=40 && value.none { it.isWhitespace() || it.isISOControl() || it=='/' }
     /** Valid IDs in native order, first occurrence, at most [MAX]; labels come from `effort_labels` at the same index. */
     fun parse(option:JSONObject?):List<NativeEffort> {
         val ids=option?.optJSONArray("effort_options") ?: return emptyList()
