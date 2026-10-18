@@ -607,17 +607,7 @@ final class ConversationModel {
             }
             if messages.contains(where: { merged.recordedRequestIds.contains($0.requestId) && $0.status != "recorded" }) {
                 let recorded = merged.recordedRequestIds
-                self.app.editMessages { state in
-                    var copy = state
-                    copy.outgoing = state.outgoing.map { message in
-                        guard recorded.contains(message.requestId), message.status != "reviewed" else { return message }
-                        var updated = message
-                        updated.status = "recorded"
-                        updated.error = ""
-                        return updated
-                    }
-                    return copy
-                }
+                self.app.editMessages { MessageChanges.recorded($0, recorded) }
             }
             // Last: opening a child replaces this parent presentation.
             self.openPendingAgent()
