@@ -149,6 +149,8 @@ fn cached_at(path: &Path, home: &Path) -> Option<Value> {
         .then_some(value)
 }
 
+/// The catalog answer. Its reason can carry server text to phones, so it is
+/// clipped and sanitized as session rows clip OpenCode's messages.
 fn answer(
     options: Value,
     selected: &str,
@@ -158,7 +160,7 @@ fn answer(
     at: Value,
 ) -> Value {
     json!({"model_options": options, "settings_model": selected, "model_catalog_source": source,
-        "catalog_state": state, "catalog_reason": reason, "catalog_at": at})
+        "catalog_state": state, "catalog_reason": journal::clipped(&json!(reason), 300), "catalog_at": at})
 }
 
 fn unavailable(why: &Unavailable, home_location: bool) -> Value {
@@ -512,6 +514,37 @@ mod tests {
             "q/zz",
         );
         assert_eq!(rows[255]["id"], "q/zz");
+    }
+
+    #[test]
+    fn catalog_reasons_are_bounded_and_sanitized() {
+        // Server text that reached a reason travels to phones in the catalog.
+        let server = format!("OpenCode HTTP 500: \x1b[1m{}\u{0}\r", "z".repeat(600));
+        let why = Unavailable::Unreachable(server);
+        let row = answer(
+            json!([]),
+            "",
+            "unavailable",
+            "unreachable",
+            &why.reason("fixture"),
+            Value::Null,
+        );
+        let reason = row["catalog_reason"].as_str().unwrap();
+        assert_eq!(reason.chars().count(), 301, "{reason}");
+        assert!(reason.starts_with("OpenCode HTTP 500: zzz") && reason.ends_with('…'));
+        assert!(!reason.chars().any(char::is_control));
+        assert_eq!(row["catalog_state"], "unreachable");
+        // Zerus's own reasons stay byte for byte.
+        for (state, reason) in [
+            ("ready", String::new()),
+            ("loading", "OpenCode is still loading providers".to_owned()),
+            ("not_running", Unavailable::NotRunning.reason("fixture")),
+            ("disabled", Unavailable::Disabled.reason("fixture")),
+        ] {
+            let row = answer(json!([]), "", "opencode_service", state, &reason, json!(1));
+            assert_eq!(row["catalog_reason"], json!(reason));
+            assert_eq!(row["catalog_state"], state);
+        }
     }
 
     #[test]

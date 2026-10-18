@@ -112,12 +112,19 @@ fn legacy_verdict(record: &Value, migration: &Value, session: Option<&Value>) ->
     }
 }
 type Reply = std::result::Result<Response, String>;
+/// OpenCode's refusal as a session row or error carries it: the server's own
+/// message clipped to 300 characters, without escape sequences or control
+/// characters other than tabs and line breaks.
 fn refusal_text(response: &Response) -> String {
     let reason = response.body["message"]
         .as_str()
         .or(response.body["data"]["message"].as_str())
         .unwrap_or("Native operation refused");
-    format!("OpenCode HTTP {}: {reason}", response.status)
+    format!(
+        "OpenCode HTTP {}: {}",
+        response.status,
+        journal::clipped(&json!(reason), 300)
+    )
 }
 fn successful(response: &Response) -> bool {
     (200..300).contains(&response.status)
@@ -615,15 +622,7 @@ fn get(native: &dyn Native, path: &str) -> Result<Value> {
     if successful(&response) {
         return Ok(response.body);
     }
-    let reason = response.body["message"]
-        .as_str()
-        .or(response.body["data"]["message"].as_str())
-        .unwrap_or("Native operation refused");
-    Err(format!(
-        "OpenCode HTTP {}: {}",
-        response.status,
-        journal::clipped(&json!(reason), 300)
-    ))
+    Err(refusal_text(&response))
 }
 /// The sessions OpenCode is running now, keyed by session ID.
 fn active_sessions(native: &dyn Native) -> Result<Value> {
@@ -1986,6 +1985,63 @@ mod tests {
     }
     fn fixture(bytes: &[u8]) -> Value {
         serde_json::from_slice(bytes).unwrap()
+    }
+    #[test]
+    fn server_refusals_are_bounded_and_sanitized_like_get() {
+        // OpenCode's own message, longer and dirtier than a row should carry.
+        let long = format!("\x1b[31mbad\x1b[0m\u{7}\r{}\ttail\n", "x".repeat(400));
+        for body in [
+            json!({ "message": long }),
+            json!({"data": { "message": long }}),
+        ] {
+            let response = Response {
+                status: 500,
+                body: body.clone(),
+            };
+            let text = refusal_text(&response);
+            let native = Scripted(std::cell::RefCell::new(vec![(
+                "GET /api/x".into(),
+                500,
+                body,
+            )]));
+            assert_eq!(get(&native, "/api/x").unwrap_err(), text);
+            let reason = text.strip_prefix("OpenCode HTTP 500: ").unwrap();
+            assert_eq!(reason.chars().count(), 301, "{reason}");
+            assert!(reason.starts_with("badxxx") && reason.ends_with('…'));
+            assert!(!reason.chars().any(char::is_control));
+            // The same text wherever a reply becomes a session row or a refusal.
+            assert_eq!(
+                migration_completed(&Ok(response.clone())).unwrap_err(),
+                text
+            );
+            assert!(matches!(
+                creation_reply(Ok(response.clone()), &ack),
+                Err(Refusal::Other(other)) if other == text
+            ));
+            let refused = Response {
+                status: 400,
+                ..response
+            };
+            assert!(matches!(
+                creation_reply(Ok(refused.clone()), &ack),
+                Err(Refusal::Definite(definite)) if definite == refusal_text(&refused)
+                    && definite.chars().count() == "OpenCode HTTP 400: ".len() + 301
+            ));
+        }
+        // Tabs and line breaks stay, as get() keeps them; other controls go.
+        let short = Response {
+            status: 409,
+            body: json!({"message": "a\tb\nc\u{0}\x1b[2Kd"}),
+        };
+        assert_eq!(refusal_text(&short), "OpenCode HTTP 409: a\tb\ncd");
+        let silent = Response {
+            status: 502,
+            body: json!("Bad gateway"),
+        };
+        assert_eq!(
+            refusal_text(&silent),
+            "OpenCode HTTP 502: Native operation refused"
+        );
     }
     #[test]
     fn a_queued_message_is_found_in_the_inbox_after_a_lost_response() {
