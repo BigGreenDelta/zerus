@@ -366,9 +366,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         saveOrganization(); rebuild();
     });
     m_markAllReadAction = new QAction(tr("Mark all as read"), this); m_markAllReadAction->setObjectName("markAllSessionsRead");
-    m_markAllReadAction->setToolTip(tr("Mark current replies across all machines as read, including hidden sessions. Pending approvals, questions and errors stay highlighted."));
+    m_markAllReadAction->setToolTip(tr("Mark current replies across all machines as read, including hidden sessions. Pending approvals, questions and errors stay highlighted. Sessions you marked as needing attention keep their reply unread."));
     m_markAllReadAction->setEnabled(false);
     connect(m_markAllReadAction, &QAction::triggered, this, &SessionsWindow::markAllRepliesRead);
+    // Right-clicking the Sessions icon in the rail offers the same action.
+    auto *railMenu = new QMenu(m_sessionsNav); railMenu->setObjectName("sessionsNavMenu"); railMenu->setToolTipsVisible(true);
+    railMenu->addAction(m_markAllReadAction); m_sessionsNav->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_sessionsNav, &QWidget::customContextMenuRequested, railMenu, [this, railMenu](const QPoint &at) { railMenu->popup(m_sessionsNav->mapToGlobal(at)); });
     groupsMenu->addSeparator(); groupsMenu->addAction(m_markAllReadAction); groupsMenu->setToolTipsVisible(true);
     m_clearArchiveAction = new QAction(tr("Clear archive…"), this); m_clearArchiveAction->setObjectName("clearArchive");
     connect(m_clearArchiveAction, &QAction::triggered, this, &SessionsWindow::clearArchive);
@@ -455,6 +459,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         });
     m_count = label({}, "listSummary"); m_count->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     auto *summary = new QHBoxLayout; summary->addWidget(m_count, 1);
+    m_markAllReadButton = iconButton("read-all", tr("Mark all as read"), "markAllReadButton"); m_markAllReadButton->setAutoDefault(false);
+    m_markAllReadButton->setEnabled(false); summary->addWidget(m_markAllReadButton);
+    connect(m_markAllReadButton, &QPushButton::clicked, this, &SessionsWindow::markAllRepliesRead);
     auto *drafts = m_savedDrafts = iconButton("drafts", tr("Saved drafts"), "savedDrafts"); drafts->setAutoDefault(false);
     drafts->setToolTip(tr("Saved drafts: recover local drafts, including those from ended sessions")); summary->addWidget(drafts);
     connect(drafts, &QPushButton::clicked, this, [this] {
@@ -1765,8 +1772,8 @@ void SessionsWindow::applyTheme()
         QPushButton#sessionFilter { padding:4px 2px; min-height:22px; font-size:11px; background:transparent; border-color:transparent; }
         QPushButton#sessionFilter:checked { background:%10; border-color:%4; color:%5; }
         QPushButton#sessionFilter:hover { background:%7; }
-        QPushButton#newSession, QPushButton#sessionPanelNewSession, QPushButton#batchActions, QPushButton#sessionPanelToggle, QPushButton#savedDrafts { padding:0; background:transparent; border-color:transparent; }
-        QPushButton#newSession:hover, QPushButton#sessionPanelNewSession:hover, QPushButton#batchActions:hover, QPushButton#sessionPanelToggle:hover, QPushButton#sessionStripSearch:hover, QPushButton#savedDrafts:hover { background:%7; }
+        QPushButton#newSession, QPushButton#sessionPanelNewSession, QPushButton#batchActions, QPushButton#sessionPanelToggle, QPushButton#savedDrafts, QPushButton#markAllReadButton { padding:0; background:transparent; border-color:transparent; }
+        QPushButton#newSession:hover, QPushButton#sessionPanelNewSession:hover, QPushButton#batchActions:hover, QPushButton#sessionPanelToggle:hover, QPushButton#sessionStripSearch:hover, QPushButton#savedDrafts:hover, QPushButton#markAllReadButton:hover { background:%7; }
         QPushButton#sessionStripSearch { padding:0; background:%3; border:1px solid %4; }
         QWidget#sessionListPanel { background:%1; }
         QPushButton#newSession { background:%10; }
@@ -1936,7 +1943,7 @@ void SessionsWindow::applySessionStrip()
         m_sessionHeader->setAlignment(m_sessionsToggle, strip ? Qt::AlignHCenter : Qt::Alignment());
         m_filterRow->setContentsMargins(filters ? SessionStrip::tileColumn() : QMargins());
     }
-    m_heading->setVisible(!strip); m_panelNewSession->setVisible(!strip); m_batchButton->setVisible(!strip); m_savedDrafts->setVisible(!strip);
+    m_heading->setVisible(!strip); m_panelNewSession->setVisible(!strip); m_batchButton->setVisible(!strip); m_savedDrafts->setVisible(!strip); m_markAllReadButton->setVisible(!strip);
     // The search button stands in for the field at the same height and as wide
     // as a tile, border included. A widget style survives the window style's
     // repolish, which resets button minimums.
@@ -2803,6 +2810,8 @@ void SessionsWindow::rebuild()
     m_markAllReadAction->setEnabled(unreadCount > 0);
     m_markAllReadAction->setText(unreadCount ? tr("Mark all as read (%1)").arg(unreadCount) : tr("Mark all as read"));
     m_markAllReadAction->setIcon(workspaceIcon("read-all", QColor(m_muted)));
+    m_markAllReadButton->setEnabled(unreadCount > 0); m_markAllReadButton->setAccessibleName(m_markAllReadAction->text());
+    m_markAllReadButton->setToolTip(m_markAllReadAction->text() + '\n' + m_markAllReadAction->toolTip());
     const QMap<QString, int> counts{{"all", total}, {"active", active}, {"attention", attention}, {"paused", saved}, {"archived", archived}};
     QString countCaption;
     for (auto *button : m_filters) {
