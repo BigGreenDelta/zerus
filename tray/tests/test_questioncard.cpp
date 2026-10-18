@@ -184,6 +184,7 @@ private slots:
     void openCodeSeededDefaultsStayUnsavedUntilEdited();
     void openCodeOtherAnswerCountsTowardItemBounds();
     void openCodePermissionListsNativeChoicesAndConfirmsAlwaysAllow();
+    void openCodeFormTextMayStartWithSlashOrBang();
     void claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes();
     void unreadableApprovalPointsToTerminal();
     void kimiPlanReviewShowsPlanAndNamedRevise();
@@ -734,6 +735,45 @@ void TestQuestionCard::openCodePermissionListsNativeChoicesAndConfirmsAlwaysAllo
     QCOMPARE(chosen, QStringList({"once", "always", "reject"}));
     QCOMPARE(QJsonDocument(openCodeCase("permission-once").value("answers").toArray()).toJson(QJsonDocument::Compact),
         QByteArray(R"([{"question_id":"permission","selected_option_ids":["once"],"text":""}])"));
+}
+
+// OpenCode form answers go through its form reply API, not a terminal, so they
+// may start with / or !. Every other card keeps refusing them.
+void TestQuestionCard::openCodeFormTextMayStartWithSlashOrBang()
+{
+    QuestionCard card; card.resize(700, 450); card.show(); card.activateWindow(); QApplication::setActiveWindow(&card);
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    const auto status = [&card] { return card.findChild<QLabel *>("questionStatus")->text(); };
+    auto *tabs = card.findChild<QTabBar *>("questionTabs");
+    for (const QString name : {"plain-string-slash", "plain-string-bang"}) {
+        const auto contractCase = openCodeCase(name); QVERIFY2(!contractCase.isEmpty(), qPrintable(name));
+        const auto form = openCodeCard(contractCase); const auto expected = contractCase.value("answers").toArray();
+        const auto id = form["questions"][0]["id"].toString(), answer = expected.first()["text"].toString();
+        QVERIFY(answer.startsWith('/') || answer.startsWith('!'));
+        setQuestionReady(card, "opencode\nsession", form); sent.clear();
+        text(card, id)->setText(answer);
+        QVERIFY2(submit(card)->isEnabled(), qPrintable(status()));
+        QVERIFY2(tabs->tabText(0).startsWith(QStringLiteral("✓ ")), qPrintable(tabs->tabText(0)));
+        QCOMPARE(status(), QString("Your choices are ready to send."));
+        submit(card)->click(); QCOMPARE(sent.size(), 1); QCOMPARE(sent.first()[2].toJsonArray(), expected);
+        // The other limits still apply.
+        text(card, id)->setText(answer + QChar(1)); QVERIFY(!submit(card)->isEnabled());
+        QCOMPARE(status(), QString("Remove control characters from your custom answer."));
+        text(card, id)->setText(answer + QString(4096, QChar(0x044f)).left(4096 - answer.size()));
+        QVERIFY(!submit(card)->isEnabled()); QCOMPARE(status(), QString("Keep your custom answer under 4 KiB."));
+        // Terminal agents, and an OpenCode approval, keep the existing refusal.
+        for (const QString source : {"codex_async", "hook", "opencode_approval"}) {
+            auto variant = form; variant["question_hash"] = name + "/" + source;
+            if (source == "opencode_approval") { variant["approval"] = true; variant["approval_choices"] = true; }
+            else variant["source"] = source;
+            setQuestionReady(card, "opencode\nsession", variant); sent.clear();
+            text(card, id)->setText(answer); card.setReviewDelayForTests(0); QTest::qWait(150);
+            QVERIFY2(!submit(card)->isEnabled(), qPrintable(source));
+            QVERIFY2(!tabs->tabText(0).startsWith(QStringLiteral("✓ ")), qPrintable(source));
+            QCOMPARE(status(), QString("Use Terminal for answers starting with / or !."));
+            submit(card)->click(); QCOMPARE(sent.size(), 0);
+        }
+    }
 }
 
 void TestQuestionCard::unreadableApprovalPointsToTerminal()

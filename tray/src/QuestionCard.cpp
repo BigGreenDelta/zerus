@@ -93,13 +93,20 @@ bool webLink(const QUrl &url)
         && (url.scheme() == "https" || url.scheme() == "http");
 }
 
-QString customAnswerProblem(const QString &text)
+// Terminal agents read an answer starting with / or ! as a command. OpenCode
+// form answers go through its form reply API instead, so they may.
+bool formReplyCard(const QJsonObject &question)
+{
+    return question.value("source") == "opencode_native" && !question.value("approval").toBool();
+}
+
+QString customAnswerProblem(const QString &text, bool formReply)
 {
     if (text.toUtf8().size() > 4096) return QObject::tr("Keep your custom answer under 4 KiB.");
     if (text.contains('\n') || text.contains('\r')) return QObject::tr("Use one line for a custom answer. Multiline input is available in Terminal.");
     for (const auto ch : text) if (ch.unicode() < 0x20 || (ch.unicode() >= 0x7f && ch.unicode() <= 0x9f))
         return QObject::tr("Remove control characters from your custom answer.");
-    if (text.trimmed().startsWith('/') || text.trimmed().startsWith('!'))
+    if (!formReply && (text.trimmed().startsWith('/') || text.trimmed().startsWith('!')))
         return QObject::tr("Use Terminal for answers starting with / or !.");
     return {};
 }
@@ -724,7 +731,7 @@ QJsonArray QuestionCard::answers(bool *valid) const
         // hgs counts the chosen options and an Other answer against the bounds.
         const auto count = selected.size() + (text.isEmpty() ? 0 : 1);
         if ((selected.isEmpty() && text.isEmpty()) || (custom && text.isEmpty())
-            || (!form.multi && selected.size() > 1) || !customAnswerProblem(text).isEmpty() || form.id.isEmpty()
+            || (!form.multi && selected.size() > 1) || !customAnswerProblem(text, formReplyCard(m_question)).isEmpty() || form.id.isEmpty()
             || (form.minItems > 0 && count < form.minItems) || (form.maxItems > 0 && count > form.maxItems)) complete = false;
         result.append(QJsonObject{{"question_id", form.id}, {"selected_option_ids", selected}, {"text", text}});
     }
@@ -789,7 +796,7 @@ void QuestionCard::updateControls()
         const bool custom = form.allowOther && (form.options.isEmpty() || answer.other);
         const QString text = custom ? answer.text.trimmed() : QString();
         const bool filled = (!answer.options.isEmpty() || !text.isEmpty())
-            && (!custom || !text.isEmpty()) && customAnswerProblem(text).isEmpty();
+            && (!custom || !text.isEmpty()) && customAnswerProblem(text, formReplyCard(m_question)).isEmpty();
         if (filled) ++answered;
         m_tabs->setTabText(i, (filled ? QStringLiteral("✓ ") : QString()) + m_tabs->tabData(i).toString());
     }
@@ -808,7 +815,7 @@ void QuestionCard::updateControls()
     if (notice.isEmpty()) for (const auto &form : m_forms) {
         const auto answer = draft.answers.value(form.id);
         if (!form.allowOther || (!form.options.isEmpty() && !answer.other)) continue;
-        notice = customAnswerProblem(answer.text.trimmed());
+        notice = customAnswerProblem(answer.text.trimmed(), formReplyCard(m_question));
         if (!notice.isEmpty()) break;
     }
     if (notice.isEmpty() && confirming)
