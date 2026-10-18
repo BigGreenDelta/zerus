@@ -187,7 +187,8 @@ class Installer(windows_host.HostCase):
         # Setup refuses before it changes anything (exit code 7: Preparing to Install
         # determined that Setup cannot proceed), and the installation stays as it was.
         self.assertEqual(code, 7, log[-4000:])
-        self.assertIn(str(link), log)
+        self.assertIn("contains a link or junction", log)
+        self.assertIn("linked", log)
         self.assertTrue(os.path.isjunction(link))
         self.assertEqual(registered()["DisplayVersion"], self.manifest["version"])
         self.assertTrue((self.app / "hgs-tray.exe").is_file())

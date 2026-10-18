@@ -139,6 +139,13 @@ job from the tested portable zip:
   install folder: `hgs-tray.exe` and short-lived `hgs.exe` commands. The session
   host runs from its staged image, outside the install folder, so it and its
   sessions keep running, as when the zip is replaced.
+- **Links.** If the install folder is a link, or contains a junction, symbolic
+  link or other reparse point, Setup stops before it changes anything (exit
+  code 7) and names the link. Such a link could lead installed files or the
+  stale-file sweep anywhere the user can write, such as configuration or state.
+  The sweep itself never follows or removes a link either. It runs only in a
+  folder that is no link and whose `installation.json` is the installer's
+  record.
 - **Uninstall.** It removes only the installed files and the shortcut, and keeps
   the staged CLI, host images, configuration and sessions. The documentation
   points at `hgs.exe session-host uninstall` for disabling local sessions first.

@@ -85,6 +85,10 @@ Filename: "{app}\hgs-tray.exe"; Flags: nowait; Check: Relaunch
 Type: dirifempty; Name: "{app}"
 
 [Code]
+const
+  { FILE_ATTRIBUTE_REPARSE_POINT: junctions, symbolic links and mount points. }
+  ReparsePoint = $400;
+
 var
   Upgrade: Boolean;
   Payload: TStringList;
@@ -99,8 +103,78 @@ begin
       Result := True;
 end;
 
+{ Whether Path itself, not what it may lead to, is a reparse point. }
+function IsLink(const Path: String): Boolean;
+var
+  Find: TFindRec;
+begin
+  Result := False;
+  if FindFirst(RemoveBackslashUnlessRoot(Path), Find) then
+  try
+    Result := (Find.Attributes and ReparsePoint) <> 0;
+  finally
+    FindClose(Find);
+  end;
+end;
+
+{ The first reparse point in Folder or below it, else ''. Never follows one. }
+function FindLink(const Folder: String): String;
+var
+  Find: TFindRec;
+  Path: String;
+begin
+  Result := '';
+  if not FindFirst(AddBackslash(Folder) + '*', Find) then
+    Exit;
+  try
+    repeat
+      if (Find.Name <> '.') and (Find.Name <> '..') then
+      begin
+        Path := AddBackslash(Folder) + Find.Name;
+        if (Find.Attributes and ReparsePoint) <> 0 then
+          Result := Path
+        else if (Find.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+          Result := FindLink(Path);
+      end;
+    until (Result <> '') or not FindNext(Find);
+  finally
+    FindClose(Find);
+  end;
+end;
+
+{ A link in the folder could lead writes and the stale-file sweep anywhere the
+  user can write: refuse before anything changes. Setup exits with code 7. }
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Link: String;
+begin
+  Result := '';
+  if IsLink(ExpandConstant('{app}')) then
+    Link := ExpandConstant('{app}')
+  else
+    Link := FindLink(ExpandConstant('{app}'));
+  if Link <> '' then
+  begin
+    Result := 'The Zerus folder contains a link or junction: ' + Link +
+      '. Remove it, then run Setup again. Nothing was changed.';
+    Log(Result);
+  end;
+end;
+
+{ The installer record scripts/windows_installer.py writes: only a folder an
+  earlier installer created, and that is no link itself, is cleaned up. }
+function OwnedFolder(): Boolean;
+var
+  Contents: AnsiString;
+begin
+  Result := not IsLink(ExpandConstant('{app}')) and
+    LoadStringFromFile(ExpandConstant('{app}\installation.json'), Contents) and
+    (Pos('"kind": "installer"', Contents) > 0) and (Pos('"product": "Zerus"', Contents) > 0);
+end;
+
 { Removes files in Folder (relative path Relative) that the new payload does
-  not name, and then empty folders. uninstall\ keeps the uninstaller. }
+  not name, and then empty folders. uninstall\ keeps the uninstaller. A link is
+  never followed or removed, whatever it points at. }
 procedure RemoveStale(const Folder, Relative: String);
 var
   Find: TFindRec;
@@ -117,7 +191,9 @@ begin
           Name := Find.Name
         else
           Name := Relative + '\' + Find.Name;
-        if (Find.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+        if (Find.Attributes and ReparsePoint) <> 0 then
+          Log('Kept ' + Name + ': the clean-up never follows or removes links.')
+        else if (Find.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
         begin
           if CompareText(Name, 'uninstall') <> 0 then
           begin
@@ -144,9 +220,8 @@ var
   Lines: TArrayOfString;
   I: Integer;
 begin
-  { Only a folder an earlier installer created is cleaned up. }
   if CurStep = ssInstall then
-    Upgrade := FileExists(ExpandConstant('{app}\installation.json'));
+    Upgrade := OwnedFolder();
   { After every file is in place: a failed install rolls back and removes nothing. }
   if (CurStep = ssPostInstall) and Upgrade then
   begin

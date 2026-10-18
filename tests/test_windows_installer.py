@@ -4,6 +4,7 @@ script's contract (docs/superpowers/specs/2026-10-18-windows-installer-design.md
 Runs on every platform; installing it is tested on Windows by
 test_windows_installer_survival.py."""
 import importlib.util
+import json
 from pathlib import Path
 import re
 import sys
@@ -188,14 +189,47 @@ class Script(unittest.TestCase):
         self.assertEqual(re.findall(r"(?m)^Name: (.*)$", self.text.split("[Icons]", 1)[1].split("\n[", 1)[0]),
                          ['"{autoprograms}\\Zerus"; Filename: "{app}\\hgs-tray.exe"; WorkingDir: "{app}"'])
 
+    def procedure(self, name):
+        """The body of a [Code] function or procedure, up to the next one."""
+        code = self.text.split("[Code]", 1)[1]
+        match = re.search(rf"(?m)^(?:function|procedure) {name}\b.*?(?=^(?:function|procedure) |\Z)", code, re.S)
+        self.assertIsNotNone(match, name)
+        return match[0]
+
     def test_stale_files_are_removed_only_after_a_complete_upgrade(self):
         code = self.text.split("[Code]", 1)[1]
-        self.assertIn(f"{{app}}\\{windows_installer.INSTALLATION}", code)
         self.assertIn("{app}\\" + windows_installer.PAYLOAD_LIST.replace("/", "\\"), code)
         self.assertIn(f"CompareText(Name, '{windows_installer.UNINSTALL}') <> 0", code)
-        self.assertRegex(code, r"CurStep = ssInstall then\s+Upgrade := FileExists")
+        self.assertRegex(code, r"CurStep = ssInstall then\s+Upgrade := OwnedFolder\(\);")
         self.assertRegex(code, r"\(CurStep = ssPostInstall\) and Upgrade then")
         self.assertNotIn("DelTree", code)
+
+    def test_only_a_folder_the_installer_owns_is_cleaned_up(self):
+        owned = self.procedure("OwnedFolder")
+        self.assertIn(f"{{app}}\\{windows_installer.INSTALLATION}", owned)
+        self.assertIn("not IsLink(ExpandConstant('{app}'))", owned)
+        # The markers it looks for are those of the record stage() writes.
+        record = json.dumps(windows_installer.installation_record({"version": "0.45.0", "source_commit": "c" * 40}), indent=2)
+        markers = re.findall(r"Pos\('([^']+)', Contents\)", owned)
+        self.assertEqual(markers, ['"kind": "installer"', '"product": "Zerus"'])
+        for marker in markers:
+            self.assertIn(marker, record)
+
+    def test_links_are_never_followed(self):
+        # FILE_ATTRIBUTE_REPARSE_POINT: junctions, symbolic links, mount points.
+        self.assertRegex(self.text, r"(?m)^  ReparsePoint = \$400;")
+        # The sweep and the scan test for a link before they treat an entry as a folder.
+        for name in ("RemoveStale", "FindLink"):
+            body = self.procedure(name)
+            self.assertLess(body.index("(Find.Attributes and ReparsePoint) <> 0"),
+                            body.index("(Find.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0"), name)
+        self.assertNotRegex(self.procedure("RemoveStale").split("ReparsePoint) <> 0 then", 1)[1].split("else if", 1)[0],
+                            r"DeleteFile|RemoveDir|RemoveStale")
+        # Setup refuses before it changes anything when the folder is or holds a link.
+        prepare = self.procedure("PrepareToInstall")
+        self.assertIn("IsLink(ExpandConstant('{app}'))", prepare)
+        self.assertIn("FindLink(ExpandConstant('{app}'))", prepare)
+        self.assertRegex(prepare, r"Result := 'The Zerus folder contains a link or junction: '")
 
     def test_only_a_silent_self_update_relaunches_the_app(self):
         runs = re.findall(r"(?m)^Filename: (.*)$", self.text.split("[Run]", 1)[1].split("\n[", 1)[0])
