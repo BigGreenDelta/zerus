@@ -757,7 +757,8 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         self.assertEqual(len(self.channels("emitted.json")), 3)
 
     def test_a_bash_panel_taller_than_80x24_is_answered_through_the_hook(self):
-        # The host's size for a session no client views (host::SIZE): the panel loses its top.
+        # The host's size for a session no client views (host::SIZE): the panel loses its top,
+        # and keeps losing it at the most hgs grows such a pane.
         name = self.launch("clipped")
         card = self.hook_card(name, api.LONG_BASH)
         question = card["questions"][0]

@@ -14,7 +14,8 @@ one of these phrases (not a request that quotes it, such as a title request):
   with CODEX_QUESTIONS when it offers that tool.
 - WRITE: Claude's Write tool, creating APPROVED_FILE in --project with APPROVED_TEXT.
 - BASH: Claude's Bash tool with BASH_INPUT, which creates BASH_FILE in its folder; LONG_BASH
-  the same command after LONG_LINES no-op lines, a panel taller than 80x24.
+  the same command after LONG_LINES no-op lines, a panel taller than the 192 rows to which
+  hgs grows a pane no client views (question_terminal::MAX_UNVIEWED_ROWS), so it stays clipped.
 
 After the tool's result the turn ends with DONE. Side requests (titles, token counts) get
 the plain reply.
@@ -40,7 +41,7 @@ BASH = "Use the Bash tool now."
 LONG_BASH = "Use the long Bash tool now."
 BASH_FILE = "bash-approved.txt"
 BASH_INPUT = {"command": f"printf approved > {BASH_FILE}", "description": "Create the fixture file after approval"}
-LONG_LINES = 90
+LONG_LINES = 240
 # The questions of tests/test_claude_questions_native.py, which the Windows screen fixtures
 # tests/fixtures/claude-question-*-windows.txt were recorded with.
 QUESTION_ITEMS = [
