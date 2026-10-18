@@ -250,6 +250,9 @@ public:
     // succeeds; failed and uncertain receipts report their error.
     quint64 requestRemoveQueued(const QString &host, const QString &name, const QString &run,
                                 const QString &conversation, const QString &messageId);
+    // `hgs [@host] session-action <name> --json` with action forget: removes only
+    // the Zerus binding of that exact run and conversation (OpenCode keeps it).
+    quint64 requestForgetBinding(const QString &host, const QString &name, const QString &run, const QString &conversation);
     quint64 requestAnswerQuestion(const QString &host, const QString &name,
                                   const QJsonObject &question, const QJsonArray &answers, const QString &durableRequestId = {});
     // `hgs [@host] read <session> --json`: the host applies each field only while

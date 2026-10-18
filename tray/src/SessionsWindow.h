@@ -262,6 +262,9 @@ private:
     quint64 m_removeQueuedRequest = 0;
     QString m_removeQueuedKey;
     void removeQueuedMessage(const QString &messageId);
+    // A confirmed OpenCode Forget that removes only the Zerus binding.
+    quint64 m_forgetBindingRequest = 0;
+    QString m_forgetBindingName;
     bool queuedMessageRemovable(const QString &messageId) const;
     void runSessionMenuAction(const Entry &original, SessionMenuAction action);
     bool selectSessionEntry(const Entry &original);

@@ -859,6 +859,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // Close first: the confirmation dialog must not open over a popup.
     connect(m_cacheClear,&QPushButton::clicked,this,[this]{m_cacheStatus->closePopover();clearContext();});
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &,const QString &error) {
+        if(!m_forgetBindingRequest||id!=m_forgetBindingRequest)return;
+        m_forgetBindingRequest=0;m_pending=false;
+        showNotice(ok?tr("Zerus forgot %1. The conversation stays in OpenCode.").arg(m_forgetBindingName):error,!ok);
+        emit refreshRequested();rebuild();inspect();
+    });
+    connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &,const QString &error) {
         if(!m_removeQueuedRequest||id!=m_removeQueuedRequest)return;
         m_removeQueuedRequest=0;
         if(m_selectedKey==m_removeQueuedKey){showNotice(ok?tr("Queued message removed."):error,!ok);inspect();}
@@ -3326,9 +3332,10 @@ void SessionsWindow::renderDetails()
     m_renameAction->setEnabled(NativeSessionCapabilities::action(s,"rename",m_details) && entry->online && !updating && !s.name.section('/', 0, 0).isEmpty() && !s.name.section('/', 1, 1).isEmpty() && (!archived || !s.archiveId.isEmpty()));
     m_archiveAction->setVisible(s.cmd != "dsh" && (s.state == "paused" || s.state == "stopped"));
     m_archiveAction->setEnabled(!updating && NativeSessionCapabilities::action(s,"archive",m_details));
-    m_forgetAction->setEnabled(!updating && NativeSessionCapabilities::action(s,s.state=="running"?"terminate":"forget",m_details));
-    m_forgetAction->setToolTip(s.cmd=="opencode" && s.state=="running" ? tr("Pause OpenCode before forgetting its saved session.") : QString());
-    m_forgetAction->setText(archived ? tr("Forget archived session…") : s.state == "running" ? tr("Terminate session…") : tr("Forget saved session…"));
+    const auto endOperation=NativeSessionCapabilities::endOperation(s,m_details);
+    m_forgetAction->setEnabled(!updating && NativeSessionCapabilities::action(s,endOperation,m_details));
+    m_forgetAction->setToolTip(NativeSessionCapabilities::forgetsBindingOnly(s,m_details) ? tr("Zerus forgets this session. The conversation stays in OpenCode.") : QString());
+    m_forgetAction->setText(archived ? tr("Forget archived session…") : endOperation == "terminate" ? tr("Terminate session…") : tr("Forget saved session…"));
     const auto questionError=m_details.value("pending_questions_error").toString();
     QString hint;
     if (terminating) hint = tr("Waiting for the session to stop. Its native conversation history is kept.");
@@ -4657,8 +4664,9 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     add(tr("Copy session reference"), "contextCopyReference", SessionMenuAction::CopyReference, original.online && !target.runId.isEmpty());
     add(tr("Copy folder path"), "contextCopyFolder", SessionMenuAction::CopyFolder, !directory.isEmpty());
     m_sessionMenu->addSeparator();
-    add(archived ? tr("Forget archived session…") : original.session.state == "running" ? tr("Terminate session…") : tr("Forget saved session…"),
-        "contextTerminateSession", SessionMenuAction::Terminate, available && NativeSessionCapabilities::action(target,target.state=="running"?"terminate":"forget") && (!archived || !target.archiveId.isEmpty()),NativeSessionCapabilities::actionReason(target,target.state=="running"?"terminate":"forget"));
+    const auto endOperation=NativeSessionCapabilities::endOperation(target);
+    add(archived ? tr("Forget archived session…") : endOperation == "terminate" ? tr("Terminate session…") : tr("Forget saved session…"),
+        "contextTerminateSession", SessionMenuAction::Terminate, available && NativeSessionCapabilities::action(target,endOperation) && (!archived || !target.archiveId.isEmpty()),NativeSessionCapabilities::actionReason(target,endOperation));
     m_sessionMenu->popup(position);
 }
 
@@ -4933,15 +4941,21 @@ void SessionsWindow::renameSession()
 
 void SessionsWindow::terminateSession()
 {
-    const auto *e = selected(); if (!e || !e->online || isTerminating(*e) || m_pending || !m_renameKey.isEmpty()
-        || !NativeSessionCapabilities::action(e->session,e->session.state=="running"?"terminate":"forget",m_details)) return;
+    const auto *e = selected(); if (!e || !e->online || isTerminating(*e) || m_pending || !m_renameKey.isEmpty() || m_forgetBindingRequest
+        || !NativeSessionCapabilities::action(e->session,NativeSessionCapabilities::endOperation(e->session,m_details),m_details)) return;
     const Entry original = *e;
     const QString host = e->host, name = e->session.name, archiveId = e->session.archiveId;
-    const bool live = e->session.state == "running", archived = e->session.state == "archived";
+    const bool archived = e->session.state == "archived";
+    // OpenCode keeps its conversation; with a known identity only the binding goes.
+    const auto run = m_details.value("run_id").toString(e->session.runId), conversation = m_details.value("conversation_id").toString(e->session.conversationId);
+    const bool bindingOnly = !archived && NativeSessionCapabilities::forgetsBindingOnly(e->session,m_details);
+    const bool scopedForget = bindingOnly && !run.isEmpty();
+    const bool live = e->session.state == "running" && !bindingOnly;
     const bool keepArchive = live && e->session.tracked && QStringList{"codex","claude","kimi"}.contains(e->session.cmd);
     QMessageBox confirm(QMessageBox::Warning, live ? tr("Terminate session?") : archived ? tr("Forget archived session?") : tr("Forget saved session?"),
         live ? (keepArchive ? tr("Stop %1 and move its recorded conversation to Archive? Running processes will stop; the conversation history is kept.").arg(name) : tr("Terminate %1? Its running processes will stop. No HGS archive is available for this session; any native conversation history is kept.").arg(name))
              : archived ? tr("Remove this archived instance of %1 from HGS? Other sessions with this name and the agent’s native conversation history are kept.").arg(name)
+             : bindingOnly ? tr("Forget %1 in Zerus? The conversation stays in OpenCode; only Zerus forgets it.").arg(name)
              : tr("Remove %1 from HGS? The agent’s native conversation history is kept.").arg(name), QMessageBox::Yes | QMessageBox::Cancel, this);
     confirm.setObjectName("terminateSessionConfirm"); confirm.setTextFormat(Qt::PlainText);
     confirm.setInformativeText(tr("Computer: %1").arg(original.machine));
@@ -4950,9 +4964,18 @@ void SessionsWindow::terminateSession()
     confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
     if (confirm.exec() != QMessageBox::Yes || !selectSessionEntry(original)) return;
     const auto *current = selected();
-    if (!current || !current->online || isTerminating(*current) || m_pending || !m_renameKey.isEmpty()) return;
-    if ((current->session.state == "running") != live) {
+    if (!current || !current->online || isTerminating(*current) || m_pending || !m_renameKey.isEmpty() || m_forgetBindingRequest) return;
+    const bool currentBindingOnly = !archived && NativeSessionCapabilities::forgetsBindingOnly(current->session,m_details);
+    if ((current->session.state == "running" && !currentBindingOnly) != live || currentBindingOnly != bindingOnly) {
         showNotice(tr("The session state changed. Open its actions again."), true); return;
+    }
+    if (scopedForget) {
+        if (m_details.value("run_id").toString(current->session.runId) != run || m_details.value("conversation_id").toString(current->session.conversationId) != conversation) {
+            showNotice(tr("The session state changed. Open its actions again."), true); return;
+        }
+        m_pending = true; m_restoreKey.clear(); m_forgetBindingName = name;
+        m_forgetBindingRequest = m_client.requestForgetBinding(host, name, run, conversation);
+        renderDetails(); return;
     }
     m_pending = true; m_restoreKey.clear();
     if(live){

@@ -1725,13 +1725,18 @@ quint64 HgsClient::requestRemoveQueued(const QString &host, const QString &name,
     return runSessionAction(host,name,"remove_queued",{{"expected_run_id",run},{"expected_conversation_id",conversation},{"message_id",messageId}});
 }
 
+quint64 HgsClient::requestForgetBinding(const QString &host, const QString &name, const QString &run, const QString &conversation)
+{
+    return runSessionAction(host,name,"forget",{{"expected_run_id",run},{"expected_conversation_id",conversation}});
+}
+
 quint64 HgsClient::runSessionAction(const QString &host, const QString &name, const QString &operation, QJsonObject data)
 {
     const auto request = ++m_sessionActionRequest;
     const auto requestId = QUuid::createUuid().toString(QUuid::WithoutBraces); data["request_id"] = requestId;
     // Scoped native actions go through the receipt-keeping `session-action`
     // command, which names the action in its request.
-    const bool scoped = operation == "remove_queued";
+    const bool scoped = operation == "remove_queued" || operation == "forget";
     if (scoped) data["action"] = operation;
     QStringList args{scoped ? QStringLiteral("session-action") : operation,name}; if (operation == "attachment") args << "--stage";
     args << "--json"; if (!host.isEmpty()) args.prepend('@' + host);
@@ -1763,9 +1768,9 @@ quint64 HgsClient::runSessionAction(const QString &host, const QString &name, co
                 if (scoped && identity && (state == "failed" || state == "uncertain")) {
                     // A durable receipt that is not a success is never retried here.
                     const auto reason = result.value("error").toString().trimmed().left(2000);
-                    fail(state == "failed" ? (reason.isEmpty() ? tr("The queued message was not removed.") : reason)
-                        : reason.isEmpty() ? tr("Removal was not confirmed. Refresh Activity before trying again.")
-                        : tr("Removal was not confirmed (%1). Refresh Activity before trying again.").arg(reason));
+                    fail(state == "failed" ? (!reason.isEmpty() ? reason : operation == "forget" ? tr("The session was not forgotten.") : tr("The queued message was not removed."))
+                        : reason.isEmpty() ? tr("The result was not confirmed. Refresh before trying again.")
+                        : tr("The result was not confirmed (%1). Refresh before trying again.").arg(reason));
                 } else if (!identity
                     || (data.contains("expected_created") && result.value("created").toInteger(-1) != data.value("expected_created").toInteger())
                     || !(state == (scoped ? "completed" : operation == "attachment" ? "staged" : "submitted")
