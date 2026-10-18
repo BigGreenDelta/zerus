@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import shutil
 import shlex
@@ -89,6 +90,9 @@ def stop(*args):
     event("SessionEnd", reason="exit" if agent == "kimi" else "other")
     sys.exit(143)
 signal.signal(signal.SIGTERM, stop)
+# Only stop_report sends this: the Python stacks go to the pane's terminal.
+import faulthandler
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 if (home / "record-interrupts").exists():
     def interrupted(*args):
         with open(home / ("interrupts-" + sid), "a") as log:
@@ -212,8 +216,68 @@ class Harness(unittest.TestCase):
     def hgs(self, *args, rc=0, cwd=None):
         p = subprocess.run([str(HGS), *args], env=self.env,
                            capture_output=True, text=True, timeout=20, cwd=cwd)
-        self.assertEqual(p.returncode, rc, p.stdout + p.stderr)
+        stalled = p.returncode != rc and args[:1] == ("pause",) and "did not exit after SIGTERM" in p.stderr
+        self.assertEqual(p.returncode, rc, p.stdout + p.stderr + (self.stop_report() if stalled else ""))
         return p.stdout
+
+    def stop_report(self):
+        """What still runs once a stop has missed its deadline, and where: the
+        saved stop evidence, each process of the private panes, the fake
+        agents' Python stacks and, natively, what each process waits in."""
+        panes = subprocess.run([str(self.bin / "tmux"), "list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid} #{pane_dead}"],
+                               env=self.env, capture_output=True, text=True).stdout
+        rows = [line.split(None, 4) for line in subprocess.run(["ps", "-axo", "pid=,ppid=,stat=,etime=,command="],
+                capture_output=True, text=True).stdout.splitlines()]
+        rows = [row for row in rows if len(row) == 5]
+        children = {}
+        for row in rows:
+            children.setdefault(row[1], []).append(row[0])
+        owned, pending = set(), [line.split()[2] for line in panes.splitlines() if len(line.split()) == 4]
+        while pending:
+            pid = pending.pop()
+            if pid not in owned:
+                owned.add(pid)
+                pending += children.get(pid, [])
+        owned |= {row[0] for row in rows if str(self.root) in row[4]}
+        processes = [row for row in rows if row[0] in owned][:12]
+        report = ["", "Stop diagnostics:", "panes: " + panes.strip()]
+        for path in sorted((self.root / "state").glob("*.json"))[:3]:
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            report.append("record: " + json.dumps({key: record.get(key) for key in (
+                "name", "pid", "supervisor", "activity", "pausing", "session_end", "exited_at", "completion_reason")}))
+        report += ["process: " + " ".join(row[:4]) + " " + row[4][:200] for row in processes]
+        agents = [row[0] for row in processes if str(self.bin) in row[4] and "python" in row[4].lower()]
+        for pid in agents:
+            try:
+                os.kill(int(pid), signal.SIGUSR1)
+            except ProcessLookupError:
+                pass
+        if agents:
+            time.sleep(0.3)
+        for line in panes.splitlines():
+            if len(line.split()) == 4:
+                screen = subprocess.run([str(self.bin / "tmux"), "capture-pane", "-p", "-J", "-S", "-200", "-t", line.split()[1]],
+                                        env=self.env, capture_output=True, text=True).stdout.splitlines()
+                starts = [i for i, text in enumerate(screen) if re.match(r"(Current thread|Thread) 0x", text)]
+                if starts:
+                    report.append("python in " + line.split()[1] + ": " + " | ".join(text.strip() for text in screen[starts[0]:] if text.strip())[:1500])
+        for row in processes[:6]:
+            if sys.platform == "darwin":
+                sampled = subprocess.run(["sample", row[0], "1", "-mayDie"], capture_output=True, text=True).stdout
+                graph = sampled.split("Call graph:", 1)[-1].split("Total number in stack", 1)[0].splitlines()
+                threads = [i for i, text in enumerate(graph) if text.startswith("    ") and text[4:5] != " " and "Thread_" in text]
+                for start, end in zip(threads, threads[1:] + [len(graph)]):
+                    frames = [text.strip() for text in graph[start + 1:end] if text.strip()]
+                    report.append(f"stack {row[0]} {graph[start].strip()[:60]}: " + " <- ".join(frames[-1:-7:-1])[:600])
+            else:
+                try:
+                    report.append(f"wchan {row[0]}: " + Path(f"/proc/{row[0]}/wchan").read_text())
+                except OSError:
+                    pass
+        return "\n".join(report)
 
     def t(self, *args):
         return subprocess.run([str(self.bin / "tmux"), *args], env=self.env,
@@ -248,7 +312,7 @@ class Harness(unittest.TestCase):
             time.sleep(0.05)
         self.fail("timeout; state=" + str(list((self.root / "state").glob("*"))) +
                   "\n" + subprocess.run([str(self.bin / "tmux"), "capture-pane", "-p"],
-                    env=self.env, capture_output=True, text=True).stdout)
+                    env=self.env, capture_output=True, text=True).stdout + self.stop_report())
 
     def start(self, agent="claude", tag="one", *extra):
         name = f"{agent}/p/{tag}"
@@ -1074,10 +1138,38 @@ exit $status
     def test_timeout_does_not_escalate_to_forced_kill(self):
         name = self.start()
         (self.root / "ignore-term").touch()
+        reports = []
+        report = self.stop_report
+        self.stop_report = lambda: reports.append(1) or report()
         self.hgs("pause", name, rc=1)
+        self.assertEqual(reports, [], "an expected refusal carries no stop report")
         self.t("has-session", "-t", "=" + name)
         self.assertFalse(self.binding(name).get("pausing"))
         self.assertFalse(self.binding(name).get("paused"))
+
+    def test_stop_report_follows_only_a_missed_stop_deadline(self):
+        name = self.start()
+        reports = []
+        report = self.stop_report
+        self.stop_report = lambda: reports.append(time.monotonic()) or report()
+        # An ordinary pause and resume report nothing.
+        self.hgs("pause", name)
+        self.resume(name)
+        self.assertEqual(reports, [])
+        # A private fake agent ignores SIGTERM: the pause misses its deadline,
+        (self.root / "ignore-term").touch()
+        # and only then does the failure carry the report.
+        started = time.monotonic()
+        with self.assertRaises(AssertionError) as caught:
+            self.hgs("pause", name)
+        self.assertEqual(len(reports), 1)
+        self.assertGreaterEqual(reports[0] - started, 10)
+        message, pid = str(caught.exception), str(self.binding(name)["pid"])
+        self.assertIn("did not exit after SIGTERM", message)
+        self.assertIn("Stop diagnostics:", message)
+        self.assertRegex(message, r"(?m)^process: " + pid + r" \d+ ")
+        self.assertRegex(message, r"(?m)^python in %\d+: (Current thread|Thread) 0x.*line \d+ in <module>")
+        self.assertRegex(message, r"(?m)^stack " + pid + " " if sys.platform == "darwin" else r"(?m)^wchan " + pid + ": ")
 
     def test_abandoned_pause_does_not_block_future_work(self):
         name = self.start()
