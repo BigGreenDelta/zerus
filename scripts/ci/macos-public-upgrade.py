@@ -19,6 +19,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -279,6 +280,7 @@ class Qualification:
         self.output = output
         self.commands = 0
         self.gui = None
+        self.gui_runtime = None
         self.native = None
         self.installed = None
         self.phases = []
@@ -374,7 +376,33 @@ class Qualification:
                 "server_start": server_start, "conversation": record["conversation_id"], "pane": live_pane,
                 "api_requests": len(n.native_requests)}
 
+    def prepare_gui_runtime(self):
+        require(self.gui_runtime is None, "A private GUI runtime already exists.")
+        # A resolved native fixture below /private/var/folders can put hgs-tray
+        # at Darwin's 104-byte sockaddr_un limit. Own a short separate directory.
+        self.gui_runtime = tempfile.TemporaryDirectory(prefix="zerus-cask-ipc-", dir="/tmp")
+        self.env["TMPDIR"] = str(Path(self.gui_runtime.name).resolve())
+
+    def gui_runtime_info(self):
+        runtime = Path(self.env["TMPDIR"])
+        canonical = runtime.resolve(strict=True)
+        require(self.gui_runtime is not None and runtime == canonical
+                == Path(self.gui_runtime.name).resolve(strict=True), "GUI runtime is not this fixture's directory.")
+        attributes = canonical.stat()
+        require(attributes.st_uid == os.geteuid() and stat.S_IMODE(attributes.st_mode) == 0o700,
+                "GUI runtime must be private to this fixture account.")
+        socket_path = runtime / "hgs-tray"
+        canonical_socket = canonical / "hgs-tray"
+        paths = {"runtime": runtime, "canonical_runtime": canonical,
+                 "socket": socket_path, "canonical_socket": canonical_socket}
+        proof = {name: str(path) for name, path in paths.items()}
+        proof.update({name + "_bytes": len(os.fsencode(path)) for name, path in paths.items()})
+        require(proof["socket_bytes"] <= 90 and proof["canonical_socket_bytes"] <= 90,
+                "Private GUI IPC path exceeds its short-path budget.")
+        return proof
+
     def start_gui(self, phase):
+        (self.output / (phase + "-ipc.json")).write_text(json.dumps(self.gui_runtime_info(), indent=2) + "\n")
         log = (self.output / (phase + "-gui.log")).open("w")
         self.gui = subprocess.Popen([str(APP / "Contents/MacOS/hgs-tray"), "--sessions", "--hgs",
                                      str(APP / "Contents/MacOS/hgs")], env=self.env,
@@ -433,9 +461,7 @@ class Qualification:
             raise
         self.env = self.native.env
         self.env["HGS_PEERS"] = ""
-        runtime = self.native.root / "gui-runtime"
-        runtime.mkdir(mode=0o700)
-        self.env["TMPDIR"] = str(runtime)
+        self.prepare_gui_runtime()
         self.native_identity = self.native_state()
         (self.output / "native-package-pin.json").write_text(json.dumps(package, indent=2) + "\n")
 
@@ -478,22 +504,27 @@ class Qualification:
     def cleanup(self):
         errors = []
         try:
-            self.stop_gui()
-        except subprocess.TimeoutExpired:
-            # Only the exact Popen child owned by this disposable fixture.
-            self.gui.kill()
-            self.gui.wait(timeout=10)
-            self.gui = None
-            errors.append("The private GUI did not finish its normal durable shutdown.")
-        if self.native:
-            if not self.native.doCleanups():
-                errors.append("Private native fixture cleanup failed.")
-        if self.installed:
             try:
-                self.run(["brew", "uninstall", "--cask", self.installed])
-                self.installed = None
-            except (ValueError, subprocess.TimeoutExpired) as error:
-                errors.append(str(error))
+                self.stop_gui()
+            except subprocess.TimeoutExpired:
+                # Only the exact Popen child owned by this disposable fixture.
+                self.gui.kill()
+                self.gui.wait(timeout=10)
+                self.gui = None
+                errors.append("The private GUI did not finish its normal durable shutdown.")
+            if self.native:
+                if not self.native.doCleanups():
+                    errors.append("Private native fixture cleanup failed.")
+            if self.installed:
+                try:
+                    self.run(["brew", "uninstall", "--cask", self.installed])
+                    self.installed = None
+                except (ValueError, subprocess.TimeoutExpired) as error:
+                    errors.append(str(error))
+        finally:
+            if self.gui_runtime is not None:
+                self.gui_runtime.cleanup()
+                self.gui_runtime = None
         require(not errors, "; ".join(errors))
 
 

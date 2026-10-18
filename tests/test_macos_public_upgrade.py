@@ -190,6 +190,91 @@ class PublicCaskBoundaries(unittest.TestCase):
                 self.assertEqual(stdout.strip(), "ABSENT")
             self.assertTrue(all(token not in path.read_text() for path in Path(tmp).glob("*.json")))
 
+    def test_short_gui_runtime_is_owned_and_cleanup_never_follows_external_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            retained = outside / "retain.txt"
+            retained.write_text("Unrelated private fixture data")
+            q = upgrade.Qualification(Path(tmp))
+            q.env = {"TMPDIR": str(outside)}
+            q.prepare_gui_runtime()
+            runtime = Path(q.env["TMPDIR"])
+            try:
+                self.assertEqual(runtime.parent, Path("/tmp").resolve())
+                self.assertEqual(stat.S_IMODE(runtime.stat().st_mode), 0o700)
+                self.assertNotEqual(runtime, outside)
+                self.assertLessEqual(q.gui_runtime_info()["canonical_socket_bytes"], 90)
+                (runtime / "external").symlink_to(outside, target_is_directory=True)
+                (runtime / "hgs-tray").touch()
+                with self.assertRaises(ValueError):
+                    q.prepare_gui_runtime()
+            finally:
+                q.cleanup()
+            self.assertFalse(runtime.exists())
+            self.assertIsNone(q.gui_runtime)
+            self.assertEqual(retained.read_text(), "Unrelated private fixture data")
+
+    def test_gui_runtime_cleanup_also_runs_after_native_cleanup_failure(self):
+        for throws in (False, True):
+            with self.subTest(throws=throws), tempfile.TemporaryDirectory() as tmp:
+                q = upgrade.Qualification(Path(tmp))
+                q.env = {}
+                q.prepare_gui_runtime()
+                runtime = Path(q.env["TMPDIR"])
+                def cleanup():
+                    if throws:
+                        raise RuntimeError("Private native fixture cleanup failure")
+                    return False
+                q.native = types.SimpleNamespace(doCleanups=cleanup)
+                with self.assertRaisesRegex(RuntimeError if throws else ValueError, "native fixture cleanup fail"):
+                    q.cleanup()
+                self.assertFalse(runtime.exists())
+                self.assertIsNone(q.gui_runtime)
+
+    def test_start_gui_records_actual_ipc_paths_before_owned_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            q = upgrade.Qualification(Path(tmp))
+            q.env = {}
+            q.prepare_gui_runtime()
+            runtime = Path(q.env["TMPDIR"])
+            def start(*args, **kwargs):
+                proof = json.loads((Path(tmp) / "fixture-ipc.json").read_text())
+                self.assertEqual(proof["runtime"], str(runtime))
+                self.assertEqual(proof["canonical_runtime"], str(runtime.resolve()))
+                self.assertEqual(proof["canonical_socket_bytes"], len(os.fsencode(runtime / "hgs-tray")))
+                self.assertEqual(kwargs["env"]["TMPDIR"], str(runtime))
+                return types.SimpleNamespace(poll=lambda: None, send_signal=lambda _: None, wait=lambda **_: 0)
+            try:
+                with patch.object(upgrade.subprocess, "Popen", side_effect=start) as popen, \
+                        patch.object(upgrade.socket, "socket") as socket:
+                    q.start_gui("fixture")
+                    popen.assert_called_once()
+                    socket.return_value.__enter__.return_value.connect.assert_called_once_with(str(runtime / "hgs-tray"))
+            finally:
+                q.cleanup()
+            self.assertFalse(runtime.exists())
+
+    def test_foreign_runtime_is_refused_before_gui_launch_and_not_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            marker = outside / "hgs-tray"
+            marker.write_text("Never touch another runtime")
+            q = upgrade.Qualification(Path(tmp))
+            q.env = {}
+            q.prepare_gui_runtime()
+            owned = Path(q.env["TMPDIR"])
+            q.env["TMPDIR"] = str(outside)
+            try:
+                with patch.object(upgrade.subprocess, "Popen") as popen, self.assertRaises(ValueError):
+                    q.start_gui("refused")
+                popen.assert_not_called()
+            finally:
+                q.cleanup()
+            self.assertFalse(owned.exists())
+            self.assertEqual(marker.read_text(), "Never touch another runtime")
+
     def test_only_literal_current_or_retained_casks_are_accepted(self):
         for channel in ("stable", "nightly"):
             for legacy in (False, True):
