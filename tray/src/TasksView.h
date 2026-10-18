@@ -80,8 +80,9 @@ private:
     struct Step { QStringList arguments; QString input; std::function<void(const QJsonObject &)> then = {}; };
     QList<Step> steps(const TaskItem &task, TaskAction action) const;
     QList<Step> editSteps(const TaskItem &task, const TaskEdits &edits) const;
-    // Runs the steps in order and stops at the first failure; refreshes after.
-    void run(QList<Step> steps);
+    // Runs the steps in order and refreshes after. `finished` follows the last
+    // success; `failed` replaces the notice for the first refusal.
+    void run(QList<Step> steps, std::function<void()> finished = {}, std::function<void(const QString &)> failed = {});
     void act(const TaskItem &task, TaskAction action);
     void openTask(const TaskItem &task);
     void confirmCancel(const TaskItem &task);

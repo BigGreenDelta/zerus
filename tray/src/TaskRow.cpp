@@ -1,12 +1,14 @@
 #include "TaskRow.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
+#include <QApplication>
 #include <QDateTime>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QTextLayout>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -70,6 +72,8 @@ QString TaskRow::actionKey(TaskAction action) {
 TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(true)) {
     setAttribute(Qt::WA_Hover); setCursor(Qt::PointingHandCursor);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);   // rows never take the list's spare height
+    // Tab reaches a row, Enter or Space opens it, and its actions follow the focus.
+    setFocusPolicy(Qt::TabFocus);
     auto *layout = new QHBoxLayout(this); layout->setContentsMargins(12, 6, 12, 10); layout->setSpacing(11);
     m_glyph = new QLabel; m_glyph->setObjectName("taskGlyph"); m_glyph->setFixedSize(18, 18); m_glyph->setAlignment(Qt::AlignCenter);
     auto *glyphColumn = new QVBoxLayout; glyphColumn->setContentsMargins(0, 4, 0, 0); glyphColumn->addWidget(m_glyph); glyphColumn->addStretch();
@@ -100,6 +104,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
         : task.stage == QLatin1String("review") || task.stage == QLatin1String("done") ? QStringLiteral("✓")
         : task.stage == QLatin1String("active") ? QStringLiteral("•") : QString();
     m_glyph->setText(glyph);
+    setAccessibleName(task.id + QStringLiteral(": ") + task.text.section(QLatin1Char('\n'), 0, 0));
     setWorkspaceStyle(m_glyph, QStringLiteral("border:2px solid %1;border-radius:9px;color:%1;font-size:9.5px;font-weight:700;").arg(stage.name()));
     // Meta: ID, the session (or the target), the session's status for In
     // progress, the time, and who filed it.
@@ -145,6 +150,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
             auto *button = new QToolButton(m_actions); button->setObjectName(QStringLiteral("taskAction:") + actionKey(action));
             button->setFixedSize(26, 26); button->setIconSize(QSize(15, 15)); button->setAutoRaise(true); button->setCursor(Qt::ArrowCursor);
             connect(button, &QToolButton::clicked, this, [this, action] { emit actionRequested(action); });
+            button->installEventFilter(this);
             m_actions->layout()->addWidget(button); m_buttons.insert(int(action), button);
         }
         m_actions->setFixedWidth(int(actions.size()) * 26 + qMax(0, int(actions.size()) - 1) * 2);
@@ -156,8 +162,28 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
         it.value()->setAccessibleName(TaskBoard::actionLabel(action));
         setWorkspaceStyle(it.value(), QStringLiteral("QToolButton{border:0;border-radius:6px;background:transparent;}QToolButton:hover{background:%1;}").arg(colors.hover.name()));
     }
-    showActions(m_hovered);
+    updateActions();
     layoutText(); update();
+}
+
+void TaskRow::updateActions() {
+    const auto *focus = QApplication::focusWidget();
+    showActions(m_hovered || (focus && (focus == this || isAncestorOf(focus))));
+}
+
+void TaskRow::focusInEvent(QFocusEvent *event) { QWidget::focusInEvent(event); updateActions(); update(); }
+
+// The focus may move to one of the row's own actions: decide once it has landed.
+void TaskRow::focusOutEvent(QFocusEvent *event) { QWidget::focusOutEvent(event); QTimer::singleShot(0, this, &TaskRow::updateActions); update(); }
+
+bool TaskRow::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() == QEvent::FocusOut) QTimer::singleShot(0, this, &TaskRow::updateActions);
+    return QWidget::eventFilter(watched, event);
+}
+
+void TaskRow::keyPressEvent(QKeyEvent *event) {
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter || event->key() == Qt::Key_Space) { emit opened(); event->accept(); return; }
+    QWidget::keyPressEvent(event);
 }
 
 void TaskRow::showActions(bool shown) {
@@ -171,9 +197,9 @@ void TaskRow::layoutText() {
 
 void TaskRow::resizeEvent(QResizeEvent *event) { QWidget::resizeEvent(event); layoutText(); }
 
-void TaskRow::enterEvent(QEnterEvent *event) { QWidget::enterEvent(event); m_hovered = true; showActions(true); update(); }
+void TaskRow::enterEvent(QEnterEvent *event) { QWidget::enterEvent(event); m_hovered = true; updateActions(); update(); }
 
-void TaskRow::leaveEvent(QEvent *event) { QWidget::leaveEvent(event); m_hovered = false; showActions(false); update(); }
+void TaskRow::leaveEvent(QEvent *event) { QWidget::leaveEvent(event); m_hovered = false; updateActions(); update(); }
 
 void TaskRow::mouseReleaseEvent(QMouseEvent *event) {
     QWidget::mouseReleaseEvent(event);
@@ -182,8 +208,9 @@ void TaskRow::mouseReleaseEvent(QMouseEvent *event) {
 
 void TaskRow::paintEvent(QPaintEvent *) {
     QPainter p(this);
+    const bool lit = m_hovered || hasFocus();
     QColor tint = m_state.mine ? m_colors.accent : m_colors.fg;
-    tint.setAlphaF(m_state.mine ? (m_hovered ? 0.11 : 0.07) : (m_hovered ? 0.04 : 0));
+    tint.setAlphaF(m_state.mine ? (lit ? 0.11 : 0.07) : (lit ? 0.04 : 0));
     p.fillRect(rect(), tint);
     if (m_state.mine) { p.setPen(Qt::NoPen); p.setBrush(m_colors.accent); p.drawRoundedRect(QRectF(0, 6, 3, height() - 12), 1.5, 1.5); }
     if (property("separated").toBool()) { p.setPen(QPen(m_colors.border, 1)); p.drawLine(41, 0, width(), 0); }

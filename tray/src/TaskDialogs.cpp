@@ -1,4 +1,5 @@
 #include "TaskDialogs.h"
+#include "ScopeFilterWidgets.h"
 #include "TasksView.h"
 #include "WorkspaceIcons.h"
 #include <QButtonGroup>
@@ -10,6 +11,7 @@
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSpinBox>
 #include <QTextBrowser>
 #include <QVBoxLayout>
@@ -20,6 +22,10 @@ QLabel *section(const QString &text) {
     auto *label = new QLabel(text); label->setProperty("taskSection", true);
     QFont font = label->font(); font.setPixelSize(11); font.setWeight(QFont::DemiBold); label->setFont(font);
     return label;
+}
+QLabel *errorLabel(const QString &name) {
+    auto *label = new QLabel; label->setObjectName(name); label->setWordWrap(true); label->setTextFormat(Qt::PlainText);
+    label->setStyleSheet(QStringLiteral("color:#e06c75;")); label->hide(); return label;
 }
 QString time(qint64 ms) { return QDateTime::fromMSecsSinceEpoch(ms).toString(QStringLiteral("d MMM HH:mm")); }
 QString actor(const QJsonObject &actor) {
@@ -72,7 +78,10 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
     }
     layout->addWidget(section(tr("Session")));
     if (m_editable) {
-        auto *chips = new QHBoxLayout; chips->setSpacing(6); m_sessions = new QButtonGroup(this);
+        // The sessions wrap onto rows and scroll past three, however many the project has.
+        auto *area = new QScrollArea; area->setObjectName("taskSessionChoices"); area->setWidgetResizable(true);
+        area->setFrameShape(QFrame::NoFrame); area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); area->setMaximumHeight(104);
+        auto *choices = new QWidget; auto *chips = new ScopeFilterWidgets::ChipFlow(choices); m_sessions = new QButtonGroup(this);
         m_choices << TaskTarget{true, {}, {}};
         for (const auto &session : sessions) m_choices << TaskTarget{false, session.host, session.name};
         // A pinned session that no longer exists stays a choice until it is changed.
@@ -85,7 +94,7 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
             for (const auto &session : sessions)
                 if (!choice.any && session.host == choice.host && session.name == choice.session) chip->setToolTip(session.status);
         }
-        chips->addStretch(); layout->addLayout(chips);
+        area->setWidget(choices); layout->addWidget(area);
     } else {
         auto *fixed = new QLabel(m_task.sessionName.isEmpty() ? (m_task.targetSession.isEmpty() ? tr("Any session")
             : sessionLabel(m_task.targetHost, m_task.targetSession)) : sessionLabel(m_task.sessionHost, m_task.sessionName));
@@ -101,6 +110,7 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
     const auto commentNow = [this] { if (!m_comment->text().trimmed().isEmpty()) emit commentRequested(m_comment->text().trimmed()); };
     connect(add, &QPushButton::clicked, this, commentNow); connect(m_comment, &QLineEdit::returnPressed, this, commentNow);
     comment->addWidget(m_comment, 1); comment->addWidget(add); layout->addLayout(comment);
+    m_error = errorLabel("taskDialogError"); layout->addWidget(m_error);
     auto *actions = new QHBoxLayout; actions->setSpacing(8);
     const auto stageActions = TaskBoard::actions(m_task.stage);
     for (const auto action : stageActions) {
@@ -110,7 +120,8 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
         const QString why = !m_task.writable ? tr("Update Zerus to edit this task") : action == TaskAction::SendNow ? sendBlocker : QString();
         button->setEnabled(why.isEmpty()); button->setToolTip(why.isEmpty() ? TaskBoard::actionLabel(action) : why);
         if (action == stageActions.last()) button->setStyleSheet(QStringLiteral("color:%1;").arg(colors.accent.name()));
-        connect(button, &QPushButton::clicked, this, [this, action] { emit actionRequested(edits(), action); accept(); });
+        button->setProperty("ready", why.isEmpty());
+        connect(button, &QPushButton::clicked, this, [this, action] { setBusy(true); emit actionRequested(edits(), action); });
         actions->addWidget(button);
     }
     actions->addStretch();
@@ -118,7 +129,8 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
         auto *cancel = new QPushButton(tr("Cancel")); cancel->setObjectName("discardTaskEdits"); cancel->setAutoDefault(false);
         auto *save = new QPushButton(tr("Save")); save->setObjectName("saveTask"); save->setDefault(true);
         connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
-        connect(save, &QPushButton::clicked, this, [this] { emit saveRequested(edits()); accept(); });
+        save->setProperty("ready", true);
+        connect(save, &QPushButton::clicked, this, [this] { setBusy(true); emit saveRequested(edits()); });
         actions->addWidget(cancel); actions->addWidget(save);
     } else {
         auto *close = new QPushButton(tr("Close")); close->setObjectName("closeTask"); close->setDefault(true);
@@ -143,6 +155,15 @@ void TaskDialog::setHistory(const QJsonArray &log) {
 }
 
 void TaskDialog::clearComment() { m_comment->clear(); }
+
+// While hgs works the buttons wait; a refusal shows here and gives them back.
+void TaskDialog::setBusy(bool busy) {
+    for (auto *button : findChildren<QPushButton *>())
+        if (button->property("ready").isValid()) button->setEnabled(!busy && button->property("ready").toBool());
+    if (busy) m_error->hide();
+}
+
+void TaskDialog::setError(const QString &error) { m_error->setText(error); m_error->show(); setBusy(false); }
 
 TaskCancelDialog::TaskCancelDialog(const TaskItem &task, const QString &sessionStatus, bool running, QWidget *parent) : QDialog(parent) {
     setObjectName("taskCancelDialog"); setWindowTitle(tr("Cancel %1?").arg(task.id));
@@ -186,12 +207,16 @@ TaskSettingsDialog::TaskSettingsDialog(const QString &projectName, const QJsonOb
     m_limit->setValue(settings.value("agent_limit").toInt());
     limit->addWidget(new QLabel(tr("Limit tasks started by agents"))); limit->addWidget(m_limit); limit->addWidget(new QLabel(tr("per hour")));
     limit->addStretch(); layout->addLayout(limit);
+    m_error = errorLabel("taskSettingsError"); layout->addWidget(m_error);
     auto *buttons = new QHBoxLayout; buttons->addStretch();
     auto *cancel = new QPushButton(tr("Cancel")); cancel->setObjectName("cancelTaskSettings"); cancel->setAutoDefault(false);
-    auto *save = new QPushButton(tr("Save")); save->setObjectName("saveTaskSettings"); save->setDefault(true);
-    connect(cancel, &QPushButton::clicked, this, &QDialog::reject); connect(save, &QPushButton::clicked, this, &QDialog::accept);
-    buttons->addWidget(cancel); buttons->addWidget(save); layout->addLayout(buttons);
+    m_save = new QPushButton(tr("Save")); m_save->setObjectName("saveTaskSettings"); m_save->setDefault(true);
+    connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
+    connect(m_save, &QPushButton::clicked, this, [this] { m_save->setEnabled(false); m_error->hide(); emit saveRequested(changes()); });
+    buttons->addWidget(cancel); buttons->addWidget(m_save); layout->addLayout(buttons);
 }
+
+void TaskSettingsDialog::setError(const QString &error) { m_error->setText(error); m_error->show(); m_save->setEnabled(true); }
 
 QJsonObject TaskSettingsDialog::changes() const {
     QJsonObject changes;

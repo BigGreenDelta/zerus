@@ -49,6 +49,8 @@ private slots:
     void aFailedListingIsShownInsteadOfTasks();
     void aSessionOutsideProjectsExplainsWhy();
     void theTabBadgeCountsReviewAndTodo();
+    void rowsWorkFromTheKeyboard();
+    void leavingAProjectClearsItsCounts();
 };
 
 void TestTasksView::initTestCase() {
@@ -225,6 +227,31 @@ void TestTasksView::theTabBadgeCountsReviewAndTodo() {
     QCOMPARE(badge.accessibleName(), QString("1 to review, 12 to do"));
     QVERIFY(badge.sizeHint().width() > badge.sizeHint().height());
     badge.setCounts(0, 0); QVERIFY(!badge.isVisible());
+}
+
+void TestTasksView::rowsWorkFromTheKeyboard() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
+    QVERIFY(QTest::qWaitForWindowActive(&view));
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    QTRY_VERIFY(row(view, 1)); auto *taskRow = row(view, 1);
+    QCOMPARE(taskRow->focusPolicy(), Qt::TabFocus); QVERIFY(taskRow->accessibleName().startsWith("T-000001"));
+    QVERIFY(!action(taskRow, "sendNow")->isVisible());
+    // Focus shows the row's actions and keeps them while it moves among them.
+    taskRow->setFocus(); QTRY_VERIFY(action(taskRow, "sendNow")->isVisible());
+    action(taskRow, "top")->setFocus(); QTest::qWait(20); QVERIFY(action(taskRow, "sendNow")->isVisible());
+    taskRow->setFocus(); QTest::keyClick(taskRow, Qt::Key_Return);
+    QTRY_VERIFY(FakeTasksCli::calls(dir.path()).contains(QStringList({"task", "get", "uuid-1", "--project", "project-1"})));
+}
+
+void TestTasksView::leavingAProjectClearsItsCounts() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"), FakeTasksCli::task(2, "review")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
+    QSignalSpy counts(&view, &TasksView::countsChanged);
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    QTRY_VERIFY(!counts.isEmpty() && counts.last().value(1).toInt() == 1);
+    view.setContext({}, {}, "", "codex/api", "\ncodex/api", sessions());
+    QCOMPARE(counts.last().value(0).toInt(), 0); QCOMPARE(counts.last().value(1).toInt(), 0);
 }
 
 QTEST_MAIN(TestTasksView)

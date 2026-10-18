@@ -2,7 +2,8 @@
 // A fake `hgs task …` over a JSON file beside the script (tasks.json): enough of
 // the real command's replies for the Tasks tab. Every call is appended to
 // calls.jsonl as {"argv", "stdin"}. A file named "fail" holding a subcommand
-// (list, add, send, …) makes that subcommand fail with "hgs refused: <name>".
+// (list, add, send, …), optionally followed by flags it must carry ("settings
+// --set"), makes those calls fail with "hgs refused: <subcommand>".
 #include "FakeCli.h"
 #include <QDir>
 #include <QFile>
@@ -20,7 +21,8 @@ text=sys.stdin.read()
 with open(here/'calls.jsonl','a') as f: f.write(json.dumps({'argv':a,'stdin':text})+'\n')
 fail=here/'fail'
 if a[:1]!=['task']: print('unexpected command',file=sys.stderr); sys.exit(2)
-if fail.exists() and a[1]==fail.read_text().strip(): print('hgs refused: '+a[1],file=sys.stderr); sys.exit(1)
+want=fail.read_text().split() if fail.exists() else []
+if want and a[1]==want[0] and all(w in a for w in want[1:]): print('hgs refused: '+a[1],file=sys.stderr); sys.exit(1)
 state=here/'tasks.json'
 data=json.loads(state.read_text()) if state.exists() else {}
 data.setdefault('tasks',[]); data.setdefault('next',1)

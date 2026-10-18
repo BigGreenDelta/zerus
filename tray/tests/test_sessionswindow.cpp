@@ -990,6 +990,10 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
     QCOMPARE(tabs->tabBar()->tabButton(tabs->indexOf(view), QTabBar::RightSide), badge);
     // The label counts the project's tasks in In review and To do.
     QTRY_COMPARE(badge->property("todo").toInt(), 2); QCOMPARE(badge->property("review").toInt(), 1); QVERIFY(badge->isVisible());
+    // The counts take room in the label: the tab widens to hold the text and the badge.
+    QTRY_VERIFY(badge->width() >= badge->sizeHint().width() && badge->width() > 0);
+    QVERIFY(tabs->tabBar()->tabRect(tabs->indexOf(view)).width() > QFontMetrics(tabs->tabBar()->font()).horizontalAdvance("Tasks") + badge->width());
+    QVERIFY(tabs->tabBar()->tabRect(tabs->indexOf(view)).contains(badge->geometry()));
     QFile calls(fixture + ".tasks"); QVERIFY(calls.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(calls.readLine()).array(), QJsonArray({"task", "list", "--project", work}));
     tabs->setCurrentWidget(view); QTRY_VERIFY(view->isVisible());
@@ -1004,6 +1008,7 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
     // A session in no project explains where tasks live.
     window.showSession({}, "codex/website/navigation");
     QTRY_VERIFY(view->findChild<QLabel *>("taskEmpty")->text().startsWith("Tasks belong to a project"));
+    QCOMPARE(badge->property("todo").toInt(), 0); QVERIFY(!badge->isVisible());
 }
 
 void TestSessionsWindow::projectHeaderFiltersOnlyThisProject()

@@ -67,7 +67,8 @@ TaskTabBadge::TaskTabBadge(QWidget *parent) : QWidget(parent) { setObjectName("t
 void TaskTabBadge::setCounts(int review, int todo) {
     m_review = review; m_todo = todo; setProperty("review", review); setProperty("todo", todo);
     setAccessibleName(tr("%1 to review, %2 to do").arg(review).arg(todo));
-    setVisible(review > 0 || todo > 0); updateGeometry(); update();
+    // A tab button keeps the size it has; the owner relayouts the tab for it.
+    resize(sizeHint()); setVisible(review > 0 || todo > 0); update();
 }
 
 void TaskTabBadge::setTheme(bool dark) { m_dark = dark; update(); }
@@ -152,6 +153,7 @@ void TasksView::setContext(const QString &projectId, const QString &projectName,
         m_projectId = projectId; ++m_generation; m_board = {}; m_loaded = false; m_error.clear(); m_showOlder = false; m_stage = QStringLiteral("todo");
         for (auto *row : std::as_const(m_rows)) { row->hide(); row->setObjectName({}); row->deleteLater(); }
         m_rows.clear();
+        emit countsChanged(0, 0);   // until the new project's listing arrives
     }
     m_sessionKey = sessionKey; applyComposerKey();
     m_composer->setAvailability(!m_projectId.isEmpty() && !m_session.isEmpty(), tr("Open a session to add tasks for it."));
@@ -321,13 +323,14 @@ QList<TasksView::Step> TasksView::editSteps(const TaskItem &task, const TaskEdit
     return out;
 }
 
-void TasksView::run(QList<Step> steps) {
-    if (steps.isEmpty()) return refresh();
+void TasksView::run(QList<Step> steps, std::function<void()> finished, std::function<void(const QString &)> failed) {
+    if (steps.isEmpty()) { refresh(); if (finished) finished(); return; }
     auto step = steps.takeFirst();
-    request(step.arguments, step.input, [this, steps, then = step.then](const QJsonObject &reply) {
+    request(step.arguments, step.input, [this, steps, then = step.then, finished, failed](const QJsonObject &reply) {
         if (then) then(reply);
-        run(steps);
-    });
+        run(steps, finished, failed);
+    }, failed ? std::function<void(const QString &)>([this, failed](const QString &error) { failed(error); refresh(); })
+              : std::function<void(const QString &)>());
 }
 
 void TasksView::act(const TaskItem &task, TaskAction action) {
@@ -356,15 +359,18 @@ void TasksView::openTask(const TaskItem &task) {
         for (auto *open : findChildren<TaskDialog *>()) open->reject();
         auto *dialog = new TaskDialog(reply.value("task").toObject(), m_sessions, sendBlocker(task), m_dark, this);
         dialog->setAttribute(Qt::WA_DeleteOnClose);
-        connect(dialog, &TaskDialog::saveRequested, this, [this, task](const TaskEdits &edits) { run(editSteps(task, edits)); });
-        connect(dialog, &TaskDialog::actionRequested, this, [this, task](const TaskEdits &edits, TaskAction action) {
+        // The dialog closes once hgs took everything; a refusal keeps it, and the edits, open.
+        QPointer<TaskDialog> guard(dialog);
+        const auto close = [guard] { if (guard) guard->accept(); };
+        const auto refused = [this, guard](const QString &error) { if (guard) guard->setError(error); else emit notice(error, true); };
+        connect(dialog, &TaskDialog::saveRequested, this, [this, task, close, refused](const TaskEdits &edits) { run(editSteps(task, edits), close, refused); });
+        connect(dialog, &TaskDialog::actionRequested, this, [this, task, close, refused](const TaskEdits &edits, TaskAction action) {
             // The action meets the task as the edits leave it.
             auto edited = task;
             if (edits.target) { edited.targetSession = edits.target->any ? QString() : edits.target->session; edited.targetHost = edits.target->host; }
-            if (action == TaskAction::Cancel) { run(editSteps(task, edits)); return confirmCancel(edited); }
-            run(editSteps(task, edits) + steps(edited, action));
+            if (action == TaskAction::Cancel) return run(editSteps(task, edits), [this, close, edited] { close(); confirmCancel(edited); }, refused);
+            run(editSteps(task, edits) + steps(edited, action), close, refused);
         });
-        QPointer<TaskDialog> guard(dialog);
         connect(dialog, &TaskDialog::commentRequested, this, [this, guard, uuid = task.uuid](const QString &text) {
             request(withProject({"comment", uuid}), text, [guard](const QJsonObject &reply) {
                 if (!guard) return;
@@ -397,11 +403,12 @@ void TasksView::openSettings() {
     request({"settings", "--project", m_projectId}, {}, [this](const QJsonObject &reply) {
         auto *dialog = new TaskSettingsDialog(m_projectName, reply.value("settings").toObject(), this);
         dialog->setAttribute(Qt::WA_DeleteOnClose);
-        connect(dialog, &QDialog::accepted, this, [this, dialog] {
-            const auto changes = dialog->changes();
-            if (!changes.isEmpty())
-                request({"settings", "--project", m_projectId, "--set"}, QString::fromUtf8(QJsonDocument(changes).toJson(QJsonDocument::Compact)),
-                        [](const QJsonObject &) {});
+        QPointer<TaskSettingsDialog> guard(dialog);
+        connect(dialog, &TaskSettingsDialog::saveRequested, this, [this, guard](const QJsonObject &changes) {
+            if (changes.isEmpty()) { if (guard) guard->accept(); return; }
+            request({"settings", "--project", m_projectId, "--set"}, QString::fromUtf8(QJsonDocument(changes).toJson(QJsonDocument::Compact)),
+                [guard](const QJsonObject &) { if (guard) guard->accept(); },
+                [this, guard](const QString &error) { if (guard) guard->setError(error); else emit notice(error, true); });
         });
         dialog->open();
     });

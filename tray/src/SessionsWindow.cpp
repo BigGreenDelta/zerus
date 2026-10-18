@@ -1196,7 +1196,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // The open session's project tasks; the label counts In review and To do.
     m_tasks = new TasksView(&m_client); tabs->addTab(m_tasks, tr("Tasks"));
     m_tasksBadge = new TaskTabBadge; tabs->tabBar()->setTabButton(tabs->indexOf(m_tasks), QTabBar::RightSide, m_tasksBadge);
-    connect(m_tasks, &TasksView::countsChanged, m_tasksBadge, &TaskTabBadge::setCounts);
+    connect(m_tasks, &TasksView::countsChanged, this, [this](int review, int todo) {
+        m_tasksBadge->setCounts(review, todo);
+        // The tab bar reads a button's size when it lays the tabs out: relayout for the new width.
+        const int index = m_detailTabs->indexOf(m_tasks); m_detailTabs->tabBar()->setTabText(index, m_detailTabs->tabBar()->tabText(index));
+    });
     connect(m_tasks, &TasksView::notice, this, &SessionsWindow::showNotice);
     m_nativeUi = new NativeUiView(&m_client, [] { return NativeBrowserPlugin::factory(); });
     tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(tabs->indexOf(m_nativeUi), false);

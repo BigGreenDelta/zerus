@@ -39,10 +39,16 @@ protected:
     void paintEvent(QPaintEvent *event) override;
     void enterEvent(QEnterEvent *event) override;
     void leaveEvent(QEvent *event) override;
+    void focusInEvent(QFocusEvent *event) override;
+    void focusOutEvent(QFocusEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 private:
     void showActions(bool shown);
+    // The actions show while the pointer is over the row or the focus is in it.
+    void updateActions();
     void layoutText();
     TaskItem m_task;
     TaskRowState m_state;

@@ -42,6 +42,8 @@ private slots:
     void aReviewTaskIsReadOnlyWithItsActions();
     void theCancelAndProjectSettingsDialogs();
     void theTabOpensTheDialogsAndAppliesThem();
+    void manySessionsWrapInTheDialog();
+    void aRefusedSaveKeepsTheDialogAndItsEdits();
 };
 
 void TestTaskDialogs::initTestCase() {
@@ -69,7 +71,11 @@ void TestTaskDialogs::theTaskDialogEditsAListedTaskAndShowsItsHistory() {
     dialog.findChild<QPushButton *>("saveTask")->click();
     QCOMPARE(saved.size(), 1); const auto edits = saved[0][0].value<TaskEdits>();
     QCOMPARE(edits.text.value_or(QString()), QString("New prompt")); QVERIFY(edits.target && edits.target->any);
-    QVERIFY(!dialog.isVisible());
+    // The dialog waits for its owner: it closes once hgs has taken the edits.
+    QVERIFY(dialog.isVisible()); QVERIFY(!dialog.findChild<QPushButton *>("saveTask")->isEnabled());
+    dialog.setError("hgs refused: edit");
+    QCOMPARE(dialog.findChild<QLabel *>("taskDialogError")->text(), QString("hgs refused: edit"));
+    QVERIFY(dialog.findChild<QPushButton *>("saveTask")->isEnabled()); QCOMPARE(prompt->toPlainText(), QString("New prompt"));
 }
 
 void TestTaskDialogs::aReviewTaskIsReadOnlyWithItsActions() {
@@ -146,6 +152,40 @@ void TestTaskDialogs::theTabOpensTheDialogsAndAppliesThem() {
     settings->findChild<QSpinBox *>("agentLimit")->setValue(2); settings->findChild<QPushButton *>("saveTaskSettings")->click();
     QTRY_VERIFY(called(dir.path(), {"task", "settings", "--project", "project-1", "--set"}));
     QCOMPARE(QJsonDocument::fromJson(FakeTasksCli::stdins(dir.path()).last().toUtf8()).object(), QJsonObject({{"agent_limit", 2}}));
+}
+
+void TestTaskDialogs::manySessionsWrapInTheDialog() {
+    QList<TaskSession> many;
+    for (int i = 0; i < 40; ++i) many << TaskSession{"", QString("codex/session-%1").arg(i), "Ready", ""};
+    TaskDialog dialog(withLog(FakeTasksCli::task(1, "todo"), {}), many, {}, true); dialog.resize(640, 640); dialog.show();
+    QVERIFY(dialog.sizeHint().width() < 900);
+    auto *first = dialog.findChild<QPushButton *>("taskSession:any"), *last = dialog.findChild<QPushButton *>("taskSession:/codex/session-39");
+    QTRY_VERIFY(last->mapTo(&dialog, QPoint()).y() > first->mapTo(&dialog, QPoint()).y());   // wrapped onto later rows
+    QVERIFY(dialog.findChild<QWidget *>("taskSessionChoices")->height() <= 104);
+}
+
+void TestTaskDialogs::aRefusedSaveKeepsTheDialogAndItsEdits() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo")}));
+    QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("edit"); fail.close();
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    QTRY_COMPARE(tile(view, "todo")->property("count").toInt(), 1); tile(view, "todo")->click();
+    click(row(view, 1)); TaskDialog *dialog = nullptr; QTRY_VERIFY((dialog = view.findChild<TaskDialog *>("taskDialog")));
+    dialog->findChild<QPlainTextEdit *>("taskPrompt")->setPlainText("A prompt worth keeping");
+    dialog->findChild<QPushButton *>("saveTask")->click();
+    QTRY_COMPARE(dialog->findChild<QLabel *>("taskDialogError")->text(), QString("hgs refused: edit"));
+    QVERIFY(dialog->isVisible()); QCOMPARE(dialog->findChild<QPlainTextEdit *>("taskPrompt")->toPlainText(), QString("A prompt worth keeping"));
+    QVERIFY(QFile::remove(dir.filePath("fail")));
+    dialog->findChild<QPushButton *>("saveTask")->click();
+    QTRY_VERIFY(!view.findChild<TaskDialog *>("taskDialog"));
+    QVERIFY(FakeTasksCli::stdins(dir.path()).contains("A prompt worth keeping"));
+    // The project settings keep a refused change open too.
+    QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("settings --set"); fail.close();
+    view.findChild<QToolButton *>("taskSettings")->click();
+    TaskSettingsDialog *settings = nullptr; QTRY_VERIFY((settings = view.findChild<TaskSettingsDialog *>("taskSettingsDialog")));
+    settings->findChild<QSpinBox *>("agentLimit")->setValue(4); settings->findChild<QPushButton *>("saveTaskSettings")->click();
+    QTRY_COMPARE(settings->findChild<QLabel *>("taskSettingsError")->text(), QString("hgs refused: settings"));
+    QVERIFY(settings->isVisible()); QCOMPARE(settings->findChild<QSpinBox *>("agentLimit")->value(), 4);
 }
 
 QTEST_MAIN(TestTaskDialogs)
