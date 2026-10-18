@@ -883,7 +883,11 @@ class WorkflowSecurityTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("agent_compatibility", ROOT / "scripts/ci/agent-compatibility.py")
         compat = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(compat)
-        suites = sum(compat.target_spec(agent, "win32-x64")["timeout"] for agent in compat.AGENTS)
+        # Only agents with a reviewed Windows package run there, as main() selects them.
+        windows = [agent for agent, pinned in compat.AGENTS.items()
+                   if compat.agent_target(agent, compat.WINDOWS) in pinned["members"]]
+        self.assertEqual(windows, ["codex", "claude"])
+        suites = sum(compat.target_spec(agent, compat.WINDOWS)["timeout"] for agent in windows)
         self.assertLess(suites + 5 * 60, harness)
         self.assertLess(harness + 3 * 60, step * 60)
         self.assertLess(step + 20, int(field(host, "timeout-minutes")))
