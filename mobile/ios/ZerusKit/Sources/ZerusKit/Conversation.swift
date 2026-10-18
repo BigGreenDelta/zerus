@@ -355,12 +355,14 @@ public enum ConversationLoadPresentation {
     }
 
     public static func status(hasContent: Bool, detailLoading: Bool, detailProgress: Bool, historyLoading: Bool, historyProgress: Bool,
-                              demo: Bool, resolved: Bool = false) -> Status? {
+                              demo: Bool, resolved: Bool = false, opening: Bool = false) -> Status? {
         if demo || !detailLoading && !historyLoading { return nil }
-        let progress = detailLoading && detailProgress || historyLoading && historyProgress
+        // Opening cached messages shows its first reads at once; later polls wait for the delayed gate.
+        let progress = opening || detailLoading && detailProgress || historyLoading && historyProgress
         let initial = !hasContent && !resolved
         if !initial && !progress { return nil }
         let text = initial ? "Loading conversation…"
+            : opening ? "Updating messages…"
             : historyLoading && detailLoading ? "Refreshing conversation and history…"
             : historyLoading ? "Loading message history…" : "Refreshing conversation…"
         return Status(text: text, initial: initial, spinner: progress)

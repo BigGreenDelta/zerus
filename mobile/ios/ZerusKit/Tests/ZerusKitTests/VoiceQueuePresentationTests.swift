@@ -9,7 +9,12 @@ final class VoiceQueuePresentationTests: XCTestCase {
         XCTAssertTrue(status.explanation.contains("native app accepted the recognized text"))
         XCTAssertTrue(status.explanation.contains("Queue status"))
         XCTAssertTrue(status.explanation.contains("does not confirm model delivery, reading or completion"))
-        XCTAssertEqual(RecordingDelivery.failed.description, RecordingDelivery.failed.explanation)
+        XCTAssertEqual("Not sent", RecordingDelivery.cancelled.description)
+        XCTAssertEqual("Delivery was cancelled. This recording was not sent to the agent.", RecordingDelivery.cancelled.explanation)
+        XCTAssertEqual("Your recording is being uploaded. Its recognized text is not confirmed as sent to the agent yet.", RecordingDelivery.uploading.explanation)
+        XCTAssertEqual("Your recording is being processed. Its recognized text is not confirmed as sent to the agent yet.", RecordingDelivery.processing.explanation)
+        XCTAssertEqual("The recording could not be sent. Your recording and any recognized text are kept for review.", RecordingDelivery.failed.explanation)
+        XCTAssertEqual("Delivery has not been confirmed. Check this recording's status before trying to send again.", RecordingDelivery.uncertain.explanation)
     }
 
     private let id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
