@@ -1719,26 +1719,40 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if (continuation != null && reason.isNotBlank()) contextNotice = reason
         continuation = null; continuationEnqueuing = ""
     }
-    fun contextActionReason(target: Target, operation: String): String {
+    fun contextActionReason(target: Target, operation: String, dismissPrompt: Boolean = false): String =
+        contextActionReason(target, operation, dismissPrompt, "")
+    private fun contextActionReason(target: Target, operation: String, dismissPrompt: Boolean, reservedRequest: String): String {
         if (target.agentId.isNotBlank() || target.archiveId.isNotBlank() || !fresh(target)) return "Refresh the live conversation before changing its context."
         if (target.run.isBlank() || target.conversation.isBlank()) return "Wait for the conversation to finish starting."
         if (operation !in relayOperations[target.connectionId].orEmpty() || operation !in machineOperations[MachineKey(target.connectionId, target.computerId)].orEmpty()) return "This gateway or computer does not support native context commands."
-        if (compactContinuationActive || contextBlocked(target) || outgoing.any { it.belongsTo(target) && it.blocksSending } || target.key in preparingTargets) return "Resolve the pending delivery or context command first."
+        val pendingContext = if (reservedRequest.isBlank()) contextBlocked(target) else
+            sessionActions.any { it.target == target && it.blocksSending } ||
+                clearExpectation?.let { it.requestId != reservedRequest && ContextPolicies.sameSessionRun(it.target, target) } == true ||
+                contextOperations.any { it.requestId != reservedRequest && ContextPolicies.sameSessionRun(it.target, target) && it.blocksSending }
+        if (compactContinuationActive || pendingContext || outgoing.any { it.belongsTo(target) && it.blocksSending } ||
+            reservedRequest.isBlank() && target.key in preparingTargets) return "Resolve the pending delivery or context command first."
         if (pickerDraft?.target == target || attachmentImporting || attachmentPreparing) return "Wait for the selected files to finish importing."
         if (drafts.any { it.target == target && it.status in listOf("submitting", "uncertain") }) return "Wait for the pending answer or interrupt."
+        if (dismissPrompt) {
+            if (operation != "clear_context") return "Prompt dismissal is available only when clearing context."
+            if (activeFrame?.target != target) return "Refresh the selected conversation before dismissing its prompt."
+            if (speech.recording) return "Finish recording before changing context."
+            return ContextPolicies.dismissReason(target, activity, relayFeatures[target.connectionId].orEmpty(),
+                machineFeatures[MachineKey(target.connectionId, target.computerId)].orEmpty())
+        }
         if (activity?.optBoolean(operation + "_supported") != true || activity?.string("activity") != "idle" || activity?.string("phase") != "idle") return "Native context changes are unavailable while the agent is busy or waiting for input."
         return ""
     }
     fun compactContext(target: Target, continueDraft: Boolean = false, expectedDraft: Draft? = null) = startContext(target, "compact_context", continueDraft, expectedDraft)
-    fun clearContext(target: Target) = startContext(target, "clear_context", false, null)
-    private fun startContext(target: Target, operation: String, continueDraft: Boolean, expectedDraft: Draft?) = viewModelScope.launch {
-        val reason = contextActionReason(target, operation)
+    fun clearContext(target: Target, dismissPrompt: Boolean = false) = startContext(target, "clear_context", false, null, dismissPrompt)
+    private fun startContext(target: Target, operation: String, continueDraft: Boolean, expectedDraft: Draft?, dismissPrompt: Boolean = false) = viewModelScope.launch {
+        val reason = contextActionReason(target, operation, dismissPrompt)
         if (demo || !storageReady || reason.isNotBlank()) { if (reason.isNotBlank()) contextNotice = reason; return@launch }
         val original = draft(target)
         if (expectedDraft != null && !ContextPolicies.sameDraft(expectedDraft, original)) { contextNotice = "Your composition changed. Review it before choosing a context action."; return@launch }
         if (continueDraft && original.text.isBlank() && original.attachments.isEmpty()) return@launch
         val connection = connections.find { it.id == target.connectionId } ?: return@launch
-        val op = ContextOperation(UUID.randomUUID().toString(), target, operation)
+        val op = ContextOperation(UUID.randomUUID().toString(), target, operation, dismissPrompt = true.takeIf { dismissPrompt })
         val navigation = navigationId
         preparingTargets += target.key; contextFlights += op.requestId
         if (continueDraft) continuation = CompactContinuation(op.requestId, original.copy(attachments = original.attachments.toList()), navigation, android.os.SystemClock.elapsedRealtime())
@@ -1752,7 +1766,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 state.context(op)
             }, { current, written -> current.context(written.contextOperations.first { it.requestId == op.requestId }) })
             check(fresh(target) && navigationId == navigation && (!continueDraft || continuation?.requestId == op.requestId) && (operation != "clear_context" || clearExpectation?.requestId == op.requestId)) { "The selected conversation changed before transport." }
-            val payload = target.json().put("request_id", op.requestId)
+            if (dismissPrompt) check(!demo && storageReady && contextActionReason(target, operation, true, op.requestId).isBlank()) {
+                "Prompt dismissal is no longer available. Nothing was sent."
+            }
+            val payload = ContextPolicies.payload(op)
             attempted = true
             val initial = try { api.submit(connection, target, operation, payload, op.requestId) }
             catch (error: RelayException) { if (error.status in listOf(400, 401, 403, 404, 409, 413, 429)) rejection = error; throw error }

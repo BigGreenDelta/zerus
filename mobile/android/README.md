@@ -343,6 +343,15 @@ confirmation and preserves unsent text and files. Confirmed rename and resume
 can move an ordinary editing draft only to their verified same-conversation
 result. Saved drafts offers explicit recovery if that destination was unavailable.
 
+When both routes advertise `clear_context_dismiss` and the selected fresh native
+inspection explicitly permits it, context details offer **Dismiss and clear…**
+with a separate named confirmation. Its mode stays fixed while the dialog is
+open and is checked again after the durable request is saved. Ordinary clear
+continues omitting `dismiss_prompt`; the explicit mode saves and sends `true`
+with the original request identity. Check result and recovery never repeat it.
+Missing capabilities, cached evidence or a changed target cannot authorize it;
+unsent composer text, files and question drafts stay intact.
+
 Native controls are enabled only when both gateway and computer advertise them
 and a fresh inspection permits the action. These include session lifecycle,
 queue Send now, model and effort changes, process output and Stop requested,

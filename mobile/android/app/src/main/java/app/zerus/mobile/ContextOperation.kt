@@ -4,7 +4,7 @@ import org.json.JSONObject
 
 /** Durable identity of one native context command; it never authorizes an automatic retry. */
 data class ContextOperation(val requestId: String, val target: Target, val operation: String,
-    val status: String = "sending", val createdAt: Long = System.currentTimeMillis(), val error: String = "", val resolvedConversation: String = "") {
+    val status: String = "sending", val createdAt: Long = System.currentTimeMillis(), val error: String = "", val resolvedConversation: String = "", val dismissPrompt: Boolean? = null) {
     val blocksSending get() = status in listOf("sending", "submitted", "uncertain")
     fun recover() = if (status in listOf("sending", "submitted")) copy(status = "uncertain", error = "Context command was interrupted. Check its original receipt; it has not been retried.") else this
 }
@@ -19,6 +19,30 @@ data class CompactContinuation(val requestId: String, val draft: Draft, val navi
 }
 
 object ContextPolicies {
+    const val DISMISS_FEATURE = "clear_context_dismiss"
+
+    /** The caller owns selected-frame freshness and pending-delivery checks. Native eligibility is explicit. */
+    fun dismissReason(target: Target, raw: JSONObject?, relayFeatures: Set<String>, machineFeatures: Set<String>): String {
+        fun marked(key: String): Boolean = raw?.opt(key).let { it != null && it != JSONObject.NULL && (it !is String || it.isNotEmpty()) }
+        if (target.archiveId.isNotEmpty() || target.agentId.isNotEmpty() || target.parentConversation.isNotEmpty() ||
+            target.connectionId.isBlank() || target.computerId.isBlank() || target.session.isBlank() || target.run.isBlank() || target.conversation.isBlank() ||
+            raw == null || raw.opt("name") != target.session || raw.opt("run_id") != target.run || raw.opt("conversation_id") != target.conversation ||
+            marked("archive_id") || marked("agent_id") || marked("parent_conversation_id") || raw.opt("state") == "archived")
+            return "Refresh the live conversation before dismissing its prompt."
+        if (DISMISS_FEATURE !in relayFeatures || DISMISS_FEATURE !in machineFeatures)
+            return "This gateway or computer does not support dismissing native prompts."
+        if (raw.opt("runtime_state") != "live" || raw.opt("process_state") != "running") return "The native agent is not running."
+        if ((raw.opt(DISMISS_FEATURE) as? Boolean) != true) return "The computer has not offered to dismiss this prompt before clearing context."
+        return ""
+    }
+
+    fun payload(operation: ContextOperation): JSONObject {
+        require(operation.dismissPrompt == null || operation.operation == "clear_context") { "Only clear context can dismiss a prompt." }
+        return operation.target.json().put("request_id", operation.requestId).also { payload ->
+            operation.dismissPrompt?.let { payload.put("dismiss_prompt", it) }
+        }
+    }
+
     fun sameSession(a: Target, b: Target) = a.agentId.isBlank() && b.agentId.isBlank() && a.archiveId.isBlank() && b.archiveId.isBlank() && a.connectionId == b.connectionId && a.computerId == b.computerId && a.session == b.session
     fun sameSessionRun(a: Target, b: Target) = sameSession(a, b) && a.run == b.run
 
