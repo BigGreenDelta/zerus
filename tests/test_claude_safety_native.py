@@ -252,7 +252,7 @@ class NativeClaudeWorkflowSafety(unittest.TestCase):
 
     def replay_hooks(self):
         path = self.root / 'native-hooks.jsonl'
-        events = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        events = native.records(path) if path.exists() else []
         for event in events[self.hook_offset:]:
             self.assertEqual(event['session_id'], self.conversation_id)
             questions.Questions.hook(self, event)
