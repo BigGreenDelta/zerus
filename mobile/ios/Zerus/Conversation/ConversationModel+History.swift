@@ -50,11 +50,7 @@ extension ConversationModel {
 
     func observeHistoryHead(_ page: HistoryPage, verified: Bool = true) {
         guard app.connections.contains(where: { $0.id == page.target.connectionId }) else { return }
-        editRead { state in
-            let next = state.head(page.target, epoch: page.epoch, latest: page.latestIncoming, total: page.totalIncoming, complete: page.complete)
-            let seen = Set(next.record(page.target)?.seen ?? [])
-            return next.visible(page.target, page.events.filter { seen.contains($0.id) })
-        }
+        editRead { ConversationReadHead.observe($0, page) }
         let key = ConversationReadPolicies.key(page.target)
         if page.complete && verified { currentHistoryHeads.insert(key) } else { currentHistoryHeads.remove(key) }
         refreshReadAttention()

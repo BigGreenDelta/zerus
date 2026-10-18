@@ -37,7 +37,7 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(Theme.muted)
                 }
                 Section {
-                    NavigationLink("Voice messages") { VoiceSettingsSheet(target: model.conversation.selected?.target) }
+                    NavigationLink("Voice messages") { VoiceSettingsSheet(target: nil) }
                     NavigationLink("Speech providers") { SpeechProvidersView(defaultSelection: model.voice.selection) }
                     NavigationLink("Third-party notices") { ThirdPartyNotices() }
                 }

@@ -184,7 +184,7 @@ struct VoiceMessageContent: View {
                     .accessibilityLabel("Recording actions")
                 }
                 Spacer()
-                DeliveryIcon(state: voice.state)
+                DeliveryIcon(state: voice.state, local: local)
             }
             .font(.footnote)
             .buttonStyle(.borderless)
@@ -194,26 +194,51 @@ struct VoiceMessageContent: View {
     }
 }
 
+/// A clock while uploading or processing, one accent check for native submission, an exclamation for failure or
+/// unconfirmed delivery, and "Not sent" for cancelled delivery. Tapping explains the status; there are no read ticks.
 struct DeliveryIcon: View {
+    @Environment(AppModel.self) private var app
     let state: String
+    var local: VoiceOutgoing? = nil
+    @State private var explaining = false
+    @State private var removing = false
 
     var body: some View {
         let delivery = RecordingDelivery.of(state)
-        let color = [.failed, .uncertain].contains(delivery) ? Theme.amber : Theme.muted
-        Group {
-            switch delivery {
-            case .processing: ProgressView().controlSize(.mini)
-            case .sent: Image(systemName: "checkmark")
-            case .failed: Image(systemName: "exclamationmark.circle")
-            case .cancelled: Image(systemName: "xmark")
-            case .uploading: Image(systemName: "icloud.and.arrow.up")
-            case .uncertain: Image(systemName: "questionmark.circle")
+        Button { explaining = true } label: {
+            Group {
+                switch delivery {
+                case .uploading, .processing: Image(systemName: "clock").foregroundStyle(Theme.muted)
+                case .sent: Image(systemName: "checkmark").foregroundStyle(Theme.mint)
+                case .failed, .uncertain: Image(systemName: "exclamationmark.circle").foregroundStyle(Theme.amber)
+                case .cancelled: Text("Not sent").foregroundStyle(Theme.muted)
+                }
             }
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
         }
-        .foregroundStyle(color)
+        .buttonStyle(.borderless)
         .accessibilityLabel(delivery.description)
-        .help(state == "submitted" ? delivery.explanation : VoiceProtocol.label(state))
-        .accessibilityHint(state == "submitted" ? delivery.explanation : "")
+        .accessibilityHint("Explains this recording's status")
+        .alert(delivery.description, isPresented: $explaining) {
+            // A terminal local copy can still be removed here, with confirmation; delivery is not affected.
+            if let local, local.terminal {
+                Button("Remove local copy", role: .destructive) { removing = true }
+                    .disabled(app.voice.activeRequests.contains(local.id))
+            }
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(delivery.explanation)
+        }
+        .alert("Remove local voice copy?", isPresented: $removing, presenting: local) { entry in
+            Button("Remove local copy", role: .destructive) {
+                app.playback.stop()
+                app.voice.dismiss(entry)
+            }
+            Button("Keep", role: .cancel) {}
+        } message: { entry in
+            Text("Remove this phone's saved audio and receipt for \(entry.target.session)? This does not cancel delivery or remove the message from the computer's conversation history.")
+        }
     }
 }
 
@@ -571,32 +596,36 @@ struct VoiceSettingsSheet: View {
                         }
                         .disabled(!voice.ready || voice.recording || voice.savingRecording)
                     }
-                    Section {
-                        Picker("Computer", selection: Binding(get: { choice.host?.computerId ?? "" }, set: { id in
-                            guard let target else { return }
-                            voice.chooseHost(MachineKey(connectionId: target.connectionId, computerId: id), target: target, previewId: choicePreview?.audio.id)
-                        })) {
-                            if selected == nil { Text(choice.host == nil ? "Choose voice computer" : "Selected computer unavailable").tag(choice.host?.computerId ?? "") }
-                            ForEach(voice.computers, id: \.id) { Text($0.name).tag($0.id) }
-                        }
-                        .disabled(voice.loading || voice.computers.isEmpty || voice.recording)
-                        Picker("Profile", selection: Binding(get: { choice.profileId }, set: { id in
-                            guard let target else { return }
-                            voice.chooseProfile(id, target: target, previewId: choicePreview?.audio.id)
-                        })) {
-                            if chosen == nil { Text(choice.profileId.isEmpty ? "Choose voice profile" : choice.profileId).tag(choice.profileId) }
-                            ForEach(profiles, id: \.id) { profile in
-                                Text(profile.available ? profile.name : "\(profile.name) (\(profile.reason.isEmpty ? "unavailable" : profile.reason))").tag(profile.id)
+                    if target == nil {
+                        DefaultVoiceProviderSection()
+                    } else {
+                        Section {
+                            Picker("Computer", selection: Binding(get: { choice.host?.computerId ?? "" }, set: { id in
+                                guard let target else { return }
+                                voice.chooseHost(MachineKey(connectionId: target.connectionId, computerId: id), target: target, previewId: choicePreview?.audio.id)
+                            })) {
+                                if selected == nil { Text(choice.host == nil ? "Choose voice computer" : "Selected computer unavailable").tag(choice.host?.computerId ?? "") }
+                                ForEach(voice.computers, id: \.id) { Text($0.name).tag($0.id) }
                             }
-                        }
-                        .disabled(voice.loading || profiles.isEmpty || voice.recording)
-                        if voice.loading { ProgressView().frame(maxWidth: .infinity) }
-                        Button("Refresh voice profiles") { voice.refreshProfiles(target) }.disabled(voice.loading)
-                    } footer: {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.")
-                            if !voice.profileNotice.isEmpty { Text(voice.profileNotice) }
-                            if !voice.statistics.isEmpty { Text(voice.statistics) }
+                            .disabled(voice.loading || voice.computers.isEmpty || voice.recording)
+                            Picker("Profile", selection: Binding(get: { choice.profileId }, set: { id in
+                                guard let target else { return }
+                                voice.chooseProfile(id, target: target, previewId: choicePreview?.audio.id)
+                            })) {
+                                if chosen == nil { Text(choice.profileId.isEmpty ? "Choose voice profile" : choice.profileId).tag(choice.profileId) }
+                                ForEach(profiles, id: \.id) { profile in
+                                    Text(profile.available ? profile.name : "\(profile.name) (\(profile.reason.isEmpty ? "unavailable" : profile.reason))").tag(profile.id)
+                                }
+                            }
+                            .disabled(voice.loading || profiles.isEmpty || voice.recording)
+                            if voice.loading { ProgressView().frame(maxWidth: .infinity) }
+                            Button("Refresh voice profiles") { voice.refreshProfiles(target) }.disabled(voice.loading)
+                        } footer: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Choose the computer and profile that transcribe recordings for this conversation. The original audio stays with the conversation.")
+                                if !voice.profileNotice.isEmpty { Text(voice.profileNotice) }
+                                if !voice.statistics.isEmpty { Text(voice.statistics) }
+                            }
                         }
                     }
                     Section {
@@ -624,7 +653,82 @@ struct VoiceSettingsSheet: View {
             .navigationDestination(isPresented: $manage) { SpeechProvidersView(defaultSelection: choice) }
             .zerusScreen()
         }
-        .task(id: target?.key) { if current { voice.refreshProfiles(target) } }
+        .task(id: target?.key) {
+            if target == nil { voice.refreshDefaultProfiles() } else if current { voice.refreshProfiles(target) }
+        }
+    }
+}
+
+/// The default computer and profile for new recordings, chosen from verified online computers without a conversation.
+private struct DefaultVoiceProviderSection: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        let voice = app.voice!
+        let host = voice.defaultHost
+        let profiles = voice.defaultProfiles
+        let selected = voice.selection.profileId
+        Section {
+            NavigationLink { DefaultVoiceComputerPicker() } label: {
+                LabeledContent("Computer", value: host?.name ?? (voice.selection.host == nil ? "Choose voice computer" : "Selected computer unavailable"))
+            }
+            .disabled(!voice.ready || voice.recording || voice.savingRecording)
+            Picker("Profile", selection: Binding(get: { selected }, set: { id in
+                if let profile = profiles.first(where: { $0.id == id }) { voice.chooseDefaultProfile(profile) }
+            })) {
+                if !profiles.contains(where: { $0.id == selected }) { Text(selected.isEmpty ? "Choose voice profile" : selected).tag(selected) }
+                ForEach(profiles, id: \.id) { profile in
+                    Text(profile.available ? profile.name : "\(profile.name) (\(profile.reason.isEmpty ? "unavailable" : profile.reason))").tag(profile.id)
+                }
+            }
+            .disabled(voice.defaultLoading || profiles.isEmpty || voice.recording || voice.savingRecording)
+            if voice.defaultLoading { ProgressView().frame(maxWidth: .infinity) }
+            Button("Refresh voice profiles") { voice.refreshDefaultProfiles() }.disabled(voice.defaultLoading)
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Choose the computer and profile that transcribe new recordings. Existing recordings keep their computer, profile and reviewed revision.")
+                if !voice.defaultNotice.isEmpty { Text(voice.defaultNotice) }
+                if !voice.statistics.isEmpty { Text(voice.statistics) }
+            }
+        }
+    }
+}
+
+/// A searchable list of at most 100 verified online computers.
+private struct DefaultVoiceComputerPicker: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    var body: some View {
+        let voice = app.voice!
+        let hosts = voice.defaultHosts(query)
+        List {
+            ForEach(hosts, id: \.self) { host in
+                let reason = voice.defaultReason(host)
+                Button {
+                    if voice.chooseDefaultHost(host) { dismiss() }
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(host.name)
+                            if !reason.isEmpty { Text(reason).font(.caption).foregroundStyle(Theme.muted) }
+                        }
+                        Spacer()
+                        if voice.defaultHost == host { Image(systemName: "checkmark").accessibilityLabel("Selected") }
+                    }
+                }
+                .disabled(!reason.isEmpty || voice.recording || voice.savingRecording)
+            }
+            if hosts.isEmpty {
+                Text(query.isEmpty ? "No verified online voice computers are available. Refresh Machines and try again." : "No computers match.")
+                    .foregroundStyle(Theme.muted)
+            }
+        }
+        .searchable(text: $query, prompt: "Search computers")
+        .navigationTitle("Voice computer")
+        .navigationBarTitleDisplayMode(.inline)
+        .zerusScreen()
     }
 }
 
@@ -635,7 +739,7 @@ struct VoiceSavedMessages: View {
 
     var body: some View {
         let voice = app.voice!
-        ForEach(voice.outgoing.sorted { $0.createdAt > $1.createdAt }, id: \.id) { entry in
+        ForEach(voice.outgoing.filter(\.needsDraftReview).sorted { $0.createdAt > $1.createdAt }, id: \.id) { entry in
             VStack(alignment: .leading, spacing: 6) {
                 Text(entry.target.session).font(.subheadline.weight(.semibold)).lineLimit(1)
                 VoiceMessageContent(target: entry.effectiveTarget, voice: entry.displayed())

@@ -258,9 +258,24 @@ final class ConversationPoliciesTests: XCTestCase {
     // MARK: Loading
 
     private func status(_ content: Bool, _ detail: Bool, _ detailProgress: Bool, _ history: Bool, _ historyProgress: Bool, _ demo: Bool,
-                        resolved: Bool = false) -> ConversationLoadPresentation.Status? {
+                        resolved: Bool = false, opening: Bool = false) -> ConversationLoadPresentation.Status? {
         ConversationLoadPresentation.status(hasContent: content, detailLoading: detail, detailProgress: detailProgress, historyLoading: history,
-                                            historyProgress: historyProgress, demo: demo, resolved: resolved)
+                                            historyProgress: historyProgress, demo: demo, resolved: resolved, opening: opening)
+    }
+
+    func testOpeningCachedHistoryIsVisibleImmediatelyAcrossBothReadStages() {
+        let inspection = status(true, true, false, false, false, false, opening: true)
+        let history = status(true, false, false, true, false, false, resolved: true, opening: true)
+        for item in [inspection, history] {
+            XCTAssertEqual(false, item?.initial)
+            XCTAssertEqual(true, item?.spinner)
+            XCTAssertEqual("Updating messages…", item?.text)
+        }
+        XCTAssertNil(status(true, false, true, false, true, false, opening: true))
+        // Once this opening has settled, fast background polls stay quiet.
+        XCTAssertNil(status(true, true, false, false, false, false, opening: false))
+        // A conversation without cached content keeps its initial placeholder.
+        XCTAssertEqual("Loading conversation…", status(false, true, false, false, false, false, opening: true)?.text)
     }
 
     func testResolvedEmptyConversationStaysEmptyAcrossRepeatedBackgroundPolls() {
