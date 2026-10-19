@@ -33,13 +33,39 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
 AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &box, qint64 now, bool applicationFocused)
 {
     AttentionChanges changes;
-    if (!box.ok) return changes;
     const auto previous = m_hosts.value(host).toObject();
+    if (!box.ok) {
+        // An explicit local mute can withdraw an offline peer's existing banner.
+        // Retain its observed event/seen IDs: an offline listing cannot resolve
+        // requests, discover events or turn unmute into a delayed notification.
+        QSet<QString> mutedRuns, mutedConversations;
+        for (const auto &s : box.sessions) if (s.muted && s.state != "archived") {
+            mutedRuns.insert(identity(s));
+            if (!s.conversationId.isEmpty()) mutedConversations.insert(s.cmd + ':' + s.conversationId);
+        }
+        auto retained = previous;
+        for (auto it = retained.begin(); it != retained.end(); ++it) {
+            auto entry = it.value().toObject();
+            const auto token = entry.value("token").toString();
+            if (token.isEmpty()) continue;
+            const auto destination = target(token);
+            if (destination.isEmpty() || destination.value("host").toString() != host) continue;
+            const bool conversation = !destination.value("reply").toString().isEmpty() || !destination.value("question").toString().isEmpty();
+            const auto run = destination.value("run").toString();
+            const auto key = run.isEmpty() ? "name:" + destination.value("name").toString() + ':' + QString::number(destination.value("created").toInteger()) : "run:" + run;
+            const bool muted = conversation ? mutedConversations.contains(destination.value("agent").toString() + ':' + destination.value("conversation").toString())
+                : mutedRuns.contains(key);
+            if (!muted) continue;
+            changes.cleared << token; entry.remove("token"); entry.remove("retry_at"); it.value() = entry;
+        }
+        if (retained != previous) m_hosts[host] = retained;
+        return changes;
+    }
     QJsonObject current;
     const auto notice = [&](const SessionInfo &s, const QString &key, const QString &phase,
                             const QString &request, const QString &reason, bool reply = false, bool silent = false) {
         const auto old = previous.value(key).toObject();
-        if (silent) {
+        if (silent || s.muted) {
             // Withdraw the banner but remember the request without a token: if an
             // acknowledgement lapses (an older host, a recovery-only identity) or a
             // schedule ends, the same request must not be announced again.
@@ -87,7 +113,7 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             // Hosts do not report routine ticks of a recurring scheduled job as
             // replies; consume any that arrive. The reply after the schedule
             // ends, or once its count is known, notifies as usual.
-            if (idle && s.replyScheduled && s.recurringSchedules > 0)
+            if (s.muted || (idle && s.replyScheduled && s.recurringSchedules > 0))
                 notice(s, key, "reply", s.replyId, {}, true, true);
             else if (idle && (!s.replyScheduled || s.recurringSchedules == 0))
                 notice(s, key, "reply", s.replyId, QObject::tr("Agent has a new reply"), true);
@@ -126,7 +152,11 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
         const auto &s = *it->session;
         if (it->unknown) {
             // An unreadable index is not an answer: keep the banner and IDs.
-            if (!old.isEmpty()) current[it.key()] = old;
+            if (!old.isEmpty()) {
+                auto entry = old;
+                if (s.muted) { entry.remove("token"); entry.remove("retry_at"); }
+                current[it.key()] = entry;
+            }
             continue;
         }
         QStringList seen, fresh;
@@ -140,7 +170,7 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
         QJsonObject entry{{"seen", QJsonArray::fromStringList(seen)}};
         // Marking the session read here or on another device acknowledges its
         // questions; turning banners off withdraws them.
-        if (!it->ids.isEmpty() && m_optionalQuestions && !s.attentionAcknowledged) {
+        if (!it->ids.isEmpty() && m_optionalQuestions && !s.attentionAcknowledged && !s.muted) {
             const auto token = old.value("token").toString();
             const auto retry = old.value("retry_at").toInteger();
             // A request that needs action announces itself; while Zerus has focus

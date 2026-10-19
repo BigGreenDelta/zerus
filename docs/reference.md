@@ -439,6 +439,16 @@ input, approvals, errors and unread main-agent replies. An offline host retains
 its last total but adds no live attention requests; a dot marks incomplete data.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
+The session menu's **Mute** disables its notifications and removes it from this
+desktop's attention counters and bell. A crossed-out bell and neutral gray or
+white attention and unread badges identify a muted session. The preference stays
+on this device across restart, rename and resume of the same conversation;
+other desktops and phones keep their own notification behavior. Muting preserves
+the agent's actual state, unread replies, questions, approvals and review reminders.
+**Unmute** restores future notifications without replaying events seen while
+muted or acknowledging pending work. Muted sessions remain available in the
+Needs attention filter.
+
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until
@@ -566,6 +576,13 @@ the conversation and press **Voice** again; opening settings does not start a
 recording. If settings cannot open, the dialog keeps the manual navigation path.
 
 Session rows show provider, machine, current action, model, effort and Git context.
+Right-click a session and choose **Compact session row** to show only its name,
+status and agent type. The expand icon or the Right key restores the full row;
+the row remains selectable and keeps its normal context actions. This device
+remembers the preference for that conversation across restarts. **Expand all
+collapsed** in the Sessions menu restores every compact row, including sessions
+hidden by the current filters. Row density never compacts the agent's context
+or changes its runtime state. A muted session keeps its mute icon in either size.
 The folder/branch line also shows native outline Git badges: a diff with the
 number of changed/new files, upload/download with outgoing/incoming commit counts,
 and a green cloud check for a clean checkout matching its verified upstream.

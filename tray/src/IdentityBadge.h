@@ -63,12 +63,13 @@ inline void paint(QPainter *p, const QRect &rect, Kind kind, const QString &valu
         CachedText::elided(f, text, kind == Machine ? Qt::ElideMiddle : Qt::ElideRight, qMax(0, textRect.width())));
     p->restore();
 }
-enum RowEmphasis { Normal, Attention, Error, Unread, Draft };
+enum RowEmphasis { Normal, Attention, Error, Unread, Draft, Muted };
 inline QColor attentionColor(bool dark, bool error = false) {
     return QColor(error ? (dark ? "#ffabb6" : "#a32238") : (dark ? "#ffda76" : "#805000"));
 }
 inline QColor emphasisColor(bool dark, RowEmphasis emphasis) {
-    return emphasis == Draft ? SessionStatusBadge::edge(SessionStatusBadge::Draft, dark) : attentionColor(dark, emphasis == Error);
+    return emphasis == Muted ? SessionStatusBadge::mutedTone(dark)
+        : emphasis == Draft ? SessionStatusBadge::edge(SessionStatusBadge::Draft, dark) : attentionColor(dark, emphasis == Error);
 }
 // The edge mark of an actionable, unread or draft row.
 inline void paintEdge(QPainter *p, const QRect &row, const QColor &color) {

@@ -7994,6 +7994,14 @@ New messages and Stop cancel recovery. Sign-in, balance, other quota and context
       <source>New reply</source>
       <translation>Новый ответ</translation>
     </message>
+    <message>
+      <source>Expand session row</source>
+      <translation>Развернуть строку сессии</translation>
+    </message>
+    <message>
+      <source>Expand session row: %1</source>
+      <translation>Развернуть строку сессии: %1</translation>
+    </message>
   </context>
   <context>
     <name>SessionSearch</name>
@@ -8237,6 +8245,26 @@ New messages and Stop cancel recovery. Sign-in, balance, other quota and context
   </context>
   <context>
     <name>SessionsWindow</name>
+    <message>
+      <source>Mute</source>
+      <translation>Отключить уведомления</translation>
+    </message>
+    <message>
+      <source>Unmute</source>
+      <translation>Включить уведомления</translation>
+    </message>
+    <message>
+      <source>Mute notifications for this session on this device</source>
+      <translation>Отключить уведомления этой сессии на этом устройстве</translation>
+    </message>
+    <message>
+      <source>Allow future notifications for this session on this device</source>
+      <translation>Включить будущие уведомления этой сессии на этом устройстве</translation>
+    </message>
+    <message>
+      <source>Muted on this device</source>
+      <translation>Уведомления отключены на этом устройстве</translation>
+    </message>
     <message>
       <location filename="../src/SessionSelection.cpp" line="45" />
       <location filename="../src/SessionsWindow.cpp" line="886" />
@@ -10956,6 +10984,30 @@ Working folder: %1</source>
       <location filename="../src/SessionsWindowShortcuts.cpp" line="444" />
       <source>Content scale %1%</source>
       <translation type="unfinished" />
+    </message>
+    <message>
+      <source>Expand all collapsed</source>
+      <translation>Развернуть все свёрнутые</translation>
+    </message>
+    <message>
+      <source>Restore full session rows, including sessions hidden by filters</source>
+      <translation>Восстановить полные строки сессий, включая скрытые фильтрами</translation>
+    </message>
+    <message>
+      <source>Compact session row</source>
+      <translation>Свернуть строку сессии</translation>
+    </message>
+    <message>
+      <source>Expand session row</source>
+      <translation>Развернуть строку сессии</translation>
+    </message>
+    <message>
+      <source>Collapsed session row. Press Right to expand.</source>
+      <translation>Строка сессии свёрнута. Нажмите стрелку вправо, чтобы развернуть.</translation>
+    </message>
+    <message>
+      <source>The compact row limit has been reached. Expand another session row first.</source>
+      <translation>Достигнут лимит свёрнутых строк. Сначала разверните другую строку сессии.</translation>
     </message>
   </context>
   <context>

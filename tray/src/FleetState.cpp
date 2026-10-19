@@ -100,9 +100,16 @@ void FleetState::updateUnread(const QString &host, BoxState &box)
         const auto key = attentionKey(host, s), fallback = attentionFallbackKey(host, s);
         if (key != fallback && m_attentionMarks.contains(fallback)) {
             if (!m_attentionMarks.contains(key)) m_attentionMarks[key] = m_attentionMarks.value(fallback);
+            else {
+                auto mark = m_attentionMarks.value(key).toObject();
+                if (!mark.contains("muted") && m_attentionMarks.value(fallback).toObject().contains("muted"))
+                    mark["muted"] = m_attentionMarks.value(fallback).toObject().value("muted");
+                m_attentionMarks[key] = mark;
+            }
             m_attentionMarks.remove(fallback);
         }
         const auto mark = m_attentionMarks.value(key).toObject();
+        s.muted = mark.value("muted").toBool();
         s.reviewLater = s.state != "archived" && mark.value("review").toBool();
         const bool localAcknowledged = mark.value("acknowledged").toString() == attentionFingerprint(s);
         if (!s.sharedRead) {
@@ -153,6 +160,13 @@ bool FleetState::setReviewLater(const QString &host, const SessionInfo &expected
     const auto key = attentionKey(host, *s);
     auto mark = m_attentionMarks.value(key).toObject(); mark["review"] = marked;
     m_attentionMarks[key] = mark; s->reviewLater = marked; return true;
+}
+bool FleetState::setMuted(const QString &host, const SessionInfo &expected, bool muted)
+{
+    auto *s = matchingSession(host, expected); if (!s) return false;
+    const auto key = attentionKey(host, *s);
+    auto mark = m_attentionMarks.value(key).toObject(); mark["muted"] = muted;
+    m_attentionMarks[key] = mark; s->muted = muted; return true;
 }
 bool FleetState::markSessionRead(const QString &host, const SessionInfo &expected)
 {
@@ -301,14 +315,14 @@ int FleetState::attentionSessions(qint64 nowMs) const
 {
     auto count = [](const BoxState &box) {
         return int(std::count_if(box.sessions.cbegin(), box.sessions.cend(),
-            [&box](const SessionInfo &s) { return s.reviewLater || (box.ok && s.needsAttention()); }));
+            [&box](const SessionInfo &s) { return !s.muted && (s.reviewLater || (box.ok && s.needsAttention())); }));
     };
     int total = m_haveLocal ? count(m_local) : 0;
     for (const auto &entry : m_peers)
         if (entry.everPolled) {
             if (nowMs - entry.polledAt < kPeerStaleMs) total += count(entry.box);
             else total += int(std::count_if(entry.box.sessions.cbegin(), entry.box.sessions.cend(),
-                [](const SessionInfo &s) { return s.reviewLater; }));
+                [](const SessionInfo &s) { return !s.muted && s.reviewLater; }));
         }
     return total;
 }

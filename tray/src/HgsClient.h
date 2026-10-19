@@ -43,6 +43,8 @@ struct SessionInfo {
     double backgroundStarted = 0, backgroundObservedAt = 0;
     QString backgroundCommand;
     bool reviewLater = false, attentionAcknowledged = false;
+    // This desktop's explicit notification preference; never changes read or agent state.
+    bool muted = false;
     // Shared read state from the session's host. sharedRead is false for hosts
     // whose hgs predates `hgs read`; those keep this device's own marks.
     bool sharedRead = false;

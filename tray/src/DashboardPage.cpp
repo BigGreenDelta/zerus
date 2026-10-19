@@ -130,7 +130,7 @@ public:
             : tr("Total memory minus available memory, including reclaimable cache."));
         updateLoadBar(ramBar, total > 0 ? 100. * used / total : 0, fresh, total > 0);
         int active = 0, needs = 0;
-        for (const auto &session : box.sessions) { if (session.state != "archived") ++active; if (session.needsAttention()) ++needs; }
+        for (const auto &session : box.sessions) { if (session.state != "archived") ++active; if (!session.muted && session.needsAttention()) ++needs; }
         const auto countLabel = active == 1 ? tr("1 session") : tr("%1 sessions").arg(active);
         sessions->setText(countLabel + (needs ? tr(", %1 need attention").arg(needs) : QString()));
         sessions->setToolTip(fresh ? tr("View sessions on %1").arg(alias) : tr("View last known sessions on %1").arg(alias));
@@ -174,6 +174,7 @@ public:
         set(SessionRoles::Effort, session.effort);
         set(SessionRoles::Attention, session.reviewLater || (online && !session.attentionAcknowledged && session.needsAction()));
         set(SessionRoles::ReviewLater, session.reviewLater);
+        set(SessionRoles::Muted, session.muted);
         set(SessionRoles::Unread, session.visibleUnreadReply(online));
         set(SessionRoles::Working, working(session, online));
         set(SessionRoles::Draft, draft);
@@ -423,7 +424,7 @@ void DashboardPage::render()
             ++knownSessions;
             if (!machine.fresh) ++offlineSessions;
             const bool needsAttention = SessionPresentation::needsAttention(session, machine.fresh);
-            if (needsAttention) ++attentionCount;
+            if (needsAttention && !session.muted) ++attentionCount;
             if (!SessionPresentation::active(session, machine.fresh, m_drafts.contains(machine.host + '\n' + session.name))) continue;
             active.append({machine.key + QChar(0x1f) + session.name, machine.host, machine.alias, session, machine.fresh});
         }

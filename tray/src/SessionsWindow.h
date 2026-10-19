@@ -19,6 +19,7 @@ class SwarmController;
 #include "FleetState.h"
 #include "HgsClient.h"
 #include "SessionOrganization.h"
+#include "SessionRowPreferences.h"
 
 class QAction;
 class QLabel;
@@ -117,6 +118,9 @@ private:
     void applyContentScale();
     void applyActivityWidth();
     void saveOrganization();
+    void setSessionRowCollapsed(const Entry &entry, bool collapsed);
+    void saveSessionRowPreferences();
+    void updateSessionRowPresentation();
     void savePendingLaunches();
     void placeLaunchedSessions();
     bool takeEndedLaunch(const QString &launchId, QJsonObject *launch = nullptr);
@@ -229,7 +233,7 @@ private:
     QStringList m_selectionErrors;
     int m_selectionTotal = 0, m_selectionDone = 0, m_selectionFailed = 0;
     bool m_selectionRunning = false;
-    enum class SessionMenuAction { OpenTerminal, OpenProcesses, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyReference, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh, Clear };
+    enum class SessionMenuAction { OpenTerminal, OpenProcesses, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyReference, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh, Clear, ToggleMute, CollapseRow, ExpandRow };
     void copySessionReference(const Entry &entry, const QString &agent = {});
     void showSessionMenu(const QString &key, const QPoint &position);
     void clearContext();
@@ -412,6 +416,7 @@ private:
     DashboardPage *m_dashboard;
     AccountsPage *m_accountsPage;
     SessionOrganization m_organization;
+    SessionRowPreferences m_sessionRowPreferences;
     SwarmController *m_swarm = nullptr;
     QByteArray m_savedOrganization;
     QPushButton *m_sessionsNav, *m_machinesNav, *m_accountsNav;
@@ -456,6 +461,7 @@ private:
     QPushButton *m_shell, *m_fileManager, *m_copyHeaderId, *m_clear, *m_restore, *m_more;
     QAction *m_renameAction, *m_forkAction, *m_openAction, *m_changeAction, *m_freshAction, *m_archiveAction, *m_forgetAction;
     QAction *m_markAllReadAction = nullptr;
+    QAction *m_expandAllRowsAction = nullptr;
     QMenu *m_sessionMenu;
     QTextBrowser *m_children = nullptr, *m_info = nullptr;
     ActivityView *m_activityView = nullptr;

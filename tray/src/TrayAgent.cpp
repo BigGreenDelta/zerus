@@ -624,6 +624,10 @@ void TrayAgent::showSessions()
         connect(m_sessionsWindow, &SessionsWindow::attentionMarksChanged, this, [this, publishReadState](const QJsonObject &marks, const QJsonObject &read) {
             m_state.setAttentionMarks(marks); m_state.setReadReplies(read);
             QSettings().setValue("attention/sessionMarks", QJsonDocument(marks).toJson(QJsonDocument::Compact));
+            // Consume muted events and withdraw current banners immediately.
+            // Unmute keeps the recorded edge, so it never replays an old event.
+            observeAttention({}, m_state.local());
+            for (const auto &host : m_state.peerNames()) if (const auto *box = m_state.peer(host)) observeAttention(host, *box);
             publishReadState();
         });
         connect(m_sessionsWindow, &SessionsWindow::sessionActivated, this, &TrayAgent::activateSession);

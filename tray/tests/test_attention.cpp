@@ -33,7 +33,134 @@ private slots:
     void optionalQuestionsNotifyOncePerQuestionWhenEnabled();
     void optionalQuestionsSurviveUnknownCountsAndResume();
     void optionalQuestionsDeferToRequestsAndRetry();
+    void muteConsumesAllNotificationEdgesWithoutAcknowledging();
+    void muteWithdrawsBannersAndConsumesOptionalQuestions();
+    void mutePersistsByConversationAndKeepsOtherSessionsAudible();
+    void muteWithdrawsOnlyMatchingOfflineBannersWithoutReplay();
 };
+
+void TestAttention::muteWithdrawsOnlyMatchingOfflineBannersWithoutReplay()
+{
+    SessionInfo action; action.name="codex/project/action"; action.cmd="codex"; action.runId="action-run";
+    action.conversationId="action-conversation"; action.phase="approval"; action.attentionId="approval-1";
+    auto question=action; question.name="codex/project/question"; question.runId="question-run"; question.conversationId="question-conversation";
+    question.phase="working"; question.activity="busy"; question.optionalQuestionsReported=true; question.optionalQuestions=1; question.optionalQuestionIds={"q1"};
+    auto reply=action; reply.name="codex/project/reply"; reply.runId="reply-run"; reply.conversationId="reply-conversation";
+    reply.phase="idle"; reply.activity="idle"; reply.unreadReply=true; reply.replyId="reply-1";
+    auto audible=action; audible.name="codex/project/audible"; audible.runId="audible-run"; audible.conversationId="audible-conversation";
+    auto unknown=action; unknown.name="codex/project/unknown"; unknown.runId="unknown-run"; unknown.conversationId="unknown-conversation";
+    BoxState box; box.host="peer"; box.ok=true; box.sessions={action,question,reply,audible,unknown};
+    AttentionTracker tracker; tracker.setOptionalQuestions(true);
+    const auto initial=tracker.observe("peer",box,100,false); QCOMPARE(initial.raised.size(),5);
+    const auto actionToken=tracker.state().value("peer").toObject().value("run:action-run").toObject().value("token").toString();
+    tracker.deliveryFailed(actionToken,100);
+    const auto before=tracker.state().value("peer").toObject();
+    box.ok=false; box.sessions.removeLast(); // An offline snapshot's absence never resolves the unknown request.
+    for(int i=0;i<3;++i)box.sessions[i].muted=true;
+    box.sessions[0].runId="replacement"; // A muted replacement must not withdraw another run's banner.
+    auto changes=tracker.observe("peer",box,200,false); QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared.size(),2);
+    QVERIFY(!changes.cleared.contains(actionToken));
+    box.sessions[0].runId=action.runId;
+    changes=tracker.observe("peer",box,201,false); QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared,QStringList{actionToken});
+    const auto after=tracker.state().value("peer").toObject();
+    QCOMPARE(after.value("run:audible-run"),before.value("run:audible-run"));
+    QCOMPARE(after.value("run:unknown-run"),before.value("run:unknown-run"));
+    auto consumed=before.value("run:action-run").toObject(); consumed.remove("token"); consumed.remove("retry_at");
+    QCOMPARE(after.value("run:action-run").toObject(),consumed);
+    QCOMPARE(after.value("question:codex:question-conversation").toObject().value("seen"),before.value("question:codex:question-conversation").toObject().value("seen"));
+    for(int i=0;i<3;++i)box.sessions[i].muted=false;
+    QVERIFY(tracker.observe("peer",box,202,false).raised.isEmpty()); QCOMPARE(tracker.state().value("peer").toObject(),after);
+    box.ok=true; box.sessions.append(unknown);
+    AttentionTracker restarted(tracker.state()); restarted.setOptionalQuestions(true);
+    QVERIFY(restarted.observe("peer",box,203,false).raised.isEmpty());
+    box.sessions[0].attentionId="approval-2"; box.sessions[1].optionalQuestionIds.append("q2"); box.sessions[1].optionalQuestions=2;
+    box.sessions[2].replyId="reply-2";
+    QCOMPARE(restarted.observe("peer",box,204,false).raised.size(),3);
+}
+
+void TestAttention::muteConsumesAllNotificationEdgesWithoutAcknowledging()
+{
+    SessionInfo s; s.name="codex/project/muted"; s.cmd="codex"; s.runId="run"; s.conversationId="conversation";
+    s.phase="approval"; s.activity="busy"; s.attentionId="approval-1"; s.unreadReply=true; s.replyId="reply-1";
+    s.subagentSource="native"; s.subagents={{"child",QJsonObject{{"state","input"},{"question_id","child-1"}}}};
+    s.muted=true;
+    auto other=s; other.name="codex/project/audible"; other.runId="other-run"; other.conversationId="other-conversation";
+    other.muted=false; other.unreadReply=false; other.subagents={};
+    BoxState box; box.ok=true; box.sessions={s,other}; AttentionTracker tracker;
+    auto changes=tracker.observe({},box,100,false); QCOMPARE(changes.raised.size(),1);
+    QVERIFY(changes.raised.first().body.contains(other.name));
+    QVERIFY(box.sessions[0].unreadReply); QVERIFY(!box.sessions[0].attentionAcknowledged); QVERIFY(box.sessions[0].needsAction());
+    QVERIFY(box.sessions[0].needsAttention()); QCOMPARE(box.sessions[0].phase,QString("approval"));
+    box.sessions[0].muted=false;
+    AttentionTracker restarted(tracker.state());
+    QVERIFY(restarted.observe({},box,101,false).raised.isEmpty());
+    box.sessions[0].phase="idle"; box.sessions[0].activity="idle"; box.sessions[0].subagents={};
+    QVERIFY(restarted.observe({},box,102,false).raised.isEmpty()); // The reply arrived while muted, before idleness.
+    box.sessions[0].replyId="reply-2";
+    changes=restarted.observe({},box,103,false); QCOMPARE(changes.raised.size(),1);
+    QCOMPARE(changes.raised.first().title,QString("Zerus — New reply"));
+    box.sessions[0].phase="approval"; box.sessions[0].attentionId="approval-2";
+    QCOMPARE(restarted.observe({},box,104,false).raised.size(),1);
+}
+
+void TestAttention::muteWithdrawsBannersAndConsumesOptionalQuestions()
+{
+    SessionInfo s; s.name="codex/project/session"; s.cmd="codex"; s.runId="run"; s.conversationId="conversation";
+    s.phase="approval"; s.attentionId="approval-1";
+    BoxState box; box.ok=true; box.sessions={s}; AttentionTracker tracker;
+    auto changes=tracker.observe({},box,100,false); QCOMPARE(changes.raised.size(),1);
+    const auto token=changes.raised.first().token; tracker.deliveryFailed(token,100);
+    box.sessions[0].muted=true;
+    changes=tracker.observe({},box,200,false); QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared,QStringList{token});
+    box.sessions[0].muted=false;
+    QVERIFY(tracker.observe({},box,300,false).raised.isEmpty());
+    box.sessions[0].attentionId="approval-2"; QCOMPARE(tracker.observe({},box,301,false).raised.size(),1);
+
+    s.phase="working"; s.activity="busy"; s.optionalQuestionsReported=true; s.optionalQuestions=1; s.optionalQuestionIds={"q1"};
+    box.sessions={s}; AttentionTracker questions; questions.setOptionalQuestions(true);
+    QCOMPARE(questions.observe({},box,100,false).raised.size(),1);
+    box.sessions[0].muted=true; box.sessions[0].optionalQuestions=-1;
+    changes=questions.observe({},box,101,false); QVERIFY(changes.raised.isEmpty()); QCOMPARE(changes.cleared.size(),1);
+    box.sessions[0].optionalQuestions=2; box.sessions[0].optionalQuestionIds={"q1","q2"};
+    QVERIFY(questions.observe({},box,102,false).raised.isEmpty());
+    box.sessions[0].muted=false;
+    QVERIFY(questions.observe({},box,103,false).raised.isEmpty());
+    box.sessions[0].optionalQuestions=3; box.sessions[0].optionalQuestionIds.append("q3");
+    QCOMPARE(questions.observe({},box,104,false).raised.size(),1);
+    QCOMPARE(box.sessions[0].optionalQuestions,3); QVERIFY(!box.sessions[0].attentionAcknowledged);
+}
+
+void TestAttention::mutePersistsByConversationAndKeepsOtherSessionsAudible()
+{
+    SessionInfo s; s.name="codex/project/session"; s.cmd="codex"; s.runId="run"; s.conversationId="conversation";
+    s.created=10; s.phase="approval"; s.attentionId="approval-1"; s.replyId="reply-1";
+    BoxState local; local.ok=true; local.sessions={s};
+    auto remote=local; remote.host="peer";
+    FleetState fleet; fleet.setLocal(local,0); fleet.setPeer(remote,0);
+    QCOMPARE(fleet.attentionSessions(0),2);
+    QVERIFY(fleet.setMuted({},s,true)); QCOMPARE(fleet.attentionSessions(0),1);
+    QVERIFY(fleet.local().sessions.first().muted); QVERIFY(fleet.local().sessions.first().unreadReply);
+    QVERIFY(!fleet.local().sessions.first().attentionAcknowledged); QVERIFY(fleet.local().sessions.first().needsAction());
+    QVERIFY(!fleet.peer("peer")->sessions.first().muted); QVERIFY(fleet.takeNewReadMarks().isEmpty());
+    FleetState reopened; reopened.setAttentionMarks(fleet.attentionMarks());
+    local.sessions[0].name="codex/project/renamed"; local.sessions[0].runId="resumed";
+    reopened.setLocal(local,0); QVERIFY(reopened.local().sessions.first().muted); QCOMPARE(reopened.attentionSessions(0),0);
+    auto stale=local.sessions.first(); stale.created++;
+    QVERIFY(!reopened.setMuted({},stale,false)); QVERIFY(reopened.local().sessions.first().muted);
+    QVERIFY(reopened.setMuted({},local.sessions.first(),false)); QCOMPARE(reopened.attentionSessions(0),1);
+    local.sessions[0].conversationId="different"; reopened.setLocal(local,0); QVERIFY(!reopened.local().sessions.first().muted);
+
+    // A host may report the conversation identity only on a later poll.
+    FleetState fallback; s.conversationId.clear(); local.sessions={s}; fallback.setLocal(local,0);
+    QVERIFY(fallback.setReviewLater({},s,true)); QVERIFY(fallback.setMuted({},s,true));
+    local.sessions[0].conversationId="discovered"; fallback.setLocal(local,0);
+    QVERIFY(fallback.local().sessions.first().muted); QVERIFY(fallback.local().sessions.first().reviewLater);
+    QVERIFY(fallback.local().sessions.first().unreadReply); QCOMPARE(fallback.attentionSessions(0),0);
+    QVERIFY(fallback.setMuted({},local.sessions.first(),false)); QCOMPARE(fallback.attentionSessions(0),1);
+    QVERIFY(fleet.setReviewLater("peer",s,true)==false); // A stale identity cannot target the peer.
+    QVERIFY(fleet.setMuted("peer",remote.sessions.first(),true)); QCOMPARE(fleet.attentionSessions(0),0);
+    remote.ok=false; fleet.setPeer(remote,10); QCOMPARE(fleet.attentionSessions(FleetState::kPeerStaleMs+1),0);
+}
 
 namespace {
 SessionInfo optionalQuestionSession(const QStringList &ids)

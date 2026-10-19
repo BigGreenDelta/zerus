@@ -14,6 +14,9 @@
 #include "SessionPresentation.h"
 #include "WorkspaceIcons.h"
 #include "MessageBoxIcons.h"
+#include "SessionRowPreferences.h"
+#include <QAccessible>
+#include <QToolButton>
 #include <QDir>
 #include <algorithm>
 
@@ -53,7 +56,164 @@ private slots:
     void optionalQuestionChipFollowsTheStatusBadge();
     void subagentInactivityKeepsConflictingAndUnknownEvidence();
     void explicitIndependentWaitKeepsNativePriorityAndRejectsStaleInspection();
+    void compactRowsKeepTheirGeometryAndHideDetails_data();
+    void compactRowsKeepTheirGeometryAndHideDetails();
+    void compactRowsHaveAccessibleExpandControls();
+    void compactRowPreferencesKeepExactBoundedIdentities();
+    void mutedAttentionUsesNeutralPresentation_data();
+    void mutedAttentionUsesNeutralPresentation();
 };
+
+void TestWorkspace::compactRowsKeepTheirGeometryAndHideDetails_data()
+{
+    QTest::addColumn<bool>("dark"); QTest::addColumn<bool>("dense"); QTest::addColumn<int>("width"); QTest::addColumn<int>("scale");
+    for (bool dark : {false, true}) for (bool dense : {false, true}) for (int width : {250, 320, 500}) for (int scale : {1, 2})
+        QTest::newRow(qPrintable(QString("%1-%2-%3-%4").arg(dark).arg(dense).arg(width).arg(scale))) << dark << dense << width << scale;
+}
+
+void TestWorkspace::compactRowsKeepTheirGeometryAndHideDetails()
+{
+    QFETCH(bool, dark); QFETCH(bool, dense); QFETCH(int, width); QFETCH(int, scale);
+    ListProbe list; list.setProperty("hgsDark", dark); list.setProperty("compact", dense);
+    auto *row = new QListWidgetItem(&list); row->setData(SessionRoles::Title, "A long session name to retain");
+    row->setData(SessionRoles::Agent, "claude"); row->setData(SessionRoles::Status, "Needs approval"); row->setData(SessionRoles::Attention, true);
+    row->setData(SessionRoles::RowCollapsed, true);
+    const auto index = list.model()->index(0, 0); SessionDelegate delegate;
+    QStyleOptionViewItem option; option.widget = &list; option.font = list.font(); option.font.setPixelSize(11 * scale);
+    option.rect = {0, 0, width, 40}; option.state = QStyle::State_Enabled | QStyle::State_Selected;
+    QCOMPARE(delegate.sizeHint(option, index).height(), 40);
+    const auto layout = SessionDelegate::compactLayout(option, index);
+    for (const auto &rect : {layout.title, layout.status, layout.provider, layout.expand}) {
+        QVERIFY(!rect.isEmpty()); QVERIFY(option.rect.contains(rect));
+    }
+    QVERIFY(layout.title.width() >= 60); QVERIFY(!layout.title.intersects(layout.status));
+    QVERIFY(!layout.status.intersects(layout.provider)); QVERIFY(!layout.provider.intersects(layout.expand));
+    QCOMPARE(SessionDelegate::expandRowRect(option, index), layout.expand);
+    const auto render = [&] {
+        QImage image(QSize(width, 40) * scale, QImage::Format_ARGB32_Premultiplied); image.setDevicePixelRatio(scale);
+        image.fill(dark ? QColor("#171c22") : QColor("#f3f6f8")); { QPainter painter(&image); delegate.paint(&painter, option, index); } return image;
+    };
+    const QImage compact = render();
+    row->setData(SessionRoles::Meta, "hidden folder / branch"); row->setData(SessionRoles::MetaIcon, "git-branch");
+    row->setData(SessionRoles::Detail, "hidden current action"); row->setData(SessionRoles::Model, "hidden model"); row->setData(SessionRoles::Effort, "high");
+    row->setData(SessionRoles::Host, "hidden machine"); row->setData(SessionRoles::Children, "12"); row->setData(SessionRoles::HasChildren, true);
+    row->setData(SessionRoles::OptionalQuestions, 8); row->setData(SessionRoles::GitStatus, QJsonObject{{"changed_files", 5}});
+    QCOMPARE(render(), compact); // The compact painter uses only name, status and provider.
+    QVERIFY(SessionList::childrenControlRect(option.rect, index, option.font).isEmpty());
+    QVERIFY(SessionDelegate::gitStatusRect(option.rect, index, option.font, dense).isEmpty());
+    QVERIFY(SessionDelegate::optionalQuestionRect(option.rect, index, option.font, dense).isEmpty());
+    row->setData(SessionRoles::Muted, true);
+    const auto muted = SessionDelegate::compactLayout(option, index); QVERIFY(!muted.mute.isEmpty());
+    QVERIFY(!muted.provider.intersects(muted.mute)); QVERIFY(!muted.mute.intersects(muted.expand));
+    row->setData(SessionRoles::RowCollapsed, false); QVERIFY(delegate.sizeHint(option, index).height() > 40);
+    QVERIFY(SessionDelegate::expandRowRect(option, index).isEmpty());
+    row->setData(SessionRoles::RowCollapsed, true); list.setProperty("expansion", 0.0);
+    QVERIFY(delegate.sizeHint(option, index).height() > 40); QVERIFY(SessionDelegate::expandRowRect(option, index).isEmpty());
+}
+
+void TestWorkspace::compactRowsHaveAccessibleExpandControls()
+{
+    ListProbe list; list.setItemDelegate(new SessionDelegate(&list)); list.resize(320, 180);
+    for (int i = 0; i < 300; ++i) {
+        auto *row = new QListWidgetItem(&list); row->setData(SessionRoles::Key, QString::number(i));
+        row->setData(SessionRoles::Title, "Session " + QString::number(i)); row->setData(SessionRoles::Agent, "codex");
+        row->setData(SessionRoles::Status, "Ready"); row->setData(SessionRoles::RowCollapsed, true);
+    }
+    list.setCurrentRow(0); list.show(); QTRY_VERIFY(list.isVisible()); list.syncRowExpandButtons();
+    const auto buttons = list.findChildren<QToolButton *>("expandSessionRow"); QVERIFY(!buttons.isEmpty()); QVERIFY(buttons.size() < 10);
+    const auto found = std::find_if(buttons.cbegin(), buttons.cend(), [](QToolButton *b) { return b->property("sessionKey") == "1"; });
+    QVERIFY(found != buttons.cend()); auto *button = *found;
+    QVERIFY(button->isVisible()); QVERIFY(button->accessibleName().contains("Session 1"));
+    auto *accessible = QAccessible::queryAccessibleInterface(button); QVERIFY(accessible); QCOMPARE(accessible->role(), QAccessible::Button);
+    QVERIFY(accessible->actionInterface()); QVERIFY(accessible->actionInterface()->actionNames().contains(QAccessibleActionInterface::pressAction()));
+    QSignalSpy expand(&list, &SessionList::rowExpanded);
+    QTest::mouseClick(button, Qt::LeftButton); QCOMPARE(expand.size(), 1); QCOMPARE(expand.last()[0].toString(), QString("1"));
+    QCOMPARE(list.currentRow(), 0); // The expand icon does not open another conversation.
+    list.setFocus(); QTest::keyClick(&list, Qt::Key_Right); QCOMPARE(expand.size(), 2); QCOMPARE(expand.last()[0].toString(), QString("0"));
+    list.scrollToItem(list.item(250), QAbstractItemView::PositionAtTop); list.syncRowExpandButtons();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    const auto moved = list.findChildren<QToolButton *>("expandSessionRow"); QVERIFY(!moved.isEmpty()); QVERIFY(moved.size() < 10);
+    for (auto *control : moved) QVERIFY(control->property("sessionKey").toString().toInt() >= 250);
+    list.setProperty("expansion", 0.0); list.syncRowExpandButtons();
+    for (auto *control : moved) QVERIFY(!control->isVisible());
+}
+
+void TestWorkspace::compactRowPreferencesKeepExactBoundedIdentities()
+{
+    SessionInfo session; session.name = "codex/project/one"; session.cmd = "codex"; session.created = 10;
+    SessionRowPreferences prefs; QVERIFY(prefs.setCollapsed({}, session, true));
+    QVERIFY(prefs.collapsed({}, session)); QVERIFY(!prefs.collapsed("peer", session));
+    session.conversationId = "conversation-one"; QVERIFY(prefs.observe({}, session)); QVERIFY(prefs.collapsed({}, session));
+    session.name = "codex/project/renamed"; session.runId = "resumed-run"; QVERIFY(prefs.collapsed({}, session));
+    SessionRowPreferences restored(prefs.save()); QVERIFY(restored.collapsed({}, session));
+    auto other = session; other.conversationId = "conversation-two"; QVERIFY(!restored.collapsed({}, other));
+    other = session; other.archiveId = "archive-one"; QVERIFY(!restored.collapsed({}, other));
+    other = session; other.cmd = "claude"; QVERIFY(!restored.collapsed({}, other));
+    QVERIFY(restored.setCollapsed("peer", session, true)); restored.expandAll(); QVERIFY(restored.empty()); QVERIFY(restored.save().isEmpty());
+    QVERIFY(SessionRowPreferences(QByteArray(1, 'x')).empty());
+    QVERIFY(SessionRowPreferences(QByteArray(SessionRowPreferences::MaxRows * SessionRowPreferences::KeyBytes + 32, 'x')).empty());
+}
+
+void TestWorkspace::mutedAttentionUsesNeutralPresentation_data()
+{
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("light") << false;
+    QTest::newRow("dark") << true;
+}
+
+void TestWorkspace::mutedAttentionUsesNeutralPresentation()
+{
+    QFETCH(bool,dark);
+    SessionList list; list.setProperty("hgsDark",dark);
+    auto *row=new QListWidgetItem(&list); row->setData(SessionRoles::Title,"Muted session");
+    row->setData(SessionRoles::Agent,"codex"); row->setData(SessionRoles::Status,"Needs approval");
+    row->setData(SessionRoles::Attention,true); row->setData(SessionRoles::Unread,true);
+    row->setData(SessionRoles::ReviewLater,true);
+    row->setData(SessionRoles::OptionalQuestions,1);
+    const auto index=list.model()->index(0,0);
+    const auto normal=SessionDelegate::statusOf(index,false);
+    QCOMPARE(normal.kind,SessionStatusBadge::Attention); QCOMPARE(normal.emphasis,IdentityBadges::Attention);
+    row->setData(SessionRoles::Muted,true);
+    const auto muted=SessionDelegate::statusOf(index,false);
+    QCOMPARE(muted.kind,SessionStatusBadge::MutedAttention); QCOMPARE(muted.emphasis,IdentityBadges::Muted);
+    QCOMPARE(muted.caption,normal.caption); QVERIFY(muted.attention); QVERIFY(muted.unread);
+    QCOMPARE(IdentityBadges::emphasisColor(dark,muted.emphasis),SessionStatusBadge::mutedTone(dark));
+    QVERIFY(SessionStatusBadge::edge(muted.kind,dark)!=SessionStatusBadge::edge(normal.kind,dark));
+    const QRect bounds(0,0,480,104);
+    const auto layout=SessionDelegate::titleLayout(bounds,list.font(),false,index,muted);
+    QVERIFY(layout.title.left()>=sessionCardRect(bounds).left()+30); // The mute icon has reserved space.
+    SessionDelegate delegate;
+    const auto render=[&](qreal expansion) {
+        list.setProperty("expansion",expansion); list.setProperty("expandedRowWidth",480);
+        QImage image(480,104,QImage::Format_ARGB32_Premultiplied); image.fill(dark?QColor("#151b21"):QColor("#f3f6f8"));
+        QStyleOptionViewItem option; option.rect=expansion<1?QRect(0,0,SessionStrip::width(false),104):bounds;
+        option.font=list.font(); option.widget=&list;
+        QPainter painter(&image); delegate.paint(&painter,option,index); painter.end(); return image;
+    };
+    const auto hasColor=[](const QImage &image,const QColor &color) {
+        for(int y=0;y<image.height();++y)for(int x=0;x<image.width();++x)if(image.pixelColor(x,y)==color)return true;
+        return false;
+    };
+    for(qreal expansion:{0.0,1.0}) {
+        row->setData(SessionRoles::Muted,false);
+        QVERIFY(hasColor(render(expansion),OptionalQuestionBadge::fill(dark)));
+        row->setData(SessionRoles::Muted,true);
+        const auto image=render(expansion);
+        QVERIFY(!hasColor(image,OptionalQuestionBadge::fill(dark)));
+        QVERIFY(hasColor(image,OptionalQuestionBadge::fill(dark,true)));
+        QVERIFY(hasColor(image,SessionStatusBadge::mutedTone(dark)));
+        QCOMPARE(index.data(SessionRoles::OptionalQuestions).toInt(),1);
+    }
+    row->setData(SessionRoles::Attention,false); row->setData(SessionRoles::ReviewLater,false);
+    QCOMPARE(SessionDelegate::statusOf(index,false).kind,SessionStatusBadge::MutedUnread);
+    row->setData(SessionRoles::Working,true); row->setData(SessionRoles::Status,"Working");
+    QCOMPARE(SessionDelegate::statusOf(index,false).kind,SessionStatusBadge::Working);
+    row->setData(SessionRoles::Attention,true); row->setData(SessionRoles::Failure,true);
+    QCOMPARE(SessionDelegate::statusOf(index,false).kind,SessionStatusBadge::Error);
+    row->setData(SessionRoles::Working,false); row->setData(SessionRoles::Failure,false);
+    row->setData(SessionRoles::Muted,false); row->setData(SessionRoles::Status,"Needs approval");
+    QCOMPARE(SessionDelegate::statusOf(index,false).kind,SessionStatusBadge::Attention);
+}
 
 void TestWorkspace::explicitIndependentWaitKeepsNativePriorityAndRejectsStaleInspection()
 {
