@@ -125,7 +125,7 @@ private slots:
         QCOMPARE(read(dir.filePath("keep.txt")), QByteArray("user copy"));
         QVERIFY(!QFileInfo::exists(dir.filePath("keep (1).txt")));
     }
-    void openFileIdentityRejectsAtomicPathReplacement() {
+    void openFileIdentityRejectsPathReplacement() {
         QTemporaryDir dir; const auto path = dir.filePath("copy.txt");
         QVERIFY(write(path, "opened-A"));
         QFile opened;
@@ -149,9 +149,27 @@ private slots:
         QVERIFY(DownloadCache::Detail::sameFile(opened, path));
         const auto modified = opened.fileTime(QFileDevice::FileModificationTime);
         QCOMPARE(opened.readAll(), QByteArray("opened-A"));
+#ifdef Q_OS_WIN
+        // QSaveFile's FileRenameInfo overwrite can refuse an open destination.
+        // Keep A open at an owned aside, then publish closed B at the free name.
+        // Each rename is native and same-directory; no one-call overwrite claim.
+        const auto asidePath = dir.filePath("aside-A.txt"), nextPath = dir.filePath("next-B.txt");
+        QVERIFY(!QFileInfo::exists(asidePath)); QVERIFY(write(nextPath, "edited-B"));
+        const auto aside = QDir::toNativeSeparators(asidePath), next = QDir::toNativeSeparators(nextPath);
+        const bool movedA = ::MoveFileExW(reinterpret_cast<LPCWSTR>(native.utf16()),
+            reinterpret_cast<LPCWSTR>(aside.utf16()), 0);
+        const DWORD moveAError = ::GetLastError();
+        QVERIFY2(movedA, qPrintable(QStringLiteral("Cannot rename open A: %1").arg(moveAError)));
+        QVERIFY(DownloadCache::Detail::sameFile(opened, asidePath));
+        const bool movedB = ::MoveFileExW(reinterpret_cast<LPCWSTR>(next.utf16()),
+            reinterpret_cast<LPCWSTR>(native.utf16()), 0);
+        const DWORD moveBError = ::GetLastError();
+        QVERIFY2(movedB, qPrintable(QStringLiteral("Cannot publish B: %1").arg(moveBError)));
+#else
         QSaveFile replacement(path); replacement.setDirectWriteFallback(false);
         QVERIFY(replacement.open(QIODevice::WriteOnly)); QCOMPARE(replacement.write("edited-B"), 8);
-        QVERIFY(replacement.commit());
+        QVERIFY2(replacement.commit(), qPrintable(replacement.errorString()));
+#endif
         QFile current(path); QVERIFY(current.open(QIODevice::ReadWrite));
         QVERIFY(current.setFileTime(modified, QFileDevice::FileModificationTime)); current.close();
         QCOMPARE(opened.size(), QFileInfo(path).size());
