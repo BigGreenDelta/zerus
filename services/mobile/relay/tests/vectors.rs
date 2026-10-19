@@ -274,8 +274,8 @@ fn request_hashes_match_python_through_the_batch_codec() {
         missing.is_empty(),
         "listed rows without a vector: {missing:?}"
     );
-    // 56 requests of request_hash.jsonl and 60 of request_envelopes.jsonl.
-    assert_eq!(hashed, 116); // Archive, scoped hook health and analytics envelopes.
+    // 56 requests of request_hash.jsonl and 62 of request_envelopes.jsonl.
+    assert_eq!(hashed, 118); // Archive, scoped hook health and analytics envelopes.
 }
 
 /// `services/mobile/tests/rust-only-operations.json`: each operation only
