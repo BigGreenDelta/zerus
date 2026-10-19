@@ -32,6 +32,10 @@ for name in ('HGS_SESSION', 'HGS_RUN_ID'):
     env.pop(name, None)  # an SSH login is no agent
 args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
+if (root / ('dropafter-' + alias)).exists() and args[:2] == ['task', 'send']:
+    # The connection drops after that computer pasted and answered.
+    subprocess.run([os.environ['ROUTING_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
+    print('Connection reset by peer', file=sys.stderr); sys.exit(255)
 if (root / ('failexchange-' + alias)).exists() and args[1:2] in (['replica-inventory'], ['replica-exchange']):
     print('Connection reset by peer', file=sys.stderr); sys.exit(255)
 if (root / ('noreplica-' + alias)).exists():
@@ -266,6 +270,24 @@ class TaskRouting(unittest.TestCase):
         refused = self.task("a", "send", task["id"], "--project", "project-1", ok=False)
         self.assertIn("already In progress in codex/remote", refused)
         self.assertEqual(self.received().count("Add rate limiting"), 1)
+
+    def test_an_agents_send_that_computer_refuses_says_nothing_was_sent(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        self.swarm("b", "sync")
+        self.task("b", "send", task["id"], "--project", "project-1")
+        self.wait_received("Add rate limiting")
+        refused = self.task("a", "send", task["id"], "--project", "project-1", ok=False, session="codex/local")
+        self.assertIn("codex/remote cannot take it now: ", refused)
+        self.assertIn("already In progress in codex/remote. Nothing was sent.", refused)
+        self.assertEqual(refused.count("cannot take it now"), 1, refused)
+
+    def test_a_send_whose_connection_drops_after_the_paste_never_says_nothing_was_sent(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        (self.root / "dropafter-b").touch()
+        failed = self.task("a", "send", task["id"], "--project", "project-1", ok=False, session="codex/local")
+        self.wait_received("Add rate limiting")
+        self.assertIn("Connection reset by peer", failed)
+        self.assertNotIn("Nothing was sent", failed)
 
     def test_an_agent_sends_as_itself(self):
         task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")

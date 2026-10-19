@@ -224,7 +224,7 @@ fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
     };
     let record = crate::state::session_graph::caller_record().ok_or_else(|| {
         fail(format!(
-            "this command names the agent session {claimed}, but that run is not live on this computer or does not run it; run hgs task from the session's own shell"
+            "this command names the agent session {claimed}, but that run is not live on this computer or does not run it; run hgs task from the agent's own shell, or unset HGS_SESSION and HGS_RUN_ID to act as yourself"
         ))
     })?;
     Ok(Actor::Agent(SessionKey {
@@ -426,9 +426,12 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
     let r = reference(config, args, &who)?;
     let (project_id, project_name) = (&r.project.0, &r.project.1);
     // An agent reads a refused send as "SESSION cannot take it now: …"; a paste
-    // that happened is never reworded.
+    // that happened is never reworded. A command another computer forwards
+    // (`--agent`) leaves the wording to that computer, where the agent reads it.
+    let forwarded_here = option(args, "--agent")?.is_some();
     let refuse = |error: Error, to: &str| -> Error {
         if matches!(who, Actor::Agent(_))
+            && !forwarded_here
             && action == "send"
             && !error.message.starts_with("the prompt was sent")
         {
@@ -458,13 +461,13 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
         let uuid = task.uuid().to_owned();
         drop(store);
         let out = match reach(config, &machines, project_id, session) {
-            Ok(alias) => forwarded(config, &machines, &r.project, &uuid, action, args, session, &alias, &who),
+            // That computer words its own refusals (see `forwarded`).
+            Ok(alias) => forwarded(config, &machines, &r.project, &uuid, action, args, session, &alias, &who)?,
             // A cancel goes through while that computer is out of reach: the task
             // moves to In review here and its session is not told.
-            Err(reason) if action == "cancel" => cancel_here(config, &machines, &r.project, &uuid, args, &who, reason),
-            Err(reason) => Err(fail(reason)),
-        }
-        .map_err(|e| refuse(e, &to))?;
+            Err(reason) if action == "cancel" => cancel_here(config, &machines, &r.project, &uuid, args, &who, reason)?,
+            Err(reason) => return Err(refuse(fail(reason), &to)),
+        };
         return Ok(with_answer(&who, action, out, 0, &to));
     }
     let text = text.unwrap_or_default();
@@ -607,7 +610,22 @@ fn forwarded(
         remote.extend(["--agent".into(), format!("{}/{}", agent.machine, agent.session)]);
     }
     let reply = crate::swarm::remote_hgs(config, alias, &remote).map_err(|e| {
-        fail(format!("{e:#}").replacen(&format!("{alias}: hgs: "), &format!("{alias}: "), 1))
+        let message = format!("{e:#}");
+        match message.strip_prefix(&format!("{alias}: hgs: ")) {
+            // That computer's own refusal: it pasted nothing, and an agent reads
+            // it as a send that was not taken.
+            Some(refusal)
+                if action == "send"
+                    && matches!(who, Actor::Agent(_))
+                    && !refusal.starts_with("the prompt was sent") =>
+            {
+                fail(answers::refused(&session.session, refusal))
+            }
+            Some(refusal) => fail(format!("{alias}: {refusal}")),
+            // A connection that failed on the way may have failed after the
+            // paste: never say that nothing was sent.
+            None => fail(message),
+        }
     })?;
     // Its copy comes back now (its identity was checked a moment ago); when
     // that fails the next sync brings it, and `synced` says the copy here is behind.

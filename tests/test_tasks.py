@@ -323,6 +323,8 @@ class AgentIdentity(Fixture):
                                 text=True, capture_output=True, timeout=30)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("names the agent session codex/api", result.stderr)
+        # A person's shell in the session's tmux inherits its variables: say the way out.
+        self.assertIn("or unset HGS_SESSION and HGS_RUN_ID to act as yourself", result.stderr)
         self.assertEqual(self.ids("todo"), [])
         # A record without the owned process proves nothing either.
         agent_record(self.state, self.env, "codex/api", "run-stale", process_start="not this process")
