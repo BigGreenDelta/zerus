@@ -4,6 +4,7 @@
 mod catalog;
 mod launch_project;
 mod model;
+mod replica;
 mod service;
 mod store;
 mod transport;
@@ -164,6 +165,8 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         "bind" => transport::bind(config,alias()?),
         "join" => transport::join(config,alias()?,serde_json::from_value(input()?)?),
         "exchange" => transport::exchange(config,serde_json::from_value(input()?)?),
+        "replica-inventory" => replica::inventory(config,serde_json::from_value(input()?)?),
+        "replica-exchange" => replica::exchange(config,serde_json::from_value(input()?)?),
         "sync" => transport::sync(config),
         "get" | "initialize" | "apply" | "export" | "resolve" | "disconnect" => {
             // Read stdin before taking the lock: slow clients cannot monopolize it.
@@ -196,6 +199,6 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             snapshot["written"] = json!(written);
             Ok(snapshot)
         }
-        _ => bail!("usage: hgs swarm get | initialize | apply | preview PEER | join PEER | sync | worker | resolve | disconnect PEER | preference get|set"),
+        _ => bail!("usage: hgs swarm get | initialize | apply | preview PEER | join PEER | sync | worker | resolve | disconnect PEER | preference get|set | replica-inventory | replica-exchange"),
     }
 }

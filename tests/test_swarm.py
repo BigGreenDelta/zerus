@@ -2,6 +2,7 @@
 """Catalog replication through the real CLI, with isolated nodes and fake SSH."""
 import copy
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,16 @@ if (root / ('offline-' + alias)).exists():
 env = dict(os.environ, HGS_CONFIG_DIR=str(root / alias), HGS_STATE_DIR=str(root / alias / 'state'))
 args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
+if (root / ('noreplica-' + alias)).exists():
+    # A member from before task replication: its hello has no replica field and
+    # it knows no replica commands.
+    if args[1:2] in (['replica-inventory'], ['replica-exchange']):
+        print('usage: hgs swarm get | initialize', file=sys.stderr); sys.exit(1)
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout); output.pop('replica', None)
+    print(json.dumps(output)); sys.exit(0)
 if (root / ('preference-' + alias)).exists():
     # A member from before the shared project order: it lists the kinds it
     # accepts, without "order", and rejects that kind.
@@ -49,6 +60,14 @@ output = json.loads(result.stdout)
 output.pop('kinds', None)
 print(json.dumps(output))
 '''
+
+
+def noise(seed, length):
+    """Text that does not compress, as task documents are compressed."""
+    out = ''
+    while len(out) < length:
+        out += hashlib.sha256(f'{seed}-{len(out)}'.encode()).hexdigest()
+    return out[:length]
 
 
 def project(id, name, machine, path):
@@ -82,6 +101,19 @@ class Swarm(unittest.TestCase):
             return json.loads(result.stdout)
         self.assertNotEqual(result.returncode, 0)
         return result.stderr
+
+    def task(self, node, *args, text=None):
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / node), HGS_STATE_DIR=str(self.root / node / 'state'))
+        result = subprocess.run([str(HGS), 'task', *args], input=text, env=env, text=True, capture_output=True, timeout=40)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def tasks(self, node):
+        return sorted(t['text'] for t in self.task(node, 'list', '--project', 'a')['tasks'])
+
+    def exchanges(self):
+        calls = self.root / 'calls'
+        return sum('replica-exchange' in line for line in calls.read_text().splitlines()) if calls.exists() else 0
 
     def join(self, node, peer, mapping=None, prefer_peer=False):
         preview = self.call(node, 'preview', peer)
@@ -396,6 +428,75 @@ class Swarm(unittest.TestCase):
             worker.terminate(); worker.communicate(timeout=5)
         self.assertEqual(self.call('a', 'get')['worker'], {'running': False, 'current': False})
         self.assertFalse((self.root / 'service-calls').exists())
+
+    def test_tasks_replicate_after_the_catalog(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        first = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
+        self.task('a', 'add', '--project', 'a', text='Document the setup')
+        # b fetches them from a, and c from b.
+        self.call('b', 'sync'); self.call('c', 'sync')
+        for node in 'bc':
+            self.assertEqual(self.tasks(node), ['Add rate limiting', 'Document the setup'], node)
+        # Changes made on two members at once merge everywhere.
+        self.task('c', 'comment', first['id'], '--project', 'a', text='Use the config value.')
+        self.task('a', 'stage', first['id'], 'backlog', '--project', 'a')
+        self.converge()
+        for node in 'abc':
+            view = self.task(node, 'get', first['id'], '--project', 'a')['task']
+            self.assertEqual(view['stage'], 'backlog', node)
+            self.assertIn('Use the config value.', [entry.get('text') for entry in view['log']], node)
+        hellos = [self.call(node, 'hello')['replica'] for node in 'abc']
+        self.assertEqual(len({json.dumps(h['projects'], sort_keys=True) for h in hellos}), 1)
+        self.assertEqual({(h['protocol'], h['schema']) for h in hellos}, {(1, 1)})
+        # Equal digests: a sync exchanges no project.
+        before = self.exchanges(); self.call('a', 'sync'); self.call('b', 'sync')
+        self.assertEqual(self.exchanges(), before)
+
+    def test_a_large_project_travels_in_pages(self):
+        self.join('a', 'b'); self.join('b', 'a')
+        self.call('a', 'sync'); self.call('b', 'sync')
+        for n in range(20):
+            self.task('a', 'add', '--project', 'a', text=noise(n, 60000))
+        before = self.exchanges()
+        self.assertTrue(self.call('b', 'sync')['a']['ok'])
+        self.assertEqual(len(self.tasks('b')), 20)
+        self.assertGreaterEqual(self.exchanges() - before, 3)
+
+    def test_members_without_task_replication_are_skipped_and_named(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        self.task('b', 'add', '--project', 'a', text='Add rate limiting')
+        (self.root / 'noreplica-c').touch()  # c now answers like a release without task replication
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual(self.tasks('c'), [])
+        peers = self.call('b', 'get')['peers']
+        self.assertTrue(peers['c']['tasks_outdated'])
+        self.assertNotIn('tasks_outdated', peers['a'])
+        # After the update it receives the tasks and the notice clears.
+        (self.root / 'noreplica-c').unlink()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual(self.tasks('c'), ['Add rate limiting'])
+        self.assertNotIn('tasks_outdated', self.call('b', 'get')['peers']['c'])
+
+    def test_the_worker_sends_a_new_task_within_seconds(self):
+        self.join('a', 'b'); self.join('b', 'a')
+        self.call('a', 'sync'); self.call('b', 'sync')
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'a'), HGS_STATE_DIR=str(self.root / 'a/state'))
+        worker = subprocess.Popen([str(HGS), 'swarm', 'worker'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            # Its first round is over; the next scheduled one is 30 s away.
+            synced = self.call('a', 'get')['peers']['b']['last_sync']
+            deadline = time.monotonic() + 10
+            while self.call('a', 'get')['peers']['b']['last_sync'] == synced and time.monotonic() < deadline:
+                time.sleep(.1)
+            self.task('a', 'add', '--project', 'a', text='Add rate limiting')
+            deadline = time.monotonic() + 10
+            while self.tasks('b') != ['Add rate limiting'] and time.monotonic() < deadline:
+                time.sleep(.2)
+            self.assertEqual(self.tasks('b'), ['Add rate limiting'])
+        finally:
+            worker.terminate(); worker.communicate(timeout=5)
 
     def test_initial_join_can_keep_existing_swarm_session_placement(self):
         for node in ['a', 'b']:

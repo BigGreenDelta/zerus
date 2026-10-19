@@ -13,6 +13,8 @@ use std::{
 /// Members whose hgs predates shared preferences. Kept beside catalog.json,
 /// which an older hgs on this machine must still be able to read.
 const OUTDATED: &str = "outdated-peers.json";
+/// Members whose hgs does not replicate tasks, kept the same way.
+const REPLICA_OUTDATED: &str = "replica-outdated-peers.json";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,15 +44,42 @@ pub struct Store {
     pub peers: BTreeMap<String, Peer>,
 }
 
+/// Keeps the members still enrolled with the same node and writes the list
+/// when it changed; an empty list removes its file.
+fn save_members(
+    path: &Path,
+    members: &mut BTreeMap<String, String>,
+    peers: &BTreeMap<String, Peer>,
+    original: &mut Vec<u8>,
+) -> Result<()> {
+    members.retain(|alias, node| peers.get(alias).is_some_and(|p| &p.node == node));
+    let bytes = if members.is_empty() { vec![] } else { serde_json::to_vec(members)? };
+    if bytes != *original {
+        if bytes.is_empty() {
+            match fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+        } else {
+            replace(path, &bytes)?;
+        }
+        *original = bytes;
+    }
+    Ok(())
+}
+
 pub struct LockedStore {
     pub data: Store,
     /// Alias -> node of members that keep syncing projects and folders but do
     /// not receive the delivery choice. A missing or damaged file means none.
     pub outdated: BTreeMap<String, String>,
+    /// Alias -> node of members that keep syncing the catalog but not tasks.
+    pub replica_outdated: BTreeMap<String, String>,
     pub path: PathBuf,
     _lock: platform::FileLock,
     original: Vec<u8>,
     outdated_original: Vec<u8>,
+    replica_outdated_original: Vec<u8>,
 }
 
 impl LockedStore {
@@ -87,13 +116,16 @@ impl LockedStore {
         };
         data.catalog.validate()?;
         let outdated_original = fs::read(dir.join(OUTDATED)).unwrap_or_default();
+        let replica_outdated_original = fs::read(dir.join(REPLICA_OUTDATED)).unwrap_or_default();
         let mut loaded = Self {
             data,
             outdated: serde_json::from_slice(&outdated_original).unwrap_or_default(),
+            replica_outdated: serde_json::from_slice(&replica_outdated_original).unwrap_or_default(),
             path,
             _lock: lock,
             original,
             outdated_original,
+            replica_outdated_original,
         };
         let node = loaded.data.node_id.clone();
         for alias in &config.selves {
@@ -119,26 +151,13 @@ impl LockedStore {
             self.original = bytes;
         }
         let peers = &self.data.peers;
-        self.outdated
-            .retain(|alias, node| peers.get(alias).is_some_and(|p| &p.node == node));
-        let outdated = if self.outdated.is_empty() {
-            vec![]
-        } else {
-            serde_json::to_vec(&self.outdated)?
-        };
-        if outdated != self.outdated_original {
-            let path = self.path.with_file_name(OUTDATED);
-            if outdated.is_empty() {
-                match fs::remove_file(path) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                    _ => {}
-                }
-            } else {
-                replace(&path, &outdated)?;
-            }
-            self.outdated_original = outdated;
-        }
-        Ok(())
+        save_members(&self.path.with_file_name(OUTDATED), &mut self.outdated, peers, &mut self.outdated_original)?;
+        save_members(
+            &self.path.with_file_name(REPLICA_OUTDATED),
+            &mut self.replica_outdated,
+            peers,
+            &mut self.replica_outdated_original,
+        )
     }
     /// The catalog snapshot, naming members that need an hgs update.
     pub fn snapshot(&self, config: &Config) -> Value {
@@ -146,6 +165,9 @@ impl LockedStore {
         for (alias, peer) in &self.data.peers {
             if self.outdated.get(alias) == Some(&peer.node) {
                 snapshot["peers"][alias]["catalog_outdated"] = json!(true);
+            }
+            if self.replica_outdated.get(alias) == Some(&peer.node) {
+                snapshot["peers"][alias]["tasks_outdated"] = json!(true);
             }
         }
         snapshot

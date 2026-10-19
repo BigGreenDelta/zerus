@@ -1,6 +1,6 @@
 use super::{
     catalog::{self, Catalog, Key, Operation},
-    service,
+    replica, service,
     store::{LockedStore, Peer},
 };
 use crate::{config::Config, platform};
@@ -128,6 +128,9 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     if inventory {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
     }
+    // Project stores are opened after the catalog lock is released.
+    drop(store);
+    result["replica"] = replica::hello(config)?;
     Ok(result)
 }
 
@@ -241,6 +244,7 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
     } else {
         drop(local);
     }
+    replica::sync_peer(config, alias, &identity)?;
     let mut local = LockedStore::load(config)?;
     if let Some(peer) = local.data.peers.get_mut(alias) {
         peer.last_sync = now();
@@ -487,10 +491,12 @@ pub fn worker() -> Result<()> {
             .and_then(|config| {
                 let mut store = LockedStore::load(&config)?;
                 store.save()?;
-                let digest = store.data.catalog.digest();
-                let changed = digest != last_digest;
+                let catalog = store.data.catalog.digest();
                 let peers: Vec<_> = store.data.peers.keys().cloned().collect();
                 drop(store);
+                // A local change to the catalog or to any task syncs at once.
+                let digest = catalog + &replica::fingerprint(&config)?;
+                let changed = digest != last_digest;
                 for alias in peers {
                     let (due, failures) = schedule.get(&alias).copied().unwrap_or_default();
                     if now() < due && !(changed && failures == 0) {
@@ -512,7 +518,7 @@ pub fn worker() -> Result<()> {
                         }
                     }
                 }
-                last_digest = LockedStore::load(&config)?.data.catalog.digest();
+                last_digest = LockedStore::load(&config)?.data.catalog.digest() + &replica::fingerprint(&config)?;
                 Ok(())
             }) {
             Ok(()) => {}
