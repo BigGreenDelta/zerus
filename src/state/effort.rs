@@ -924,6 +924,36 @@ struct Request {
     effort: String,
 }
 
+thread_local! {
+    /// Whether this settings attempt sent keys, and whether the agent has yet to
+    /// visibly react to the last of them; a reaction proves it read the earlier ones.
+    static ATTEMPT_KEYS: std::cell::Cell<(bool, bool)> = const { std::cell::Cell::new((false, false)) };
+}
+
+fn start_attempt() {
+    ATTEMPT_KEYS.with(|keys| keys.set((false, false)));
+}
+
+fn sent_keys() {
+    ATTEMPT_KEYS.with(|keys| keys.set((true, true)));
+}
+
+fn reacted() {
+    ATTEMPT_KEYS.with(|keys| keys.set((keys.get().0, false)));
+}
+
+/// After a failed attempt nothing is unconfirmed when it sent no keys, or when
+/// the agent reacted to the last of them and is back at its empty prompt.
+/// Otherwise input stays blocked until a native event, as for sent text.
+fn mark_unconfirmed(record: &mut Value) {
+    let (sent, unread) = ATTEMPT_KEYS.with(|keys| keys.replace((false, false)));
+    if !sent || (!unread && input::checked_terminal(record, true).is_ok()) {
+        return;
+    }
+    record["settings_unconfirmed_at"] = json!(now());
+    let _ = write(record);
+}
+
 fn checked(name: &str, request: &Request, empty: bool) -> Result<Value> {
     let record = input::checked_settings(
         name,
@@ -935,6 +965,7 @@ fn checked(name: &str, request: &Request, empty: bool) -> Result<Value> {
 }
 
 fn send_key(record: &Value, key: &str) -> Result<()> {
+    sent_keys();
     backend::current().send(string(record, "pane"), &[backend::Key::Named(key)])
 }
 
@@ -950,6 +981,7 @@ fn wait_until<T>(mut read: impl FnMut() -> Result<Option<T>>) -> Result<T> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if let Some(value) = read()? {
+            reacted();
             return Ok(value);
         }
         if Instant::now() >= deadline {
@@ -1064,6 +1096,7 @@ fn kimi_change(name: &str, request: &Request, current: &Settings) -> Result<()> 
     {
         return Err("the current Kimi effort is not visible; open Terminal".into());
     }
+    sent_keys();
     backend::current().send(string(&record, "pane"), &[backend::Key::Literal("/effort")])?;
     wait_until(|| {
         let record = checked(name, request, false)?;
@@ -1147,6 +1180,7 @@ fn command_ready(record: &Value, command: &str) -> Result<bool> {
 
 fn open_model(name: &str, request: &Request) -> Result<()> {
     let record = checked(name, request, true)?;
+    sent_keys();
     backend::current().send(string(&record, "pane"), &[backend::Key::Literal("/model")])?;
     wait_until(|| {
         let r = checked(name, request, false)?;
@@ -1729,6 +1763,8 @@ fn claude_model(name: &str, request: &Request, model: &ModelOption) -> Result<()
             _ => {}
         }
         if claude_picker(&screen).is_none() {
+            // Without a dialog, a closed picker shows Claude read the last key.
+            reacted();
             if let Some(effort) = claude_receipt_since(&transcript, &conversation, offset, &model.label)? {
                 // The receipt names effort only when the picker changed it; the
                 // indicator, when shown, must agree with the request.
@@ -1822,6 +1858,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     let mut receipt = json!({"request_id":id,"name":name,"digest":digest,"status":"in_progress", "run_id":request.expected_run_id,"conversation_id":request.expected_conversation_id,"effort":request.effort,"model":current.model,"scope":"session","at":now()});
     atomic(&receipt_path, &receipt.to_string())?;
+    start_attempt();
     let result = if current.effort == request.effort {
         Ok(())
     } else {
@@ -1833,8 +1870,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         }
     };
     if let Err(error) = result {
-        record["input_pending_at"] = json!(now());
-        let _ = write(&mut record);
+        mark_unconfirmed(&mut record);
         return Err(format!("effort change not confirmed: {error}"));
     }
     let latest = history(&record);
@@ -1924,6 +1960,7 @@ fn apply_settings(
     atomic(receipt_path, &receipt.to_string())?;
     let screen = capture(&record)?;
     let visible_effort = target_footer(&record, model, &screen);
+    start_attempt();
     let result = if string(&record, "agent") == "claude" {
         // Its indicator shows effort only; history or a receipt names the model.
         let shown = claude_footer(&screen);
@@ -1972,8 +2009,7 @@ fn apply_settings(
         }
     };
     if let Err(error) = result {
-        record["input_pending_at"] = json!(now());
-        let _ = write(&mut record);
+        mark_unconfirmed(&mut record);
         return Err(format!("settings change not confirmed: {error}"));
     }
     let latest = history(&record);

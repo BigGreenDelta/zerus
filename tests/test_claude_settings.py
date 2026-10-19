@@ -221,6 +221,11 @@ class ClaudeSettings(unittest.TestCase):
         self.assertNotIn(b's', received.removeprefix(b'/model\r'))
         self.assertEqual(self.inspect()['model'], 'claude-opus-5-5')
         self.assertDefaultsUntouched()
+        # Claude read every key and closed its picker at the empty prompt, so
+        # nothing is left unconfirmed: the next change is accepted.
+        self.assertNotIn('settings_unconfirmed_at', json.loads(self.record_path.read_text()))
+        self.assertEqual(self.settings(self.payload('claude-sonnet-5-5', 'high'))['status'], 'applied')
+        self.assertEqual(self.inspect()['model'], 'claude-sonnet-5-5')
 
     def test_unconfirmed_change_is_not_replayed(self):
         (self.root / 'freeze').touch()
@@ -228,6 +233,18 @@ class ClaudeSettings(unittest.TestCase):
         self.assertIn('not confirmed', self.settings(p, success=False))
         self.assertEqual(self.received(), b'/model')
         self.assertIn('already', self.settings(p, success=False))
+        self.assertEqual(self.received(), b'/model')
+        # Claude has not read the typed keys: a new change or message types nothing.
+        record = json.loads(self.record_path.read_text())
+        self.assertIn('settings_unconfirmed_at', record)
+        self.assertFalse(record.get('input_pending_at'))
+        self.assertIn('did not react', self.settings(self.payload('claude-haiku-5-5', 'high'), success=False))
+        message = dict(request_id=str(uuid.uuid4()), text='hello', attachments=[], expected_run_id=self.run_id,
+                       expected_conversation_id=self.conversation_id)
+        result = subprocess.run([str(test_input.HGS), 'send', self.name, '--json'], env=self.env,
+                                input=json.dumps(message), text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('did not react', result.stderr)
         self.assertEqual(self.received(), b'/model')
 
     def test_draft_and_foreign_transcript_send_no_input(self):
