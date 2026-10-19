@@ -222,7 +222,8 @@ settings) is a local edit on any replica, online or offline.
   packages the libraries.
 - CI gets an Android job that builds the crate for those targets with the
   pinned Rust and runs the binding tests; the APK grows by the size of the
-  library per ABI, measured and reported in the plan.
+  library per ABI, measured and reported in the plan. The measured sizes are in
+  docs/superpowers/plans/2026-10-19-task-replica-android-bindings.md.
 - The app keeps its documents in private storage, never in shared storage or
   backups that leave the device unencrypted.
 

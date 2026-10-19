@@ -365,7 +365,15 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn('echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"', listed[configure])
         self.assertIn("os.environ['JAVA_HOME_17_X64']", signed)
         self.assertIn("        working-directory: mobile/android\n"
-                      "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true\n", listed[gradle])
+                      "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease assembleDebug -PzerusFirebase=true\n", listed[gradle])
+        # The task replica is built for every packaged ABI with the pinned toolchain and NDK, in
+        # the check and in the signed build alike (the sdkmanager lines match above).
+        for line in ("rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android",
+                     "cargo +1.99.1 install cargo-ndk --version 4.1.2 --locked"):
+            with self.subTest(line=line):
+                self.assertIn(line, android)
+                self.assertIn(line, signed)
+        self.assertIn("'ndk;28.2.13676358'", android)
         self.assertIn("-PzerusFirebase=true", signed)
         config = re.search(r"(?s)cat > mobile/android/app/google-services\.json <<'JSON'\n(.*?)\n          JSON\n",
                            listed[configure])[1]
@@ -474,6 +482,9 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt",
                      "run: cargo +1.99.1 test --locked",
                      "cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml --target-dir target/replica",
+                     "cargo +1.99.1 fmt --check --manifest-path crates/replica-ffi/Cargo.toml",
+                     "cargo +1.99.1 clippy --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi --all-targets -- -D warnings",
+                     "cargo +1.99.1 test --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi",
                      'run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"'):
             self.assertIn(line, quick)
         for name in ("quick", "relay", "connector", "connector-macos", "android", "cli", "arch", "arch-package",
@@ -1062,7 +1073,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         suites = job(checks, "gate")
         self.assertIn("android", field(suites, "needs").strip("[]").split(", "))
         self.assertIn("'android': True,", suites)
-        self.assertIn("testDebugUnitTest lintRelease -PzerusFirebase=true", job(checks, "android"))
+        self.assertIn("testDebugUnitTest lintRelease assembleDebug -PzerusFirebase=true", job(checks, "android"))
 
     def test_android_candidate_accepts_only_a_successful_gate_of_this_attempt(self):
         namespace = {}

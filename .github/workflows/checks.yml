@@ -113,12 +113,15 @@ jobs:
           key: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: msrv-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - run: cargo +1.99.1 test --locked
-      - name: Replica crate (format, lints, tests, golden vectors)
+      - name: Replica crates (format, lints, tests, golden vectors, the mobile binding surface)
         run: |
           rustup component add --toolchain 1.99.1 rustfmt clippy
           cargo +1.99.1 fmt --check --manifest-path crates/replica/Cargo.toml
           cargo +1.99.1 clippy --locked --manifest-path crates/replica/Cargo.toml --target-dir target/replica --all-targets -- -D warnings
           cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml --target-dir target/replica
+          cargo +1.99.1 fmt --check --manifest-path crates/replica-ffi/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi
       # Packages fail without a notice for every shipped crate; find out here.
       - name: Rust license notices
         run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"
@@ -414,7 +417,7 @@ jobs:
     name: Android unit tests and lint
     needs: source
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -434,9 +437,14 @@ jobs:
             "configuration_version": "1"
           }
           JSON
-      - name: Android platform and build tools
+      # The task replica (crates/replica-ffi) is built for every packaged ABI.
+      - name: Rust and cargo-ndk for the task replica
         run: |
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0'
+          rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+          cargo +1.99.1 install cargo-ndk --version 4.1.2 --locked
+      - name: Android platform, build tools and NDK
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
       # Gradle caches: a monthly epoch precedes the hash of the wrapper and build
       # scripts. A dependency change restores the previous entry; a new month
       # starts afresh, so unused artifacts cannot accumulate.
@@ -454,7 +462,7 @@ jobs:
           restore-keys: android-gradle-v1-${{ steps.gradle.outputs.epoch }}-
       - name: Unit tests and release lint
         working-directory: mobile/android
-        run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true
+        run: ./gradlew --no-daemon testDebugUnitTest lintRelease assembleDebug -PzerusFirebase=true
       - name: Save Gradle cache
         if: inputs.save_caches && steps.gradle-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

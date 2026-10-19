@@ -1354,4 +1354,18 @@ git commit -m "Build the task replica for every Android ABI in CI and document t
 
 ## Measurements
 
-Filled in by Task 3 Step 5: each ABI's `libzerus_replica_ffi.so` size, the debug APK size before and after, and the LOAD alignments.
+Measured on 2026-10-19 with Rust 1.99.1, NDK 28.2.13676358, cargo-ndk 4.1.2 and the release profile of `crates/replica-ffi` (`opt-level = "z"`, LTO, one codegen unit, stripped):
+
+| ABI | `libzerus_replica_ffi.so` | LOAD alignment |
+|---|---|---|
+| arm64-v8a | 3 071 616 B | 0x4000 |
+| armeabi-v7a | 1 861 652 B | 0x1000 |
+| x86_64 | 3 585 176 B | 0x4000 |
+
+The debug APK, packaged from scratch, went from 25 909 949 B to 35 650 702 B (+9 740 753 B). Of that:
+- the three libraries are 8 518 444 B, stored uncompressed and page aligned;
+- JNA's `libjnidispatch.so` for the same ABIs is about 0.4 MB;
+- the Rust crates' licence notices (148 crates) are 620 175 B compressed;
+- the rest is the generated bindings.
+
+An APK carries all three libraries; an App Bundle would deliver only the device's. With `opt-level = "s"` the arm64 library was 3 363 384 B.

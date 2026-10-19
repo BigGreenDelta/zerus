@@ -521,8 +521,15 @@ relay can read relayed audio; this transport has no end-to-end encryption.
 
 ## Build and install
 
-Install JDK 17 or 21 and Android SDK platform 36 / build tools 35.0.0. Set
-`JAVA_HOME` and `ANDROID_HOME` for those tools, then run:
+Install JDK 17 or 21, Android SDK platform 36 / build tools 36.0.0 and NDK
+28.2.13676358, Rust 1.99.1 with the targets `aarch64-linux-android`,
+`armv7-linux-androideabi` and `x86_64-linux-android`, and
+`cargo install cargo-ndk --version 4.1.2 --locked`. Set `JAVA_HOME` and
+`ANDROID_HOME` for those tools. The build compiles the task replica
+(`crates/replica-ffi`) for each packaged ABI (arm64-v8a, armeabi-v7a, x86_64),
+generates its Kotlin bindings with UniFFI from the host library, which the unit
+tests load, and collects the Rust crates' licence notices into Third-party
+notices. Then run:
 
 ```sh
 cd mobile/android
