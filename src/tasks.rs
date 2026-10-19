@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zerus_replica::{
-    cancel_message, task_prompt, Actor, NewTask, Position, ProjectStore, SessionKey, Settings,
+    cancel_message, task_prompt, Actor, Position, ProjectStore, SessionKey, Settings,
     Stage, Target, TaskDoc, Tools, MAX_TEXT,
 };
 
@@ -289,15 +289,6 @@ fn with_answer(who: &Actor, action: &str, mut out: Value, place: usize, destinat
     out
 }
 
-/// Refuses a prompt that the task prompt could not carry when it is sent.
-fn check_prompt(store: &ProjectStore, task: &TaskDoc, project_name: &str) -> Result<()> {
-    let settings = store.project().map_err(fail)?.settings();
-    let view = task.view().map_err(fail)?;
-    task_prompt(&settings.task_template, &view, project_name, Tools::Cli)
-        .map(|_| ())
-        .map_err(fail)
-}
-
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     if dry {
         return Err(fail("task commands do not support --dry-run"));
@@ -407,20 +398,9 @@ fn add(config: &Config, args: &[String]) -> Result<Value> {
     };
     let position = position_index(args)?.map_or(Position::End, Position::Index);
     let store = store(config, &id)?;
-    let rank = store.rank_for(stage, &position, None).map_err(fail)?;
-    let short = store.unused_short_id().map_err(fail)?;
-    let mut task = TaskDoc::create(NewTask {
-        project: &id,
-        id: &short,
-        text: &text,
-        stage,
-        target,
-        author: author.clone(),
-        rank: &rank,
-        now: now(),
-    })
-    .map_err(fail)?;
-    check_prompt(&store, &task, &name)?;
+    let mut task = store
+        .new_task(&text, stage, target, author.clone(), &position, &name, now())
+        .map_err(fail)?;
     store.save(&mut task).map_err(fail)?;
     let at = place(&store, &task)?;
     Ok(with_answer(&author, "add", json!({"task": view(&task, &name, true, &machines)?}), at, ""))
@@ -495,8 +475,9 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
     let mut destination = String::new();
     match action {
         "edit" => {
-            task.edit_text(&text, &who, now()).map_err(fail)?;
-            check_prompt(&store, &task, project_name)?;
+            store
+                .edit_task(&mut task, &text, &who, project_name, now())
+                .map_err(fail)?;
         }
         "comment" => task.comment(&text, &who, now()).map_err(fail)?,
         "report" => {
@@ -515,23 +496,11 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
             } else {
                 return Err(fail(USAGE));
             };
-            let stage = task.stage().map_err(fail)?;
-            let rank = store
-                .rank_for(stage, &position, Some(task.uuid()))
-                .map_err(fail)?;
-            task.set_rank(&rank).map_err(fail)?;
+            store.reorder(&mut task, &position).map_err(fail)?;
         }
         "stage" => {
             let to = Stage::parse(args.get(1).ok_or_else(|| fail(USAGE))?).map_err(fail)?;
-            let from = task.stage().map_err(fail)?;
-            task.set_stage(to, &who, now()).map_err(fail)?;
-            // A task that changes list goes to the top of its new list.
-            if from != to && matches!(to, Stage::Todo | Stage::Backlog) {
-                let rank = store
-                    .rank_for(to, &Position::Top, Some(task.uuid()))
-                    .map_err(fail)?;
-                task.set_rank(&rank).map_err(fail)?;
-            }
+            store.change_stage(&mut task, to, &who, now()).map_err(fail)?;
         }
         "target" => {
             let value = args.get(1).ok_or_else(|| fail(USAGE))?;

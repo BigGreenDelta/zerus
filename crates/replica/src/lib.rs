@@ -3,6 +3,7 @@
 //! a Loro upgrade or a schema change happens here once.
 mod error;
 pub mod ids;
+mod ops;
 mod project;
 pub mod rank;
 mod render;
