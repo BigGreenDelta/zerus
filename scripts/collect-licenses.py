@@ -17,9 +17,11 @@ def main():
     # Each locked Cargo project whose binary the distribution ships; the root
     # workspace (hgs) by default. Linux packages add the mobile connector.
     parser.add_argument("--manifest-path", type=Path, action="append", dest="manifests")
+    # The Android app ships a library built for Android targets.
+    parser.add_argument("--target", help="the Rust target the binaries are built for [default: this host]")
     args = parser.parse_args()
-    target = next(line[6:] for line in subprocess.check_output(["rustc", "-vV"], text=True).splitlines()
-                  if line.startswith("host: "))
+    target = args.target or next(line[6:] for line in subprocess.check_output(["rustc", "-vV"], text=True).splitlines()
+                                 if line.startswith("host: "))
     packages = {}
     for manifest in args.manifests or [None]:
         command = ["cargo", "metadata", "--locked", "--offline", "--format-version", "1", "--filter-platform", target]
@@ -27,8 +29,19 @@ def main():
             command += ["--manifest-path", str(manifest)]
         metadata = json.loads(subprocess.check_output(command, text=True))
         resolved = {node["id"] for node in metadata["resolve"]["nodes"]}
+        shipped = None
+        if args.target:
+            # Only the crates built into that target's binaries: its normal
+            # dependencies, with the features the build resolves for it.
+            tree = ["cargo", "tree", "--locked", "--offline", "-e", "normal", "--target", target,
+                    "--prefix", "none", "--format", "{p}"]
+            if manifest is not None:
+                tree += ["--manifest-path", str(manifest)]
+            shipped = {tuple(line.split()[:2]) for line in subprocess.check_output(tree, text=True).splitlines()
+                       if line.strip()}
         for package in metadata["packages"]:
-            if package.get("source") and package["id"] in resolved:
+            if package.get("source") and package["id"] in resolved and (
+                    shipped is None or (package["name"], "v" + package["version"]) in shipped):
                 packages[(package["name"], package["version"])] = package
     destination = args.destination.resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -60,7 +73,7 @@ def main():
             (folder / "SQLite-public-domain.txt").write_text(header + "*/\nhttps://www.sqlite.org/copyright.html\n")
         inventory.append({key: package.get(key) for key in ("name", "version", "license", "repository")})
     (destination / "inventory.json").write_text(json.dumps({"target": target, "packages": inventory}, indent=2) + "\n")
-    print(f"Collected notices for {len(inventory)} host-target dependencies.")
+    print(f"Collected notices for {len(inventory)} {'host-target' if not args.target else target} dependencies.")
 
 
 if __name__ == "__main__":

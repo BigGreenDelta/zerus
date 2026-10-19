@@ -13,6 +13,17 @@ URL and the checksum.
 | `generic-btree` | https://github.com/loro-dev/generic-btree/blob/0ae02fad39fbaf6b4836e1e578e3da7759e321ed/LICENSE | `732d8393fd664a8126a46f0b7a4c23c577fdfc9658e9ad1620d5354050fb9f51` |
 | `serde_columnar` | https://github.com/loro-dev/columnar/blob/06663cfc569c6c770b28688f015f8a87fc04e156/LICENSE | `a9af0e3a3ded007f9914a1125b736ec526d469105c6577e367e2a9ca4de39d6b` |
 | `serde_columnar_derive` | https://github.com/loro-dev/columnar/blob/06663cfc569c6c770b28688f015f8a87fc04e156/LICENSE | `a9af0e3a3ded007f9914a1125b736ec526d469105c6577e367e2a9ca4de39d6b` |
+| `uniffi` | https://github.com/mozilla/uniffi-rs/blob/7bc621ee9d0d15371d792612707ba5ed4111f950/LICENSE | `1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5` |
+| `uniffi_bindgen` | https://github.com/mozilla/uniffi-rs/blob/7bc621ee9d0d15371d792612707ba5ed4111f950/LICENSE | `1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5` |
+| `uniffi_core` | https://github.com/mozilla/uniffi-rs/blob/7bc621ee9d0d15371d792612707ba5ed4111f950/LICENSE | `1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5` |
+| `uniffi_internal_macros` | https://github.com/mozilla/uniffi-rs/blob/7bc621ee9d0d15371d792612707ba5ed4111f950/LICENSE | `1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5` |
+| `uniffi_macros` | https://github.com/mozilla/uniffi-rs/blob/7bc621ee9d0d15371d792612707ba5ed4111f950/LICENSE | `1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5` |
+| `uniffi_meta` | https://github.com/mozilla/uniffi-rs/blob/7bc621ee9d0d15371d792612707ba5ed4111f950/LICENSE | `1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5` |
+| `uniffi_pipeline` | https://github.com/mozilla/uniffi-rs/blob/7bc621ee9d0d15371d792612707ba5ed4111f950/LICENSE | `1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5` |
+| `uniffi_udl` | https://github.com/mozilla/uniffi-rs/blob/7bc621ee9d0d15371d792612707ba5ed4111f950/LICENSE | `1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5` |
 
 `serde_columnar` and `serde_columnar_derive` are offered under "MIT OR
 Apache-2.0"; Zerus uses them under MIT, the license their repository carries.
+
+The `uniffi` crates (UniFFI 0.32.2, tag `v0.32.2`) are under MPL-2.0; the Android
+app's task replica links them (`crates/replica-ffi`).

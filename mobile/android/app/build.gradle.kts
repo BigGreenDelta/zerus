@@ -47,6 +47,7 @@ val hostLibraryName = if (System.getProperty("os.name").startsWith("Mac")) "libz
 val hostLibrary = rustBuild.map { it.file("host/debug/$hostLibraryName") }
 val uniffiKotlin = layout.buildDirectory.dir("generated/uniffi/kotlin")
 val rustJniLibs = rustBuild.map { it.dir("jniLibs") }
+val rustLicenseAssets = layout.buildDirectory.dir("generated/rust-licenses")
 val rustHostLibrary by tasks.registering(Exec::class) {
     inputs.files(replicaSources)
     outputs.file(hostLibrary)
@@ -65,6 +66,20 @@ val uniffiBindings by tasks.registering(Exec::class) {
         "--library", hostLibrary.get().asFile.path, "--language", "kotlin", "--no-format",
         "--out-dir", uniffiKotlin.get().asFile.path)
 }
+// The licence notices of every crate built into the library, for Third-party notices;
+// the collector fails the build when a crate ships none.
+val rustLicenses by tasks.registering(Exec::class) {
+    // The collector reads the crates cargo has downloaded for the host build.
+    dependsOn(rustHostLibrary)
+    inputs.file(replicaCrate.resolve("Cargo.lock"))
+    inputs.dir(rootProject.file("../../packaging/rust-licenses"))
+    outputs.dir(rustLicenseAssets)
+    doFirst { delete(rustLicenseAssets) }
+    commandLine("python3", rootProject.file("../../scripts/collect-licenses.py").path,
+        rustLicenseAssets.get().dir("rust-licenses").asFile.path,
+        "--manifest-path", replicaCrate.resolve("Cargo.toml").path, "--target", "aarch64-linux-android")
+}
+
 android {
     namespace = "app.zerus.mobile"
     compileSdk = 36
@@ -101,6 +116,8 @@ android {
     sourceSets.getByName("main") {
         java.srcDir(uniffiKotlin)
         jniLibs.srcDir(rustJniLibs)
+        // The task, not only its folder: whatever reads the assets then runs it first.
+        assets.srcDir(rustLicenses)
     }
     if (firebaseEnabled) {
         sourceSets.getByName("main").java.srcDir("src/firebase/java")

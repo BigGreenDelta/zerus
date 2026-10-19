@@ -32,6 +32,9 @@ import kotlinx.coroutines.withContext
             }
         }
     }
+    val replicaLicenses by produceState("Loading task store licenses…",context) {
+        value = withContext(Dispatchers.IO) { runCatching { rustNotices(context) }.getOrDefault("License texts are unavailable.") }
+    }
     val octiconsLicense by produceState("Loading icon license…",context) {
         value = withContext(Dispatchers.IO) {
             context.assets.open("licenses/octicons.txt").bufferedReader().use { it.readText() }
@@ -48,8 +51,34 @@ import kotlinx.coroutines.withContext
         Text("CommonMark Java 0.30.0 (BSD-2-Clause) and autolink-java 0.12.0 (MIT) — Robin Stocker and contributors.",style = MaterialTheme.typography.titleSmall)
         Text("Sources: github.com/commonmark/commonmark-java; github.com/robinst/autolink-java",style = MaterialTheme.typography.bodySmall)
         Text(markdownLicenses,style = MaterialTheme.typography.bodySmall)
+        Text("Task store — Loro, UniFFI and the other Rust crates of zerus-replica; JNA 5.17.0 (Apache License 2.0).",style = MaterialTheme.typography.titleSmall)
+        Text("Sources: github.com/loro-dev/loro; github.com/mozilla/uniffi-rs; github.com/java-native-access/jna",style = MaterialTheme.typography.bodySmall)
+        Text(replicaLicenses,style = MaterialTheme.typography.bodySmall)
         Text("GitHub mark — Primer Octicons (MIT).",style = MaterialTheme.typography.titleSmall)
         Text("Source: github.com/primer/octicons\nCommit 97825f832c98f817867f770d084c08e3edc6f78c",style = MaterialTheme.typography.bodySmall)
         Text(octiconsLicense,style = MaterialTheme.typography.bodySmall)
     } }
 }
+
+/** Each crate of the task store's library with its licence and notice texts, then JNA's. */
+private fun rustNotices(context: android.content.Context): String {
+    val assets = context.assets
+    val inventory = org.json.JSONObject(assets.open("rust-licenses/inventory.json").bufferedReader().use { it.readText() })
+    val packages = inventory.getJSONArray("packages")
+    val crates = (0 until packages.length()).joinToString("\n\n") { index ->
+        val crate = packages.getJSONObject(index)
+        val folder = "rust-licenses/${crate.getString("name")}-${crate.getString("version")}"
+        val texts = assetFiles(assets, folder).joinToString("\n\n") { file ->
+            assets.open(file).bufferedReader().use { it.readText() }
+        }
+        "${crate.getString("name")} ${crate.getString("version")} (${crate.optString("license")})\n$texts"
+    }
+    return crates + "\n\n" + assets.open("licenses/jna.txt").bufferedReader().use { it.readText() }
+}
+
+/** The files below an asset folder, depth first: some crates keep notices in subfolders. */
+private fun assetFiles(assets: android.content.res.AssetManager, folder: String): List<String> =
+    assets.list(folder).orEmpty().sorted().flatMap { name ->
+        val path = "$folder/$name"
+        if (assets.list(path).orEmpty().isEmpty()) listOf(path) else assetFiles(assets, path)
+    }
