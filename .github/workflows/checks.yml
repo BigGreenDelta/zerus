@@ -207,6 +207,7 @@ jobs:
           "$RUNNER_TEMP/relay-venv/bin/pip" install ./services/mobile -r services/mobile/tests/requirements.txt
           export ZERUS_RELAY_BINARY="$GITHUB_WORKSPACE/services/mobile/relay/target/debug/zerus-relay"
           export ZERUS_DIRECTORY_TEST_HGS="$GITHUB_WORKSPACE/target/debug/hgs"
+          export ZERUS_TASK_TEST_HGS="$GITHUB_WORKSPACE/target/debug/hgs"
           export PATH="$GITHUB_WORKSPACE/services/mobile/relay/target/debug:$PATH"
           "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_[!b]*.py' -v
           env -u ZERUS_RELAY_BINARY "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests -p 'test_mobile_speech*.py' -v

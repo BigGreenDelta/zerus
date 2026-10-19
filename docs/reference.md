@@ -1912,6 +1912,15 @@ here goes out within seconds. Changes made on several computers at once merge.
 A member whose Zerus does not share tasks keeps syncing the catalog and is
 named in the Swarm settings.
 
+Phones reach a project's tasks through the mobile relay and the Rust mobile
+connector, which uses two commands of its own. `hgs task digests --json` prints
+each project's digest of what a phone holds (the project document and every
+task that is not Done), which the connector adds to its heartbeat;
+`hgs task exchange --json` reads a phone's request on stdin, imports the
+phone's changes and answers a page of what the phone lacks, at most 512 KiB of
+updates, with a larger task in parts. A task the phone holds keeps coming to it
+after it becomes Done. See `services/mobile/relay/README.md`.
+
 Agents use the same `hgs task` commands in their own shell. A command run inside
 an agent session acts as that session when it proves it as `hgs self` does (the
 run is live here and the command descends from the agent; renames are

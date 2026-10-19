@@ -524,7 +524,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual({path.name for path in tests.glob("test_b*.py")},
                          {path.name for path in tests.glob("test_bb_*.py")})
         self.assertTrue(list(tests.glob("test_bb_*.py")))
-        for variable in ("ZERUS_RELAY_BINARY", "ZERUS_DIRECTORY_TEST_HGS"):
+        for variable in ("ZERUS_RELAY_BINARY", "ZERUS_DIRECTORY_TEST_HGS", "ZERUS_TASK_TEST_HGS"):
             self.assertIn(f"\n          export {variable}=", relay)
         # The relay fixtures' database driver is a test-only requirement.
         self.assertIn('\n          "$RUNNER_TEMP/relay-venv/bin/pip" install ./services/mobile'

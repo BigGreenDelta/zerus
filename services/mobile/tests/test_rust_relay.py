@@ -21,6 +21,8 @@ import relay_fixture
 
 OPERATIONS = set(json.loads((Path(__file__).resolve().parents[1] / 'vectors/operations.json')
                             .read_text())['sets']['OPERATIONS'])
+# The phone's task exchange, which only the Rust relay and connector offer.
+RUST_OPERATIONS = {'task_exchange'}
 # Background maintenance every 0.1 s, so expired rows leave while a test waits.
 MAINTAINED = dict(background=True, maintenance_interval=0.1)
 TOMBSTONE = 'request history expired; delivery must not be retried'
@@ -406,7 +408,7 @@ class RustHttpContracts(unittest.IsolatedAsyncioTestCase):
         delivered = await self.call('GET', '/v1/node/requests', node=True)
         self.assertEqual(delivered['requests'][0]['payload'], value['payload'])
         # The released operation set, as the golden vectors froze it from the connector.
-        self.assertEqual(set((await self.call('GET', '/v1/capabilities'))['operations']), OPERATIONS)
+        self.assertEqual(set((await self.call('GET', '/v1/capabilities'))['operations']), OPERATIONS | RUST_OPERATIONS)
 
     async def test_set_mobile_delivery_request_validation(self):
         value = {'request_id': str(uuid.uuid4()), 'computer_id': self.node['node_id'],
