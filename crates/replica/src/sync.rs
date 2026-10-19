@@ -1,6 +1,7 @@
 //! Replicating a project between replicas: what each holds (its inventory, the
 //! version of every document), the updates the other lacks, and importing them.
 //! The inventory is bookkeeping, not a log, so nothing here grows without bound.
+use crate::schema::Stage;
 use crate::store::{write_atomic, Damaged, ProjectStore};
 use crate::task::TaskDoc;
 use crate::{ids, Error, Result};
@@ -94,6 +95,9 @@ struct Cached {
     /// Why the task does not load; it is read again only when its files change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// The task's stage, for the phone's view; an entry without one is read again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage: Option<Stage>,
 }
 
 /// A rewrite within one timestamp tick can hand a file its old inode back, so
@@ -155,6 +159,32 @@ impl ProjectStore {
     /// The version of every document of the project, and the tasks that do not
     /// load. A task is read again only when its files changed since last time.
     pub fn inventory(&self) -> Result<(Inventory, Vec<Damaged>)> {
+        let (inventory, _, damaged) = self.inventory_with_stages()?;
+        Ok((inventory, damaged))
+    }
+
+    /// What a phone holds of this project: the project document and every task
+    /// that is not Done (docs/superpowers/specs/2026-10-18-task-replication-loro-design.md, "Phone").
+    pub fn live_inventory(&self) -> Result<(Inventory, Vec<Damaged>)> {
+        let (mut inventory, stages, damaged) = self.inventory_with_stages()?;
+        inventory
+            .tasks
+            .retain(|uuid, _| stages.get(uuid) != Some(&Stage::Done));
+        Ok((inventory, damaged))
+    }
+
+    /// What a phone holding `theirs` is answered from: the live documents and
+    /// every task it already holds, so a task that became Done still reaches it.
+    pub fn phone_inventory(&self, theirs: &Inventory) -> Result<Inventory> {
+        let (mut inventory, stages, _) = self.inventory_with_stages()?;
+        inventory.tasks.retain(|uuid, _| {
+            stages.get(uuid) != Some(&Stage::Done) || theirs.tasks.contains_key(uuid)
+        });
+        Ok(inventory)
+    }
+
+    /// The inventory with each loaded task's stage.
+    fn inventory_with_stages(&self) -> Result<(Inventory, BTreeMap<String, Stage>, Vec<Damaged>)> {
         let path = self.dir().join(CACHE);
         let old: Cache = fs::read(&path)
             .ok()
@@ -162,6 +192,7 @@ impl ProjectStore {
             .unwrap_or_default();
         let mut cache = Cache::default();
         let mut inventory = Inventory::default();
+        let mut stages = BTreeMap::new();
         let mut damaged = Vec::new();
         let project = vec![stamp(&self.dir().join("project.loro"))];
         if project[0].is_some() {
@@ -176,6 +207,7 @@ impl ProjectStore {
                     files: project,
                     version: version(&VersionVector::decode(&self.project()?.version())?),
                     error: None,
+                    stage: None,
                 },
             };
             inventory.project = cached.version.clone();
@@ -189,18 +221,23 @@ impl ProjectStore {
                 stamp(&self.updates_path(&uuid)),
             ];
             let trusted = settled(&files);
-            let cached = match old.tasks.get(&uuid).filter(|c| trusted && c.files == files) {
+            let remembered = old.tasks.get(&uuid).filter(|c| {
+                trusted && c.files == files && (c.error.is_some() || c.stage.is_some())
+            });
+            let cached = match remembered {
                 Some(cached) => cached.clone(),
                 None => match self.load(&uuid) {
                     Ok(task) => Cached {
                         files,
                         version: version(&task.current_vv()),
                         error: None,
+                        stage: Some(task.stage()?),
                     },
                     Err(error) => Cached {
                         files,
                         version: Version::new(),
                         error: Some(error.to_string()),
+                        stage: None,
                     },
                 },
             };
@@ -211,6 +248,9 @@ impl ProjectStore {
                 }),
                 None => {
                     inventory.tasks.insert(uuid.clone(), cached.version.clone());
+                    if let Some(stage) = cached.stage {
+                        stages.insert(uuid.clone(), stage);
+                    }
                 }
             }
             if trusted {
@@ -221,7 +261,7 @@ impl ProjectStore {
             // Only a speed-up: an unwritten cache means reading the tasks again.
             let _ = write_atomic(&path, &serde_json::to_vec(&cache)?);
         }
-        Ok((inventory, damaged))
+        Ok((inventory, stages, damaged))
     }
 
     /// The updates a replica holding `theirs` lacks of `ours` (this store's

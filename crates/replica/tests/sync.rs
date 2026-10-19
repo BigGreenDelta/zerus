@@ -413,3 +413,123 @@ fn stored_projects_are_listed_by_id() {
         .is_empty());
     let _ = Inventory::default();
 }
+
+/// Sends, reports and accepts `task`: it ends in Done.
+fn accept(store: &ProjectStore, task: &mut TaskDoc) {
+    let session = zerus_replica::SessionKey {
+        machine: "m".into(),
+        session: "codex/api".into(),
+    };
+    task.record_send(&session, "request-1", &Actor::Person, 2)
+        .unwrap();
+    task.record_report("Done.", &Actor::Agent(session.clone()), 3)
+        .unwrap();
+    task.set_stage(Stage::Done, &Actor::Person, 4).unwrap();
+    store.save(task).unwrap();
+}
+
+/// Every file of the project, old enough for the cache to trust.
+fn settle_all(root: &Path) {
+    fn walk(folder: &Path) {
+        for entry in fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path);
+            } else if path.file_name().unwrap() != "inventory.json" {
+                settle(&path);
+            }
+        }
+    }
+    walk(&root.join(format!("{:x}", Sha256::digest(b"project-1"))));
+}
+
+#[test]
+fn the_live_inventory_leaves_done_tasks_out() {
+    let root = tempfile::tempdir().unwrap();
+    let a = store(root.path());
+    let live = add(&a, "Add rate limiting");
+    let mut done = add(&a, "Measure first");
+    accept(&a, &mut done);
+    let (inventory, _) = a.live_inventory().unwrap();
+    assert_eq!(inventory.tasks.keys().collect::<Vec<_>>(), [live.uuid()]);
+    assert_eq!(a.inventory().unwrap().0.tasks.len(), 2);
+}
+
+#[test]
+fn the_phone_view_keeps_what_the_phone_holds() {
+    let (a_root, b_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a, phone) = (store(a_root.path()), store(b_root.path()));
+    let live = add(&a, "Add rate limiting");
+    let mut done = add(&a, "Measure first");
+    replicate(&a, &phone, 1 << 20);
+    accept(&a, &mut done);
+    let (theirs, _) = phone.inventory().unwrap();
+    let view = a.phone_inventory(&theirs).unwrap();
+    let mut held: Vec<_> = view.tasks.keys().map(String::as_str).collect();
+    held.sort();
+    let mut expected = vec![live.uuid(), done.uuid()];
+    expected.sort();
+    assert_eq!(held, expected);
+    // The view carries this store's newer version of the Done task.
+    assert_eq!(
+        view.tasks[done.uuid()],
+        a.inventory().unwrap().0.tasks[done.uuid()]
+    );
+    // A phone that never held it is not offered the Done task.
+    assert!(!a
+        .phone_inventory(&Inventory::default())
+        .unwrap()
+        .tasks
+        .contains_key(done.uuid()));
+}
+
+#[test]
+fn the_cached_stage_follows_a_change() {
+    let root = tempfile::tempdir().unwrap();
+    let a = store(root.path());
+    let mut task = add(&a, "Add rate limiting");
+    settle_all(root.path());
+    assert!(a
+        .live_inventory()
+        .unwrap()
+        .0
+        .tasks
+        .contains_key(task.uuid()));
+    accept(&a, &mut task);
+    settle_all(root.path());
+    assert!(!a
+        .live_inventory()
+        .unwrap()
+        .0
+        .tasks
+        .contains_key(task.uuid()));
+    // A remembered entry without its stage, as an older cache has, is read again.
+    remember(root.path(), task.uuid(), |entry| {
+        entry.as_object_mut().unwrap().remove("stage");
+    });
+    assert!(!a
+        .live_inventory()
+        .unwrap()
+        .0
+        .tasks
+        .contains_key(task.uuid()));
+}
+
+#[test]
+fn the_view_trusts_the_remembered_stage_of_unchanged_files() {
+    let root = tempfile::tempdir().unwrap();
+    let a = store(root.path());
+    let task = add(&a, "Add rate limiting");
+    settle_all(root.path());
+    a.live_inventory().unwrap();
+    // Unchanged files: the remembered stage answers, the document is not read.
+    remember(root.path(), task.uuid(), |entry| {
+        entry["stage"] = "done".into()
+    });
+    assert!(!a
+        .live_inventory()
+        .unwrap()
+        .0
+        .tasks
+        .contains_key(task.uuid()));
+}
