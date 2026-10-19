@@ -64,7 +64,7 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let temp = path.with_extension(format!("tmp-{}", ids::new_uuid()));
     let mut file = private_options().create_new(true).write(true).open(&temp)?;
     file.write_all(bytes)?;
@@ -160,6 +160,10 @@ impl ProjectStore {
         &self.project
     }
 
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     pub fn project(&self) -> Result<ProjectDoc> {
         match fs::read(self.dir.join("project.loro")) {
             Ok(bytes) => ProjectDoc::from_bytes(&bytes),
@@ -172,11 +176,11 @@ impl ProjectStore {
         write_atomic(&self.dir.join("project.loro"), &doc.snapshot()?)
     }
 
-    fn snapshot_path(&self, uuid: &str) -> PathBuf {
+    pub(crate) fn snapshot_path(&self, uuid: &str) -> PathBuf {
         self.dir.join("tasks").join(format!("{uuid}.loro"))
     }
 
-    fn updates_path(&self, uuid: &str) -> PathBuf {
+    pub(crate) fn updates_path(&self, uuid: &str) -> PathBuf {
         self.dir.join("tasks").join(format!("{uuid}.updates"))
     }
 

@@ -1,0 +1,254 @@
+//! Replicating a project between two stores: inventories, digests, paged
+//! updates and imports, as computers exchange them.
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::Path;
+use zerus_replica::{
+    Actor, Document, Inventory, NewTask, ProjectStore, Settings, Stage, Target, TaskDoc, Update,
+};
+
+fn store(root: &Path) -> ProjectStore {
+    ProjectStore::open(root, "project-1").unwrap()
+}
+
+fn add(store: &ProjectStore, text: &str) -> TaskDoc {
+    let mut task = TaskDoc::create(NewTask {
+        project: store.project_id(),
+        id: &store.unused_short_id().unwrap(),
+        text,
+        stage: Stage::Todo,
+        target: Target::Any,
+        author: Actor::Person,
+        rank: "V",
+        now: 1,
+    })
+    .unwrap();
+    store.save(&mut task).unwrap();
+    task
+}
+
+/// Everything `from` holds that `to` lacks, page by page.
+fn replicate(from: &ProjectStore, to: &ProjectStore, limit: usize) -> usize {
+    let mut pages = 0;
+    loop {
+        let (theirs, _) = to.inventory().unwrap();
+        let (updates, more) = from.updates_for(&theirs, limit).unwrap();
+        if updates.is_empty() {
+            return pages;
+        }
+        pages += 1;
+        let imported = to.import_updates(updates).unwrap();
+        assert!(imported.refused.is_empty(), "{:?}", imported.refused);
+        if !more {
+            return pages;
+        }
+    }
+}
+
+/// Text that does not compress: snapshots are compressed.
+fn noise(seed: &str, length: usize) -> String {
+    let mut out = String::new();
+    while out.len() < length {
+        out += &format!("{:x}", Sha256::digest(format!("{seed}-{}", out.len())));
+    }
+    out.truncate(length);
+    out
+}
+
+fn texts(store: &ProjectStore) -> Vec<String> {
+    let (tasks, _) = store.listing().unwrap();
+    let mut out: Vec<String> = tasks.iter().map(|t| t.view().unwrap().text).collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn two_replicas_meet_and_then_agree() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a, b) = (store(a.path()), store(b.path()));
+    add(&a, "Add rate limiting");
+    add(&a, "Document the setup");
+    let mut doc = a.project().unwrap();
+    doc.set_settings(&Settings {
+        agent_limit: 3,
+        ..doc.settings()
+    })
+    .unwrap();
+    a.save_project(&doc).unwrap();
+    assert_ne!(
+        a.inventory().unwrap().0.digest(),
+        b.inventory().unwrap().0.digest()
+    );
+    replicate(&a, &b, 1 << 20);
+    assert_eq!(texts(&b), ["Add rate limiting", "Document the setup"]);
+    assert_eq!(b.project().unwrap().settings().agent_limit, 3);
+    // Equal versions, equal digests; nothing is left to send either way.
+    assert_eq!(a.inventory().unwrap().0, b.inventory().unwrap().0);
+    assert_eq!(
+        a.inventory().unwrap().0.digest(),
+        b.inventory().unwrap().0.digest()
+    );
+    assert!(a
+        .updates_for(&b.inventory().unwrap().0, 1 << 20)
+        .unwrap()
+        .0
+        .is_empty());
+    assert!(b
+        .updates_for(&a.inventory().unwrap().0, 1 << 20)
+        .unwrap()
+        .0
+        .is_empty());
+}
+
+#[test]
+fn edits_made_on_both_sides_merge() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a, b) = (store(a.path()), store(b.path()));
+    let task = add(&a, "Add rate limiting");
+    replicate(&a, &b, 1 << 20);
+    let mut here = a.load(task.uuid()).unwrap();
+    here.comment("Use the config value.", &Actor::Person, 2)
+        .unwrap();
+    a.save(&mut here).unwrap();
+    let mut there = b.load(task.uuid()).unwrap();
+    there.set_stage(Stage::Backlog, &Actor::Person, 3).unwrap();
+    b.save(&mut there).unwrap();
+    replicate(&a, &b, 1 << 20);
+    replicate(&b, &a, 1 << 20);
+    for side in [&a, &b] {
+        let view = side.load(task.uuid()).unwrap().view().unwrap();
+        assert_eq!(view.stage, Stage::Backlog);
+        assert!(view
+            .log
+            .iter()
+            .any(|e| e.kind == "comment" && e.text == "Use the config value."));
+    }
+    assert_eq!(
+        a.inventory().unwrap().0.digest(),
+        b.inventory().unwrap().0.digest()
+    );
+}
+
+#[test]
+fn updates_come_in_pages_and_a_large_document_alone() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a, b) = (store(a.path()), store(b.path()));
+    for n in 0..6 {
+        add(&a, &noise(&n.to_string(), 2000));
+    }
+    // A page stays within its limit (each snapshot here is about 5 KB) unless one
+    // document alone exceeds it.
+    let (theirs, _) = b.inventory().unwrap();
+    let (page, more) = a.updates_for(&theirs, 12_000).unwrap();
+    assert!(more);
+    assert!(
+        page.len() >= 2 && page.iter().map(|u| u.bytes.len()).sum::<usize>() <= 12_000,
+        "{:?}",
+        page.iter().map(|u| u.bytes.len()).collect::<Vec<_>>()
+    );
+    assert!(replicate(&a, &b, 12_000) >= 2);
+    assert_eq!(texts(&b).len(), 6);
+    let big = add(&a, &noise("big", 20_000));
+    let (page, _) = a.updates_for(&b.inventory().unwrap().0, 1000).unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].document, Document::Task(big.uuid().to_owned()));
+}
+
+#[test]
+fn a_document_that_cannot_be_imported_is_refused_alone() {
+    let (here, there, other) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let (a, b) = (store(here.path()), store(there.path()));
+    let good = add(&a, "Add rate limiting");
+    let foreign = ProjectStore::open(other.path(), "project-2").unwrap();
+    let stranger = add(&foreign, "Elsewhere");
+    let updates = vec![
+        Update {
+            document: Document::Task(stranger.uuid().to_owned()),
+            bytes: stranger.snapshot().unwrap(),
+        },
+        Update {
+            document: Document::Task("not-a-uuid".into()),
+            bytes: good.snapshot().unwrap(),
+        },
+        Update {
+            document: Document::Task("8f14e45f-ceea-4e7a-9b1c-2f6d1a3b5c7d".into()),
+            bytes: b"garbage".to_vec(),
+        },
+        Update {
+            document: Document::Task("8f14e45f-ceea-4e7a-9b1c-2f6d1a3b5c7e".into()),
+            bytes: good.snapshot().unwrap(),
+        },
+        Update {
+            document: Document::Task(good.uuid().to_owned()),
+            bytes: good.snapshot().unwrap(),
+        },
+    ];
+    let imported = b.import_updates(updates).unwrap();
+    assert_eq!(imported.changed, 1);
+    let refused: Vec<&str> = imported.refused.iter().map(|d| d.error.as_str()).collect();
+    assert_eq!(refused.len(), 4, "{refused:?}");
+    assert!(refused[0].contains("another project"), "{}", refused[0]);
+    assert!(refused[1].contains("not a task UUID"), "{}", refused[1]);
+    assert!(refused[3].contains("another task"), "{}", refused[3]);
+    assert_eq!(texts(&b), ["Add rate limiting"]);
+    // A local task that fails to load is left out of the inventory, named, and
+    // never stops the others.
+    let broken = add(&b, "Broken here");
+    fs::write(task_file(there.path(), broken.uuid()), b"damaged").unwrap();
+    let (inventory, damaged) = b.inventory().unwrap();
+    assert_eq!(damaged.len(), 1);
+    assert!(!inventory.tasks.contains_key(broken.uuid()));
+    add(&a, "Still replicated");
+    replicate(&a, &b, 1 << 20);
+    assert_eq!(texts(&b), ["Add rate limiting", "Still replicated"]);
+}
+
+fn task_file(root: &Path, uuid: &str) -> std::path::PathBuf {
+    root.join(format!("{:x}", Sha256::digest(b"project-1")))
+        .join("tasks")
+        .join(format!("{uuid}.loro"))
+}
+
+#[test]
+fn the_inventory_reads_a_task_again_only_when_its_files_change() {
+    let root = tempfile::tempdir().unwrap();
+    let a = store(root.path());
+    let task = add(&a, "Add rate limiting");
+    let (first, _) = a.inventory().unwrap();
+    let cache = root
+        .path()
+        .join(format!("{:x}", Sha256::digest(b"project-1")))
+        .join("inventory.json");
+    // While the task's files stay as they were, the cached version is used as is.
+    let text = fs::read_to_string(&cache).unwrap();
+    let peer = first.tasks[task.uuid()].keys().next().unwrap().clone();
+    fs::write(&cache, text.replace(&format!("\"{peer}\""), "\"7\"")).unwrap();
+    assert!(a.inventory().unwrap().0.tasks[task.uuid()].contains_key("7"));
+    // A change to them reads the task again.
+    let mut task = a.load(task.uuid()).unwrap();
+    task.comment("Later", &Actor::Person, 2).unwrap();
+    a.save(&mut task).unwrap();
+    let (later, _) = a.inventory().unwrap();
+    assert!(later.tasks[task.uuid()].contains_key(&peer));
+    assert_ne!(later, first);
+}
+
+#[test]
+fn stored_projects_are_listed_by_id() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(ProjectStore::stored(root.path()).unwrap().is_empty());
+    drop(store(root.path()));
+    drop(ProjectStore::open(root.path(), "team/web").unwrap());
+    assert_eq!(
+        ProjectStore::stored(root.path()).unwrap(),
+        ["project-1", "team/web"]
+    );
+    assert!(ProjectStore::stored(&root.path().join("missing"))
+        .unwrap()
+        .is_empty());
+    let _ = Inventory::default();
+}

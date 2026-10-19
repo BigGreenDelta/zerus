@@ -8,6 +8,7 @@ pub mod rank;
 mod render;
 mod schema;
 mod store;
+mod sync;
 mod task;
 
 pub use error::{Error, ErrorKind, Result};
@@ -17,4 +18,5 @@ pub use schema::{
     Actor, LogEntry, SessionKey, Stage, Target, TaskView, MAX_DOCUMENT, MAX_TEXT, SCHEMA,
 };
 pub use store::{Damaged, Position, ProjectStore};
+pub use sync::{Document, Imported, Inventory, Update, Version};
 pub use task::{NewTask, TaskDoc};
