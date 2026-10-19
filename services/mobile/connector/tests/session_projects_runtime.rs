@@ -35,7 +35,7 @@ impl Native for SyntheticNative {
         }
         match &self.reply {
             Ok(value) => Ok(Output::Json(value.clone())),
-            Err(message) => Err(NativeError::Failed(*message)),
+            Err(message) => Err(NativeError::Failed(message)),
         }
     }
 }
