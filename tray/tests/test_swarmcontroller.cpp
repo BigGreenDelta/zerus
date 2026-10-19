@@ -545,8 +545,10 @@ print(json.dumps(result))
     void computersThatDoNotShareTasksAreNamed() {
         HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
         auto snapshot=controller.snapshot();
-        snapshot["machines"]=QJsonArray{QJsonObject{{"id","node-mac"},{"name","Mac"},{"connection","mac"}},QJsonObject{{"id","node-pi"},{"name","Pi"},{"connection","pi"}}};
-        snapshot["peers"]=QJsonObject{{"mac",QJsonObject{{"last_sync",12345},{"tasks_outdated",true}}},{"pi",QJsonObject{{"last_sync",12345}}}};
+        snapshot["machines"]=QJsonArray{QJsonObject{{"id","node-mac"},{"name","Mac"},{"connection","mac"}},QJsonObject{{"id","node-pi"},{"name","Pi"},{"connection","pi"}},
+                                        QJsonObject{{"id","node-nas"},{"name","NAS"},{"connection","nas"}}};
+        snapshot["peers"]=QJsonObject{{"mac",QJsonObject{{"last_sync",12345},{"tasks_outdated",true}}},{"pi",QJsonObject{{"last_sync",12345}}},
+                                      {"nas",QJsonObject{{"last_sync",12345},{"error","Connection timed out"},{"tasks_outdated",true}}}};
         controller.acceptExternal(snapshot);FleetState fleet;bool checked=false;
         QTimer::singleShot(0,this,[&]{
             auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());QVERIFY(dialog);
@@ -555,6 +557,8 @@ print(json.dumps(result))
                 const auto status=[&](const QString &name){for(int row=0;row<table->rowCount();++row)if(table->item(row,0)->text()==name)return table->item(row,2)->text();return QString();};
                 QVERIFY2(status("Mac").endsWith(" · Update Zerus there to share tasks"),qPrintable(status("Mac")));
                 QVERIFY2(status("Pi").startsWith("Synced ")&&!status("Pi").contains("tasks"),qPrintable(status("Pi")));
+                // An error is shown as it is; the note waits for a sync that works.
+                QCOMPARE(status("NAS"),QString("Connection timed out"));
                 checked=true;dialog->reject();
             });
         });

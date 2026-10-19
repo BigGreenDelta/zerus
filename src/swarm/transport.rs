@@ -135,8 +135,11 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
     }
     // Project stores are opened after the catalog lock is released. Tasks
-    // that cannot be read never stop the catalog.
+    // that cannot be read never stop the catalog. Only hello reads them.
     drop(store);
+    if inventory {
+        return Ok(result);
+    }
     match replica::hello(config) {
         Ok(replica) => result["replica"] = replica,
         Err(error) => eprintln!("hgs swarm: tasks: {error:#}"),

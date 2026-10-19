@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A document's version: each Loro peer that changed it (its ID as decimal
 /// text) and how many changes it made. Sorted, so equal versions compare and
@@ -89,7 +89,25 @@ struct Cache {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct Cached {
     files: Vec<Option<Stamp>>,
+    #[serde(default)]
     version: Version,
+    /// Why the task does not load; it is read again only when its files change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// A rewrite within one timestamp tick can hand a file its old inode back, so
+/// stamps are trusted only for files older than this.
+const SETTLE: Duration = Duration::from_secs(2);
+
+fn settled(files: &[Option<Stamp>]) -> bool {
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return false;
+    };
+    files
+        .iter()
+        .flatten()
+        .all(|Stamp(_, secs, nanos, _)| Duration::new(*secs, *nanos) + SETTLE <= now)
 }
 
 fn version(vv: &VersionVector) -> Version {
@@ -147,39 +165,57 @@ impl ProjectStore {
         let mut damaged = Vec::new();
         let project = vec![stamp(&self.dir().join("project.loro"))];
         if project[0].is_some() {
-            let cached = match old.project.as_ref().filter(|c| c.files == project) {
+            let trusted = settled(&project);
+            let cached = match old
+                .project
+                .as_ref()
+                .filter(|c| trusted && c.files == project)
+            {
                 Some(cached) => cached.clone(),
                 None => Cached {
                     files: project,
                     version: version(&VersionVector::decode(&self.project()?.version())?),
+                    error: None,
                 },
             };
             inventory.project = cached.version.clone();
-            cache.project = Some(cached);
+            if trusted {
+                cache.project = Some(cached);
+            }
         }
         for uuid in self.uuids()? {
             let files = vec![
                 stamp(&self.snapshot_path(&uuid)),
                 stamp(&self.updates_path(&uuid)),
             ];
-            let cached = match old.tasks.get(&uuid).filter(|c| c.files == files) {
+            let trusted = settled(&files);
+            let cached = match old.tasks.get(&uuid).filter(|c| trusted && c.files == files) {
                 Some(cached) => cached.clone(),
                 None => match self.load(&uuid) {
                     Ok(task) => Cached {
                         files,
                         version: version(&task.current_vv()),
+                        error: None,
                     },
-                    Err(error) => {
-                        damaged.push(Damaged {
-                            uuid,
-                            error: error.to_string(),
-                        });
-                        continue;
-                    }
+                    Err(error) => Cached {
+                        files,
+                        version: Version::new(),
+                        error: Some(error.to_string()),
+                    },
                 },
             };
-            inventory.tasks.insert(uuid.clone(), cached.version.clone());
-            cache.tasks.insert(uuid, cached);
+            match &cached.error {
+                Some(error) => damaged.push(Damaged {
+                    uuid: uuid.clone(),
+                    error: error.clone(),
+                }),
+                None => {
+                    inventory.tasks.insert(uuid.clone(), cached.version.clone());
+                }
+            }
+            if trusted {
+                cache.tasks.insert(uuid, cached);
+            }
         }
         if cache != old {
             // Only a speed-up: an unwritten cache means reading the tasks again.
@@ -188,11 +224,15 @@ impl ProjectStore {
         Ok((inventory, damaged))
     }
 
-    /// The updates a replica holding `theirs` lacks, in pages of at most
-    /// `limit` bytes; a document larger than that comes alone. True when more
-    /// remain after this page.
-    pub fn updates_for(&self, theirs: &Inventory, limit: usize) -> Result<(Vec<Update>, bool)> {
-        let (ours, _) = self.inventory()?;
+    /// The updates a replica holding `theirs` lacks of `ours` (this store's
+    /// inventory), in pages of at most `limit` bytes; a document larger than
+    /// that comes alone. True when more remain after this page.
+    pub fn updates_for(
+        &self,
+        ours: &Inventory,
+        theirs: &Inventory,
+        limit: usize,
+    ) -> Result<(Vec<Update>, bool)> {
         let mut page = Vec::new();
         let mut size = 0;
         let mut add = |update: Update| {

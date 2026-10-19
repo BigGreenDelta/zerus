@@ -342,10 +342,18 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
     // A send or cancel for a session another computer runs happens there.
     let session = match action {
         "send" => Some(send_session(&task, args, &who, &machines)?),
-        "cancel" => task.view().map_err(fail)?.session.map(|session| (session, false)),
+        // Only a task In progress is cancelled; this computer refuses anything else.
+        "cancel" if task.stage().map_err(fail)? == Stage::Active => {
+            task.view().map_err(fail)?.session.map(|session| (session, false))
+        }
         _ => None,
     };
     if let Some((session, _)) = session.as_ref().filter(|(session, _)| session.machine != here) {
+        // This computer's copy refuses first: a task it shows In progress, or
+        // in a stage that is not sent, never reaches the other computer.
+        if action == "send" {
+            task.check_send().map_err(fail)?;
+        }
         let uuid = task.uuid().to_owned();
         drop(store);
         return match reach(config, &machines, project_id, session) {
@@ -431,7 +439,7 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
 /// the pinned session, or for an Any task the agent's own session.
 fn send_session(task: &TaskDoc, args: &[String], who: &Actor, machines: &Machines) -> Result<(SessionKey, bool)> {
     let view = task.view().map_err(fail)?;
-    let host = option(args, "--host")?;
+    let host = option(args, "--host")?.filter(|host| !host.is_empty());
     let named = |session: &str| -> Result<SessionKey> {
         Ok(SessionKey {
             machine: machines.node(host)?,
@@ -492,12 +500,16 @@ fn forwarded(
         fail(format!("{e:#}").replacen(&format!("{alias}: hgs: "), &format!("{alias}: "), 1))
     })?;
     // Its copy comes back now (its identity was checked a moment ago); when
-    // that fails the next sync brings it.
-    if let Err(error) = crate::swarm::exchange_tasks(config, alias, &project.0) {
-        eprintln!("hgs: {error:#}");
-    }
+    // that fails the next sync brings it, and `synced` says the copy here is behind.
+    let synced = match crate::swarm::exchange_tasks(config, alias, &project.0) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("hgs: {error:#}");
+            false
+        }
+    };
     let task = store(config, &project.0)?.find(uuid).map_err(fail)?;
-    let mut out = json!({"task": view(&task, &project.1, true, machines)?});
+    let mut out = json!({"task": view(&task, &project.1, true, machines)?, "synced": synced});
     for key in ["receipt", "cancel_message"] {
         if let Some(value) = reply.get(key) {
             out[key] = value.clone();

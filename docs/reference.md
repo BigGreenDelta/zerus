@@ -1890,7 +1890,8 @@ JSON object and changes only the fields it names.
 `--host ALIAS` names a session on another computer of the swarm that this
 computer verified itself. A send or cancel for such a session runs on that
 computer: it gets the project's tasks first, refuses a task its own copy shows
-In progress, pastes and records there, and its copy comes back. When it cannot
+In progress, pastes and records there, and its copy comes back (`synced` is
+false when it could not; the next sync brings it). When it cannot
 be reached, or its Zerus is too old to share tasks, a send is refused with the
 reason and nothing changes, while a cancel goes through here: the task moves
 to In review, its session gets no cancel message, and that computer's copy

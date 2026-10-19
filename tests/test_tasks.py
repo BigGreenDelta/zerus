@@ -232,6 +232,10 @@ class TaskCommands(Fixture):
         self.assertIn("only send and cancel take --agent",
                       self.hgs("add", "--project", "orchard", "--agent", node + "/codex/web", text="x", ok=False))
 
+    def test_an_empty_host_is_this_computer(self):
+        task = self.add("Add rate limiting")
+        self.assertIn("choose the session with --session", self.hgs("send", task["ref"], "--host", "", ok=False))
+
     def test_a_project_name_with_a_slash(self):
         task = self.hgs("add", "--project", "team/web", text="Ship it")["task"]
         self.assertEqual(task["ref"], "team/web/" + task["id"])

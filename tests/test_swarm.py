@@ -536,6 +536,37 @@ class Swarm(unittest.TestCase):
         self.assertEqual(len(self.task('b', 'list', '--project', 'b')['tasks']), 20)
         self.assertEqual([t['text'] for t in self.task('b', 'list', '--project', 'c')['tasks']], ['Still replicated'])
 
+    def test_replica_requests_name_their_swarm_and_known_projects(self):
+        self.join('a', 'b'); self.join('b', 'a')
+        self.call('a', 'sync')
+        self.task('a', 'add', '--project', 'a', text='Add rate limiting')
+        hello = self.call('a', 'hello')
+        swarm = hello['swarm_id']
+        # Answers name their computer; a later hgs may add fields to a request.
+        reply = self.call('a', 'replica-inventory', data={'swarm_id': swarm, 'project': 'a', 'stage': 'live'})
+        self.assertEqual(reply['node_id'], hello['node_id'])
+        self.assertEqual(len(reply['inventory']['tasks']), 1)
+        # A request from another swarm, or for a project nobody here knows, is refused.
+        self.assertIn('another swarm', self.call('a', 'replica-inventory', data={'swarm_id': 'elsewhere', 'project': 'a'}, ok=False))
+        self.assertIn('swarm_id', self.call('a', 'replica-inventory', data={'project': 'a'}, ok=False))
+        replica = self.root / 'a/state/replica'
+        before = sorted(p.name for p in replica.iterdir())
+        self.assertIn('no project', self.call('a', 'replica-exchange', data={'swarm_id': swarm, 'project': 'nowhere', 'inventory': {'project': {}, 'tasks': {}}}, ok=False))
+        self.assertEqual(sorted(p.name for p in replica.iterdir()), before)
+        # Only hello reads the task digests.
+        self.assertNotIn('replica', self.call('a', 'inventory'))
+
+    def test_a_held_project_does_not_hold_up_hello(self):
+        self.task('a', 'add', '--project', 'a', text='Add rate limiting')
+        lock = self.root / 'a/state/replica' / hashlib.sha256(b'a').hexdigest() / '.lock'
+        with lock.open('a') as file:
+            fcntl.flock(file, fcntl.LOCK_EX)
+            started = time.monotonic()
+            hello = self.call('a', 'hello')
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertNotIn('a', hello['replica']['projects'])
+        self.assertIn('a', self.call('a', 'hello')['replica']['projects'])
+
     def test_initial_join_can_keep_existing_swarm_session_placement(self):
         for node in ['a', 'b']:
             before = self.call(node, 'get'); desired = copy.deepcopy(before['organization'])

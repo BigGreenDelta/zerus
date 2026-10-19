@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::time::Duration;
 use zerus_replica::{Document, Inventory, ProjectStore, Update, SCHEMA};
 
 /// The replica exchange this hgs speaks; members with another one are skipped.
@@ -19,6 +20,9 @@ pub const PROTOCOL: u64 = 1;
 const PAGE: usize = 1 << 20;
 /// Pages of one project in one sync; the next sync continues.
 const MAX_PAGES: usize = 64;
+/// How long a digest waits for a project another command holds; the project is
+/// left out until the next pass.
+const PROJECT_WAIT: Duration = Duration::from_secs(2);
 
 fn root(config: &Config) -> PathBuf {
     config.state.join("replica")
@@ -30,10 +34,14 @@ fn digests(config: &Config) -> Result<BTreeMap<String, String>> {
     let root = root(config);
     let mut out = BTreeMap::new();
     for id in ProjectStore::stored(&root)? {
-        match ProjectStore::open(&root, &id).and_then(|store| store.inventory()) {
-            Ok((inventory, _)) => {
-                out.insert(id, inventory.digest());
-            }
+        match ProjectStore::open_within(&root, &id, PROJECT_WAIT) {
+            Ok(Some(store)) => match store.inventory() {
+                Ok((inventory, _)) => {
+                    out.insert(id, inventory.digest());
+                }
+                Err(error) => eprintln!("hgs swarm: the tasks of {id:?} cannot be read: {error}"),
+            },
+            Ok(None) => eprintln!("hgs swarm: the tasks of {id:?} are busy; they are left out this time"),
             Err(error) => eprintln!("hgs swarm: the tasks of {id:?} cannot be read: {error}"),
         }
     }
@@ -52,8 +60,8 @@ pub fn fingerprint(config: &Config) -> Result<String> {
 }
 
 /// One update on the wire: the document and its Loro updates in base64.
+/// Requests and updates ignore fields a later hgs adds.
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Wire {
     document: Document,
     bytes: String,
@@ -81,8 +89,9 @@ fn decode(wire: Vec<Wire>) -> Result<Vec<Update>> {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Request {
+    /// The requester's swarm; members of another one are refused.
+    swarm_id: String,
     project: String,
     #[serde(default)]
     inventory: Option<Inventory>,
@@ -90,22 +99,51 @@ pub struct Request {
     updates: Vec<Wire>,
 }
 
+/// Admits a member's request: it comes from this swarm and names a project
+/// this member knows (stored here, or alive in the catalog). This member's node.
+fn admit(config: &Config, request: &Request) -> Result<String> {
+    let store = LockedStore::load(config)?;
+    ensure!(request.swarm_id == store.data.catalog.swarm_id, "the request comes from another swarm");
+    let node = store.data.node_id.clone();
+    let alive = alive(config, &store);
+    drop(store);
+    ensure!(
+        alive.contains(&request.project) || ProjectStore::stored(&root(config))?.contains(&request.project),
+        "no project {:?} here",
+        request.project
+    );
+    Ok(node)
+}
+
+/// The projects alive in this member's catalog.
+fn alive(config: &Config, store: &LockedStore) -> BTreeSet<String> {
+    store.snapshot(config)["organization"]["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
 /// `swarm replica-inventory`: what this member holds of the project.
 pub fn inventory(config: &Config, request: Request) -> Result<Value> {
+    let node = admit(config, &request)?;
     let store = ProjectStore::open(&root(config), &request.project)?;
-    Ok(json!({"inventory": store.inventory()?.0}))
+    Ok(json!({"node_id": node, "inventory": store.inventory()?.0}))
 }
 
 /// `swarm replica-exchange`: imports the requester's updates and answers with
 /// a page of what its inventory lacks.
 pub fn exchange(config: &Config, request: Request) -> Result<Value> {
+    let node = admit(config, &request)?;
     let theirs = request
         .inventory
         .ok_or_else(|| anyhow::anyhow!("a replica exchange needs the requester's inventory"))?;
     let store = ProjectStore::open(&root(config), &request.project)?;
     let imported = store.import_updates(decode(request.updates)?)?;
-    let (updates, more) = store.updates_for(&theirs, PAGE)?;
-    Ok(json!({"imported": imported.changed, "refused": imported.refused, "updates": encode(updates), "more": more}))
+    let (ours, _) = store.inventory()?;
+    let (updates, more) = store.updates_for(&ours, &theirs, PAGE)?;
+    Ok(json!({"node_id": node, "imported": imported.changed, "refused": imported.refused, "updates": encode(updates), "more": more}))
 }
 
 /// Exchanges every project whose digest differs with the member behind
@@ -121,6 +159,7 @@ pub fn sync_peer(config: &Config, alias: &str, identity: &Value) -> Result<()> {
         store.replica_outdated.insert(alias.into(), node);
     }
     store.save()?;
+    let alive = alive(config, &store);
     drop(store);
     if !supported {
         return Ok(());
@@ -132,7 +171,9 @@ pub fn sync_peer(config: &Config, alias: &str, identity: &Value) -> Result<()> {
     // A project that fails never keeps the others from their exchange.
     let mut failed = None;
     for project in projects {
-        if local.get(project) != theirs.get(project) {
+        // A project gone from the catalog is exchanged only while both still hold it.
+        let held = local.contains_key(project) && theirs.contains_key(project);
+        if local.get(project) != theirs.get(project) && (held || alive.contains(project)) {
             if let Err(error) = exchange_project(config, alias, project) {
                 failed.get_or_insert(error);
             }
@@ -166,22 +207,38 @@ pub fn replicate(config: &Config, alias: &str, project: &str) -> Result<()> {
 /// Exchanges one project's tasks with the member behind `alias`, page by page.
 pub fn exchange_project(config: &Config, alias: &str, project: &str) -> Result<()> {
     let root = root(config);
+    let (node, swarm) = {
+        let store = LockedStore::load(config)?;
+        let peer = store
+            .data
+            .peers
+            .get(alias)
+            .ok_or_else(|| anyhow::anyhow!("{alias} is not a member of this swarm"))?;
+        (peer.node.clone(), store.data.catalog.swarm_id.clone())
+    };
     for _ in 0..MAX_PAGES {
-        let reply = transport::remote(config, alias, "replica-inventory", Some(&json!({"project": project})))?;
+        let reply = transport::remote(
+            config,
+            alias,
+            "replica-inventory",
+            Some(&json!({"swarm_id": swarm, "project": project})),
+        )?;
+        ensure!(reply["node_id"] == node.as_str(), "the computer behind {alias} changed identity");
         let theirs: Inventory = serde_json::from_value(reply["inventory"].clone())?;
         // The project's lock is held only between network calls.
         let (mine, page, more_mine) = {
             let store = ProjectStore::open(&root, project)?;
             let (mine, _) = store.inventory()?;
-            let (page, more) = store.updates_for(&theirs, PAGE)?;
+            let (page, more) = store.updates_for(&mine, &theirs, PAGE)?;
             (mine, page, more)
         };
         let response = transport::remote(
             config,
             alias,
             "replica-exchange",
-            Some(&json!({"project": project, "inventory": mine, "updates": encode(page)})),
+            Some(&json!({"swarm_id": swarm, "project": project, "inventory": mine, "updates": encode(page)})),
         )?;
+        ensure!(response["node_id"] == node.as_str(), "the computer behind {alias} changed identity");
         let updates = decode(serde_json::from_value(response["updates"].clone())?)?;
         ensure!(response["more"].is_boolean(), "{alias} sent an invalid replica exchange");
         let mut changed = response["imported"].as_u64().unwrap_or(0) as usize;

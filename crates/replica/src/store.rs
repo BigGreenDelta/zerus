@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// A rank longer than this renumbers its stage (ranks stay valid up to 64).
 const RENUMBER_AT: usize = 32;
@@ -117,6 +118,16 @@ fn blocks(bytes: &[u8]) -> (Vec<(&[u8], usize)>, bool) {
 impl ProjectStore {
     /// Opens the project's directory below `root` and waits for its lock.
     pub fn open(root: &Path, project: &str) -> Result<Self> {
+        Ok(Self::opening(root, project, None)?.expect("open waits for the lock"))
+    }
+
+    /// Opens the project like `open`, but gives up after `wait` while another
+    /// process holds its lock.
+    pub fn open_within(root: &Path, project: &str, wait: Duration) -> Result<Option<Self>> {
+        Self::opening(root, project, Some(wait))
+    }
+
+    fn opening(root: &Path, project: &str, wait: Option<Duration>) -> Result<Option<Self>> {
         if project.is_empty() || project.len() > 128 || project.chars().any(char::is_control) {
             return Err(Error::new("invalid project ID"));
         }
@@ -129,7 +140,18 @@ impl ProjectStore {
             .truncate(false)
             .write(true)
             .open(dir.join(".lock"))?;
-        lock.lock_exclusive()?;
+        match wait {
+            None => lock.lock_exclusive()?,
+            Some(wait) => {
+                let deadline = Instant::now() + wait;
+                while lock.try_lock_exclusive().is_err() {
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
         // A crash during an atomic write leaves its temporary file behind. No
         // one else writes while this lock is held, so any left now is garbage;
         // removing it is best effort.
@@ -149,11 +171,11 @@ impl ProjectStore {
         if !name.exists() {
             write_atomic(&name, project.as_bytes())?;
         }
-        Ok(Self {
+        Ok(Some(Self {
             dir,
             project: project.into(),
             _lock: lock,
-        })
+        }))
     }
 
     pub fn project_id(&self) -> &str {

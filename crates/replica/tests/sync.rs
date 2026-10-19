@@ -2,7 +2,8 @@
 //! updates and imports, as computers exchange them.
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 use zerus_replica::{
     Actor, Document, Inventory, NewTask, ProjectStore, Settings, Stage, Target, TaskDoc, Update,
 };
@@ -32,7 +33,9 @@ fn replicate(from: &ProjectStore, to: &ProjectStore, limit: usize) -> usize {
     let mut pages = 0;
     loop {
         let (theirs, _) = to.inventory().unwrap();
-        let (updates, more) = from.updates_for(&theirs, limit).unwrap();
+        let (updates, more) = from
+            .updates_for(&from.inventory().unwrap().0, &theirs, limit)
+            .unwrap();
         if updates.is_empty() {
             return pages;
         }
@@ -89,12 +92,20 @@ fn two_replicas_meet_and_then_agree() {
         b.inventory().unwrap().0.digest()
     );
     assert!(a
-        .updates_for(&b.inventory().unwrap().0, 1 << 20)
+        .updates_for(
+            &a.inventory().unwrap().0,
+            &b.inventory().unwrap().0,
+            1 << 20
+        )
         .unwrap()
         .0
         .is_empty());
     assert!(b
-        .updates_for(&a.inventory().unwrap().0, 1 << 20)
+        .updates_for(
+            &b.inventory().unwrap().0,
+            &a.inventory().unwrap().0,
+            1 << 20
+        )
         .unwrap()
         .0
         .is_empty());
@@ -139,7 +150,9 @@ fn updates_come_in_pages_and_a_large_document_alone() {
     // A page stays within its limit (each snapshot here is about 5 KB) unless one
     // document alone exceeds it.
     let (theirs, _) = b.inventory().unwrap();
-    let (page, more) = a.updates_for(&theirs, 12_000).unwrap();
+    let (page, more) = a
+        .updates_for(&a.inventory().unwrap().0, &theirs, 12_000)
+        .unwrap();
     assert!(more);
     assert!(
         page.len() >= 2 && page.iter().map(|u| u.bytes.len()).sum::<usize>() <= 12_000,
@@ -149,7 +162,9 @@ fn updates_come_in_pages_and_a_large_document_alone() {
     assert!(replicate(&a, &b, 12_000) >= 2);
     assert_eq!(texts(&b).len(), 6);
     let big = add(&a, &noise("big", 20_000));
-    let (page, _) = a.updates_for(&b.inventory().unwrap().0, 1000).unwrap();
+    let (page, _) = a
+        .updates_for(&a.inventory().unwrap().0, &b.inventory().unwrap().0, 1000)
+        .unwrap();
     assert_eq!(page.len(), 1);
     assert_eq!(page[0].document, Document::Task(big.uuid().to_owned()));
 }
@@ -233,6 +248,128 @@ fn a_damaged_copy_is_set_aside_for_a_good_one() {
     assert_eq!(fs::read(&kept[0]).unwrap(), b"damaged");
 }
 
+/// Dates a file a minute back, as files written before the last inventory are.
+fn settle(path: &Path) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(60))
+        .unwrap();
+}
+
+fn cache_file(root: &Path) -> PathBuf {
+    root.join(format!("{:x}", Sha256::digest(b"project-1")))
+        .join("inventory.json")
+}
+
+/// Changes one task's remembered entry in the inventory cache.
+fn remember(root: &Path, uuid: &str, change: impl FnOnce(&mut serde_json::Value)) {
+    let mut cache: serde_json::Value =
+        serde_json::from_slice(&fs::read(cache_file(root)).unwrap()).unwrap();
+    change(&mut cache["tasks"][uuid]);
+    fs::write(cache_file(root), serde_json::to_vec(&cache).unwrap()).unwrap();
+}
+
+#[test]
+fn a_task_that_does_not_load_is_read_again_only_when_its_files_change() {
+    let root = tempfile::tempdir().unwrap();
+    let a = store(root.path());
+    let broken = add(&a, "Broken here");
+    let file = task_file(root.path(), broken.uuid());
+    fs::write(&file, b"damaged").unwrap();
+    settle(&file);
+    assert_eq!(a.inventory().unwrap().1.len(), 1);
+    // The failure is remembered with the file's stamps and named again as it was.
+    remember(root.path(), broken.uuid(), |entry| {
+        entry["error"] = "remembered".into()
+    });
+    assert_eq!(a.inventory().unwrap().1[0].error, "remembered");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_file_written_moments_ago_is_always_read() {
+    use std::os::unix::fs::MetadataExt;
+    // A rewrite within one timestamp tick can hand a file its old inode back,
+    // so a stamp that matches is trusted only once the file is older than that.
+    let root = tempfile::tempdir().unwrap();
+    let a = store(root.path());
+    let task = add(&a, "Add rate limiting");
+    let file = task_file(root.path(), task.uuid());
+    settle(&file);
+    let (first, _) = a.inventory().unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(SystemTime::now())
+        .unwrap();
+    let meta = fs::metadata(&file).unwrap();
+    let modified = meta
+        .modified()
+        .unwrap()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    remember(root.path(), task.uuid(), |entry| {
+        entry["files"][0] = serde_json::json!([
+            meta.len(),
+            modified.as_secs(),
+            modified.subsec_nanos(),
+            meta.ino()
+        ]);
+        entry["version"] = serde_json::json!({"7": 1});
+    });
+    assert_eq!(a.inventory().unwrap().0, first);
+}
+
+#[test]
+fn a_held_project_is_skipped_after_a_short_wait() {
+    let root = tempfile::tempdir().unwrap();
+    let held = store(root.path());
+    let started = Instant::now();
+    assert!(
+        ProjectStore::open_within(root.path(), "project-1", Duration::from_millis(200))
+            .unwrap()
+            .is_none()
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    drop(held);
+    assert!(
+        ProjectStore::open_within(root.path(), "project-1", Duration::from_millis(200))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn an_inventory_that_claims_too_much_is_refused_and_then_healed() {
+    // A replica that names changes it lacks gets updates it cannot apply; they
+    // are refused, and the next exchange with its true inventory heals it.
+    let (here, there) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a, b) = (store(here.path()), store(there.path()));
+    let task = add(&a, "Add rate limiting");
+    replicate(&a, &b, 1 << 20);
+    let mut changed = a.load(task.uuid()).unwrap();
+    changed.comment("First", &Actor::Person, 2).unwrap();
+    a.save(&mut changed).unwrap();
+    let after_first = a.inventory().unwrap().0;
+    changed.comment("Second", &Actor::Person, 3).unwrap();
+    a.save(&mut changed).unwrap();
+    let (updates, _) = a
+        .updates_for(&a.inventory().unwrap().0, &after_first, 1 << 20)
+        .unwrap();
+    let imported = b.import_updates(updates).unwrap();
+    assert_eq!(imported.refused.len(), 1);
+    assert!(
+        imported.refused[0].error.contains("could not be applied"),
+        "{}",
+        imported.refused[0].error
+    );
+    replicate(&a, &b, 1 << 20);
+    assert_eq!(a.inventory().unwrap().0, b.inventory().unwrap().0);
+}
+
 fn task_file(root: &Path, uuid: &str) -> std::path::PathBuf {
     root.join(format!("{:x}", Sha256::digest(b"project-1")))
         .join("tasks")
@@ -244,11 +381,9 @@ fn the_inventory_reads_a_task_again_only_when_its_files_change() {
     let root = tempfile::tempdir().unwrap();
     let a = store(root.path());
     let task = add(&a, "Add rate limiting");
+    settle(&task_file(root.path(), task.uuid()));
     let (first, _) = a.inventory().unwrap();
-    let cache = root
-        .path()
-        .join(format!("{:x}", Sha256::digest(b"project-1")))
-        .join("inventory.json");
+    let cache = cache_file(root.path());
     // While the task's files stay as they were, the cached version is used as is.
     let text = fs::read_to_string(&cache).unwrap();
     let peer = first.tasks[task.uuid()].keys().next().unwrap().clone();

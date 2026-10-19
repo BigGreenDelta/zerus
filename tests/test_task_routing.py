@@ -32,6 +32,8 @@ for name in ('HGS_SESSION', 'HGS_RUN_ID'):
     env.pop(name, None)  # an SSH login is no agent
 args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
+if (root / ('failexchange-' + alias)).exists() and args[1:2] in (['replica-inventory'], ['replica-exchange']):
+    print('Connection reset by peer', file=sys.stderr); sys.exit(255)
 if (root / ('noreplica-' + alias)).exists():
     # hgs from before task replication: no replica field in hello.
     result = subprocess.run([os.environ['ROUTING_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
@@ -146,6 +148,7 @@ class TaskRouting(unittest.TestCase):
         task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
         sent = self.task("a", "send", task["id"], "--project", "project-1")
         self.assertEqual(sent["receipt"]["status"], "submitted")
+        self.assertTrue(sent["synced"])
         self.wait_received("[Zerus task orchard/" + task["id"] + "]")
         self.wait_received("Add rate limiting")
         # Both copies show it In progress in b's session, sent by the person.
@@ -165,6 +168,34 @@ class TaskRouting(unittest.TestCase):
         self.wait_received("Add rate limiting")
         calls = [line.split()[1:3] for line in (self.root / "calls").read_text().splitlines()]
         self.assertEqual(calls, [["swarm", "hello"], ["task", "send"], ["swarm", "replica-inventory"], ["swarm", "replica-exchange"]])
+
+    def test_this_computers_copy_refuses_first(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        self.task("a", "send", task["id"], "--project", "project-1")
+        self.wait_received("Add rate limiting")
+        self.confirm()
+        self.task("a", "cancel", task["id"], "--project", "project-1")
+        # a's copy came back In review: neither a send nor a cancel asks b now.
+        (self.root / "calls").write_text("")
+        self.assertIn("a task in In review is not sent", self.task("a", "send", task["id"], "--project", "project-1", ok=False))
+        self.assertIn("only a task In progress can be cancelled", self.task("a", "cancel", task["id"], "--project", "project-1", ok=False))
+        self.assertEqual((self.root / "calls").read_text(), "")
+
+    def test_a_send_whose_copy_cannot_come_back_says_so(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        self.swarm("a", "sync")
+        # The connection drops after b pasted and recorded the send.
+        (self.root / "failexchange-b").touch()
+        sent = self.task("a", "send", task["id"], "--project", "project-1")
+        self.wait_received("Add rate limiting")
+        self.assertFalse(sent["synced"])
+        self.assertEqual(sent["task"]["stage"], "todo")
+        # b's record comes with the next sync; a second send is refused here then.
+        (self.root / "failexchange-b").unlink()
+        self.swarm("a", "sync")
+        self.assertEqual(self.get("a", task)["stage"], "active")
+        self.assertIn("already In progress in codex/remote", self.task("a", "send", task["id"], "--project", "project-1", ok=False))
+        self.assertEqual(self.received().count("Add rate limiting"), 1)
 
     def test_an_any_session_task_goes_to_the_session_named_there(self):
         task = self.add("Document the setup")

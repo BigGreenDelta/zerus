@@ -128,8 +128,8 @@ void showSwarmDialog(HgsClient *client,SwarmController *controller,const FleetSt
             auto *access=machines->item(row,1);access->setText(machine.value("local").toBool()?QObject::tr("This computer"):alias.isEmpty()?QObject::tr("Not configured"):alias);access->setToolTip(access->text());
             const auto state=peers.value(alias).toObject();QString text=machine.value("local").toBool()?QObject::tr("Local catalog"):QObject::tr("Shared through swarm");
             if(!state.isEmpty()){text=state.value("error").toString();if(text.isEmpty()){const auto timestamp=qint64(state.value("last_sync").toDouble());text=timestamp?QObject::tr("Synced %1").arg(QDateTime::fromSecsSinceEpoch(timestamp).toLocalTime().toString("HH:mm:ss")):QObject::tr("Waiting to sync");}}
-            // Its Zerus syncs the catalog but not tasks.
-            if(state.value("tasks_outdated").toBool())text+=QObject::tr(" · Update Zerus there to share tasks");
+            // Its Zerus syncs the catalog but not tasks; an error is shown as it is.
+            if(state.value("tasks_outdated").toBool()&&state.value("error").toString().isEmpty())text+=QObject::tr(" · Update Zerus there to share tasks");
             auto *item=machines->item(row,2);item->setText(text);item->setToolTip(text);
         }
         machines->setSortingEnabled(true);filterMachines();
