@@ -619,7 +619,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             }
         } }
         item { OutlinedTextField(model.sessionQuery, { model.changeSessionQuery(it) }, Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text(if(model.sessionFilter==SessionFilter.Archive) "Search archive names and IDs" else "Search sessions and IDs") },
-            leadingIcon = { Icon(Icons.Default.Search, "Search sessions") }, shape = RoundedCornerShape(14.dp)) }
+            leadingIcon = { Icon(Icons.Default.Search, "Search sessions") },
+            trailingIcon = { if (model.sessionQuery.isNotEmpty()) IconButton(onClick = { model.changeSessionQuery("") }) { Icon(Icons.Default.Close, "Clear search") } },
+            shape = RoundedCornerShape(14.dp)) }
         item { Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             SessionFilter.entries.forEach { filter ->
                 val selected = model.sessionFilter == filter
