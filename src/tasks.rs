@@ -72,22 +72,49 @@ fn project(config: &Config, wanted: &str) -> Result<(String, String)> {
     }
 }
 
-/// A task reference: `PROJECT/T-xxxxxx`, or `T-xxxxxx` (or a UUID) with `--project`.
+/// The project a command works on when it names none: the calling agent's
+/// session's catalog project. The person is told `missing`.
+fn own_project(config: &Config, who: &Actor, missing: &str) -> Result<(String, String)> {
+    let Actor::Agent(own) = who else {
+        return Err(fail(missing));
+    };
+    crate::swarm::session_project(config, &own.session)
+        .map_err(fail)?
+        .ok_or_else(|| {
+            fail(format!(
+                "{} belongs to no project; name one: PROJECT/T-xxxxxx or --project P",
+                own.session
+            ))
+        })
+}
+
+/// `--project P`, or the calling agent's own project.
+fn project_arg(config: &Config, args: &[String], who: &Actor) -> Result<(String, String)> {
+    match option(args, "--project")? {
+        Some(wanted) => project(config, wanted),
+        None => own_project(config, who, USAGE),
+    }
+}
+
+/// A task reference: `PROJECT/T-xxxxxx`, or `T-xxxxxx` (or a UUID) with
+/// `--project`, or of the calling agent's own project.
 struct Reference {
     project: (String, String),
     task: String,
 }
 
-fn reference(config: &Config, args: &[String]) -> Result<Reference> {
+fn reference(config: &Config, args: &[String], who: &Actor) -> Result<Reference> {
     let value = args.first().ok_or_else(|| fail(USAGE))?;
     let (project_name, task) = match value.rsplit_once('/') {
         Some((project, task)) => (Some(project), task),
         None => (option(args, "--project")?, value.as_str()),
     };
-    let project_name =
-        project_name.ok_or_else(|| fail("name the project: PROJECT/T-xxxxxx or --project P"))?;
+    let found = match project_name {
+        Some(name) => project(config, name)?,
+        None => own_project(config, who, "name the project: PROJECT/T-xxxxxx or --project P")?,
+    };
     Ok(Reference {
-        project: project(config, project_name)?,
+        project: found,
         task: task.to_owned(),
     })
 }
@@ -140,10 +167,12 @@ impl Machines {
     }
 }
 
-/// The agent of the session that runs this command, as hooks know it (both
-/// `HGS_SESSION` and `HGS_RUN_ID`), or the person. A send or cancel another
-/// computer forwards (`forwardable`) names its agent with `--agent NODE/SESSION`;
-/// an agent itself always acts as its own session.
+/// The agent of the session that runs this command, or the person. A command
+/// whose environment names a session (`HGS_SESSION`, `HGS_RUN_ID`) acts as its
+/// agent only when it proves it as `hgs self` does: the run is live on this
+/// computer and the command descends from its agent; the proof follows a rename
+/// to the session's current name. A send or cancel another computer forwards
+/// (`forwardable`) names its agent with `--agent NODE/SESSION`.
 fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
     let var = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
     if let Some(agent) = option(args, "--agent")? {
@@ -162,13 +191,18 @@ fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
             session: session.to_owned(),
         }));
     }
-    Ok(match (var("HGS_SESSION"), var("HGS_RUN_ID")) {
-        (Some(session), Some(_)) => Actor::Agent(SessionKey {
-            machine: here.to_owned(),
-            session,
-        }),
-        _ => Actor::Person,
-    })
+    let (Some(claimed), Some(_)) = (var("HGS_SESSION"), var("HGS_RUN_ID")) else {
+        return Ok(Actor::Person);
+    };
+    let record = crate::state::session_graph::caller_record().ok_or_else(|| {
+        fail(format!(
+            "this command names the agent session {claimed}, but that run is not live on this computer or does not run it; run hgs task from the session's own shell"
+        ))
+    })?;
+    Ok(Actor::Agent(SessionKey {
+        machine: here.to_owned(),
+        session: record["name"].as_str().unwrap_or(&claimed).to_owned(),
+    }))
 }
 
 fn view(task: &TaskDoc, project_name: &str, with_log: bool, machines: &Machines) -> Result<Value> {
@@ -220,8 +254,9 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     match action.as_str() {
         "list" => list(config, args),
         "get" => {
-            let r = reference(config, args)?;
             let machines = machines(config)?;
+            let who = actor(&machines.here, args, false)?;
+            let r = reference(config, args, &who)?;
             let task = store(config, &r.project.0)?
                 .find(&r.task)
                 .map_err(fail)?;
@@ -237,15 +272,13 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
 }
 
 fn list(config: &Config, args: &[String]) -> Result<i32> {
-    let (id, name) = project(
-        config,
-        option(args, "--project")?.ok_or_else(|| fail(USAGE))?,
-    )?;
+    let machines = machines(config)?;
+    let who = actor(&machines.here, args, false)?;
+    let (id, name) = project_arg(config, args, &who)?;
     let only = option(args, "--stage")?
         .map(Stage::parse)
         .transpose()
         .map_err(fail)?;
-    let machines = machines(config)?;
     // One load of the project; each stage is then a filter of the sorted list.
     let (tasks, damaged) = store(config, &id)?.listing().map_err(fail)?;
     let mut out = Vec::new();
@@ -268,12 +301,9 @@ fn list(config: &Config, args: &[String]) -> Result<i32> {
 
 fn add(config: &Config, args: &[String]) -> Result<i32> {
     let text = stdin_text("prompt")?;
-    let (id, name) = project(
-        config,
-        option(args, "--project")?.ok_or_else(|| fail(USAGE))?,
-    )?;
     let machines = machines(config)?;
     let author = actor(&machines.here, args, false)?;
+    let (id, name) = project_arg(config, args, &author)?;
     let stage = if flag(args, "--backlog") {
         Stage::Backlog
     } else {
@@ -332,11 +362,11 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
         "report" => Some(stdin_text("report")?),
         _ => None,
     };
-    let r = reference(config, args)?;
-    let (project_id, project_name) = (&r.project.0, &r.project.1);
     let machines = machines(config)?;
     let here = machines.here.as_str();
     let who = actor(here, args, matches!(action, "send" | "cancel"))?;
+    let r = reference(config, args, &who)?;
+    let (project_id, project_name) = (&r.project.0, &r.project.1);
     let store = store(config, project_id)?;
     let mut task = store.find(&r.task).map_err(fail)?;
     // A send or cancel for a session another computer runs happens there.
@@ -642,10 +672,8 @@ fn settings(config: &Config, args: &[String]) -> Result<i32> {
     } else {
         None
     };
-    let (id, name) = project(
-        config,
-        option(args, "--project")?.ok_or_else(|| fail(USAGE))?,
-    )?;
+    let who = actor(&machines(config)?.here, args, false)?;
+    let (id, name) = project_arg(config, args, &who)?;
     let store = store(config, &id)?;
     let mut doc = store.project().map_err(fail)?;
     if let Some(changes) = changes {

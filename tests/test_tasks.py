@@ -25,11 +25,57 @@ fd = sys.stdin.fileno()
 tty.setraw(fd)
 os.write(1, b'\x1b[?2004h\x1b[2J\x1b[H' + '› '.encode())
 (root / 'agent-pid').write_text(str(os.getpid()))
+# Runs the commands the test hands this agent, the way an agent's shell runs them.
+import json, subprocess, threading, time
+def commands():
+    inbox, outbox = root / 'commands', root / 'results'
+    while True:
+        for request in sorted(inbox.glob('*.json')):
+            job = json.loads(request.read_text())
+            request.unlink()
+            done = subprocess.run(job['argv'], input=job['stdin'], env=job['env'], text=True, capture_output=True)
+            answer = outbox / (request.stem + '.tmp')
+            answer.write_text(json.dumps(dict(code=done.returncode, stdout=done.stdout, stderr=done.stderr)))
+            answer.rename(outbox / request.name)
+        time.sleep(.02)
+threading.Thread(target=commands, daemon=True).start()
 while True:
     value = os.read(fd, 65536)
     if not value: break
     with (root / 'received').open('ab') as file: file.write(value)
 '''
+
+
+def agent_record(state, env, name, run_id, pid=None, **fields):
+    """A live run of `name` whose agent is process `pid` (this test process by
+    default): commands its descendants run act as that session's agent."""
+    pid = pid or os.getpid()
+    start = subprocess.check_output(["ps", "-p", str(pid), "-o", "lstart="],
+                                    env=dict(env, LC_ALL="C", TZ="UTC"), text=True).strip()
+    record = dict(version=1, name=name, agent=name.split("/")[0], run_id=run_id,
+                  conversation_id=str(uuid.uuid4()), pid=pid, process_start=start, activity="idle",
+                  phase="idle", active_tools={}, subagents={}, last_event_at=time.time(), created=time.time())
+    record.update(fields)
+    path = Path(state) / (hashlib.sha256(name.encode()).hexdigest() + ".json")
+    path.write_text(json.dumps(record))
+    return path
+
+
+def join(env, project_id, name):
+    """Moves this computer's session `name` into the catalog project `project_id`."""
+    def swarm(*args, data=None):
+        result = subprocess.run([str(HGS), "swarm", *args], input=json.dumps(data) if data is not None else None,
+                                env=env, text=True, capture_output=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+    node = swarm("export")["node_id"]
+    before = swarm("get")
+    desired = json.loads(json.dumps(before["organization"]))
+    for project in desired["projects"]:
+        project["sessions"] = [s for s in project.get("sessions", []) if s.split("\n", 1)[-1] != name]
+        if project["id"] == project_id:
+            project["sessions"].append(node + "\n" + name)
+    swarm("apply", data=dict(base=before["organization"], desired=desired, versions=before["versions"]))
 
 
 class Fixture(unittest.TestCase):
@@ -41,6 +87,7 @@ class Fixture(unittest.TestCase):
         self.bin.mkdir(parents=True)
         self.state = self.root / "state"
         self.state.mkdir()
+        self.runs = {}
         self.socket = self.root / "socket"
         self.env = dict(os.environ, HOME=str(self.root), TASK_FIXTURE=str(self.root),
                         HGS_CONFIG_DIR=str(self.root / "config"), HGS_STATE_DIR=str(self.state),
@@ -65,11 +112,18 @@ class Fixture(unittest.TestCase):
         path.write_text(value)
         path.chmod(0o755)
 
+    def agent(self, name):
+        """The run of `name` whose agent is this test process."""
+        if name not in self.runs:
+            self.runs[name] = "run-" + str(uuid.uuid4())
+            agent_record(self.state, self.env, name, self.runs[name])
+        return self.runs[name]
+
     def hgs(self, *args, text=None, ok=True, session=None):
         env = dict(self.env)
         if session:
-            # An agent, as hooks know it: its session and its run.
-            env.update(HGS_SESSION=session, HGS_RUN_ID="run-test")
+            # An agent: its session and its run, which this test process owns.
+            env.update(HGS_SESSION=session, HGS_RUN_ID=self.agent(session))
         result = subprocess.run([str(HGS), "task", *args], input=text, env=env, text=True,
                                 capture_output=True, timeout=30)
         if ok:
@@ -250,11 +304,52 @@ class TaskCommands(Fixture):
         self.assertEqual(len(listing["damaged"]), 1)
 
 
+class AgentIdentity(Fixture):
+    def test_an_unproven_session_is_refused(self):
+        env = dict(self.env, HGS_SESSION="codex/api", HGS_RUN_ID="run-that-ended")
+        result = subprocess.run([str(HGS), "task", "add", "--project", "orchard"], input="Fix it", env=env,
+                                text=True, capture_output=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("names the agent session codex/api", result.stderr)
+        self.assertEqual(self.ids("todo"), [])
+        # A record without the owned process proves nothing either.
+        agent_record(self.state, self.env, "codex/api", "run-stale", process_start="not this process")
+        env["HGS_RUN_ID"] = "run-stale"
+        result = subprocess.run([str(HGS), "task", "list", "--project", "orchard"], env=env,
+                                text=True, capture_output=True, timeout=30)
+        self.assertIn("names the agent session codex/api", result.stderr)
+
+    def test_a_renamed_session_acts_under_its_current_name(self):
+        run = self.agent("codex/api")
+        old = self.state / (hashlib.sha256(b"codex/api").hexdigest() + ".json")
+        old.unlink()
+        agent_record(self.state, self.env, "codex/api-renamed", run)
+        task = self.add("Document the setup", session="codex/api")
+        self.assertEqual((task["target"]["session"], task["author"]["session"]), ("codex/api-renamed", "codex/api-renamed"))
+
+    def test_an_agent_works_on_its_sessions_project(self):
+        self.agent("codex/api")
+        self.assertIn("codex/api belongs to no project", self.hgs("list", session="codex/api", ok=False))
+        join(self.env, "project-2", "codex/api")
+        filed = self.hgs("add", "--json", text="Theme the header", session="codex/api")["task"]
+        self.assertTrue(filed["ref"].startswith("team/web/"), filed["ref"])
+        self.assertEqual(self.hgs("list", session="codex/api")["project"]["name"], "team/web")
+        self.assertEqual(self.hgs("get", filed["id"], session="codex/api")["task"]["uuid"], filed["uuid"])
+        # A reference or --project still names another project.
+        other = self.add("Add rate limiting")
+        self.assertEqual(self.hgs("get", other["ref"], session="codex/api")["task"]["uuid"], other["uuid"])
+        self.assertEqual(self.hgs("list", "--project", "orchard", session="codex/api")["project"]["name"], "orchard")
+        # The person still names the project.
+        self.assertIn("usage", self.hgs("list", ok=False))
+
+
 @unittest.skipUnless(TMUX, "tmux is required for delivery")
 class TaskDelivery(Fixture):
     def setUp(self):
         super().setUp()
         (self.root / "agent.py").write_text(AGENT)
+        (self.root / "commands").mkdir()
+        (self.root / "results").mkdir()
         self.name = "codex/task-test"
         self.run_id = str(uuid.uuid4())
         self.tmux("new-session", "-d", "-s", self.name, "-x", "100", "-y", "30", "python3", str(self.root / "agent.py"))
@@ -269,11 +364,8 @@ class TaskDelivery(Fixture):
                                         env=dict(self.env, LC_ALL="C", TZ="UTC"), text=True).strip()
         pane = self.tmux("display-message", "-p", "-t", "=" + self.name + ":", "#{pane_id}").strip()
         self.tmux("set-option", "-t", "=" + self.name + ":", "@hgs_run", self.run_id)
-        self.record_path = self.state / (hashlib.sha256(self.name.encode()).hexdigest() + ".json")
-        self.record_path.write_text(json.dumps(dict(
-            version=1, name=self.name, agent="codex", run_id=self.run_id, conversation_id=str(uuid.uuid4()),
-            pane=pane, pid=pid, process_start=start, activity="idle", phase="idle", active_tools={},
-            subagents={}, last_event_at=time.time(), created=time.time())))
+        self.record_path = agent_record(self.state, self.env, self.name, self.run_id, pid=pid, agent="codex", pane=pane)
+        self.runs[self.name] = self.run_id
 
     def stop(self):
         # kill-server acknowledges before its panes exit; wait for them before the
@@ -291,6 +383,22 @@ class TaskDelivery(Fixture):
             if pids:
                 time.sleep(.02)
         self.assertFalse(pids, "owned fixture panes survived tmux shutdown")
+
+    def as_agent(self, *args, text=None, ok=True):
+        """`hgs task ARGS` run by the scripted agent of `self.name`, as its shell would."""
+        job = str(uuid.uuid4())
+        env = dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id)
+        request = self.root / "commands" / (job + ".tmp")
+        request.write_text(json.dumps(dict(argv=[str(HGS), "task", *args], stdin=text or "", env=env)))
+        request.rename(self.root / "commands" / (job + ".json"))
+        result = self.root / "results" / (job + ".json")
+        for _ in range(1500):
+            if result.exists():
+                done = json.loads(result.read_text())
+                self.assertEqual(done["code"] == 0, ok, done["stderr"] or done["stdout"])
+                return done["stdout"] if ok else done["stderr"]
+            time.sleep(.02)
+        self.fail("the scripted agent never ran " + " ".join(args))
 
     def tmux(self, *args):
         result = subprocess.run([str(self.bin / "tmux"), *args], env=self.env, capture_output=True, text=True, timeout=5)
@@ -332,10 +440,10 @@ class TaskDelivery(Fixture):
         self.wait_received("Add rate limiting")
         self.wait_received("`hgs task report orchard/" + task["id"] + "`")
         self.assertIn("already In progress in " + self.name, self.hgs("send", task["ref"], ok=False))
-        done = self.hgs("report", task["ref"], text="Token bucket; 6 tests.", session=self.name)
+        done = json.loads(self.as_agent("report", task["ref"], "--json", text="Token bucket; 6 tests."))
         self.assertTrue(done["moved_to_review"])
         self.assertEqual((done["task"]["stage"], done["task"]["summary"]), ("review", "Token bucket; 6 tests."))
-        again = self.hgs("report", task["ref"], text="Also updated the README.", session=self.name)
+        again = json.loads(self.as_agent("report", task["ref"], "--json", text="Also updated the README."))
         self.assertFalse(again["moved_to_review"])
 
     def test_an_any_session_task_needs_a_session(self):
@@ -362,15 +470,15 @@ class TaskDelivery(Fixture):
     def test_project_settings_bound_agents(self):
         self.settings(agents_other=False)
         other = self.add("Elsewhere", "--target", "codex/other")
-        self.assertIn("only in their own session", self.hgs("send", other["ref"], session=self.name, ok=False))
+        self.assertIn("only in their own session", self.as_agent("send", other["ref"], ok=False))
         self.assertEqual(self.received(), "")
         own = self.add("Mine")
-        self.hgs("send", own["ref"], session=self.name)
+        self.as_agent("send", own["ref"], "--json")
         self.wait_received("Mine")
         self.confirm()
         self.settings(agents_other=True, agent_limit=1)
         another = self.add("One more")
-        self.assertIn("1 tasks started by agents per hour", self.hgs("send", another["ref"], session=self.name, ok=False))
+        self.assertIn("1 tasks started by agents per hour", self.as_agent("send", another["ref"], ok=False))
         # People are not limited.
         self.assertEqual(self.hgs("send", another["ref"], "--session", self.name)["task"]["stage"], "active")
 
@@ -378,7 +486,7 @@ class TaskDelivery(Fixture):
         task = self.add("Refactor the parser", "--target", self.name)
         self.hgs("send", task["ref"])
         self.confirm()
-        self.assertIn("a task you were sent", self.hgs("cancel", task["ref"], session=self.name, ok=False))
+        self.assertIn("a task you were sent", self.as_agent("cancel", task["ref"], ok=False))
         out = self.hgs("cancel", task["ref"], "--reason", "Wrong approach")
         self.assertEqual((out["task"]["stage"], out["task"]["cancel_reason"]), ("review", "Wrong approach"))
         self.assertEqual([(e["kind"], e.get("text", "")) for e in out["task"]["log"][-2:]],

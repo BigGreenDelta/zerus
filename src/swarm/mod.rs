@@ -110,6 +110,20 @@ pub(crate) fn projects(config: &Config) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// The live catalog project (ID, name) that this computer's session `name`
+/// belongs to, if any.
+pub(crate) fn session_project(config: &Config, name: &str) -> Result<Option<(String, String)>> {
+    let snapshot = LockedStore::load(config)?.snapshot(config);
+    // The snapshot names this computer's sessions "<this host>\n<session>".
+    let member = format!("{}\n{name}", config.host());
+    Ok(snapshot["organization"]["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["sessions"].as_array().is_some_and(|all| all.iter().any(|s| s.as_str() == Some(member.as_str()))))
+        .and_then(|p| Some((p["id"].as_str()?.to_owned(), p["name"].as_str().unwrap_or_default().to_owned()))))
+}
+
 /// Persist and return the machine identity without retaining the catalog lock.
 pub(crate) fn local_node_id(config: &Config) -> Result<String> {
     let mut store = LockedStore::load(config)?;

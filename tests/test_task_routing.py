@@ -76,7 +76,10 @@ class TaskRouting(unittest.TestCase):
         env = dict(self.base, HOME=str(self.root / node / "profile"), HGS_CONFIG_DIR=str(self.root / node / "config"),
                    HGS_STATE_DIR=str(self.root / node / "state"), TASK_FIXTURE=str(self.root / node))
         if session:
-            env.update(HGS_SESSION=session, HGS_RUN_ID="run-test")
+            # An agent of this computer: a run this test process owns.
+            run = "run-" + session.replace("/", "-")
+            test_tasks.agent_record(self.root / node / "state", env, session, run)
+            env.update(HGS_SESSION=session, HGS_RUN_ID=run)
         return env
 
     def swarm(self, node, *args, data=None):
