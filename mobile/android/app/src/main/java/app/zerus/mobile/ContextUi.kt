@@ -32,10 +32,10 @@ import kotlinx.coroutines.delay
             while (true) { delay(1000); nowMillis = System.currentTimeMillis() }
     }
     var details by remember(target.key) { mutableStateOf(false) }
-    var clear by remember(target.key) { mutableStateOf(false) }
+    var clear by remember(target.key) { mutableStateOf<Boolean?>(null) }
     var review by remember(target.key) { mutableStateOf<ContextOperation?>(null) }
     var restore by remember(target.key) { mutableStateOf<Draft?>(null) }
-    if(details || clear || review != null || restore != null) ObscureConversation()
+    if(details || clear != null || review != null || restore != null) ObscureConversation()
     val dark = MaterialTheme.colorScheme.background.luminance() < .5f
     val muted = Color(ContextPresentation.color(ContextTone.Muted, dark))
     val operation = model.contextOperation(target)
@@ -104,8 +104,10 @@ import kotlinx.coroutines.delay
             val clearReason = model.contextActionReason(target, "clear_context").ifBlank { view.clearReason }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = { captureDraft(); model.compactContext(target) }, enabled = available && compactReason.isBlank()) { Text("Compact") }
-                TextButton(onClick = { captureDraft(); clear = true }, enabled = available && clearReason.isBlank()) { Text("Clear context") }
+                TextButton(onClick = { captureDraft(); clear = false }, enabled = available && clearReason.isBlank()) { Text("Clear context") }
             }
+            if (model.contextActionReason(target, "clear_context", dismissPrompt = true).isBlank())
+                TextButton(onClick = { captureDraft(); clear = true }, enabled = available) { Text("Dismiss and clear…") }
             Button(onClick = { val captured = captureDraft(); model.compactContext(target, continueDraft = true, expectedDraft = captured) },
                 enabled = available && compactReason.isBlank() &&
                     (model.draft(target).text.isNotBlank() || model.draft(target).attachments.isNotEmpty()) && !model.sendingBlocked(target)) {
@@ -120,21 +122,22 @@ import kotlinx.coroutines.delay
             Spacer(Modifier.height(20.dp))
         }
     }
-    if (clear) ClearContextConfirmation(model, target, onDismiss = { clear = false }, beforeClear = { captureDraft() })
+    clear?.let { dismissPrompt -> ClearContextConfirmation(model, target, onDismiss = { clear = null },
+        beforeClear = { captureDraft() }, dismissPrompt = dismissPrompt) }
     review?.let { operation -> ContextOperationReview(model, operation, onDismiss = { review = null }) }
     restore?.let { previous -> ContextDraftRestore(model, previous, target, beforeRestore = { captureDraft() }, onDismiss = { restore = null }) }
 }
 
-@Composable internal fun ClearContextConfirmation(model: ZerusViewModel, target: Target, onDismiss: () -> Unit, beforeClear: () -> Unit = {}) {
+@Composable internal fun ClearContextConfirmation(model: ZerusViewModel, target: Target, onDismiss: () -> Unit, beforeClear: () -> Unit = {}, dismissPrompt: Boolean = false) {
     val computer = remember(target.key) { model.machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.name ?: target.computerId }
     val raw = model.activity
     val recorded = !model.activityVerified || target.archiveId.isNotBlank()
     val view = remember(raw, recorded) { ContextPresentation.from(raw, recorded) }
-    ZerusAlertDialog(onDismissRequest = onDismiss, title = { Text("Clear context?") },
-        text = { Text("Clear the conversation context in ${target.session} on $computer?\n\nThis runs the agent’s native clear command. Future messages start without the current conversation context. Your unsent draft is kept.") },
-        confirmButton = { TextButton(onClick = { beforeClear(); model.clearContext(target); onDismiss() }, enabled = !model.demo && model.storageReady &&
+    ZerusAlertDialog(onDismissRequest = onDismiss, title = { Text(if (dismissPrompt) "Dismiss and clear?" else "Clear context?") },
+        text = { Text((if (dismissPrompt) "Dismiss the agent’s current prompt and clear" else "Clear") + " the conversation context in ${target.session} on $computer?\n\nThis runs the agent’s native clear command. Future messages start without the current conversation context. Your unsent draft is kept.") },
+        confirmButton = { TextButton(onClick = { beforeClear(); model.clearContext(target, dismissPrompt); onDismiss() }, enabled = !model.demo && model.storageReady &&
             model.selected?.target == target && model.activityVerified && !model.contextBlocked(target) && !model.sendingBlocked(target) &&
-            model.contextActionReason(target, "clear_context").isBlank() && view.clearReason.isBlank()) { Text("Clear context") } },
+            model.contextActionReason(target, "clear_context", dismissPrompt).isBlank() && (dismissPrompt || view.clearReason.isBlank())) { Text(if (dismissPrompt) "Dismiss and clear" else "Clear context") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
