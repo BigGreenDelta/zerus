@@ -207,8 +207,18 @@ the earlier changes are not in its working tree.
 ### MCP server `zerus`
 
 `hgs mcp` serves the tools over stdio. Zerus attaches it when it launches or
-resumes a Claude Code or Codex session; how the server learns its session is
-part of the system spec. Agents without MCP support use the same operations
+resumes a Claude Code or Codex session, on the command line of that start only
+(Claude Code `--mcp-config`, Codex `-c mcp_servers.zerus.…`); the agent's own
+configuration and saved resume commands never contain it. The server inherits
+the session's `HGS_SESSION` and `HGS_RUN_ID` from the agent (Codex is told to
+pass them on by name) and checks on every call that this run of the session is
+live on this computer; its project is the catalog project of that session. A
+server that cannot verify its session, or whose session belongs to no project,
+refuses every tool with the reason. The same command line allows the zerus
+tools, so the agent never asks the person before calling them; the project
+settings below bound what agents may do. A session started by an older Zerus
+gets the server at its next resume; until then its task prompts name the
+`hgs task` commands. Agents without MCP support use the same operations
 through `hgs task`, named in the task prompt. Other agents get the server only
 after their capabilities are reviewed.
 
@@ -427,7 +437,4 @@ page shows the phone beside the desktop window, with the same tasks in both.
 
 - Storage, replication, the mobile relay and phases are specified in
   `docs/superpowers/specs/2026-10-18-task-replication-loro-design.md`.
-- How the MCP server learns its session (the `HGS_RUN_ID` value is not known
-  when a session is launched; the Overmind branch forwards variable names
-  instead).
 - Testing of the task logic, the interface and the MCP tools.
