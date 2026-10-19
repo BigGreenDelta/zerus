@@ -613,7 +613,8 @@ pub fn request(v: &Value) -> Result<()> {
 }
 /// The request `hgs task exchange --json` reads on stdin: the phone's
 /// inventory of one project, its updates and the next part it asks for.
-fn task_exchange(p: &Value) -> Result<()> {
+/// The connector checks a claimed payload with it again.
+pub fn task_exchange(p: &Value) -> Result<()> {
     fields(
         p,
         &["schema", "project", "inventory"],

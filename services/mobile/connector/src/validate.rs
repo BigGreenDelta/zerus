@@ -368,6 +368,15 @@ pub fn validate(
         validate_launch(operation, request.get("payload"), request_id)?;
         return Ok(validated("", request.get("payload").cloned()));
     }
+    if operation == "task_exchange" {
+        if request.get("session").and_then(Value::as_str) != Some("") {
+            return Err(error("the task exchange uses no session target"));
+        }
+        let payload = request.get("payload").unwrap_or(&Value::Null);
+        zerus_relay::protocol::task_exchange(payload)
+            .map_err(|_| error("invalid task exchange request"))?;
+        return Ok(validated("", Some(payload.clone())));
+    }
     if operation == "set_mobile_delivery" {
         if request.get("session").and_then(Value::as_str) != Some("") {
             return Err(error("the delivery setting uses no session target"));

@@ -132,6 +132,34 @@ pub fn normalize(catalog: &Value, snapshot: &Value, fallback_id: &str) -> PyResu
     )
 }
 
+/// Each project's tasks digest from `hgs task digests --json`
+/// (docs/superpowers/specs/2026-10-18-task-replication-loro-design.md, "Phone"):
+/// a phone exchanges with this computer when its own digest differs. A
+/// project without a valid digest carries none.
+pub fn apply_task_digests(catalog: &mut Value, digests: &Value) {
+    if digests.get("schema") != Some(&json!(1)) {
+        return;
+    }
+    let Some(Value::Array(projects)) = catalog.get_mut("projects") else {
+        return;
+    };
+    for project in projects.iter_mut().filter_map(Value::as_object_mut) {
+        let id = project
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let digest = digests["projects"][id]["digest"].as_str().filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        });
+        if let Some(digest) = digest {
+            project.insert("tasks_digest".into(), json!(digest));
+        }
+    }
+}
+
 /// `projects.unavailable(fallback_id)`.
 pub fn unavailable(fallback_id: &str) -> Value {
     json!({"schema": 1, "source": "swarm", "available": false, "stale": false,

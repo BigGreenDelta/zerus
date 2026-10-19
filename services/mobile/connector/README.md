@@ -196,6 +196,21 @@ refuse video before invocation; a mismatched video acknowledgement remains
 uncertain. `test_bb_voice` exercises the same media/replay contract against both
 connector implementations. See [voice and video messages](../../../docs/voice-messages.md).
 
+The phone's task exchange is this connector's own addition, which the Python
+connector never offers
+(`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md`, "Phone").
+When native help names `hgs task exchange|digests --json`, `task_exchange` is
+advertised, for a peer as well when its hgs names it. The request, checked
+with the relay's own payload rules, runs `hgs task exchange --json` (30 s) with
+its payload on stdin on the machine the route names; its delivered receipt
+leaves the journal after two minutes as a short read (`TASK_READ_SQL`, beside
+the frozen Python predicates, so the journal schema is unchanged). With an
+initialized swarm catalog every 15 s, `hgs task digests --json` (5 s) adds
+each project's `tasks_digest`; a failed read leaves them out. After a rollback
+to Python only the exchanges of the last two minutes stay in the journal, as
+Python's mutation tombstones. `tests/task_exchange.rs` and
+`test_bb_task_exchange` pin it.
+
 ## Divergences from the Python connector
 
 Each divergence is listed in the design; this build implements every row.

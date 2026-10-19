@@ -326,8 +326,22 @@ fn journal_operation_sets_match_the_python_connector() {
         items.sort();
         items
     };
-    assert_eq!(sorted(zerus_relay::protocol::READS), set("READ_OPERATIONS"));
-    assert_eq!(sorted(zerus_relay::protocol::OPERATIONS), set("OPERATIONS"));
+    // The phone's task exchange is this connector's alone.
+    let python = |operations: &[&'static str]| -> Vec<&'static str> {
+        operations
+            .iter()
+            .copied()
+            .filter(|op| !zerus_relay::protocol::TASKS.contains(op))
+            .collect()
+    };
+    assert_eq!(
+        sorted(&python(zerus_relay::protocol::READS)),
+        set("READ_OPERATIONS")
+    );
+    assert_eq!(
+        sorted(&python(zerus_relay::protocol::OPERATIONS)),
+        set("OPERATIONS")
+    );
     let mutations: Vec<&str> = zerus_relay::protocol::OPERATIONS
         .iter()
         .copied()

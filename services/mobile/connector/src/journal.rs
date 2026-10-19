@@ -59,6 +59,9 @@ pub const READ_SQL: &str = "('inspect','process_output','terminal_snapshot','cat
 pub const SPEECH_READ_SQL: &str = "('speech_profiles','speech_stats','speech_status')";
 pub const SPEECH_CONFIG_READ_SQL: &str = "('speech_config','speech_config_status')";
 pub const VOICE_READ_SQL: &str = "('voice_profiles','voice_status')";
+/// The phone's task exchange: a short read only this connector runs, outside
+/// the frozen Python predicates above.
+pub const TASK_READ_SQL: &str = "('task_exchange')";
 
 /// Delivered short-lived reads go after two minutes, other reads after an
 /// hour; a delivered mutation becomes a tombstone after seven days.
@@ -261,6 +264,10 @@ impl Journal {
             [short],
         )?;
         tx.execute(
+            &format!("DELETE FROM requests WHERE operation IN {TASK_READ_SQL} AND {delivered}"),
+            [short],
+        )?;
+        tx.execute(
             &format!("DELETE FROM requests WHERE operation='archive_list' AND {delivered}"),
             [now - 3600.0],
         )?;
@@ -316,7 +323,7 @@ impl Journal {
         }
         let reads = READS.contains(&operation);
         let count: i64 = tx.query_row(
-            &format!("SELECT count(*) FROM requests WHERE (operation IN {READ_CLASS_SQL})=?"),
+            &format!("SELECT count(*) FROM requests WHERE (operation IN {READ_CLASS_SQL} OR operation IN {TASK_READ_SQL})=?"),
             [reads as i64],
             |row| row.get(0),
         )?;

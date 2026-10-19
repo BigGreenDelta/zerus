@@ -45,6 +45,8 @@ pub const REFUSED_SPACING: f64 = 30.0;
 pub const PRESENCE_RETRY: f64 = 300.0;
 pub const PROJECT_SECONDS: f64 = 15.0;
 pub const SWARM_TIMEOUT: f64 = 3.0;
+/// `hgs task digests --json`, read with the catalog (seconds).
+pub const TASK_DIGESTS_TIMEOUT: f64 = 5.0;
 
 pub const RETIRED: &str = "Relay retired a result claim; preserving local outcome";
 pub const REJECTED: &str = "Relay rejected a stored result; preserving local outcome";
@@ -560,13 +562,23 @@ impl<N: Native + 'static> Connector<N> {
         };
         if due {
             let snapshot = json!({"host": host.unwrap_or(Value::Null)});
-            let fresh = self
+            let mut fresh = self
                 .native(Call::new(["swarm", "get"]).timeout(SWARM_TIMEOUT))
                 .await
                 .ok()
                 .and_then(|native| {
                     projects::normalize(&native.json(), &snapshot, &self.settings.binding).ok()
                 });
+            // Each project's phone-view digest; a failed read leaves them out.
+            let digests = |catalog: &&mut Value| {
+                self.flags.get().task_exchange && catalog["available"] == json!(true)
+            };
+            if let Some(catalog) = fresh.as_mut().filter(digests) {
+                let call = Call::new(["task", "digests", "--json"]).timeout(TASK_DIGESTS_TIMEOUT);
+                if let Ok(native) = self.native(call).await {
+                    projects::apply_task_digests(catalog, &native.json());
+                }
+            }
             let mut state = self.state.borrow_mut();
             let cache = match fresh {
                 Some(fresh) => fresh,

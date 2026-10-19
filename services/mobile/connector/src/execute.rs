@@ -28,6 +28,8 @@ pub const GENERIC: &str = "connector could not record native outcome";
 pub const TOO_LARGE: &str = "native result exceeds relay size limit";
 /// A native error that was not text, as the relay accepts only text.
 pub const ERROR_NOT_TEXT: &str = "native command reported an error that was not text";
+/// `hgs task exchange --json` imports and pages one project's tasks (seconds).
+pub const TASK_EXCHANGE_TIMEOUT: f64 = 30.0;
 /// `MAX_RESULT`: Python's plain-JSON bound of a receipt.
 pub const MAX_RESULT: usize = 1024 * 1024;
 /// The relay's bound of a canonical receipt with its request_id.
@@ -442,6 +444,9 @@ impl<N: Native + 'static> Connector<N> {
         if operation == "mark_read" && !flags.read {
             return Err(Failure::text("native shared read ABI is unavailable"));
         }
+        if operation == "task_exchange" && !flags.task_exchange {
+            return Err(Failure::text("native task exchange ABI is unavailable"));
+        }
         Ok(())
     }
 
@@ -481,6 +486,16 @@ impl<N: Native + 'static> Connector<N> {
                     .await
             }
             "catalog" => self.catalog(request_id).await,
+            "task_exchange" => {
+                let call = Call::new(["task", "exchange", "--json"])
+                    .payload(payload.expect("validated").clone())
+                    .timeout(TASK_EXCHANGE_TIMEOUT);
+                let result = self.call(call).await?;
+                if !result.is_object() {
+                    return Err(Failure::text("native task exchange answer is invalid"));
+                }
+                Ok(result)
+            }
             "dirs" => {
                 let path = payload
                     .and_then(|payload| payload["path"].as_str())

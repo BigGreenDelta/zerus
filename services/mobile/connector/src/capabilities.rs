@@ -40,6 +40,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "speech_stats",
     "speech_status",
     "speech_submit",
+    "task_exchange",
     "terminal_input",
     "terminal_snapshot",
     "voice_cancel",
@@ -132,6 +133,8 @@ pub struct Flags {
     pub speech_config: bool,
     /// Both peer markers (`fleet.supported`).
     pub peers: bool,
+    /// The phone's task exchange, which the Python connector never offers.
+    pub task_exchange: bool,
 }
 
 impl Flags {
@@ -159,6 +162,7 @@ impl Flags {
             voice_video: has("voice-video-v1"),
             speech_config: has("Speech profile management v1"),
             peers: has("mobile-peers --json") && has("mobile-peer --json"),
+            task_exchange: has("hgs task exchange|digests --json"),
         }
     }
 
@@ -191,6 +195,8 @@ impl Flags {
         remove(self.speech, SPEECH);
         remove(self.voice, VOICE);
         remove(self.speech_config, SPEECH_CONFIG);
+        // Only this connector offers the phone's task exchange.
+        remove(false, zerus_relay::protocol::TASKS);
         OPERATIONS
             .iter()
             .copied()
@@ -231,11 +237,16 @@ impl Flags {
     /// limited to implemented operations and the features they carry. A
     /// peer context has no fleet.
     pub fn advertised_for(&self, fleet: bool, one_hop: bool) -> Value {
-        let operations: Vec<&str> = self
+        let mut operations: Vec<&str> = self
             .python_operations(fleet)
             .into_iter()
             .filter(|operation| implemented(operation))
             .collect();
+        // Connector-only: the phone's task exchange, when hgs offers it.
+        if self.task_exchange {
+            operations.push("task_exchange");
+            operations.sort_unstable();
+        }
         let features: Vec<&str> = self
             .python_features(one_hop)
             .into_iter()
