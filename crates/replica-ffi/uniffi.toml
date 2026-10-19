@@ -1,3 +1,5 @@
 [bindings.kotlin]
 package_name = "app.zerus.mobile.replica"
 cdylib_name = "zerus_replica_ffi"
+# Android bindings: the cleaner and other choices fit the app's minimum API level.
+android = true

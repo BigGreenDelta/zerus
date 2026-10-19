@@ -34,9 +34,41 @@ if (firebaseEnabled) {
     apply(plugin = "com.google.gms.google-services")
     apply(plugin = "com.google.firebase.crashlytics")
 }
+// The task replica: zerus-replica through UniFFI (crates/replica-ffi), built with the
+// pinned CI toolchain. The host library gives the Kotlin bindings and is what the JVM
+// unit tests load; cargo-ndk builds the library of each packaged ABI.
+val rustToolchain = "1.99.1"
+val replicaCrate = rootProject.file("../../crates/replica-ffi")
+val replicaSources = listOf(replicaCrate, rootProject.file("../../crates/replica")).flatMap {
+    listOf(it.resolve("src"), it.resolve("Cargo.toml"), it.resolve("Cargo.lock"))
+} + replicaCrate.resolve("uniffi.toml")
+val rustBuild = layout.buildDirectory.dir("rust")
+val hostLibraryName = if (System.getProperty("os.name").startsWith("Mac")) "libzerus_replica_ffi.dylib" else "libzerus_replica_ffi.so"
+val hostLibrary = rustBuild.map { it.file("host/debug/$hostLibraryName") }
+val uniffiKotlin = layout.buildDirectory.dir("generated/uniffi/kotlin")
+val rustJniLibs = rustBuild.map { it.dir("jniLibs") }
+val rustHostLibrary by tasks.registering(Exec::class) {
+    inputs.files(replicaSources)
+    outputs.file(hostLibrary)
+    workingDir = replicaCrate
+    commandLine("cargo", "+$rustToolchain", "build", "--locked", "--target-dir", rustBuild.get().dir("host").asFile.path)
+}
+val uniffiBindings by tasks.registering(Exec::class) {
+    dependsOn(rustHostLibrary)
+    inputs.file(hostLibrary)
+    inputs.files(replicaSources)
+    outputs.dir(uniffiKotlin)
+    workingDir = replicaCrate
+    doFirst { delete(uniffiKotlin) }
+    commandLine("cargo", "+$rustToolchain", "run", "--locked", "--features", "bindgen", "--bin", "uniffi-bindgen",
+        "--target-dir", rustBuild.get().dir("bindgen").asFile.path, "--", "generate",
+        "--library", hostLibrary.get().asFile.path, "--language", "kotlin", "--no-format",
+        "--out-dir", uniffiKotlin.get().asFile.path)
+}
 android {
     namespace = "app.zerus.mobile"
     compileSdk = 36
+    ndkVersion = "28.2.13676358"
     defaultConfig {
         applicationId = "app.zerus.mobile"
         minSdk = 26
@@ -45,6 +77,9 @@ android {
         versionName = previewVersionName ?: (devBuildNumber?.let { "$devBaseVersion-dev.$it" } ?: stableVersionName)
         buildConfigField("boolean", "FIREBASE_ENABLED", firebaseEnabled.toString())
         testInstrumentationRunner = providers.gradleProperty("zerusInstrumentationRunner").orNull ?: "androidx.test.runner.AndroidJUnitRunner"
+        // The ABIs the task replica's library is built for (crates/replica-ffi). JNA's own
+        // library would otherwise add ABIs on which the replica is missing.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     if(privateSigningFile.isFile) signingConfigs.create("development") {
         val keyFile = File(checkNotNull(privateSigning.getProperty("storeFile")))
@@ -63,6 +98,10 @@ android {
         }
     }
     buildFeatures { compose = true; buildConfig = true }
+    sourceSets.getByName("main") {
+        java.srcDir(uniffiKotlin)
+        jniLibs.srcDir(rustJniLibs)
+    }
     if (firebaseEnabled) {
         sourceSets.getByName("main").java.srcDir("src/firebase/java")
         sourceSets.getByName("debug").manifest.srcFile("src/firebase/AndroidManifest.xml")
@@ -76,6 +115,21 @@ android {
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     // The CI gate requires lintRelease, which also fails on the fatal vital checks.
     lint { checkReleaseBuilds = false }
+}
+val rustAndroidLibraries by tasks.registering(Exec::class) {
+    inputs.files(replicaSources)
+    outputs.dir(rustJniLibs)
+    workingDir = replicaCrate
+    environment("ANDROID_NDK_HOME", android.ndkDirectory.path)
+    commandLine("cargo", "+$rustToolchain", "ndk", "-t", "arm64-v8a", "-t", "armeabi-v7a", "-t", "x86_64",
+        "--platform", "26", "-o", rustJniLibs.get().asFile.path, "build", "--release", "--locked",
+        "--target-dir", rustBuild.get().dir("android").asFile.path)
+}
+tasks.named("preBuild") { dependsOn(uniffiBindings) }
+tasks.matching { it.name.matches(Regex("merge.*JniLibFolders")) }.configureEach { dependsOn(rustAndroidLibraries) }
+tasks.withType<Test>().configureEach {
+    dependsOn(rustHostLibrary)
+    systemProperty("uniffi.component.zerus_replica_ffi.libraryOverride", hostLibrary.get().asFile.path)
 }
 gradle.taskGraph.whenReady {
     if(allTasks.any { it.name in setOf("packageRelease","signReleaseBundle") })
@@ -177,6 +231,9 @@ dependencies {
         }
     }
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // The task replica's bindings reach the Rust library through JNA.
+    implementation("net.java.dev.jna:jna:5.17.0@aar")
+    testImplementation("net.java.dev.jna:jna:5.17.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")

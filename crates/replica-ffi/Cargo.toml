@@ -30,7 +30,7 @@ tempfile = "3"
 
 [profile.release]
 # The library ships once per ABI in the APK: small and without symbols.
-opt-level = "s"
+opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
