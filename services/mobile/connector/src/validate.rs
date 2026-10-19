@@ -455,6 +455,9 @@ pub fn validate(
     let payload = payload.expect("checked");
     match operation {
         "history" => validate_history(payload, request_id)?,
+        "project_assignment" | "project_assign" => {
+            crate::session_projects::validate(operation, payload, request_id)?
+        }
         "hooks_status" => {
             crate::mutations::validate_for_session("clear_context", session, payload, request_id)?
         }

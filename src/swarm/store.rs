@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -55,12 +55,27 @@ pub struct LockedStore {
 
 impl LockedStore {
     pub fn load(config: &Config) -> Result<Self> {
+        Self::load_with(config, false)
+    }
+    /// An existing catalog for one scoped metadata operation. Do not stage the
+    /// ordinary loader's machine-name/binding refresh as another shared edit.
+    pub fn load_scoped(config: &Config) -> Result<Self> {
+        Self::load_with(config, true)
+    }
+    fn load_with(config: &Config, scoped: bool) -> Result<Self> {
         let dir = config.dir.join("swarm");
-        fs::create_dir_all(&dir)?;
-        platform::restrict_dir(&dir)?;
+        if scoped {
+            ensure!(
+                dir.is_dir(),
+                "Shared projects are not initialized on this computer"
+            );
+        } else {
+            fs::create_dir_all(&dir)?;
+            platform::restrict_dir(&dir)?;
+        }
         let lock = platform::private_open(
             OpenOptions::new()
-                .create(true)
+                .create(!scoped)
                 .truncate(false)
                 .read(true)
                 .write(true),
@@ -68,10 +83,28 @@ impl LockedStore {
         .open(dir.join("catalog.lock"))?;
         let lock = platform::FileLock::exclusive(lock)?;
         let path = dir.join("catalog.json");
-        let original = match fs::read(&path) {
-            Ok(v) => v,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
-            Err(e) => return Err(e.into()),
+        let original = if scoped {
+            let metadata = fs::symlink_metadata(&path)?;
+            ensure!(
+                metadata.file_type().is_file(),
+                "Shared project catalog is not a regular file"
+            );
+            let mut bytes = Vec::new();
+            fs::File::open(&path)?
+                .take(128 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            ensure!(
+                bytes.len() <= 128 * 1024 * 1024,
+                "Shared project catalog is too large"
+            );
+            ensure!(!bytes.is_empty(), "Shared project catalog is empty");
+            bytes
+        } else {
+            match fs::read(&path) {
+                Ok(v) => v,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+                Err(e) => return Err(e.into()),
+            }
         };
         let data: Store = if original.is_empty() {
             Store {
@@ -86,7 +119,11 @@ impl LockedStore {
                 .context("read swarm catalog; the original file was left untouched")?
         };
         data.catalog.validate()?;
-        let outdated_original = fs::read(dir.join(OUTDATED)).unwrap_or_default();
+        let outdated_original = if scoped {
+            vec![]
+        } else {
+            fs::read(dir.join(OUTDATED)).unwrap_or_default()
+        };
         let mut loaded = Self {
             data,
             outdated: serde_json::from_slice(&outdated_original).unwrap_or_default(),
@@ -95,29 +132,26 @@ impl LockedStore {
             original,
             outdated_original,
         };
-        let node = loaded.data.node_id.clone();
-        for alias in &config.selves {
-            loaded.data.bindings.insert(
-                alias.clone(),
-                Binding {
-                    id: node.clone(),
-                    verified: true,
-                },
-            );
+        if !scoped {
+            let node = loaded.data.node_id.clone();
+            for alias in &config.selves {
+                loaded.data.bindings.insert(
+                    alias.clone(),
+                    Binding {
+                        id: node.clone(),
+                        verified: true,
+                    },
+                );
+            }
+            loaded
+                .data
+                .catalog
+                .set(&node, Key::machine(&node, "name"), json!(config.host()))?;
         }
-        loaded
-            .data
-            .catalog
-            .set(&node, Key::machine(&node, "name"), json!(config.host()))?;
         Ok(loaded)
     }
     pub fn save(&mut self) -> Result<()> {
-        self.data.catalog.validate()?;
-        let bytes = serde_json::to_vec(&self.data)?;
-        if bytes != self.original {
-            replace(&self.path, &bytes)?;
-            self.original = bytes;
-        }
+        self.save_catalog_only()?;
         let peers = &self.data.peers;
         self.outdated
             .retain(|alias, node| peers.get(alias).is_some_and(|p| &p.node == node));
@@ -137,6 +171,16 @@ impl LockedStore {
                 replace(&path, &outdated)?;
             }
             self.outdated_original = outdated;
+        }
+        Ok(())
+    }
+    /// Persist only the catalog. Scoped assignment must not prune peer metadata.
+    pub fn save_catalog_only(&mut self) -> Result<()> {
+        self.data.catalog.validate()?;
+        let bytes = serde_json::to_vec(&self.data)?;
+        if bytes != self.original {
+            replace(&self.path, &bytes)?;
+            self.original = bytes;
         }
         Ok(())
     }
@@ -221,6 +265,60 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scoped_session_edit_preserves_other_catalog_and_local_peer_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            home: dir.path().to_str().unwrap().into(),
+            dir: dir.path().join("config"),
+            state: dir.path().join("state"),
+            selves: vec!["example-local".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let (catalog_path, node) = {
+            let mut store = LockedStore::load(&config).unwrap();
+            store.data.imported = true;
+            store.save().unwrap();
+            (store.path.clone(), store.data.node_id.clone())
+        };
+        let original: Value = serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+        let metadata = catalog_path.with_file_name(OUTDATED);
+        fs::write(&metadata, b"{\"example-peer\":\"retained-metadata\"}").unwrap();
+        let metadata_before = fs::read(&metadata).unwrap();
+        config.selves = vec!["renamed-local".into()];
+        let mut store = LockedStore::load_scoped(&config).unwrap();
+        assert_eq!(serde_json::to_value(&store.data).unwrap(), original);
+        let key = Key::Session {
+            machine: node.clone(),
+            session: "claude/example/task".into(),
+        };
+        store
+            .data
+            .catalog
+            .set(&node, key.clone(), json!("logical"))
+            .unwrap();
+        store.save_catalog_only().unwrap();
+        assert_eq!(fs::read(&metadata).unwrap(), metadata_before);
+        let after: Value = serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+        for field in ["node_id", "bindings", "peers", "imported"] {
+            assert_eq!(after[field], original[field]);
+        }
+        let added: Vec<_> = store
+            .data
+            .catalog
+            .operations
+            .iter()
+            .filter(|(id, _)| original["catalog"]["operations"].get(id.as_str()).is_none())
+            .collect();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].1.key, key);
+    }
+
     #[test]
     fn outdated_members_stay_out_of_the_catalog_older_hgs_reads() {
         let dir = tempfile::tempdir().unwrap();

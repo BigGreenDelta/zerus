@@ -179,7 +179,14 @@ fn parse(text: &str) -> Value {
 fn validation_matches_the_python_connector_for_implemented_operations() {
     let mut checked = 0;
     let mut refused = 0;
-    for family in ["control", "conversation", "envelope", "launch", "speech"] {
+    for family in [
+        "control",
+        "conversation",
+        "envelope",
+        "launch",
+        "project",
+        "speech",
+    ] {
         let rows = records(&format!("validation/{family}.jsonl"));
         let base = rows.iter().find(|row| row["kind"] == "context").unwrap()["context"].clone();
         for case in rows.iter().filter(|row| row["kind"] == "case") {
@@ -253,7 +260,7 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
         }
     }
     // The common Python vectors include both hook health and analytics reads.
-    assert_eq!((checked, refused), (254, 2));
+    assert_eq!((checked, refused), (276, 2));
 }
 
 /// Python's `capable(node)`: every flag, the vectors' sessions and archive.
@@ -352,6 +359,8 @@ async fn executions_match_the_python_connector() {
             "pause-native-failed",
             "process-output",
             "process-output-too-large",
+            "project_assign-confirmed",
+            "project_assignment-confirmed",
             "restore-archive",
             "send-completed",
             "send-native-crash",

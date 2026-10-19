@@ -43,8 +43,9 @@ pub const ADDED_COLUMNS: [(&str, &str); 5] = [
     ("delivered_at", "REAL"),
     ("response_expired", "INTEGER NOT NULL DEFAULT 0"),
 ];
-pub const INDEXES: [(&str, &str); 9] = [
+pub const INDEXES: [(&str, &str); 10] = [
     ("delivered_history", "CREATE INDEX IF NOT EXISTS delivered_history ON requests(delivered,delivered_at)"),
+    ("project_assignment_delivered_v1", "CREATE INDEX IF NOT EXISTS project_assignment_delivered_v1 ON requests(delivered_at) WHERE operation='project_assignment' AND delivered=1 AND state!='running'"),
     ("analytics_delivered_reads", "CREATE INDEX IF NOT EXISTS analytics_delivered_reads ON requests(delivered_at) WHERE operation='analytics_read' AND delivered=1 AND state!='running'"),
     ("terminal_delivered_reads", "CREATE INDEX IF NOT EXISTS terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running'"),
     ("archive_delivered_reads", "CREATE INDEX IF NOT EXISTS archive_delivered_reads ON requests(delivered_at) WHERE operation='archive_list' AND delivered=1 AND state!='running'"),
@@ -56,7 +57,7 @@ pub const INDEXES: [(&str, &str); 9] = [
 ];
 
 // The Python connector's frozen predicates (operations.json `sql`).
-pub const READ_CLASS_SQL: &str = "('analytics_read','archive_list','attachment_read','catalog','dirs','file_read','history','hooks_status','inspect','mark_read','process_output','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
+pub const READ_CLASS_SQL: &str = "('analytics_read','archive_list','attachment_read','catalog','dirs','file_read','history','hooks_status','inspect','mark_read','process_output','project_assignment','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
 pub const READ_SQL: &str = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')";
 pub const SPEECH_READ_SQL: &str = "('speech_profiles','speech_stats','speech_status')";
 pub const SPEECH_CONFIG_READ_SQL: &str = "('speech_config','speech_config_status')";
@@ -253,6 +254,7 @@ impl Journal {
             SPEECH_READ_SQL,
             VOICE_READ_SQL,
             "('hooks_status')",
+            "('project_assignment')",
         ] {
             tx.execute(
                 &format!("DELETE FROM requests WHERE operation IN {set} AND {delivered}"),

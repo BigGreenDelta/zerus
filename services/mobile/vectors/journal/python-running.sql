@@ -15,6 +15,7 @@ INSERT INTO requests VALUES('b4c3a9da-e9d7-5e31-a97f-66944326835a','invalid','ru
 INSERT INTO requests VALUES('d46c23ab-2b24-54f2-9d28-1e796b26efae','speech_profile_upsert','running',NULL,0,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1759999900.0,1759999900.0,NULL,0);
 INSERT INTO requests VALUES('781658f4-e463-5d81-9206-78fba720533c','attachment_read','running',NULL,0,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1759999900.0,1759999900.0,NULL,0);
 CREATE INDEX delivered_history ON requests(delivered,delivered_at);
+CREATE INDEX project_assignment_delivered_v1 ON requests(delivered_at) WHERE operation='project_assignment' AND delivered=1 AND state!='running';
 CREATE INDEX analytics_delivered_reads ON requests(delivered_at) WHERE operation='analytics_read' AND delivered=1 AND state!='running';
 CREATE INDEX terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running';
 CREATE INDEX archive_delivered_reads ON requests(delivered_at) WHERE operation='archive_list' AND delivered=1 AND state!='running';

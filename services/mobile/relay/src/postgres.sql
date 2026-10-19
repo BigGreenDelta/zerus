@@ -95,3 +95,7 @@ CREATE INDEX IF NOT EXISTS hook_health_history ON requests(updated,id) WHERE ope
 CREATE INDEX IF NOT EXISTS analytics_reads_history ON requests(updated,id) WHERE operation='analytics_read' AND state IN ('completed','failed','uncertain');
 
 CREATE INDEX IF NOT EXISTS git_status_history_v1 ON requests(updated,id) WHERE operation='git_status' AND state IN ('completed','failed','uncertain');
+
+-- Additive index for session-project-v1 reads; legacy read_history_v3 and
+-- mutation UUID tombstones are deliberately unchanged on upgrade.
+CREATE INDEX IF NOT EXISTS project_assignment_history_v1 ON requests(updated,id) WHERE operation='project_assignment' AND state IN ('completed','failed','uncertain');

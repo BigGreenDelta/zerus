@@ -39,7 +39,7 @@ data class SessionMenuRead(val unavailable: String = "", val canMark: Boolean = 
 /** Exact row facts captured by the view model. [supported] is the gateway and computer operation intersection. */
 data class SessionMenuFacts(val target: Target, val row: JSONObject, val state: String, val archived: Boolean, val online: Boolean,
     val supported: Set<String>, val blocked: String = "", val busy: String = "", val needsAttention: Boolean = false,
-    val read: SessionMenuRead = SessionMenuRead(), val reference: String? = null, val folder: String = "", val referenceReason: String = "")
+    val read: SessionMenuRead = SessionMenuRead(), val reference: String? = null, val folder: String = "", val referenceReason: String = "", val projectReason: String = "")
 /** A native action chosen in Sessions, consumed once by the conversation header it opened. */
 data class SessionMenuRequest(val target: Target, val operation: String, val navigation: Long)
 
@@ -56,6 +56,7 @@ object SessionActionsMenu {
         return listOf(
             if (archived) emptyList() else listOf(SessionMenuItem("terminal","Open terminal",terminalReason(facts))),
             if (archived || facts.target.agentId.isNotBlank()) emptyList() else listOf(readItem(facts)),
+            if(archived || facts.target.agentId.isNotBlank()) emptyList() else listOf(SessionMenuItem(SessionProjectProtocol.assign,"Move to project…",projectReason(facts),"Change project grouping; keep the working folder.")),
             buildList {
                 add(if (archived) native("restore","Restore session…") else if (running) native("pause","Pause session…") else native("resume","Resume session…"))
                 add(native("rename","Rename…"))
@@ -69,6 +70,15 @@ object SessionActionsMenu {
             listOf(if (archived) native("forget","Forget archived version…") else if (running) native("terminate","Terminate session…")
                 else native("forget","Forget saved session…"))
         ).filter { it.isNotEmpty() }
+    }
+    fun projectReason(facts:SessionMenuFacts):String = when {
+        facts.blocked.isNotBlank() -> facts.blocked
+        facts.archived || facts.target.archiveId.isNotBlank() || facts.target.agentId.isNotBlank() -> "Project grouping belongs to the parent session."
+        !facts.online -> "The machine is offline."
+        !facts.supported.containsAll(SessionProjectProtocol.operations) -> "This gateway or computer does not support project grouping changes."
+        facts.projectReason.isNotBlank() -> facts.projectReason
+        facts.busy.isNotBlank() -> facts.busy
+        else -> ""
     }
     /** Mark as read reuses Read all's evidence rules; otherwise the row offers a phone-local reminder. */
     fun readItem(facts: SessionMenuFacts): SessionMenuItem {
@@ -164,6 +174,7 @@ internal fun Modifier.sessionCardGestures(shape: Shape, onOpen: () -> Unit, onAc
 }
 
 private fun menuIcon(id: String): ImageVector = when (id) {
+    "project_assign" -> Icons.Default.Folder
     "terminal" -> Icons.Default.Terminal
     "mark_read" -> Icons.Default.DoneAll
     "clear_reminder" -> Icons.Default.NotificationsOff
