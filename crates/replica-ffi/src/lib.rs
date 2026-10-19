@@ -5,7 +5,7 @@
 //! docs/superpowers/specs/2026-10-18-task-replication-loro-design.md.
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zerus_replica as replica;
 
 uniffi::setup_scaffolding!();
@@ -39,6 +39,9 @@ impl From<replica::Error> for ReplicaError {
 }
 
 type Result<T> = std::result::Result<T, ReplicaError>;
+
+/// How long a call waits for a project another caller holds, such as an exchange.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
 
 fn now() -> i64 {
     SystemTime::now()
@@ -351,8 +354,10 @@ pub struct ImportResult {
     pub refused: Vec<DamagedTask>,
 }
 
-/// The tasks of one project below `root`. Each call opens the project under
-/// its lock and releases it on return, so several callers never hold it.
+/// The tasks of one project below `root`. Each call reads and writes files and
+/// opens the project under its lock, waiting up to five seconds while another
+/// caller holds it (then it fails with "busy"); call it off the main thread,
+/// on `Dispatchers.IO`. The lock is released on return.
 #[derive(uniffi::Object)]
 pub struct TaskStore {
     root: PathBuf,
@@ -362,7 +367,8 @@ pub struct TaskStore {
 
 impl TaskStore {
     fn store(&self) -> Result<replica::ProjectStore> {
-        Ok(replica::ProjectStore::open(&self.root, &self.project)?)
+        replica::ProjectStore::open_within(&self.root, &self.project, LOCK_WAIT)?
+            .ok_or_else(|| ReplicaError::Failed("the project's tasks are busy; try again".into()))
     }
 
     /// Runs `change` on the task `reference` and saves it.

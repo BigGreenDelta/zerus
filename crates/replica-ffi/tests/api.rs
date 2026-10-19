@@ -140,3 +140,27 @@ fn a_damaged_inventory_is_refused() {
         Err(ReplicaError::Refused(_))
     ));
 }
+
+#[test]
+fn a_held_project_answers_busy_instead_of_waiting() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(&root);
+    store
+        .add(
+            "Add rate limiting".into(),
+            TaskStage::Todo,
+            TaskTarget::AnySession,
+            TaskPosition::End,
+        )
+        .unwrap();
+    // Another caller, such as an exchange, holds the project.
+    let held = zerus_replica::ProjectStore::open(root.path(), "project-1").unwrap();
+    let started = std::time::Instant::now();
+    match store.list() {
+        Err(ReplicaError::Failed(message)) => assert!(message.contains("busy"), "{message}"),
+        other => panic!("expected the busy failure, got {other:?}"),
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    drop(held);
+    assert_eq!(store.list().unwrap().tasks.len(), 1);
+}

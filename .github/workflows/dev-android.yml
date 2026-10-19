@@ -81,8 +81,9 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
       - name: Build the dev APK with the shared signer
         working-directory: mobile/android
-        # The job timeout is sized for the gate wait, not for a hung build.
-        timeout-minutes: 30
+        # The job timeout is sized for the gate wait, not for a hung build; the task
+        # replica's three release builds come on top of the app's.
+        timeout-minutes: 35
         env:
           DEV_RUN_NUMBER: ${{ github.run_number }}
         run: |

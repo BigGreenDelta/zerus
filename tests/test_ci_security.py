@@ -358,6 +358,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertLess(configure, gradle)
         self.assertLess(names.index("Restore Gradle cache"), gradle)
         self.assertLess(gradle, names.index("Save Gradle cache"))
+        # cargo-ndk comes from the cache when it holds this version.
+        self.assertLess(names.index("Restore Gradle cache"), names.index("Rust and cargo-ndk for the task replica"))
         # The signed build's toolchain and Firebase variant, with placeholder values only.
         signed = self.dev_android()
         sdkmanager = r'(?m)^ +"\$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" (.+)$'
@@ -365,7 +367,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn('echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"', listed[configure])
         self.assertIn("os.environ['JAVA_HOME_17_X64']", signed)
         self.assertIn("        working-directory: mobile/android\n"
-                      "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease assembleDebug -PzerusFirebase=true\n", listed[gradle])
+                      "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease checkReplicaPackaging -PzerusFirebase=true\n", listed[gradle])
         # The task replica is built for every packaged ABI with the pinned toolchain and NDK, in
         # the check and in the signed build alike (the sdkmanager lines match above).
         for line in ("rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android",
@@ -391,10 +393,13 @@ class WorkflowSecurityTests(unittest.TestCase):
     def test_android_gradle_cache_is_a_monthly_content_keyed_family(self):
         restore = self.checks_step("android", "gradle-cache")
         self.assertIn('echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"', self.checks_step("android", "gradle"))
-        self.assertEqual(self.step_paths(restore), ["~/.gradle/caches", "~/.gradle/wrapper"])
+        # Cargo's registry and the installed cargo-ndk (with Cargo's records of it) travel along.
+        self.assertEqual(self.step_paths(restore), ["~/.gradle/caches", "~/.gradle/wrapper", "~/.cargo/registry/index",
+                                                    "~/.cargo/registry/cache", "~/.cargo/bin/cargo-ndk",
+                                                    "~/.cargo/.crates.toml", "~/.cargo/.crates2.json"])
         family = "android-gradle-v1-${{ steps.gradle.outputs.epoch }}-"
         content = ("${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties', "
-                   "'mobile/android/**/*.gradle.kts') }}")
+                   "'mobile/android/**/*.gradle.kts', 'crates/replica/Cargo.lock', 'crates/replica-ffi/Cargo.lock') }}")
         self.assertIn(f"          key: {family}{content}\n          restore-keys: {family}\n", restore)
         # cache-trim groups main entries by the key without its last segment:
         # that segment must be the content hash, so the month stays in the family.
@@ -1073,7 +1078,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         suites = job(checks, "gate")
         self.assertIn("android", field(suites, "needs").strip("[]").split(", "))
         self.assertIn("'android': True,", suites)
-        self.assertIn("testDebugUnitTest lintRelease assembleDebug -PzerusFirebase=true", job(checks, "android"))
+        self.assertIn("testDebugUnitTest lintRelease checkReplicaPackaging -PzerusFirebase=true", job(checks, "android"))
 
     def test_android_candidate_accepts_only_a_successful_gate_of_this_attempt(self):
         namespace = {}

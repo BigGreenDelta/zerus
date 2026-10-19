@@ -1365,7 +1365,7 @@ Measured on 2026-10-19 with Rust 1.99.1, NDK 28.2.13676358, cargo-ndk 4.1.2 and 
 The debug APK, packaged from scratch, went from 25 909 949 B to 35 650 702 B (+9 740 753 B). Of that:
 - the three libraries are 8 518 444 B, stored uncompressed and page aligned;
 - JNA's `libjnidispatch.so` for the same ABIs is about 0.4 MB;
-- the Rust crates' licence notices (148 crates) are 620 175 B compressed;
+- the Rust crates' licence notices (148 crates for arm64 then; 149 once all three ABIs' crates are collected, adding `spin` for x86_64) are about 620 KB compressed;
 - the rest is the generated bindings.
 
 An APK carries all three libraries; an App Bundle would deliver only the device's. With `opt-level = "s"` the arm64 library was 3 363 384 B.

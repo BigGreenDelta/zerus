@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.util.zip.ZipFile
 import java.io.File
 
 plugins {
@@ -47,7 +48,8 @@ val hostLibraryName = if (System.getProperty("os.name").startsWith("Mac")) "libz
 val hostLibrary = rustBuild.map { it.file("host/debug/$hostLibraryName") }
 val uniffiKotlin = layout.buildDirectory.dir("generated/uniffi/kotlin")
 val rustJniLibs = rustBuild.map { it.dir("jniLibs") }
-val rustLicenseAssets = layout.buildDirectory.dir("generated/rust-licenses")
+// Each packaged ABI and the Rust target its library is built for.
+val replicaAbis = mapOf("arm64-v8a" to "aarch64-linux-android", "armeabi-v7a" to "armv7-linux-androideabi", "x86_64" to "x86_64-linux-android")
 val rustHostLibrary by tasks.registering(Exec::class) {
     inputs.files(replicaSources)
     outputs.file(hostLibrary)
@@ -65,19 +67,6 @@ val uniffiBindings by tasks.registering(Exec::class) {
         "--target-dir", rustBuild.get().dir("bindgen").asFile.path, "--", "generate",
         "--library", hostLibrary.get().asFile.path, "--language", "kotlin", "--no-format",
         "--out-dir", uniffiKotlin.get().asFile.path)
-}
-// The licence notices of every crate built into the library, for Third-party notices;
-// the collector fails the build when a crate ships none.
-val rustLicenses by tasks.registering(Exec::class) {
-    // The collector reads the crates cargo has downloaded for the host build.
-    dependsOn(rustHostLibrary)
-    inputs.file(replicaCrate.resolve("Cargo.lock"))
-    inputs.dir(rootProject.file("../../packaging/rust-licenses"))
-    outputs.dir(rustLicenseAssets)
-    doFirst { delete(rustLicenseAssets) }
-    commandLine("python3", rootProject.file("../../scripts/collect-licenses.py").path,
-        rustLicenseAssets.get().dir("rust-licenses").asFile.path,
-        "--manifest-path", replicaCrate.resolve("Cargo.toml").path, "--target", "aarch64-linux-android")
 }
 
 android {
@@ -116,8 +105,6 @@ android {
     sourceSets.getByName("main") {
         java.srcDir(uniffiKotlin)
         jniLibs.srcDir(rustJniLibs)
-        // The task, not only its folder: whatever reads the assets then runs it first.
-        assets.srcDir(rustLicenses)
     }
     if (firebaseEnabled) {
         sourceSets.getByName("main").java.srcDir("src/firebase/java")
@@ -141,6 +128,51 @@ val rustAndroidLibraries by tasks.registering(Exec::class) {
     commandLine("cargo", "+$rustToolchain", "ndk", "-t", "arm64-v8a", "-t", "armeabi-v7a", "-t", "x86_64",
         "--platform", "26", "-o", rustJniLibs.get().asFile.path, "build", "--release", "--locked",
         "--target-dir", rustBuild.get().dir("android").asFile.path)
+}
+/** Collects the licence notices of every crate built into the library for each packaged ABI. */
+abstract class RustLicenses : Exec() {
+    @get:OutputDirectory abstract val outputDir: DirectoryProperty
+}
+// The notices for Third-party notices, as each variant's generated assets, so that whatever
+// reads the assets runs the collector first; it fails the build when a crate ships none.
+androidComponents {
+    onVariants { variant ->
+        val licenses = tasks.register<RustLicenses>("${variant.name}RustLicenses") {
+            // The collector reads the crates cargo has downloaded for the host build.
+            dependsOn(rustHostLibrary)
+            val collector = rootProject.file("../../scripts/collect-licenses.py")
+            inputs.file(collector)
+            inputs.file(replicaCrate.resolve("Cargo.lock"))
+            inputs.dir(rootProject.file("../../packaging/rust-licenses"))
+            executable = "python3"
+            argumentProviders.add(CommandLineArgumentProvider {
+                listOf(collector.path, outputDir.get().dir("rust-licenses").asFile.path,
+                    "--manifest-path", replicaCrate.resolve("Cargo.toml").path) +
+                    replicaAbis.values.flatMap { listOf("--target", it) }
+            })
+            doFirst { project.delete(outputDir) }
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(licenses, RustLicenses::outputDir)
+    }
+}
+// Every packaged ABI carries the replica's library and the APK the notices of its crates on
+// all of them: a build that loses either fails instead of shipping without it.
+val checkReplicaPackaging by tasks.registering {
+    dependsOn("assembleDebug")
+    val apk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk")
+    doLast {
+        ZipFile(apk.get().asFile).use { zip ->
+            val entries: Set<String> = zip.entries().asSequence().map { entry -> entry.name }.toSet()
+            val missing = (replicaAbis.keys.map { "lib/$it/libzerus_replica_ffi.so" } + "assets/rust-licenses/inventory.json")
+                .filterNot { it in entries }
+            require(missing.isEmpty()) { "The debug APK lacks ${missing.joinToString()}" }
+            val others = entries.filter { it.startsWith("lib/") }.map { it.split('/')[1] }.toSet() - replicaAbis.keys
+            require(others.isEmpty()) { "The debug APK carries ABIs without the task replica: $others" }
+            val inventory = zip.getInputStream(zip.getEntry("assets/rust-licenses/inventory.json")).bufferedReader().use { it.readText() }
+            val targets = (groovy.json.JsonSlurper().parseText(inventory) as Map<*, *>)["targets"]
+            require(targets == replicaAbis.values.toList()) { "The notices cover $targets, not ${replicaAbis.values}" }
+        }
+    }
 }
 tasks.named("preBuild") { dependsOn(uniffiBindings) }
 tasks.matching { it.name.matches(Regex("merge.*JniLibFolders")) }.configureEach { dependsOn(rustAndroidLibraries) }

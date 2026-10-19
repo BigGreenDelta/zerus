@@ -437,11 +437,6 @@ jobs:
             "configuration_version": "1"
           }
           JSON
-      # The task replica (crates/replica-ffi) is built for every packaged ABI.
-      - name: Rust and cargo-ndk for the task replica
-        run: |
-          rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
-          cargo +1.99.1 install cargo-ndk --version 4.1.2 --locked
       - name: Android platform, build tools and NDK
         run: |
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
@@ -455,14 +450,26 @@ jobs:
         id: gradle-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
+          # Cargo's registry and the installed cargo-ndk (with Cargo's records of it) travel along.
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: android-gradle-v1-${{ steps.gradle.outputs.epoch }}-${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/android/**/*.gradle.kts') }}
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/bin/cargo-ndk
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: android-gradle-v1-${{ steps.gradle.outputs.epoch }}-${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/android/**/*.gradle.kts', 'crates/replica/Cargo.lock', 'crates/replica-ffi/Cargo.lock') }}
           restore-keys: android-gradle-v1-${{ steps.gradle.outputs.epoch }}-
+      # The task replica (crates/replica-ffi) is built for every packaged ABI; cargo-ndk
+      # comes from the cache when it holds this version.
+      - name: Rust and cargo-ndk for the task replica
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+          cargo +1.99.1 install cargo-ndk --version 4.1.2 --locked
       - name: Unit tests and release lint
         working-directory: mobile/android
-        run: ./gradlew --no-daemon testDebugUnitTest lintRelease assembleDebug -PzerusFirebase=true
+        run: ./gradlew --no-daemon testDebugUnitTest lintRelease checkReplicaPackaging -PzerusFirebase=true
       - name: Save Gradle cache
         if: inputs.save_caches && steps.gradle-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -470,6 +477,11 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/bin/cargo-ndk
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
           key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - name: Collect Android reports
         if: failure()
