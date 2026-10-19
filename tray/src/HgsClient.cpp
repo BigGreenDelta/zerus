@@ -21,6 +21,8 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QDateTime>
+#include <QPointer>
+#include <QDataStream>
 #include <QCryptographicHash>
 #include <QUuid>
 
@@ -708,16 +710,66 @@ quint64 HgsClient::downloadFile(const QString &host, const QString &path, const 
     return id;
 }
 
-quint64 HgsClient::downloadFileToCache(const QString &host, const QString &path)
+quint64 HgsClient::findCachedFile(const QString &host, const QString &path)
 {
     const auto id = ++m_fileDownloadRequest;
     const auto root = DownloadCache::directory();
-    DownloadCache::async<DownloadCache::Prepared>(this, [root] { return DownloadCache::prepare(root); },
-        [this, id, host, path](const DownloadCache::Prepared &prepared) {
-            if (!prepared.error.isEmpty()) { emit fileDownloadFailed(id, prepared.error); return; }
-            transferFile(id, host, path, prepared.pending->path, prepared.pending);
+    DownloadCache::async<DownloadCache::Result>(this, [root, host, path] { return DownloadCache::lookup(root, {host, path}); },
+        [this, id](const DownloadCache::Result &result) { emit fileCacheChecked(id, result.path, result.error); });
+    return id;
+}
+
+quint64 HgsClient::downloadFileToCache(const QString &host, const QString &path, bool force)
+{
+    const auto id = ++m_fileDownloadRequest;
+    const auto root = DownloadCache::directory();
+    QByteArray key;
+    QDataStream stream(&key, QIODevice::WriteOnly); stream.setVersion(QDataStream::Qt_6_0);
+    stream << root << host << path;
+    auto active = m_cachedDownloads.find(key);
+    if (active != m_cachedDownloads.end()) {
+        active->requests.append(id); active->force = active->force || force;
+        return id;
+    }
+    m_cachedDownloads.insert(key, CachedDownload{{id}, force});
+    if (force) prepareCachedDownload(key, root, host, path);
+    else DownloadCache::async<DownloadCache::Result>(this, [root, host, path] { return DownloadCache::lookup(root, {host, path}); },
+        [this, key, root, host, path](const DownloadCache::Result &result) {
+            const auto current = m_cachedDownloads.constFind(key);
+            if (current == m_cachedDownloads.cend()) return;
+            if (!result.error.isEmpty()) { finishCachedDownload(key, {}, result.error); return; }
+            if (!result.path.isEmpty() && !current->force) { finishCachedDownload(key, result.path, {}); return; }
+            prepareCachedDownload(key, root, host, path);
         });
     return id;
+}
+
+void HgsClient::prepareCachedDownload(const QByteArray &key, const QString &root, const QString &host, const QString &path)
+{
+    DownloadCache::async<DownloadCache::Prepared>(this, [root] { return DownloadCache::prepare(root); },
+        [this, key, host, path](const DownloadCache::Prepared &prepared) {
+            const auto active = m_cachedDownloads.constFind(key);
+            if (active == m_cachedDownloads.cend()) return;
+            if (!prepared.error.isEmpty()) { finishCachedDownload(key, {}, prepared.error); return; }
+            transferFile(active->requests.first(), host, path, prepared.pending->path, prepared.pending, key);
+        });
+}
+
+void HgsClient::finishCachedDownload(const QByteArray &key, const QString &path, const QString &error, const QString &warning)
+{
+    const auto active = m_cachedDownloads.take(key);
+    const QPointer<HgsClient> alive(this);
+    for (const auto id : active.requests) {
+        if (!error.isEmpty()) emit fileDownloadFailed(id, error);
+        else emit fileDownloaded(id, path);
+        // A direct result slot can close the window and destroy its client.
+        if (!alive) return;
+    }
+    if (!warning.isEmpty()) {
+        emit downloadCacheWarning(warning);
+        if (!alive) return;
+    }
+    if (error.isEmpty() && !active.requests.isEmpty()) scheduleDownloadCacheTrim();
 }
 
 quint64 HgsClient::requestApprovalLog(const QString &operation, const QJsonObject &data)
@@ -750,29 +802,30 @@ quint64 HgsClient::requestApprovalLog(const QString &operation, const QJsonObjec
 }
 
 void HgsClient::transferFile(quint64 id, const QString &host, const QString &path, const QString &destination,
-                             const std::shared_ptr<DownloadCache::Pending> &pending)
+                             const std::shared_ptr<DownloadCache::Pending> &pending, const QByteArray &cacheKey)
 {
+    const auto failed = [this, id, cacheKey](const QString &error) {
+        if (cacheKey.isEmpty()) emit fileDownloadFailed(id, error);
+        else finishCachedDownload(cacheKey, {}, error);
+    };
     runHgs(m_hgs, {'@' + host, "download", "--path", path, "--output", destination}, 135000, this,
-        [this, id, host, path, destination, pending](const QByteArray &out) {
-            if (out.size() > 65536) { emit fileDownloadFailed(id, tr("Invalid file transfer response.")); return; }
+        [this, id, host, path, destination, pending, cacheKey, failed](const QByteArray &out) {
+            if (out.size() > 65536) { failed(tr("Invalid file transfer response.")); return; }
             const auto object = QJsonDocument::fromJson(out).object();
             const QFileInfo saved(destination);
             if (object.value("host").toString() != host || object.value("path").toString() != path
                 || object.value("local_path").toString() != destination || !object.value("bytes").isDouble()
                 || !LocalFile::readable(saved) || object.value("bytes").toDouble() != LocalFile::size(saved)) {
-                emit fileDownloadFailed(id, tr("The file transfer did not confirm the saved local file.")); return;
+                failed(tr("The file transfer did not confirm the saved local file.")); return;
             }
             if (!pending) { emit fileDownloaded(id, destination); return; }
             DownloadCache::async<DownloadCache::Result>(this,
-                [pending, path] { return DownloadCache::publish(pending, path); },
-                [this, id](const DownloadCache::Result &result) {
-                    if (!result.error.isEmpty()) { emit fileDownloadFailed(id, result.error); return; }
-                    emit fileDownloaded(id, result.path);
-                    if (!result.warning.isEmpty()) emit downloadCacheWarning(result.warning);
-                    scheduleDownloadCacheTrim();
+                [pending, host, path] { return DownloadCache::publish(pending, path, -1, {host, path}); },
+                [this, cacheKey](const DownloadCache::Result &result) {
+                    finishCachedDownload(cacheKey, result.path, result.error, result.warning);
                 });
-        }, [this, id, pending](const QString &, const QString &error) {
-            emit fileDownloadFailed(id, error.startsWith("hgs: ") ? error.mid(5) : error);
+        }, [pending, failed](const QString &, const QString &error) {
+            failed(error.startsWith("hgs: ") ? error.mid(5) : error);
         });
 }
 

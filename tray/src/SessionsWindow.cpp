@@ -663,7 +663,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const bool local = host.isEmpty(), online = entry->online;
         const QString path = SessionFileReference::resolve(target, m_subagentId.isEmpty() ? selectedDirectory() : m_subagentCwd, local ? QDir::homePath() : QString());
         // Files open after the dialog closes; folders open as they are.
-        QUrl desktopTarget; bool desktopFile = false;
+        QUrl desktopTarget; bool desktopFile = false, revealFile = false;
         QDialog dialog(this); dialog.setObjectName("sessionFileDialog");
         dialog.setWindowTitle(tr("File reference — Zerus")); dialog.resize(local ? 560 : 650, 230);
         auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(20, 20, 20, 20); layout->setSpacing(12);
@@ -691,7 +691,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         hint->setTextFormat(Qt::PlainText); hint->setWordWrap(true); layout->addWidget(hint);
         auto *buttons = new QDialogButtonBox; layout->addWidget(buttons);
         QString savedPath;
-        quint64 pending = 0; bool openAfterDownload = false;
+        quint64 pending = 0, cacheRequest = 0; bool openAfterDownload = false;
         if (local && !path.isEmpty()) {
             auto *open = buttons->addButton(tr("Open file"), QDialogButtonBox::ActionRole); open->setObjectName("openSessionFile");
             connect(open, &QPushButton::clicked, &dialog, [path, hint, &dialog, &desktopTarget, &desktopFile] {
@@ -713,13 +713,24 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             auto *download = buttons->addButton(tr("Download…"), QDialogButtonBox::ActionRole); download->setObjectName("downloadSessionFile");
             auto *open = buttons->addButton(tr("Download and open"), QDialogButtonBox::ActionRole); open->setObjectName("downloadOpenSessionFile");
             open->setToolTip(tr("Save automatically to %1 and open the local copy.").arg(QDir::toNativeSeparators(DownloadCache::directory())));
-            auto *savedOpen = buttons->addButton(tr("Open local copy"), QDialogButtonBox::ActionRole); savedOpen->setObjectName("openDownloadedSessionFile"); savedOpen->hide();
+            auto *localActions = new QWidget;
+            auto *localLayout = new QHBoxLayout(localActions); localLayout->setContentsMargins(0, 0, 0, 0);
+            auto *savedOpen = new QPushButton(tr("Open local copy")); savedOpen->setObjectName("openDownloadedSessionFile");
+            auto *showFile = new QPushButton(tr("Show file")); showFile->setObjectName("showDownloadedSessionFile");
+            localLayout->addWidget(savedOpen); localLayout->addWidget(showFile); localLayout->addStretch();
+            localActions->hide(); layout->insertWidget(layout->count() - 1, localActions);
+            download->setAutoDefault(false); open->setAutoDefault(false); showFile->setAutoDefault(false);
             const QString remotePath = path.isEmpty() && target.path.startsWith("~/") ? target.path : path;
             const bool downloadable = online && !remotePath.isEmpty();
             download->setEnabled(downloadable); open->setEnabled(downloadable);
             if (!online) hint->setText(tr("%1 is offline. Connect to this machine to download its files.").arg(machine));
             else if (remotePath.isEmpty()) hint->setText(tr("The session folder is unknown. Copy the path or use the SSH terminal to locate the file."));
-            auto startDownload = [&, download, open, savedOpen, progress, remotePath](bool opening) {
+            const auto showCopy = [&, open, savedOpen, localActions](const QString &destination) {
+                savedPath = destination;
+                hint->setText(tr("Saved on this computer: %1\nOpen the downloaded copy, or download again to get an updated file.").arg(destination));
+                localActions->show(); savedOpen->setDefault(true); open->setText(tr("Download again"));
+            };
+            auto startDownload = [&, download, open, localActions, progress, remotePath](bool opening) {
                 if (pending) return;
                 QString destination = DownloadCache::directory();
                 if (!opening) {
@@ -729,10 +740,15 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                     if (save.exec() != QDialog::Accepted || save.selectedFiles().isEmpty()) return;
                     destination = save.selectedFiles().first();
                 }
-                download->setEnabled(false); open->setEnabled(false); savedOpen->hide();
+                const bool refresh = opening && !savedPath.isEmpty();
+                // A later Save As completion owns the shown copy, even when an
+                // earlier cache check finishes after a large-file hash.
+                cacheRequest = 0;
+                download->setEnabled(false); open->setEnabled(false); localActions->hide();
+                progress->setAccessibleName(tr("Downloading file from %1").arg(machine));
                 progress->show(); hint->setText(tr("Downloading from %1 to %2…\nThe download continues if you close this dialog.").arg(machine, destination));
                 openAfterDownload = opening;
-                pending = opening ? m_client.downloadFileToCache(host, remotePath) : m_client.downloadFile(host, remotePath, destination);
+                pending = opening ? m_client.downloadFileToCache(host, remotePath, refresh) : m_client.downloadFile(host, remotePath, destination);
                 auto *completion = new QObject(this);
                 const QPointer<QDialog> shownDialog(&dialog);
                 const auto request = pending;
@@ -754,22 +770,42 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             };
             connect(download, &QPushButton::clicked, &dialog, [startDownload] { startDownload(false); });
             connect(open, &QPushButton::clicked, &dialog, [startDownload] { startDownload(true); });
-            connect(&m_client, &HgsClient::fileDownloadFailed, &dialog, [&, progress, download, open, downloadable](quint64 request, const QString &error) {
+            connect(&m_client, &HgsClient::fileDownloadFailed, &dialog, [&, progress, download, open, localActions, downloadable](quint64 request, const QString &error) {
                 if (!pending || request != pending) return;
                 pending = 0; progress->hide(); download->setEnabled(downloadable); open->setEnabled(downloadable);
+                localActions->setVisible(LocalFile::readable(QFileInfo(savedPath)));
                 hint->setText(tr("Download failed: %1").arg(error));
             });
-            connect(&m_client, &HgsClient::fileDownloaded, &dialog, [&, progress, download, open, savedOpen, downloadable](quint64 request, const QString &destination) {
+            connect(&m_client, &HgsClient::fileDownloaded, &dialog, [&, progress, download, open, showCopy, downloadable](quint64 request, const QString &destination) {
                 if (!pending || request != pending) return;
-                pending = 0; progress->hide(); savedPath = destination;
+                pending = 0; progress->hide();
                 download->setEnabled(downloadable); open->setEnabled(downloadable);
-                hint->setText(tr("Saved on this computer: %1").arg(destination)); open->hide(); savedOpen->show();
+                showCopy(destination);
                 if (openAfterDownload) { desktopTarget = QUrl::fromLocalFile(destination); desktopFile = true; dialog.accept(); }
             });
             connect(savedOpen, &QPushButton::clicked, &dialog, [&] {
                 if (!LocalFile::readable(QFileInfo(savedPath))) { hint->setText(tr("The local copy is no longer available.")); return; }
                 desktopTarget = QUrl::fromLocalFile(savedPath); desktopFile = true; dialog.accept();
             });
+            connect(showFile, &QPushButton::clicked, &dialog, [&] {
+                if (!LocalFile::readable(QFileInfo(savedPath))) { hint->setText(tr("The local copy is no longer available.")); return; }
+                desktopTarget = QUrl::fromLocalFile(savedPath); revealFile = true; dialog.accept();
+            });
+            const auto downloadHint = hint->text();
+            connect(&m_client, &HgsClient::fileCacheChecked, &dialog, [&, showCopy, progress, open, downloadHint, downloadable](quint64 request, const QString &destination, const QString &error) {
+                if (request != cacheRequest) return;
+                cacheRequest = 0;
+                if (pending) return;
+                progress->hide(); open->setEnabled(downloadable);
+                if (!error.isEmpty()) { hint->setText(tr("Cannot check the downloaded copy: %1").arg(error)); return; }
+                if (!destination.isEmpty()) showCopy(destination);
+                else hint->setText(downloadHint);
+            });
+            if (!remotePath.isEmpty()) {
+                progress->setAccessibleName(tr("Checking the downloaded copy…"));
+                open->setEnabled(false); progress->show(); hint->setText(tr("Checking the downloaded copy…"));
+                cacheRequest = m_client.findCachedFile(host, remotePath);
+            }
             auto *ssh = buttons->addButton(tr("Open SSH terminal"), QDialogButtonBox::ActionRole); ssh->setObjectName("openSessionFileSsh");
             connect(ssh, &QPushButton::clicked, &dialog, [this, host, &dialog] { emit machineSshRequested(host); dialog.accept(); });
             auto *close = buttons->addButton(QDialogButtonBox::Close);
@@ -782,8 +818,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             // activation token. Destroying that window cancels the callback.
             // Dispatch after the modal has gone, using the persistent workspace.
             // Folders take the same path: a macOS bundle folder would launch.
-            QTimer::singleShot(0, this, [this, desktopTarget, desktopFile, local] {
-                openExternalFile(desktopTarget.toLocalFile(), desktopFile && !local);
+            QTimer::singleShot(0, this, [this, desktopTarget, desktopFile, revealFile, local] {
+                const auto path = desktopTarget.toLocalFile();
+                if (revealFile) {
+                    if (!ExternalFile::reveal(path)) showNotice(tr("The file manager could not show the saved copy at %1.").arg(QDir::toNativeSeparators(path)), true);
+                } else openExternalFile(path, desktopFile && !local);
             });
         }
     };
