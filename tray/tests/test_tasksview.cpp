@@ -137,15 +137,25 @@ void TestTasksView::sendNowNamesWhyASessionCannotTakeIt() {
         FakeTasksCli::task(1, "todo", {{"target", FakeTasksCli::pinned("codex/gone")}}),
         FakeTasksCli::task(2, "todo", {{"target", FakeTasksCli::pinned("codex/stopped")}}),
         FakeTasksCli::task(3, "todo", {{"target", FakeTasksCli::pinned("codex/ios", "orchard-mac")}}),
-        FakeTasksCli::task(4, "todo", {{"target", FakeTasksCli::pinned("codex/web")}})}));
+        FakeTasksCli::task(4, "todo", {{"target", FakeTasksCli::pinned("codex/web")}}),
+        FakeTasksCli::task(5, "todo")}));
     HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
     view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
-    QTRY_VERIFY(row(view, 4)); tile(view, "todo")->click();
+    QTRY_VERIFY(row(view, 5)); tile(view, "todo")->click();
     const auto blocked = [&](int n) { auto *b = action(row(view, n), "sendNow"); return b->isEnabled() ? QString() : b->toolTip(); };
     QCOMPARE(blocked(1), QString("codex/gone no longer exists — choose another session"));
     QCOMPARE(blocked(2), QString("The agent is not running. Resume it before sending."));
-    QCOMPARE(blocked(3), QString("codex/ios runs on another computer; sending there comes with replication"));
     QCOMPARE(blocked(4), QString());
+    // A session on another computer takes it there; hgs runs the send on that computer.
+    QCOMPARE(blocked(3), QString());
+    action(row(view, 3), "sendNow")->click();
+    QTRY_VERIFY(FakeTasksCli::calls(dir.path()).contains(QStringList({"task", "send", "uuid-3", "--project", "project-1"})));
+    // An Any session task goes to the open session, there too.
+    view.setContext("project-1", "orchard", "orchard-mac", "codex/ios", "orchard-mac\ncodex/ios", sessions());
+    QTRY_VERIFY(row(view, 5) && action(row(view, 5), "sendNow")->isEnabled());
+    action(row(view, 5), "sendNow")->click();
+    QTRY_VERIFY(FakeTasksCli::calls(dir.path()).contains(
+        QStringList({"task", "send", "uuid-5", "--session", "codex/ios", "--host", "orchard-mac", "--project", "project-1"})));
 }
 
 void TestTasksView::theInputFilesATaskForTheOpenSession() {

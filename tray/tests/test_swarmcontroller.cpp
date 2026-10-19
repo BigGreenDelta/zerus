@@ -542,6 +542,25 @@ print(json.dumps(result))
         QTimer timeout;timeout.setSingleShot(true);connect(&timeout,&QTimer::timeout,this,[]{if(auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()))dialog->reject();});timeout.start(10000);
         showSwarmDialog(&client,&controller,fleet,nullptr,[]{});QVERIFY(checked);
     }
+    void computersThatDoNotShareTasksAreNamed() {
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
+        auto snapshot=controller.snapshot();
+        snapshot["machines"]=QJsonArray{QJsonObject{{"id","node-mac"},{"name","Mac"},{"connection","mac"}},QJsonObject{{"id","node-pi"},{"name","Pi"},{"connection","pi"}}};
+        snapshot["peers"]=QJsonObject{{"mac",QJsonObject{{"last_sync",12345},{"tasks_outdated",true}}},{"pi",QJsonObject{{"last_sync",12345}}}};
+        controller.acceptExternal(snapshot);FleetState fleet;bool checked=false;
+        QTimer::singleShot(0,this,[&]{
+            auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());QVERIFY(dialog);
+            QTimer::singleShot(50,dialog,[&,dialog]{
+                auto *table=dialog->findChild<QTableWidget*>("swarmMachines");
+                const auto status=[&](const QString &name){for(int row=0;row<table->rowCount();++row)if(table->item(row,0)->text()==name)return table->item(row,2)->text();return QString();};
+                QVERIFY2(status("Mac").endsWith(" · Update Zerus there to share tasks"),qPrintable(status("Mac")));
+                QVERIFY2(status("Pi").startsWith("Synced ")&&!status("Pi").contains("tasks"),qPrintable(status("Pi")));
+                checked=true;dialog->reject();
+            });
+        });
+        QTimer timeout;timeout.setSingleShot(true);connect(&timeout,&QTimer::timeout,this,[]{if(auto *dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()))dialog->reject();});timeout.start(10000);
+        showSwarmDialog(&client,&controller,fleet,nullptr,[]{});QVERIFY(checked);
+    }
     void largeFleetKeepsScrollAndSelection() {
         HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);controller.start(organization("Original"));QTRY_VERIFY(controller.settled());
         auto snapshot=controller.snapshot();QJsonArray machines;

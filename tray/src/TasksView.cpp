@@ -256,9 +256,9 @@ QString TasksView::sendBlocker(const TaskItem &task) const {
     const QString host = any ? m_host : task.targetHost, name = any ? m_session : task.targetSession;
     if (name.isEmpty()) return tr("Open the session to send this task to");
     if (!any && !task.targetKnown) return tr("%1 is on a computer this one has not verified").arg(name);
+    // A session on another computer takes the task there; hgs refuses when it cannot be reached.
     const auto *found = session(host, name);
     if (!found) return tr("%1 no longer exists — choose another session").arg(name);
-    if (!host.isEmpty()) return tr("%1 runs on another computer; sending there comes with replication").arg(name);
     return found->blocker;
 }
 
@@ -340,9 +340,10 @@ QList<TasksView::Step> TasksView::steps(const TaskItem &task, TaskAction action)
     case TaskAction::ToTodo: case TaskAction::BackToTodo: return {{withProject({"stage", task.uuid, "todo"}), {}}};
     case TaskAction::Accept: return {{withProject({"stage", task.uuid, "done"}), {}}};
     case TaskAction::SendNow: {
-        // An Any session task goes to the open session.
+        // An Any session task goes to the open session, on whichever computer runs it.
         QStringList arguments{"send", task.uuid};
         if (task.targetSession.isEmpty()) arguments << "--session" << m_session;
+        if (task.targetSession.isEmpty() && !m_host.isEmpty()) arguments << "--host" << m_host;
         return {{withProject(arguments), {}}};
     }
     case TaskAction::Edit: case TaskAction::Cancel: break;
