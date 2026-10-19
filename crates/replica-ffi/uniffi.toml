@@ -1,0 +1,3 @@
+[bindings.kotlin]
+package_name = "app.zerus.mobile.replica"
+cdylib_name = "zerus_replica_ffi"

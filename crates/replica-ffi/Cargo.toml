@@ -1,0 +1,36 @@
+[package]
+name = "zerus-replica-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "The Zerus task replica for the mobile apps, through UniFFI"
+publish = false
+
+[lib]
+name = "zerus_replica_ffi"
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+# Only for generating the bindings: the apps' library never contains the generator.
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+serde_json = "1"
+uniffi = "=0.32.2"
+zerus-replica = { path = "../replica" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+# The library ships once per ABI in the APK: small and without symbols.
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
