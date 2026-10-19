@@ -85,7 +85,8 @@ class Swarm(unittest.TestCase):
         ssh = self.root / 'bin/ssh'; ssh.write_text(SSH); ssh.chmod(0o755)
         self.env = dict(os.environ, SWARM_TEST_ROOT=str(self.root), SWARM_TEST_HGS=str(HGS),
                         PATH=str(self.root / 'bin') + ':' + os.environ['PATH'], HGS_TAB='0')
-        for key in ['HGS_SELF', 'HGS_PEERS', 'HGS_EXECUTABLE']:
+        # Commands of the test are the person's, never the agent's that runs it.
+        for key in ['HGS_SELF', 'HGS_PEERS', 'HGS_EXECUTABLE', 'HGS_SESSION', 'HGS_RUN_ID']:
             self.env.pop(key, None)
         for node, peers in [('a', 'b'), ('b', 'a c'), ('c', 'b')]:
             (self.root / node).mkdir()

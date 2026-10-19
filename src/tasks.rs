@@ -17,7 +17,9 @@ use zerus_replica::{
     Stage, Target, TaskDoc, Tools, MAX_TEXT,
 };
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | report REF | comment REF | settings --project P [--set]
+mod answers;
+
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | report REF | comment REF [--json] | settings --project P [--set]
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin";
 
 fn fail(message: impl std::fmt::Display) -> Error {
@@ -30,7 +32,7 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-fn stdin_text(what: &str) -> Result<String> {
+fn stdin_text(what: &str, example: &str) -> Result<String> {
     let mut bytes = Vec::new();
     std::io::stdin()
         .take(MAX_TEXT as u64 + 1)
@@ -39,7 +41,14 @@ fn stdin_text(what: &str) -> Result<String> {
     if bytes.len() > MAX_TEXT {
         return Err(fail(format!("the {what} is longer than 64 KiB")));
     }
-    String::from_utf8(bytes).map_err(|_| fail(format!("the {what} is not UTF-8")))
+    let text = String::from_utf8(bytes).map_err(|_| fail(format!("the {what} is not UTF-8")))?;
+    // Agents tend to pass texts as arguments; say where they go.
+    if text.trim().is_empty() && !example.is_empty() {
+        return Err(fail(format!(
+            "the {what} is empty; give it on stdin, for example: hgs task {example} <<'EOF'"
+        )));
+    }
+    Ok(text)
 }
 
 fn option<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>> {
@@ -230,9 +239,23 @@ fn view(task: &TaskDoc, project_name: &str, with_log: bool, machines: &Machines)
     Ok(value)
 }
 
-fn print(value: Value) -> Result<i32> {
-    println!("{value}");
-    Ok(0)
+/// The place of `task` in its list, counting from 1.
+fn place(store: &ProjectStore, task: &TaskDoc) -> Result<usize> {
+    let stage = task.stage().map_err(fail)?;
+    let (tasks, _) = store.listing().map_err(fail)?;
+    Ok(tasks
+        .iter()
+        .filter(|t| t.stage().ok() == Some(stage))
+        .position(|t| t.uuid() == task.uuid())
+        .map_or(0, |i| i + 1))
+}
+
+/// `out` with the line an agent reads (`answer`), for a change an agent made.
+fn with_answer(who: &Actor, action: &str, mut out: Value, place: usize, destination: &str) -> Value {
+    if let Actor::Agent(own) = who {
+        out["answer"] = json!(answers::answer(action, &out, place, &own.session, destination));
+    }
+    out
 }
 
 /// Refuses a prompt that the task prompt could not carry when it is sent.
@@ -248,6 +271,17 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     if dry {
         return Err(fail("task commands do not support --dry-run"));
     }
+    let out = execute(config, args)?;
+    // An agent reads one line saying what happened; --json prints the task.
+    match out.get("answer").and_then(Value::as_str) {
+        Some(line) if !flag(args, "--json") => println!("{line}"),
+        _ => println!("{out}"),
+    }
+    Ok(0)
+}
+
+/// Runs one task command and returns its JSON.
+fn execute(config: &Config, args: &[String]) -> Result<Value> {
     let Some((action, args)) = args.split_first() else {
         return Err(fail(USAGE));
     };
@@ -260,7 +294,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             let task = store(config, &r.project.0)?
                 .find(&r.task)
                 .map_err(fail)?;
-            print(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": view(&task, &r.project.1, true, &machines)?}))
+            Ok(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": view(&task, &r.project.1, true, &machines)?}))
         }
         "add" => add(config, args),
         "edit" | "move" | "stage" | "target" | "comment" | "report" | "send" | "cancel" => {
@@ -271,7 +305,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     }
 }
 
-fn list(config: &Config, args: &[String]) -> Result<i32> {
+fn list(config: &Config, args: &[String]) -> Result<Value> {
     let machines = machines(config)?;
     let who = actor(&machines.here, args, false)?;
     let (id, name) = project_arg(config, args, &who)?;
@@ -296,11 +330,24 @@ fn list(config: &Config, args: &[String]) -> Result<i32> {
             out.push(view(task, &name, false, &machines)?);
         }
     }
-    print(json!({"project": {"id": id, "name": name}, "tasks": out, "damaged": damaged}))
+    Ok(json!({"project": {"id": id, "name": name}, "tasks": out, "damaged": damaged}))
 }
 
-fn add(config: &Config, args: &[String]) -> Result<i32> {
-    let text = stdin_text("prompt")?;
+/// `--position N`, counting from 1, as a list index.
+fn position_index(args: &[String]) -> Result<Option<usize>> {
+    option(args, "--position")?
+        .map(|p| {
+            p.parse::<usize>()
+                .ok()
+                .filter(|p| *p >= 1)
+                .map(|p| p - 1)
+                .ok_or_else(|| fail("--position is a number from 1"))
+        })
+        .transpose()
+}
+
+fn add(config: &Config, args: &[String]) -> Result<Value> {
+    let text = stdin_text("prompt", "add")?;
     let machines = machines(config)?;
     let author = actor(&machines.here, args, false)?;
     let (id, name) = project_arg(config, args, &author)?;
@@ -326,16 +373,7 @@ fn add(config: &Config, args: &[String]) -> Result<i32> {
             session: session.to_owned(),
         }),
     };
-    let position = match option(args, "--position")? {
-        Some(p) => Position::Index(
-            p.parse::<usize>()
-                .ok()
-                .filter(|p| *p >= 1)
-                .ok_or_else(|| fail("--position is a number from 1"))?
-                - 1,
-        ),
-        None => Position::End,
-    };
+    let position = position_index(args)?.map_or(Position::End, Position::Index);
     let store = store(config, &id)?;
     let rank = store.rank_for(stage, &position, None).map_err(fail)?;
     let short = store.unused_short_id().map_err(fail)?;
@@ -345,21 +383,22 @@ fn add(config: &Config, args: &[String]) -> Result<i32> {
         text: &text,
         stage,
         target,
-        author,
+        author: author.clone(),
         rank: &rank,
         now: now(),
     })
     .map_err(fail)?;
     check_prompt(&store, &task, &name)?;
     store.save(&mut task).map_err(fail)?;
-    print(json!({"task": view(&task, &name, true, &machines)?}))
+    let at = place(&store, &task)?;
+    Ok(with_answer(&author, "add", json!({"task": view(&task, &name, true, &machines)?}), at, ""))
 }
 
-fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
+fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
     let text = match action {
-        "edit" => Some(stdin_text("prompt")?),
-        "comment" => Some(stdin_text("comment")?),
-        "report" => Some(stdin_text("report")?),
+        "edit" => Some(stdin_text("prompt", "edit REF")?),
+        "comment" => Some(stdin_text("comment", "comment REF")?),
+        "report" => Some(stdin_text("report", "report REF")?),
         _ => None,
     };
     let machines = machines(config)?;
@@ -367,6 +406,18 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
     let who = actor(here, args, matches!(action, "send" | "cancel"))?;
     let r = reference(config, args, &who)?;
     let (project_id, project_name) = (&r.project.0, &r.project.1);
+    // An agent reads a refused send as "SESSION cannot take it now: …"; a paste
+    // that happened is never reworded.
+    let refuse = |error: Error, to: &str| -> Error {
+        if matches!(who, Actor::Agent(_))
+            && action == "send"
+            && !error.message.starts_with("the prompt was sent")
+        {
+            fail(answers::refused(to, &error.message))
+        } else {
+            error
+        }
+    };
     let store = store(config, project_id)?;
     let mut task = store.find(&r.task).map_err(fail)?;
     // A send or cancel for a session another computer runs happens there.
@@ -379,23 +430,27 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
         _ => None,
     };
     if let Some((session, _)) = session.as_ref().filter(|(session, _)| session.machine != here) {
+        let to = session.session.clone();
         // This computer's copy refuses first: a task it shows In progress, or
         // in a stage that is not sent, never reaches the other computer.
         if action == "send" {
-            task.check_send().map_err(fail)?;
+            task.check_send().map_err(|e| refuse(fail(e), &to))?;
         }
         let uuid = task.uuid().to_owned();
         drop(store);
-        return match reach(config, &machines, project_id, session) {
+        let out = match reach(config, &machines, project_id, session) {
             Ok(alias) => forwarded(config, &machines, &r.project, &uuid, action, args, session, &alias, &who),
             // A cancel goes through while that computer is out of reach: the task
             // moves to In review here and its session is not told.
             Err(reason) if action == "cancel" => cancel_here(config, &machines, &r.project, &uuid, args, &who, reason),
             Err(reason) => Err(fail(reason)),
-        };
+        }
+        .map_err(|e| refuse(e, &to))?;
+        return Ok(with_answer(&who, action, out, 0, &to));
     }
     let text = text.unwrap_or_default();
     let mut extra = json!({});
+    let mut destination = String::new();
     match action {
         "edit" => {
             task.edit_text(&text, &who, now()).map_err(fail)?;
@@ -413,6 +468,8 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
                 Position::Before(anchor.rsplit('/').next().unwrap_or(anchor).to_owned())
             } else if let Some(anchor) = option(args, "--after")? {
                 Position::After(anchor.rsplit('/').next().unwrap_or(anchor).to_owned())
+            } else if let Some(index) = position_index(args)? {
+                Position::Index(index)
             } else {
                 return Err(fail(USAGE));
             };
@@ -451,17 +508,20 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
         }
         "send" => {
             let (session, pin) = session.expect("a send has its session");
-            extra = send(&store, &mut task, project_name, session, pin, &who)?;
+            destination = session.session.clone();
+            extra = send(&store, &mut task, project_name, session, pin, &who)
+                .map_err(|e| refuse(e, &destination))?;
         }
         "cancel" => extra = cancel(&store, &mut task, project_name, args, &who, None)?,
         _ => return Err(fail(USAGE)),
     }
     store.save(&mut task).map_err(fail)?;
+    let at = if action == "move" { place(&store, &task)? } else { 0 };
     let mut out = json!({"task": view(&task, project_name, true, &machines)?});
     for (key, value) in extra.as_object().expect("object") {
         out[key] = value.clone();
     }
-    print(out)
+    Ok(with_answer(&who, action, out, at, &destination))
 }
 
 /// The session a send goes to, and whether it pins the task there: --session
@@ -515,8 +575,9 @@ fn forwarded(
     session: &SessionKey,
     alias: &str,
     who: &Actor,
-) -> Result<i32> {
-    let mut remote: Vec<String> = vec!["task".into(), action.into(), uuid.into(), "--project".into(), project.0.clone()];
+) -> Result<Value> {
+    // That computer answers in JSON even for an agent; this one answers the agent.
+    let mut remote: Vec<String> = vec!["task".into(), action.into(), uuid.into(), "--project".into(), project.0.clone(), "--json".into()];
     if action == "send" && option(args, "--session")?.is_some() {
         remote.extend(["--session".into(), session.session.clone()]);
     }
@@ -545,7 +606,7 @@ fn forwarded(
             out[key] = value.clone();
         }
     }
-    print(out)
+    Ok(out)
 }
 
 /// Cancels here a task whose session's computer cannot be reached: it moves to
@@ -559,14 +620,14 @@ fn cancel_here(
     args: &[String],
     who: &Actor,
     reason: String,
-) -> Result<i32> {
+) -> Result<Value> {
     let store = store(config, &project.0)?;
     let mut task = store.find(uuid).map_err(fail)?;
     let extra = cancel(&store, &mut task, &project.1, args, who, Some(reason))?;
     store.save(&mut task).map_err(fail)?;
     let mut out = json!({"task": view(&task, &project.1, true, machines)?});
     out["cancel_message"] = extra["cancel_message"].clone();
-    print(out)
+    Ok(out)
 }
 
 /// Pastes the task prompt into its session on this computer.
@@ -662,10 +723,10 @@ fn cancel(
     })
 }
 
-fn settings(config: &Config, args: &[String]) -> Result<i32> {
+fn settings(config: &Config, args: &[String]) -> Result<Value> {
     let invalid = |e: &dyn std::fmt::Display| fail(format!("invalid settings: {e}"));
     let changes = if flag(args, "--set") {
-        match serde_json::from_str(&stdin_text("settings")?).map_err(|e| invalid(&e))? {
+        match serde_json::from_str(&stdin_text("settings", "")?).map_err(|e| invalid(&e))? {
             Value::Object(changes) => Some(changes),
             _ => return Err(invalid(&"expected a JSON object")),
         }
@@ -689,5 +750,5 @@ fn settings(config: &Config, args: &[String]) -> Result<i32> {
         doc.set_settings(&wanted).map_err(fail)?;
         store.save_project(&doc).map_err(fail)?;
     }
-    print(json!({"project": {"id": id, "name": name}, "settings": doc.settings()}))
+    Ok(json!({"project": {"id": id, "name": name}, "settings": doc.settings()}))
 }

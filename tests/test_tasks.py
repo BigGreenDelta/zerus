@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """`hgs task` through the real CLI: an isolated catalog and state; sends go to
 a scripted agent on a private tmux socket."""
+import datetime
 import fcntl
 import hashlib
 import json
@@ -133,7 +134,18 @@ class Fixture(unittest.TestCase):
         return result.stderr
 
     def add(self, text, *args, session=None):
-        return self.hgs("add", "--project", "orchard", *args, text=text, session=session)["task"]
+        # An agent's add answers in one line; --json prints the task.
+        extra = ["--json"] if session else []
+        return self.hgs("add", "--project", "orchard", *args, *extra, text=text, session=session)["task"]
+
+    def says(self, *args, text=None, session="codex/api"):
+        """The line an agent reads after a change."""
+        env = dict(self.env, HGS_SESSION=session, HGS_RUN_ID=self.agent(session))
+        result = subprocess.run([str(HGS), "task", *args], input=text, env=env, text=True,
+                                capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 1, result.stdout)
+        return result.stdout.strip()
 
     def ids(self, stage):
         listing = self.hgs("list", "--project", "orchard", "--stage", stage)
@@ -458,7 +470,7 @@ class TaskDelivery(Fixture):
         self.assertIn("pinned to " + self.name, self.hgs("send", pinned["ref"], "--session", "codex/other", ok=False))
         anywhere = self.add("Anywhere")
         # An agent that names the session also pins the task there.
-        sent = self.hgs("send", anywhere["ref"], "--session", self.name, session="codex/planner")["task"]
+        sent = self.hgs("send", anywhere["ref"], "--session", self.name, "--json", session="codex/planner")["task"]
         self.assertEqual(sent["target"]["session"], self.name)
 
     def test_a_refused_send_changes_nothing(self):
@@ -504,6 +516,70 @@ class TaskDelivery(Fixture):
         self.assertFalse(out["cancel_message"]["sent"])
         self.assertIn("not been confirmed", out["cancel_message"]["error"])
         self.assertEqual(out["task"]["log"][-1]["kind"], "note")
+
+
+class AgentAnswers(TaskDelivery):
+    def setUp(self):
+        super().setUp()
+        self.env["TZ"] = "UTC"
+        self.agent("codex/api")
+        join(self.env, "project-1", "codex/api")
+
+    def test_changes_answer_in_one_line(self):
+        self.add("Earlier work")
+        filed = self.says("add", text="Add rate limiting")
+        self.assertRegex(filed, r"^Filed orchard/T-\w+ in To do, position 2, for codex/api\.$")
+        ref = filed.split()[1]
+        self.assertRegex(self.says("add", "--backlog", "--position", "1", text="Measure first"),
+                         r"^Filed orchard/T-\w+ in Backlog, position 1, for codex/api\.$")
+        self.assertEqual(self.says("move", ref, "--position", "1"), ref + " is position 1 in To do.")
+        self.assertEqual(self.says("move", ref, "--position", "9"), ref + " is position 2 in To do.")
+        self.assertEqual(self.says("edit", ref, text="Add rate limiting, edited"), ref + " has the new prompt.")
+        self.assertEqual(self.says("target", ref, self.name), ref + " now goes to codex/task-test.")
+        self.assertEqual(self.says("target", ref, "any"), ref + " now goes to any session.")
+        self.assertEqual(self.says("comment", ref, text="Measured: 40 rps."), "Added your comment to " + ref + ".")
+        self.assertEqual(self.says("stage", ref, "backlog"), ref + " is in Backlog.")
+        # --json prints the task, with the answer beside it.
+        out = self.hgs("stage", ref, "todo", "--json", session="codex/api")
+        self.assertEqual((out["task"]["stage"], out["answer"]), ("todo", ref + " is in To do."))
+        # The person's commands print JSON as before, without an answer.
+        self.assertNotIn("answer", self.hgs("stage", ref, "backlog"))
+
+    def test_send_report_and_cancel_answer_in_one_line(self):
+        task = self.add("Add rate limiting", "--target", self.name)
+        self.assertEqual(self.says("send", task["ref"]), task["ref"] + " sent to codex/task-test.")
+        self.wait_received("Add rate limiting")
+        self.assertEqual(self.as_agent("report", task["ref"], text="Token bucket; 6 tests.").strip(),
+                         task["ref"] + " is In review.")
+        self.assertEqual(self.says("report", task["ref"], text="Also the README."),
+                         task["ref"] + " is In review; your report was added to its history.")
+        self.confirm()
+        again = self.add("Measure the limits", "--target", self.name)
+        self.hgs("send", again["ref"])
+        self.confirm()
+        self.assertEqual(self.says("cancel", again["ref"], "--reason", "Wrong branch"),
+                         again["ref"] + " is In review; codex/task-test got the cancel message.")
+        cancelled = self.hgs("get", again["ref"])["task"]
+        at = datetime.datetime.fromtimestamp(cancelled["cancelled_at"] / 1000, datetime.timezone.utc).strftime("%H:%M")
+        self.assertEqual(self.as_agent("report", again["ref"], text="Stopped halfway.").strip(),
+                         again["ref"] + " is In review (cancelled at " + at + "); your report was added to its history.")
+
+    def test_a_refused_send_names_its_session(self):
+        task = self.add("Add rate limiting", "--target", self.name)
+        self.says("send", task["ref"])
+        refusal = self.hgs("send", task["ref"], session="codex/api", ok=False)
+        self.assertIn("codex/task-test cannot take it now: ", refusal)
+        self.assertIn("already In progress in codex/task-test. Nothing was sent.", refusal)
+
+    def test_an_empty_text_says_where_it_goes(self):
+        task = self.add("Add rate limiting")
+        self.assertIn("the report is empty; give it on stdin, for example: hgs task report REF <<'EOF'",
+                      self.hgs("report", task["ref"], text="", session="codex/api", ok=False))
+
+
+# Only the delivery fixture is shared, not its tests.
+for _name in [n for n in vars(TaskDelivery) if n.startswith("test_")]:
+    setattr(AgentAnswers, _name, None)
 
 
 if __name__ == "__main__":

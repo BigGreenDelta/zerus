@@ -269,10 +269,17 @@ class TaskRouting(unittest.TestCase):
 
     def test_an_agent_sends_as_itself(self):
         task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
-        self.task("a", "send", task["id"], "--project", "project-1", session="codex/local")
+        self.task("a", "send", task["id"], "--project", "project-1", "--json", session="codex/local")
         self.wait_received("Add rate limiting")
         entry = next(e for e in self.get("b", task)["log"] if e["kind"] == "sent")
         self.assertEqual((entry["actor"]["kind"], entry["actor"]["session"], entry["actor"]["host"]), ("agent", "codex/local", "a"))
+
+    def test_an_agents_send_answers_in_one_line(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        result = subprocess.run([str(HGS), "task", "send", task["id"], "--project", "project-1"],
+                                env=self.env("a", "codex/local"), text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "orchard/" + task["id"] + " sent to codex/remote.")
 
     def test_a_computer_without_task_replication_is_named(self):
         task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")

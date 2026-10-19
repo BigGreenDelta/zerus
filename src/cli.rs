@@ -121,7 +121,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] resume <session> --fresh [-d] [--expected-run-id ID]   same settings, new conversation
        hgs notify [--bell] <session> [text]   event for the tray (no tray = no-op)
        hgs project ls [--json] | add <name> <dir> | set <name> <dir> | rm <name>
-       hgs task list|get|add|edit|move|stage|target|send|cancel|report|comment|settings …   project tasks (JSON)
+       hgs task list|get|add|edit|move|stage|target|send|cancel|report|comment|settings …   project tasks (JSON; agents read one line)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use
   cmd      claude | codex | kimi (know --resume) | opencode (native API) | sh (login shell) | any command
