@@ -30,6 +30,18 @@ import org.json.JSONObject
 class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val store = PrivateStore(application)
     private val api = RelayApi()
+    internal val privateAnalytics by lazy { PrivateAnalyticsController(this, viewModelScope, api) }
+    internal fun privateAnalyticsRoutes(): List<AnalyticsRoute> = machines.mapNotNull { machine ->
+        val connection = connections.find { it.id == machine.connectionId } ?: return@mapNotNull null
+        val key = MachineKey(machine.connectionId, machine.id)
+        val state = privateAnalyticsAccess(machine.machineId, machine.online && !machine.lastKnown, !demo && storageReady,
+            relayOperations[machine.connectionId].orEmpty(), machineOperations[key].orEmpty())
+        AnalyticsRoute(connection, key, machine.machineId, machine.name, state, supportsSpeechStats(key))
+    }
+    internal fun privateAnalyticsRouteCurrent(route: AnalyticsRoute, agent: Boolean = true) = privateAnalyticsRoutes().any {
+        it.key == route.key && it.machineId == route.machineId && it.connection == route.connection &&
+            (if (agent) it.state == AnalyticsReadState.Ready else it.speech && it.state in setOf(AnalyticsReadState.Ready, AnalyticsReadState.Unsupported))
+    }
     internal val speech by lazy { SpeechController(application, this, viewModelScope, api) }
     internal val defaultVoiceProviders by lazy { DefaultVoiceProviders(this, viewModelScope, api) }
     internal fun defaultVoiceProfilesReason(host: SpeechConfigHost): String = when {

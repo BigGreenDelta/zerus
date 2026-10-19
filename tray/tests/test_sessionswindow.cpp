@@ -513,8 +513,9 @@ void TestSessionsWindow::nativeSettingsNavigationOnExplicitSpeechHost()
     SettingsPage page(executable); page.setPeers({host}); page.show();
     auto *sections=page.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
     QCOMPARE(sections->item(sections->count()-1)->text(),"About");
-    QCOMPARE(sections->item(sections->count()-2)->text(),"Keyboard");
-    const int voice=sections->count()-3; QCOMPARE(sections->item(voice)->text(),"Voice input");
+    QCOMPARE(sections->item(sections->count()-2)->text(),"Private analytics");
+    QCOMPARE(sections->item(sections->count()-3)->text(),"Keyboard");
+    const int voice=sections->count()-4; QCOMPARE(sections->item(voice)->text(),"Voice input");
     sections->setCurrentRow(sections->count()-1);
     auto *version=page.findChild<QLabel *>("aboutHgsVersion"); QVERIFY(version);
     QTRY_VERIFY_WITH_TIMEOUT(version->text().startsWith("hgs CLI 1."),10000);
@@ -2988,6 +2989,82 @@ else:print('{}')
     // picked up by the next compaction poll, which reads details.json: poll often.
     constexpr int compactPollMs = 200; window.setCompactPollIntervalForTests(compactPollMs);
     auto *client=window.findChild<HgsClient *>();
+    // zerus-pvfa15: a failure prints the synthetic phases seen so far, never message
+    // or draft text, before the window and its fixture folder are destroyed.
+    const qint64 t0 = QDateTime::currentMSecsSinceEpoch();
+    const QString reviewKey = window.findChild<MessageComposer *>("messageComposer")->sessionKey();
+    QStringList phases; qsizetype droppedPhases = 0;
+    const auto bounded = [](QString value) { return value.remove('\r').replace('\n', '|').left(160); };
+    const auto flag = [](bool value) { return value ? QStringLiteral("1") : QStringLiteral("0"); };
+    const auto notePhase = [&](const QString &line) {
+        if (phases.size() < 300) phases << QStringLiteral("+%1ms %2").arg(QString::number(QDateTime::currentMSecsSinceEpoch() - t0), line);
+        else ++droppedPhases;
+    };
+    const auto fields = [&](const QJsonObject &data) {
+        QStringList values;
+        for (const char *field : {"tracked", "run_id", "conversation_id", "runtime_state", "process_state", "activity", "phase", "error", "expected_id"})
+            if (data.contains(QLatin1String(field)))
+                values << QStringLiteral("%1=%2").arg(QLatin1String(field), bounded(data.value(QLatin1String(field)).toVariant().toString()));
+        const auto compact = data.value(QStringLiteral("compact_context_request")).toObject();
+        if (!compact.isEmpty()) values << QStringLiteral("compact=%1/%2").arg(bounded(compact.value(QStringLiteral("status")).toString()),
+            compact.value(QStringLiteral("request_id")).toString().left(8));
+        return values.join(' ');
+    };
+    QObject phaseContext; // Disconnects these recorders before the helpers above are destroyed.
+    connect(client, &HgsClient::sessionActionFinished, &phaseContext, [&](quint64 action, bool ok, const QJsonObject &receipt, const QString &error) {
+        notePhase(QStringLiteral("sessionActionFinished request=%1 ok=%2 receipt=%3 error=%4").arg(QString::number(action), flag(ok),
+            receipt.value(QStringLiteral("request_id")).toString().left(8), bounded(error)));
+    });
+    connect(client, &HgsClient::messageSent, &phaseContext, [&](quint64 message, const QString &host, const QString &name, const QJsonObject &receipt) {
+        notePhase(QStringLiteral("messageSent request=%1 host=%2 name=%3 run=%4 conversation=%5").arg(QString::number(message), host, name,
+            receipt.value(QStringLiteral("run_id")).toString(), receipt.value(QStringLiteral("conversation_id")).toString()));
+    });
+    connect(client, &HgsClient::messageFailed, &phaseContext, [&](quint64 message, const QString &host, const QString &name, const QString &detail, bool uncertain) {
+        notePhase(QStringLiteral("messageFailed request=%1 host=%2 name=%3 uncertain=%4 detail=%5").arg(QString::number(message), host, name,
+            flag(uncertain), bounded(detail)));
+    });
+    connect(client, &HgsClient::inspectionLoadingChanged, &phaseContext,
+        [&](const QString &host, const QString &name, const QString &archive, const QString &agent, bool loading) {
+            if (loading) notePhase(QStringLiteral("inspectionStarted host=%1 name=%2 archive=%3 agent=%4").arg(host, name, archive, agent));
+        });
+    connect(client, &HgsClient::inspectionReady, &phaseContext, [&](const QString &host, const QString &name, const QJsonObject &data, const QString &archive) {
+        notePhase(QStringLiteral("inspectionReady host=%1 name=%2 archive=%3 %4").arg(host, name, archive, fields(data)));
+    });
+    connect(client, &HgsClient::inspectionFailed, &phaseContext, [&](const QString &host, const QString &name, const QString &detail, const QString &archive) {
+        notePhase(QStringLiteral("inspectionFailed host=%1 name=%2 archive=%3 detail=%4").arg(host, name, archive, bounded(detail)));
+    });
+    const auto snapshot = qScopeGuard([&] {
+        if (!QTest::currentTestFailed()) return;
+        QStringList lines{QStringLiteral("outcome=%1 t0=%2").arg(outcome, QString::number(t0))};
+        const auto *shown = window.findChild<MessageComposer *>("messageComposer");
+        if (!shown) lines << QStringLiteral("composer absent");
+        else {
+            const auto *status = shown->findChild<QLabel *>("messageStatus"); const auto *send = shown->findChild<QPushButton *>("sendMessage");
+            lines << QStringLiteral("composer selected=%1 waiting=%2 preparing=%3 sending=%4 draftLoading=%5 hasDraft=%6 draftMatches=%7 readOnly=%8 send=%9 status=%10").arg(
+                flag(shown->sessionKey() == reviewKey), flag(shown->isWaitingToSend(reviewKey)), flag(shown->isPreparingSending(reviewKey)),
+                flag(shown->isSending(reviewKey)), flag(shown->isDraftLoading(reviewKey)), flag(shown->hasDraft(reviewKey)),
+                flag(shown->draftMatches(reviewKey, QStringLiteral("Keep until compacted"), {})), flag(shown->editor()->isReadOnly()),
+                bounded(send ? send->text() : QString()), bounded(status ? status->text() : QString()));
+        }
+        const auto *notice = window.findChild<QLabel *>("notice"); const auto *cancel = window.findChild<QPushButton *>("cancelCompactSend");
+        lines << QStringLiteral("window visible=%1 cancelCompactSend=%2 noticeError=%3 notice=%4").arg(flag(window.isVisible()),
+            flag(cancel && cancel->isVisible()), flag(notice && notice->property("error").toBool()), bounded(notice ? notice->text() : QString()));
+        QStringList files;
+        for (const char *name : {"compact-context.json", "send.tmp", "send.json", "send-targets.txt"})
+            files << QStringLiteral("%1=%2").arg(QLatin1String(name), flag(QFileInfo::exists(temp.filePath(QLatin1String(name)))));
+        lines << QStringLiteral("files %1").arg(files.join(' '));
+        QFile compactRequest(temp.filePath("compact-context.json"));
+        if (compactRequest.open(QIODevice::ReadOnly)) lines << QStringLiteral("compact-context request=%1").arg(
+            QJsonDocument::fromJson(compactRequest.read(65536)).object().value(QStringLiteral("request_id")).toString().left(8));
+        QFile sentTo(temp.filePath("send-targets.txt"));
+        if (sentTo.open(QIODevice::ReadOnly)) lines << QStringLiteral("send-targets %1").arg(bounded(QString::fromUtf8(sentTo.read(1024))));
+        QFile served(temp.filePath("details.json"));
+        if (served.open(QIODevice::ReadOnly)) lines << QStringLiteral("details.json %1").arg(fields(QJsonDocument::fromJson(served.read(65536)).object()));
+        lines << QStringLiteral("test details %1").arg(fields(details));
+        lines << phases;
+        if (droppedPhases) lines << QStringLiteral("%1 later phases dropped").arg(QString::number(droppedPhases));
+        for (const auto &line : std::as_const(lines)) qWarning().noquote() << "pvfa15" << line;
+    });
     // Polls read details.json while it changes: replace it atomically, or a torn read
     // fails an inspection and the held send is refused.
     const auto apply=[&]{QVERIFY(FakeCli::replace(temp.filePath("details.json"),QJsonDocument(details).toJson()));client->inspectionReady("mac","claude/infra/review",details);};apply();
@@ -2997,6 +3074,7 @@ else:print('{}')
         for(auto *button:dialog->buttons())if(button->text()=="Compact and continue"){QVERIFY(button->isEnabled());button->click();return;}QFAIL("No compact option");});
     QVERIFY(composer->findChild<QPushButton *>("sendMessage")->isEnabled());
     composer->findChild<QPushButton *>("sendMessage")->click();QTRY_COMPARE(finished.size(),1);QVERIFY(finished[0][1].toBool());
+    notePhase(QStringLiteral("test compact receipt observed"));
     QCOMPARE(composer->editor()->toPlainText(),QString("Keep until compacted"));QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));
     QVERIFY(composer->editor()->isReadOnly()); QVERIFY(!composer->canAttachFiles());
     QCOMPARE(composer->findChild<QPushButton *>("sendMessage")->text(), QString("Waiting to send…"));
@@ -3005,6 +3083,7 @@ else:print('{}')
     QCOMPARE(composer->editor()->toPlainText(), QString("Keep until compacted"));
     QFile request(temp.filePath("compact-context.json"));QVERIFY(request.open(QIODevice::ReadOnly));const auto payload=QJsonDocument::fromJson(request.readAll()).object();
     const auto id=payload.value("request_id").toString();
+    notePhase(QStringLiteral("test compacting apply follows"));
     details["compact_context_request"]=QJsonObject{{"request_id",id},{"status","compacting"}};details["activity"]="busy";details["phase"]="compacting";apply();
     QVERIFY(window.findChild<QPushButton *>("cancelCompactSend")->isVisible());QVERIFY(window.findChild<QPushButton *>("cancelCompactSend")->height()<=24);QVERIFY(!QFileInfo::exists(temp.filePath("send.json")));
     if(!qEnvironmentVariable("HGS_COMPACT_PREVIEW").isEmpty())QVERIFY(window.grab().save(qEnvironmentVariable("HGS_COMPACT_PREVIEW")));
@@ -3033,10 +3112,12 @@ else:print('{}')
         QVERIFY(!composer->editor()->isReadOnly()); QVERIFY(composer->canAttachFiles());
         QCOMPARE(QApplication::focusWidget(), composer->editor());
     }
+    notePhase(QStringLiteral("test outcome apply follows"));
     details["compact_context_request"]=QJsonObject{{"request_id",id},{"status",navigated||outcome=="draft"||outcome=="identity"||outcome=="cancel"?"completed":outcome}};
     details["activity"]="idle";details["phase"]="idle";
     if (navigated) QVERIFY(FakeCli::replace(temp.filePath("details.json"), QJsonDocument(details).toJson()));
     else apply();
+    notePhase(QStringLiteral("test outcome applied failed=%1").arg(flag(QTest::currentTestFailed())));
     if(outcome=="completed" || outcome=="navigation" || outcome=="hidden") {
         QTRY_VERIFY(QFileInfo::exists(temp.filePath("send.json")));QFile sent(temp.filePath("send.json"));QVERIFY(sent.open(QIODevice::ReadOnly));
         const auto message=QJsonDocument::fromJson(sent.readAll()).object();QCOMPARE(message["text"].toString(),QString("Keep until compacted"));QCOMPARE(message["expected_compaction_id"].toString(),id);
@@ -10200,8 +10281,9 @@ void TestSessionsWindow::fileCacheSettingsNavigation(){
     auto *sections = window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
     QCOMPARE(sections->item(6)->text(), QString("Files"));
     QCOMPARE(sections->item(sections->count()-1)->text(), QString("About"));
-    QCOMPARE(sections->item(sections->count()-2)->text(), QString("Keyboard"));
-    QCOMPARE(sections->item(sections->count()-3)->text(), QString("Voice input"));
+    QCOMPARE(sections->item(sections->count()-2)->text(), QString("Private analytics"));
+    QCOMPARE(sections->item(sections->count()-3)->text(), QString("Keyboard"));
+    QCOMPARE(sections->item(sections->count()-4)->text(), QString("Voice input"));
     sections->setCurrentRow(6);
     auto *files = window.findChild<DownloadCacheSettings *>("downloadCacheSettings"); QVERIFY(files); QVERIFY(files->isVisible());
     QCOMPARE(files->findChild<QComboBox *>("downloadCachePolicy")->currentText(), QString("Never clear"));
@@ -10310,10 +10392,19 @@ struct PushFixture {
     QTemporaryDir dir; QString script = dir.filePath("hgs");
     QJsonObject details{{"tracked", true}, {"run_id", "run-one"}, {"conversation_id", "conversation-one"}, {"runtime_state", "live"},
         {"process_state", "running"}, {"activity", "busy"}, {"phase", "working"}, {"events", QJsonArray{}}, {"cursor", 0}};
+    // Set before install(): send also appends its synthetic phases, never the message, to <script>.send-trace.
+    bool traceSend = false;
     // gateSendNow: send-now waits until release() before it answers.
     bool install(const QString &base, Send mode = Send::Confirm, bool gateSendNow = false)
     {
         QFile original(base); if (!original.open(QIODevice::ReadOnly)) return false;
+        const QByteArray traceEntry = traceSend ? QByteArray(" import os,time\n def trace(*v):\n  try:\n"
+            "   with open(__file__+'.send-trace','a') as f:f.write(' '.join(str(x)[:80] for x in v)+'\\n')\n  except OSError:pass\n"
+            " trace('send-entry','pid='+str(os.getpid()),'ms='+str(int(time.time()*1000)))\n") : QByteArray();
+        const QByteArray traceRequest = traceSend ? QByteArray(" trace('send-request','request='+str(payload.get('request_id')),"
+            "'run='+str(payload.get('expected_run_id')),'conversation='+str(payload.get('expected_conversation_id')),"
+            "'ms='+str(int(time.time()*1000)))\n") : QByteArray();
+        const QByteArray traceResponse = traceSend ? QByteArray(" trace('send-response','printed','ms='+str(int(time.time()*1000)))\n") : QByteArray();
         const QByteArray confirm = " print(json.dumps({'status':'submitted','request_id':payload['request_id'],'name':a[1],'run_id':payload['expected_run_id'],"
             "'conversation_id':payload['expected_conversation_id'],'first_message':not payload['expected_conversation_id']}))\n";
         // Every branch is a QByteArray: MSVC rejects a conditional that mixes literals with one.
@@ -10323,7 +10414,7 @@ struct PushFixture {
         return FakeCli::install(script, original.readAll().replace("if False:pass\n", "if False:pass\n"
             "elif c=='inspect':print(open(__file__+'.details').read())\n"
             "elif c=='resume':pass\n"
-            "elif c=='send':\n payload=json.loads(sys.stdin.read())\n" + send +
+            "elif c=='send':\n" + traceEntry + " payload=json.loads(sys.stdin.read())\n" + traceRequest + send + traceResponse +
             "elif c=='send-now':\n payload=json.loads(sys.stdin.read())\n"
             " open(__file__+'.send-now','a').write(payload['queue_id']+'\\n')\n"
             + QByteArray(gateSendNow ? " t=__import__('time').time()\n"
@@ -10855,7 +10946,7 @@ void TestSessionsWindow::pushDropsAfterSessionIdentityChange()
 
 void TestSessionsWindow::pushFollowsTheRunThatTakesTheMessage()
 {
-    PushFixture fixture;
+    PushFixture fixture; fixture.traceSend = true;
     fixture.details = QJsonObject{{"tracked", true}, {"run_id", "run-old"}, {"conversation_id", "conversation-old"},
         {"runtime_state", "saved"}, {"process_state", "exited"}, {"events", QJsonArray{}}, {"cursor", 0}};
     QVERIFY(fixture.install(script()));
@@ -10872,6 +10963,71 @@ void TestSessionsWindow::pushFollowsTheRunThatTakesTheMessage()
     if (QTest::currentTestFailed()) return;
     auto *client = window.findChild<HgsClient *>();
     QSignalSpy delivered(client, &HgsClient::messageSent), writes(client, &HgsClient::writeDone);
+    // zerus-pvfa14: a failure prints the synthetic phases seen so far, never message
+    // or draft text, before the window and fixture are destroyed.
+    const qint64 t0 = QDateTime::currentMSecsSinceEpoch();
+    const QString pushKey = window.findChild<MessageComposer *>("messageComposer")->sessionKey();
+    QStringList phases; qsizetype droppedPhases = 0;
+    const auto bounded = [](QString value) { return value.remove('\r').replace('\n', '|').left(160); };
+    const auto flag = [](bool value) { return value ? QStringLiteral("1") : QStringLiteral("0"); };
+    const auto notePhase = [&](const QString &line) {
+        if (phases.size() < 200) phases << QStringLiteral("+%1ms %2").arg(QString::number(QDateTime::currentMSecsSinceEpoch() - t0), line);
+        else ++droppedPhases;
+    };
+    const auto fields = [&](const QJsonObject &data) {
+        QStringList values;
+        for (const char *field : {"tracked", "run_id", "conversation_id", "runtime_state", "process_state", "activity", "phase", "first_message_can_send", "error"})
+            if (data.contains(QLatin1String(field)))
+                values << QStringLiteral("%1=%2").arg(QLatin1String(field), bounded(data.value(QLatin1String(field)).toVariant().toString()));
+        if (data.contains(QStringLiteral("input_queue")))
+            values << QStringLiteral("queue=%1").arg(bounded(data.value(QStringLiteral("input_queue")).toObject().value(QStringLiteral("id")).toString()));
+        return values.join(' ');
+    };
+    QObject phaseContext; // Disconnects these recorders before the helpers above are destroyed.
+    connect(client, &HgsClient::writeDone, &phaseContext, [&](const QString &operation, bool ok, const QString &detail) {
+        notePhase(QStringLiteral("writeDone operation=%1 ok=%2 detail=%3").arg(operation, flag(ok), bounded(detail)));
+    });
+    connect(client, &HgsClient::messageSent, &phaseContext, [&](quint64 request, const QString &host, const QString &name, const QJsonObject &receipt) {
+        notePhase(QStringLiteral("messageSent request=%1 host=%2 name=%3 run=%4 conversation=%5").arg(QString::number(request), host, name,
+            receipt.value(QStringLiteral("run_id")).toString(), receipt.value(QStringLiteral("conversation_id")).toString()));
+    });
+    connect(client, &HgsClient::messageFailed, &phaseContext, [&](quint64 request, const QString &host, const QString &name, const QString &detail, bool uncertain) {
+        notePhase(QStringLiteral("messageFailed request=%1 host=%2 name=%3 uncertain=%4 detail=%5").arg(QString::number(request), host, name,
+            flag(uncertain), bounded(detail)));
+    });
+    connect(client, &HgsClient::inspectionLoadingChanged, &phaseContext,
+        [&](const QString &host, const QString &name, const QString &archive, const QString &agent, bool loading) {
+            notePhase(QStringLiteral("inspectionLoading host=%1 name=%2 archive=%3 agent=%4 loading=%5").arg(host, name, archive, agent, flag(loading)));
+        });
+    connect(client, &HgsClient::inspectionReady, &phaseContext, [&](const QString &host, const QString &name, const QJsonObject &data, const QString &archive) {
+        notePhase(QStringLiteral("inspectionReady host=%1 name=%2 archive=%3 %4").arg(host, name, archive, fields(data)));
+    });
+    connect(client, &HgsClient::inspectionFailed, &phaseContext, [&](const QString &host, const QString &name, const QString &detail, const QString &archive) {
+        notePhase(QStringLiteral("inspectionFailed host=%1 name=%2 archive=%3 detail=%4").arg(host, name, archive, bounded(detail)));
+    });
+    const auto snapshot = qScopeGuard([&] {
+        if (!QTest::currentTestFailed()) return;
+        QStringList lines{QStringLiteral("t0=%1 writes=%2 delivered=%3 confirmOpen=%4").arg(QString::number(t0), QString::number(writes.size()),
+            QString::number(delivered.size()), flag(window.findChild<QMessageBox *>("startToSendConfirm") != nullptr))};
+        const auto *composer = window.findChild<MessageComposer *>("messageComposer");
+        const auto *status = composer ? composer->findChild<QLabel *>("messageStatus") : nullptr;
+        if (!composer) lines << QStringLiteral("composer absent");
+        else lines << QStringLiteral("composer selected=%1 waiting=%2 preparing=%3 sending=%4 draftLoading=%5 hasDraft=%6 draftMatches=%7 status=%8").arg(
+            flag(composer->sessionKey() == pushKey), flag(composer->isWaitingToSend(pushKey)), flag(composer->isPreparingSending(pushKey)),
+            flag(composer->isSending(pushKey)), flag(composer->isDraftLoading(pushKey)), flag(composer->hasDraft(pushKey)),
+            flag(composer->draftMatches(pushKey, QStringLiteral("Start over and outline the plan"), {})), bounded(status ? status->text() : QString()));
+        lines << QStringLiteral("notice error=%1 text=%2").arg(flag(noticeIsError(window)), bounded(notice(window)));
+        for (const auto &session : box.sessions) if (session.name == "codex/hgs/dashboard")
+            lines << QStringLiteral("fleet state=%1 run=%2 conversation=%3").arg(session.state, session.runId, session.conversationId);
+        lines << QStringLiteral("fixture details %1").arg(fields(fixture.details));
+        QFile trace(fixture.script + ".send-trace");
+        if (!trace.open(QIODevice::ReadOnly)) lines << QStringLiteral("send-trace absent");
+        else for (const auto &line : QString::fromUtf8(trace.read(4096)).split('\n', Qt::SkipEmptyParts).mid(0, 20))
+            lines << QStringLiteral("send-trace %1").arg(bounded(line));
+        lines << phases;
+        if (droppedPhases) lines << QStringLiteral("%1 later phases dropped").arg(QString::number(droppedPhases));
+        for (const auto &line : std::as_const(lines)) qWarning().noquote() << "pvfa14" << line;
+    });
     // The stopped session starts fresh before it takes the message: the push waits for that run.
     QTimer answer; answer.setInterval(10);
     connect(&answer, &QTimer::timeout, &window, [&] {
@@ -10881,16 +11037,20 @@ void TestSessionsWindow::pushFollowsTheRunThatTakesTheMessage()
     });
     answer.start();
     pushMessage(window, "Start over and outline the plan"); if (QTest::currentTestFailed()) return;
+    notePhase(QStringLiteral("test pushed"));
     QVERIFY(!answer.isActive());
     QTRY_COMPARE(writes.size(), 1);
+    notePhase(QStringLiteral("test write observed"));
     setSession("running", "run-new", {}); window.setFleet(state);
     fixture.details = QJsonObject{{"tracked", true}, {"run_id", "run-new"}, {"runtime_state", "live"}, {"process_state", "running"},
         {"activity", "idle"}, {"phase", "idle"}, {"first_message_can_send", true}, {"events", QJsonArray{}}, {"cursor", 0}};
     inspectPush(window, fixture);
+    notePhase(QStringLiteral("test run-new inspection returned failed=%1").arg(flag(QTest::currentTestFailed())));
     QTRY_COMPARE_WITH_TIMEOUT(delivered.size(), 1, PushTimeout); QCOMPARE(delivered[0][3].toJsonObject()["run_id"].toString(), QString("run-new"));
     // The message began the run's first conversation, which the push adopts.
     fixture.details["conversation_id"] = "conversation-new"; fixture.details["activity"] = "busy"; fixture.details["phase"] = "working";
     fixture.queue("q-fresh", "❯ Start over and outline the plan"); inspectPush(window, fixture);
+    notePhase(QStringLiteral("test queue inspection returned failed=%1").arg(flag(QTest::currentTestFailed())));
     QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-fresh"}, PushTimeout);
 }
 

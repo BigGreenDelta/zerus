@@ -144,6 +144,7 @@ include(cmake/BuildVersion.cmake)
 # builds. Each layer adds Qt modules, so a suite that links the lowest layer
 # covering its code keeps its QTEST_MAIN application type.
 add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/HgsClient.cpp src/FleetState.cpp
+    src/AnalyticsClient.cpp src/AnalyticsData.cpp
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
     src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
     src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp
@@ -175,6 +176,7 @@ add_library(hgs-qrcodegen STATIC vendor/qrcodegen/qrcodegen.cpp)
 target_include_directories(hgs-qrcodegen PUBLIC vendor/qrcodegen)
 
 add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp src/DashboardPage.cpp
+    src/AnalyticsSettings.cpp
     src/MachineFilter.cpp src/ProjectFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
     src/ComposerToolbar.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
     src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp

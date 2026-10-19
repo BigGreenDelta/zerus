@@ -50,12 +50,15 @@ public:
         closeInput(); closeRead(m_out); closeRead(m_err); stopWatching();
     }
     std::function<void()> started;
+    std::function<void()> outputLimitReached;
     std::function<void(QProcess::ProcessError)> errorOccurred;
     std::function<void(int, QProcess::ExitStatus)> finished;
-    void clearCallbacks() { started = {}; errorOccurred = {}; finished = {}; }
+    void clearCallbacks() { started = {}; outputLimitReached = {}; errorOccurred = {}; finished = {}; }
     void setProgram(const QString &program) { m_program = program; }
     void setArguments(const QStringList &arguments) { m_arguments = arguments; }
     void setProcessEnvironment(const QProcessEnvironment &environment) { m_environment = environment; }
+    void setMaximumOutputBytes(qsizetype limit) { m_outputLimit = limit; }
+    bool outputLimitExceeded() const { return m_outputLimitExceeded; }
     QString errorString() const { return m_errorString; }
     QProcess::ProcessState state() const { return m_pid > 0 ? QProcess::Running : QProcess::NotRunning; }
     QByteArray readAllStandardOutput() { return std::exchange(m_out.data, {}); }
@@ -146,9 +149,22 @@ private:
     void drain(Channel &channel)
     {
         char chunk[65536];
+        int chunks = 0;
         while (channel.fd >= 0) {
             const auto count = ::read(channel.fd, chunk, sizeof chunk);
-            if (count > 0) { channel.data.append(chunk, count); continue; }
+            if (count > 0) {
+                const auto keep = m_outputLimit > 0 ? qMin<qsizetype>(count, qMax<qsizetype>(0,m_outputLimit - m_retained)) : count;
+                channel.data.append(chunk, keep); m_retained += keep;
+                if (keep < count && !m_outputLimitExceeded) {
+                    m_outputLimitExceeded = true;
+                    if (outputLimitReached) outputLimitReached();
+                    return;
+                }
+                // A producer that never pauses must still allow the deadline
+                // and unrelated helper children to run on this worker.
+                if (m_outputLimit > 0 && ++chunks >= 16) return;
+                continue;
+            }
             if (count < 0 && errno == EINTR) continue;
             if (count < 0 && errno == EAGAIN) return;
             closeRead(channel);   // end of stream: the child closed it, possibly still running
@@ -240,6 +256,8 @@ private:
     Channel m_out, m_err;
     QByteArray m_input;
     qsizetype m_written = 0;
+    qsizetype m_outputLimit = 0, m_retained = 0;
+    bool m_outputLimitExceeded = false;
     bool m_closeInput = false;
 };
 using Child = SpawnedProcess;
@@ -314,6 +332,29 @@ private:
         auto *process = job->process = new Child(m_worker);
         process->setProgram(request.program); process->setArguments(request.arguments);
         if (request.environment) process->setProcessEnvironment(*request.environment);
+#ifdef Q_OS_MACOS
+        process->setMaximumOutputBytes(request.maximumOutputBytes);
+        process->outputLimitReached = [this,id,job,process] {
+            job->result.standardOutput=process->readAllStandardOutput();job->result.standardError=process->readAllStandardError();
+            job->result.outputLimitExceeded=true;
+            report(id,job,Result::OutputLimitExceeded);process->kill();
+        };
+#else
+        if (request.maximumOutputBytes > 0) {
+            const auto drain = [this, id, job, process, limit=request.maximumOutputBytes] {
+                const auto append = [job,limit](QByteArray &target,const QByteArray &bytes) {
+                    const auto remaining = qMax<qsizetype>(0,limit - job->result.standardOutput.size() - job->result.standardError.size());
+                    target.append(bytes.constData(),qMin(remaining,bytes.size()));
+                    if (bytes.size() > remaining) job->result.outputLimitExceeded = true;
+                };
+                append(job->result.standardOutput,process->readAllStandardOutput());
+                append(job->result.standardError,process->readAllStandardError());
+                if(job->result.outputLimitExceeded&&!job->reported){report(id,job,Result::OutputLimitExceeded);process->kill();}
+            };
+            QObject::connect(process,&QProcess::readyReadStandardOutput,process,drain);
+            QObject::connect(process,&QProcess::readyReadStandardError,process,drain);
+        }
+#endif
 #if defined(Q_OS_LINUX) && QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
         // No child modifier runs here, so Linux may use vfork and skip copying
         // the page tables of the large GUI process.
@@ -333,10 +374,22 @@ private:
             // FailedToStart is the only error not followed by finished().
             if (error == QProcess::FailedToStart) { report(id, job, Result::FailedToStart); finish(id, job); }
         });
-        onFinished(process, [this, id, job, process](int code, QProcess::ExitStatus status) {
+        onFinished(process, [this, id, job, process, limit=request.maximumOutputBytes](int code, QProcess::ExitStatus status) {
             job->result.exitCode = code; job->result.exitStatus = status;
+#ifdef Q_OS_MACOS
             job->result.standardOutput = process->readAllStandardOutput(); job->result.standardError = process->readAllStandardError();
-            report(id, job, Result::Finished); finish(id, job);
+            job->result.outputLimitExceeded = process->outputLimitExceeded();
+            Q_UNUSED(limit);
+#else
+            const auto append = [job,limit](QByteArray &target,const QByteArray &bytes) {
+                const auto remaining = limit > 0 ? qMax<qsizetype>(0,limit - job->result.standardOutput.size() - job->result.standardError.size()) : bytes.size();
+                target.append(bytes.constData(),qMin(remaining,bytes.size()));
+                if (bytes.size() > remaining) job->result.outputLimitExceeded = true;
+            };
+            append(job->result.standardOutput,process->readAllStandardOutput());
+            append(job->result.standardError,process->readAllStandardError());
+#endif
+            report(id, job, job->result.outputLimitExceeded ? Result::OutputLimitExceeded : Result::Finished); finish(id, job);
         });
         if (request.timeoutMs > 0) {
             auto *timer = job->timer = new QTimer(process); timer->setSingleShot(true);
