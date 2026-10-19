@@ -177,7 +177,7 @@ class QuestionPoliciesTest {
             assertFalse(name, QuestionPolicies.openCodePermission(question))
             assertFalse(name, QuestionPolicies.alwaysAllowOffered(question))
         }
-        // Allow/deny cards behave as before, and Claude choice cards stay unanswerable here.
+        // Allow/deny cards behave as before; Claude choice cards are not allow/deny cards (see nativeChoices).
         assertTrue(QuestionPolicies.approvalSupported(refused.getValue("allow/deny")))
         assertFalse(QuestionPolicies.approvalSupported(refused.getValue("claude approval_choices")))
         assertFalse(QuestionPolicies.approvalSupported(full))
@@ -285,5 +285,119 @@ class QuestionPoliciesTest {
         val approval = question().copy(approval = true)
         assertFalse(QuestionPolicies.approvalSupported(approval))
         assertTrue(QuestionPolicies.approvalSupported(approval.copy(prompts = listOf(prompt.copy(choices = listOf(Choice("allow", "Yes", ""), Choice("deny", "No", "")))))))
+    }
+
+    /** The Kimi Bash approval card hgs builds (src/state/kimi_approval.rs), with its answer transport verified. */
+    private fun kimiApprovalCard(edit: (JSONObject) -> Unit = {}): JSONObject {
+        val card = JSONObject().put("question_id", "approval_1").put("question_hash", "kimi-hash").put("tool_call_id", "tool_1")
+            .put("agent_id", "main").put("run_id", target.run).put("conversation_id", target.conversation).put("created_at", 1.5)
+            .put("source", "kimi_tool_approval").put("approval", true).put("approval_choices", true).put("can_answer", true)
+            .put("answer_transport", "kimi_tui").put("answer_unavailable_reason", "")
+            .put("questions", JSONArray().put(JSONObject().put("id", "approval").put("question", "Run this command?").put("header", "Bash")
+                .put("body", "cwd: /synthetic/work\nDangerous: recursive delete\n$ rm -rf .cache").put("multi_select", false)
+                .put("allow_other", true).put("other_label", "Reject with feedback")
+                .put("other_description", "Reject this request with your message; Kimi continues without it")
+                .put("options", JSONArray()
+                    .put(JSONObject().put("id", "1").put("label", "Approve once").put("description", "").put("scope", "once"))
+                    .put(JSONObject().put("id", "2").put("label", "Approve for this session")
+                        .put("description", "Kimi also stops asking about this exact command for the rest of this session.").put("scope", "broader"))
+                    .put(JSONObject().put("id", "3").put("label", "Reject").put("description", "").put("scope", "once")))))
+        edit(card)
+        return card
+    }
+    private fun parsed(card: JSONObject) = NativeParser.questions(JSONObject().put("pending_questions", JSONArray().put(card))).single()
+    private fun item(card: JSONObject) = card.getJSONArray("questions").getJSONObject(0)
+
+    @Test fun nativeApprovalChoicesQualifyInTheirExactShape() {
+        val kimi = parsed(kimiApprovalCard())
+        assertTrue(kimi.approvalChoices)
+        assertEquals(listOf("once", "broader", "once"), kimi.prompts.single().choices.map { it.scope })
+        assertTrue(QuestionPolicies.nativeChoices(kimi))
+        assertFalse(QuestionPolicies.approvalSupported(kimi))
+        assertFalse(QuestionPolicies.openCodePermission(kimi))
+        // Kimi's Reject with feedback is the card's own text answer.
+        assertEquals("Reject with feedback", QuestionPolicies.textField(kimi, kimi.prompts.single())?.label)
+        // A Claude terminal panel: its options verbatim, without a text answer.
+        val claude = parsed(kimiApprovalCard {
+            it.put("source", "claude_tool_approval").put("answer_transport", "claude_tui")
+            item(it).put("allow_other", false).remove("other_label")
+            item(it).put("options", JSONArray().put(JSONObject().put("id", "1").put("label", "Yes").put("scope", "once"))
+                .put(JSONObject().put("id", "2").put("label", "Yes, and don't ask again for git commands in /synthetic/work").put("scope", "broader"))
+                .put(JSONObject().put("id", "3").put("label", "No").put("scope", "once")))
+        })
+        assertTrue(QuestionPolicies.nativeChoices(claude))
+        assertNull(QuestionPolicies.textField(claude, claude.prompts.single()))
+        // A card that cannot be answered here keeps its native options read-only.
+        val readOnly = parsed(kimiApprovalCard { it.put("can_answer", false).put("answer_unavailable_reason", "Open Terminal to answer this approval.") })
+        assertTrue(QuestionPolicies.nativeChoices(readOnly))
+        assertFalse(QuestionPolicies.inputEnabled(readOnly, true))
+        assertNull(QuestionPolicies.textField(readOnly, readOnly.prompts.single()))
+        assertEquals("Open Terminal to answer this approval.", QuestionPolicies.unavailableNotice(readOnly))
+        val refused = mapOf<String, (JSONObject) -> Unit>(
+            "no approval_choices" to { it.put("approval_choices", false) },
+            "older host without the flag" to { it.remove("approval_choices") },
+            "not an approval" to { it.put("approval", false) },
+            "multi" to { item(it).put("multi_select", true) },
+            "no options" to { item(it).put("options", JSONArray()) },
+            "missing scope" to { item(it).getJSONArray("options").getJSONObject(0).remove("scope") },
+            "unknown scope" to { item(it).getJSONArray("options").getJSONObject(1).put("scope", "always") },
+            "repeated id" to { item(it).getJSONArray("options").getJSONObject(2).put("id", "1") },
+            "blank id" to { item(it).getJSONArray("options").getJSONObject(2).put("id", "") },
+            "second item" to { it.getJSONArray("questions").put(JSONObject(item(it).toString()).put("id", "other")) },
+            "OpenCode" to { it.put("source", "opencode_native") })
+        refused.forEach { (name, edit) ->
+            val question = parsed(kimiApprovalCard(edit))
+            assertFalse(name, QuestionPolicies.nativeChoices(question))
+            assertNull(name, QuestionPolicies.broaderChoice(question, mapOf("approval" to setOf("2"))))
+            if (question.approval) assertNull(name, QuestionPolicies.textField(question, question.prompts.first()))
+        }
+    }
+
+    @Test fun nativeChoiceAnswersSendTheChosenOptionOrTheFeedbackText() {
+        val kimi = parsed(kimiApprovalCard())
+        val prompts = kimi.prompts
+        fun row(answers: JSONArray): Triple<String, List<String>, String> {
+            assertEquals(1, answers.length())
+            val row = answers.getJSONObject(0)
+            val ids = row.getJSONArray("selected_option_ids")
+            return Triple(row.getString("question_id"), (0 until ids.length()).map { ids.getString(it) }, row.getString("text"))
+        }
+        val once = QuestionPolicies.answers(prompts, mapOf("approval" to setOf("1")), emptyMap())
+        assertEquals(Triple("approval", listOf("1"), ""), row(once))
+        assertTrue(QuestionPolicies.complete(prompts, mapOf("approval" to setOf("3")), emptyMap()))
+        val feedback = mapOf("approval" to "Use rg instead")
+        assertEquals(Triple("approval", emptyList<String>(), "Use rg instead"), row(QuestionPolicies.answers(prompts, emptyMap(), feedback)))
+        assertTrue(QuestionPolicies.complete(prompts, emptyMap(), feedback))
+        assertEquals("Choose one answer for this question.", QuestionPolicies.answerError(prompts, mapOf("approval" to setOf("3")), feedback))
+        assertEquals("Enter command-like answers on your computer.", QuestionPolicies.answerError(prompts, emptyMap(), mapOf("approval" to "/rm")))
+        assertFalse(QuestionPolicies.complete(prompts, emptyMap(), mapOf("approval" to "line\nbreak")))
+        assertFalse(QuestionPolicies.complete(prompts, emptyMap(), emptyMap()))
+        assertTrue(QuestionSendPolicies.available(kimi, target, once.toString()))
+    }
+
+    @Test fun broaderChoiceAsksForItsOwnConfirmationOfTheExactCardAndOption() {
+        val kimi = parsed(kimiApprovalCard())
+        val session = mapOf("approval" to setOf("2"))
+        val once = mapOf("approval" to setOf("1"))
+        assertNull(QuestionPolicies.broaderChoice(kimi, once))
+        assertEquals("Approve for this session", QuestionPolicies.broaderChoice(kimi, session)?.label)
+        val closed = BroaderChoiceConfirmation()
+        assertFalse(closed.request(kimi, session, reviewed = false).open)
+        assertFalse(closed.request(kimi, once, reviewed = true).open)
+        val open = closed.request(kimi, session, reviewed = true)
+        assertEquals(BroaderChoiceConfirmation(kimi.id, kimi.hash, "2"), open)
+        assertEquals("2", open.showing(kimi, session, eligible = true)?.id)
+        // The dialog closes without sending when anything it confirmed changed.
+        assertNull(open.showing(kimi, session, eligible = false))
+        assertNull(open.showing(kimi, once, eligible = true))
+        assertNull(open.showing(kimi.copy(hash = "changed"), session, eligible = true))
+        assertNull(open.showing(parsed(kimiApprovalCard { item(it).getJSONArray("options").getJSONObject(1).put("scope", "once") }), session, eligible = true))
+        var sent = 0
+        assertFalse(open.confirm(kimi, once, eligible = true) { sent++ }.open)
+        assertEquals(0, sent)
+        assertFalse(open.confirm(kimi, session, eligible = true) { sent++ }.open)
+        assertEquals(1, sent)
+        assertFalse(closed.confirm(kimi, session, eligible = true) { sent++ }.open)
+        assertEquals(1, sent)
     }
 }

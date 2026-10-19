@@ -47,7 +47,8 @@ data class Event(val id: String, val role: String, val text: String, val time: S
  * receipt position (`messageId`, `index`) and/or this phone's private copy. */
 data class DisplayedAttachment(val name: String, val mime: String, val bytes: Long, val reference: String = "",
     val messageId: String = "", val index: Int = -1, val localId: String = "", val sha256: String = "")
-data class Choice(val id: String, val label: String, val description: String)
+/** [scope]: an approval option's reach, "once" for this request or "broader" for more; empty elsewhere. */
+data class Choice(val id: String, val label: String, val description: String, val scope: String = "")
 /** One question item. The additive OpenCode form fields are optional bounds and defaults. */
 data class Prompt(val id: String, val text: String, val choices: List<Choice>, val multi: Boolean,
     val required: Boolean, val other: Boolean, val header: String = "", val body: String = "",
@@ -58,7 +59,7 @@ data class Question(val id: String, val hash: String, val prompts: List<Prompt>,
     val canSkip: Boolean, val optional: Boolean, val delivery: String, val createdAt: Double = 0.0,
     val source: String = "", val approval: Boolean = false, val trustRequest: Boolean = false,
     val unavailableReason: String = "", val run: String = "", val conversation: String = "",
-    val toolCallId: String = "", val answerDelivery: NativeQuestionDelivery? = null)
+    val toolCallId: String = "", val answerDelivery: NativeQuestionDelivery? = null, val approvalChoices: Boolean = false)
 data class NativeQuestionAnswer(val questionId: String, val optionIds: List<String>, val text: String, val skip: Boolean = false)
 data class NativeQuestionDelivery(val requestId: String, val questionId: String, val questionHash: String,
     val run: String, val conversation: String, val status: String, val answers: List<NativeQuestionAnswer>)

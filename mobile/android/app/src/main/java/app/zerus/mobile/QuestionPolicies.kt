@@ -93,7 +93,7 @@ object QuestionPolicies {
      * (`input_kind: "text"`) is the answer itself. An unanswerable card is read-only and has no field.
      */
     fun textField(question: Question, prompt: Prompt): QuestionTextField? = when {
-        !prompt.other || question.approval || !question.canAnswer -> null
+        !prompt.other || question.approval && !nativeChoices(question) || !question.canAnswer -> null
         prompt.inputKind == "text" -> QuestionTextField(prompt.otherLabel.ifBlank { "Answer" }, prompt.maxLength)
         else -> QuestionTextField(prompt.otherLabel.ifBlank { "Other answer" }, prompt.maxLength)
     }
@@ -131,6 +131,27 @@ object QuestionPolicies {
     fun approvalSupported(question: Question) = question.approval && question.prompts.size == 1 &&
         !question.prompts.single().multi && question.prompts.single().choices.any { it.id == "allow" } &&
         question.prompts.single().choices.any { it.id == "deny" }
+
+    private val nativeScopes = setOf("once", "broader")
+    /**
+     * An approval answered with the agent's own options, as the desktop does: Claude's terminal panel and Kimi's
+     * tool approval mark it with `approval_choices`. One single-choice item whose options each have a scope:
+     * `once` grants nothing beyond this request, `broader` grants more and asks for [BroaderChoiceConfirmation].
+     * An Other answer, when offered, is the agent's own text choice, such as Kimi's Reject with feedback.
+     * OpenCode permission cards keep [openCodePermission]; other approvals keep [approvalSupported].
+     */
+    fun nativeChoices(question: Question): Boolean {
+        val prompt = question.prompts.singleOrNull() ?: return false
+        return question.approval && question.approvalChoices && question.source != "opencode_native" && !prompt.multi &&
+            prompt.choices.isNotEmpty() && prompt.choices.all { it.id.isNotBlank() && it.scope in nativeScopes } &&
+            prompt.choices.distinctBy { it.id }.size == prompt.choices.size
+    }
+    /** The broader option chosen in [options] on a [nativeChoices] card, or null. */
+    fun broaderChoice(question: Question, options: Map<String, Set<String>>): Choice? {
+        if (!nativeChoices(question)) return null
+        val prompt = question.prompts.single()
+        return prompt.choices.firstOrNull { it.scope == "broader" && it.id in options[prompt.id].orEmpty() }
+    }
 
     /**
      * An OpenCode form card: hgs sends its text through the form reply API, never to a terminal, so text
@@ -197,6 +218,32 @@ internal data class AlwaysAllowConfirmation(val questionId: String = "", val que
     fun cancel() = AlwaysAllowConfirmation()
     fun confirm(question: Question, eligible: Boolean, send: (JSONArray) -> Unit): AlwaysAllowConfirmation {
         if (showing(question, eligible)) send(QuestionPolicies.approvalAnswer(question, OpenCodePermissionAction.AlwaysAllow.option))
+        return cancel()
+    }
+}
+
+/**
+ * The separate confirmation of one broader option on a [QuestionPolicies.nativeChoices] card, for that exact card
+ * (ID and hash) and option. It sends only while that option is still the chosen one and the card stays eligible.
+ */
+internal data class BroaderChoiceConfirmation(val questionId: String = "", val questionHash: String = "", val optionId: String = "") {
+    val open: Boolean get() = questionId.isNotEmpty()
+    /** Opens from an enabled Send when [options] choose a broader option; [reviewed]: the card's review has finished. */
+    fun request(question: Question, options: Map<String, Set<String>>, reviewed: Boolean): BroaderChoiceConfirmation {
+        val choice = QuestionPolicies.broaderChoice(question, options) ?: return this
+        return if (reviewed) BroaderChoiceConfirmation(question.id, question.hash, choice.id) else this
+    }
+    /**
+     * The option to confirm while the dialog may stay open for the current [question] and [options], or null.
+     * [eligible]: the answer can still be edited and sent with the app in the foreground.
+     */
+    fun showing(question: Question, options: Map<String, Set<String>>, eligible: Boolean): Choice? =
+        QuestionPolicies.broaderChoice(question, options)?.takeIf {
+            open && eligible && question.id == questionId && question.hash == questionHash && it.id == optionId
+        }
+    fun cancel() = BroaderChoiceConfirmation()
+    fun confirm(question: Question, options: Map<String, Set<String>>, eligible: Boolean, send: () -> Unit): BroaderChoiceConfirmation {
+        if (showing(question, options, eligible) != null) send()
         return cancel()
     }
 }
