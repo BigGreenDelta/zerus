@@ -13,7 +13,7 @@ pub(super) fn pending(record: &Value) -> bool {
 pub(super) fn check_continuation(record: &Value, id: &str) -> Result<()> {
     if id.is_empty() { return Ok(()); }
     let request = &record["compact_context_request"];
-    if request["request_id"] != id || request["status"] != "completed"
+    if request["request_id"] != id || request["status"] != "completed" || !request["superseded_at"].is_null()
         || request["run_id"] != record["run_id"] || request["conversation_id"] != record["conversation_id"]
         || record["activity"] != "idle" || record["phase"] != "idle" {
         return Err("Compaction is not confirmed for this conversation; your message was not sent".into());
@@ -37,9 +37,13 @@ pub(super) fn observe(record: &mut Value, event: &Value) {
             request["status"] = json!("completed");
             request["completed_at"] = json!(now());
         }
-        "Interrupt" | "StopFailure" | "SessionEnd" | "UserPromptSubmit" | "PermissionRequest" => {
-            request["status"] = json!("cancelled");
-        }
+        "Interrupt" | "StopFailure" | "SessionEnd" | "UserPromptSubmit" | "PermissionRequest" => match status.as_str() {
+            "submitted" | "compacting" | "uncertain" => request["status"] = json!("cancelled"),
+            // A later turn cannot undo a finished compaction; it only ends the
+            // continuation that compaction confirmed.
+            "completed" if request["superseded_at"].is_null() => request["superseded_at"] = json!(now()),
+            _ => return,
+        },
         _ => return,
     }
     record["compact_context_request"] = request;
@@ -110,6 +114,26 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             observe(&mut state,&json!({"hook_event_name":interruption})); observe(&mut state,&post);
             assert!(check_continuation(&state,"q").is_err());
         }
+        // A later turn keeps the result and ends only its continuation.
+        for later in ["UserPromptSubmit","Interrupt","StopFailure","SessionEnd","PermissionRequest"] {
+            let mut state = r.clone(); observe(&mut state,&pre); observe(&mut state,&post);
+            let completed_at = state["compact_context_request"]["completed_at"].clone();
+            observe(&mut state,&json!({"hook_event_name":later}));
+            assert_eq!(state["compact_context_request"]["status"], "completed", "{later}");
+            assert_eq!(state["compact_context_request"]["completed_at"], completed_at);
+            assert!(check_continuation(&state,"q").is_err(), "{later}");
+            let superseded = state["compact_context_request"].clone();
+            observe(&mut state,&json!({"hook_event_name":"UserPromptSubmit"}));
+            assert_eq!(state["compact_context_request"], superseded);
+        }
+        for finished in ["cancelled","failed","unchanged"] {
+            let mut state = r.clone(); state["compact_context_request"]["status"] = json!(finished);
+            let before = state.clone(); observe(&mut state,&json!({"hook_event_name":"UserPromptSubmit"}));
+            assert_eq!(state, before);
+        }
+        let mut state = r.clone(); state["compact_context_request"]["status"] = json!("uncertain");
+        observe(&mut state,&json!({"hook_event_name":"UserPromptSubmit"}));
+        assert_eq!(state["compact_context_request"]["status"], "cancelled");
         for field in ["trigger","turn_id","agent_id"] {
             let mut state = r.clone(); observe(&mut state,&pre); let mut wrong=post.clone(); wrong[field]=json!("other");
             observe(&mut state,&wrong); assert!(check_continuation(&state,"q").is_err());

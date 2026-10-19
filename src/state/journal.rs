@@ -9,13 +9,16 @@ pub(super) const REPLY_LIMIT: usize = 32_000;
 
 /// Claude records text pasted into its prompt as
 /// `<pasted_content id="…">\n…\n</pasted_content id="…">`. The person sent only
-/// the inner text, which is also what HGS delivery receipts recorded.
+/// the inner text, which is also what HGS delivery receipts recorded. Claude
+/// 2.1.296 also frames a prompt that is only pasted text with blank lines
+/// around it; that framing is not text the person sent either.
 pub(super) fn pasted_text(text: &str) -> std::borrow::Cow<'_, str> {
     const OPEN: &str = "<pasted_content id=\"";
     if !text.contains(OPEN) {
         return text.into();
     }
     let (mut result, mut rest) = (String::with_capacity(text.len()), text);
+    let (mut typed, mut lead) = (false, None);
     while let Some(start) = rest.find(OPEN) {
         let Some((id, body)) = rest[start + OPEN.len()..].split_once("\">") else { break };
         if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
@@ -24,12 +27,17 @@ pub(super) fn pasted_text(text: &str) -> std::borrow::Cow<'_, str> {
         let close = format!("</pasted_content id=\"{id}\">");
         let Some(end) = body.find(&close) else { break };
         let inner = body[..end].strip_prefix('\n').unwrap_or(&body[..end]);
+        typed |= !rest[..start].trim().is_empty();
+        lead.get_or_insert(start);
         result.push_str(&rest[..start]);
         result.push_str(inner.strip_suffix('\n').unwrap_or(inner));
         rest = &body[end + close.len()..];
     }
     if rest.len() == text.len() {
         return text.into();
+    }
+    if !typed && rest.trim().is_empty() {
+        return result.split_off(lead.unwrap_or(0)).into();
     }
     result.push_str(rest);
     result.into()
@@ -1302,6 +1310,16 @@ mod attention_regressions {
         assert_eq!(pasted_text(&format!("<pasted_content id=\"1b93\">\n{sent}\n</pasted_content id=\"1b93\">")), sent);
         assert_eq!(pasted_text("See <pasted_content id=\"a\">\none\n</pasted_content id=\"a\"> and <pasted_content id=\"b\">two</pasted_content id=\"b\">."),
             "See one and two.");
+        // Claude 2.1.296 frames a prompt that is only a paste; the receipt has no framing.
+        assert_eq!(pasted_text(&format!("\n\n<pasted_content id=\"c9a0\">\n{sent}\n</pasted_content id=\"c9a0\">\n")), sent);
+        assert_eq!(pasted_text(&format!("\n\n<pasted_content id=\"c9a0\">\n\n{sent}\n\n</pasted_content id=\"c9a0\">\n")), format!("\n{sent}\n"));
+        assert_eq!(pasted_text("\n<pasted_content id=\"a\">\none\n</pasted_content id=\"a\">\n\n<pasted_content id=\"b\">\ntwo\n</pasted_content id=\"b\">\n"),
+            "one\n\ntwo");
+        // Typed text keeps the exact layout around the paste.
+        assert_eq!(pasted_text("Look:\n\n<pasted_content id=\"a\">\none\n</pasted_content id=\"a\">\n"), "Look:\n\none\n");
+        assert_eq!(pasted_text("\n\n<pasted_content id=\"a\">\none\n</pasted_content id=\"a\">\nThanks"), "\n\none\nThanks");
+        assert_eq!(pasted_text("\n\n<pasted_content id=\"a\">\none\n</pasted_content id=\"a\">\n<pasted_content id=\"b\">open"),
+            "\n\none\n<pasted_content id=\"b\">open");
         for unchanged in ["plain text", "<pasted_content id=\"a\">\nopen only", "<pasted_content id=\"a\">x</pasted_content id=\"b\">",
             "<pasted_content id=\"a b\">x</pasted_content id=\"a b\">"] {
             assert!(matches!(pasted_text(unchanged), std::borrow::Cow::Borrowed(text) if text == unchanged));

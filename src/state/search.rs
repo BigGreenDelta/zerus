@@ -482,6 +482,24 @@ fn text_parts(value: &Value, allowed: &[&str]) -> String {
         .unwrap_or_default()
 }
 
+/// Complete raw-string local-command/stdout envelopes without human-origin
+/// evidence, matched before pasted content is unwrapped. Explicit human-origin
+/// records, structured content and pasted wrappers are not rejected here.
+/// An identical raw literal without origin evidence is inherently ambiguous and
+/// is filtered too; independently recorded hook user rows remain separate.
+fn claude_local_command(event: &Value) -> bool {
+    static COMMAND: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    const OUTPUT: (&str, &str) = ("<local-command-stdout>", "</local-command-stdout>");
+    let Some(text) = event["message"]["content"].as_str() else { return false };
+    if event["origin"]["kind"] == "human" {
+        return false;
+    }
+    let output = text.strip_prefix(OUTPUT.0).and_then(|rest| rest.strip_suffix(OUTPUT.1))
+        .is_some_and(|body| !body.contains(OUTPUT.0) && !body.contains(OUTPUT.1));
+    output || COMMAND.get_or_init(|| Regex::new(
+        r"\A<command-name>[^<]*</command-name>\s*<command-message>[^<]*</command-message>\s*<command-args>[^<]*</command-args>\z",
+    ).unwrap()).is_match(text)
+}
 fn public_user(text: &str) -> bool {
     let text = text.trim_start();
     ![
@@ -520,7 +538,8 @@ pub(super) fn provider_event(agent: &str, event: &Value) -> Option<(Value, &'sta
             )
         }
         "claude" => {
-            if event["isMeta"] == true || event["isSidechain"] == true {
+            // A compaction summary is Claude's own context, written as a user turn.
+            if event["isMeta"] == true || event["isSidechain"] == true || event["isCompactSummary"] == true {
                 return None;
             }
             let role = match string(event, "type") {
@@ -533,7 +552,8 @@ pub(super) fn provider_event(agent: &str, event: &Value) -> Option<(Value, &'sta
             if string(message, "role") != role
                 || ["task-notification", "peer"].contains(&string(&event["origin"], "kind"))
                 || (role == "user"
-                    && journal::system_prompt(&text_parts(&message["content"], &["text"])).is_some())
+                    && (journal::system_prompt(&text_parts(&message["content"], &["text"])).is_some()
+                        || claude_local_command(event)))
             {
                 return None;
             }
@@ -810,6 +830,46 @@ mod tests {
         let pasted = json!({"type":"user","uuid":"pasted","timestamp":"2026-01-01T01:00:00Z","message":{"role":"user",
             "content":"<pasted_content id=\"1b93\">\nFrom the phone\n</pasted_content id=\"1b93\">"}});
         assert_eq!(provider_event("claude", &pasted).unwrap().0["detail"], "From the phone");
+        // Claude 2.1.296 frames a prompt that is only a paste with blank lines.
+        let mut framed = pasted.clone();
+        framed["message"]["content"] = json!("\n\n<pasted_content id=\"c9a0\">\nFrom the phone\n</pasted_content id=\"c9a0\">\n");
+        assert_eq!(provider_event("claude", &framed).unwrap().0["detail"], "From the phone");
+        // A compaction and the slash command that ran it are not messages.
+        let summary = json!({"type":"user","uuid":"summary","timestamp":"2026-01-01T01:00:00Z","isCompactSummary":true,
+            "isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation."}});
+        assert!(provider_event("claude", &summary).is_none());
+        // Claude's own complete records, as 2.1.289-2.1.296 write them, carry no human origin.
+        for command in ["<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>",
+            "<command-name>/effort</command-name>\n            <command-message>effort</command-message>\n            <command-args>xhigh</command-args>",
+            "<local-command-stdout>\u{1b}[2mCompacted (ctrl+o to see full summary)\u{1b}[22m\n\u{1b}[2mPostCompact [hgs __state hook] completed successfully\u{1b}[22m</local-command-stdout>",
+            "<local-command-stdout>Set effort level to xhigh (saved for new sessions)</local-command-stdout>"] {
+            let row = json!({"type":"user","uuid":"command","timestamp":"2026-01-01T01:00:00Z","message":{"role":"user","content":command}});
+            assert!(provider_event("claude", &row).is_none(), "{command}");
+            let literal = journal::clipped(&json!(command), MAX_LINE_BYTES);
+            // The same literal text from a person stays their message: typed, pasted, or with an image.
+            let mut typed = row.clone();
+            typed["origin"] = json!({"kind":"human"});
+            assert_eq!(provider_event("claude", &typed).unwrap().0["detail"], literal);
+            let mut pasted = row.clone();
+            pasted["message"]["content"] = json!(format!("\n\n<pasted_content id=\"c9a0\">\n{command}\n</pasted_content id=\"c9a0\">\n"));
+            assert_eq!(provider_event("claude", &pasted).unwrap().0["detail"], literal);
+            let mut parts = row.clone();
+            parts["message"]["content"] = json!([{"type":"text","text":command}]);
+            assert_eq!(provider_event("claude", &parts).unwrap().0["detail"], literal);
+            // Other agents' projection is unchanged.
+            let codex = json!({"type":"event_msg","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"user_message","message":command}});
+            assert_eq!(provider_event("codex", &codex).unwrap().0["detail"], literal);
+            let kimi = json!({"type":"agent.message.appended","agentId":"main","time":1767225600000u64,
+                "message":{"message":{"role":"user","content":[{"type":"text","text":command}]},"meta":{"messageId":"user"}}});
+            assert_eq!(provider_event("kimi", &kimi).unwrap().0["detail"], literal);
+        }
+        // Text that is not one complete record stays, whoever wrote it.
+        for typed in ["/compact", "Explain <command-name> tags", "<command-name>/compact</command-name>",
+            "<local-command-stdout>one</local-command-stdout> and more",
+            "<local-command-stdout>one</local-command-stdout><local-command-stdout>two</local-command-stdout>"] {
+            let row = json!({"type":"user","uuid":"typed","timestamp":"2026-01-01T01:00:00Z","message":{"role":"user","content":typed}});
+            assert_eq!(provider_event("claude", &row).unwrap().0["detail"], typed);
+        }
         let notice = "<task-notification>\n<status>completed</status>\n<summary>Background command \"Run checks\" completed</summary>\n</task-notification>";
         let mut task = json!({"type":"user","uuid":"task","timestamp":"2026-01-01T01:00:00Z","promptSource":"system",
             "origin":{"kind":"task-notification"},"message":{"role":"user","content":notice}});
