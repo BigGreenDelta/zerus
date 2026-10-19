@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QDataStream>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -17,6 +18,45 @@
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <algorithm>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#include <io.h>
+#else
+#include <sys/stat.h>
+#endif
+
+namespace DownloadCache::Detail {
+bool sameFile(const QFile &opened, const QString &path) {
+    if (!opened.isOpen() || opened.handle() < 0) return false;
+#ifdef Q_OS_WIN
+    // QFile owns this CRT descriptor and its native handle; do not close either.
+    const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(opened.handle()));
+    BY_HANDLE_FILE_INFORMATION before{}, current{};
+    constexpr DWORD unsafe = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
+    if (handle == INVALID_HANDLE_VALUE || !::GetFileInformationByHandle(handle, &before)
+        || (before.dwFileAttributes & unsafe)) return false;
+    auto native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
+    if (!native.startsWith(QStringLiteral("\\\\?\\")))
+        native = native.startsWith(QStringLiteral("\\\\"))
+            ? QStringLiteral("\\\\?\\UNC\\") + native.mid(2) : QStringLiteral("\\\\?\\") + native;
+    const auto other = ::CreateFileW(reinterpret_cast<LPCWSTR>(native.utf16()), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (other == INVALID_HANDLE_VALUE) return false;
+    const bool matches = ::GetFileInformationByHandle(other, &current) && !(current.dwFileAttributes & unsafe)
+        && before.dwVolumeSerialNumber == current.dwVolumeSerialNumber
+        && before.nFileIndexHigh == current.nFileIndexHigh && before.nFileIndexLow == current.nFileIndexLow;
+    const bool closed = ::CloseHandle(other);
+    return matches && closed;
+#else
+    struct stat before{}, current{};
+    const auto name = QFile::encodeName(path);
+    return ::fstat(opened.handle(), &before) == 0 && S_ISREG(before.st_mode)
+        && ::lstat(name.constData(), &current) == 0 && S_ISREG(current.st_mode)
+        && before.st_dev == current.st_dev && before.st_ino == current.st_ino;
+#endif
+}
+}
 
 namespace {
 const QString Index = QStringLiteral(".zerus-files.json");
@@ -32,6 +72,22 @@ bool occupied(const QString &path) {
 bool safeName(const QString &name) {
     return !name.isEmpty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
         && !name.contains(':') && !name.startsWith(".zerus-", Qt::CaseInsensitive);
+}
+bool validSource(const DownloadCache::Source &source) {
+    return !source.host.isEmpty() && !source.path.isEmpty()
+        && source.host.toUtf8().size() <= 4096 && source.path.toUtf8().size() <= 65536
+        && QString::fromUtf8(source.host.toUtf8()) == source.host && QString::fromUtf8(source.path.toUtf8()) == source.path;
+}
+QByteArray sourceDigest(const DownloadCache::Source &source) {
+    QByteArray bytes;
+    QDataStream stream(&bytes, QIODevice::WriteOnly); stream.setVersion(QDataStream::Qt_6_0);
+    stream << source.host << source.path;
+    return QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex();
+}
+bool sameSource(const QJsonObject &entry, const DownloadCache::Source &source, const QByteArray &digest) {
+    const auto saved = entry.value("source").toObject();
+    return saved.value("host").toString() == source.host && saved.value("path").toString() == source.path
+        && entry.value("source_sha256").toString().toLatin1() == digest;
 }
 QString filename(QString name) {
     name = name.section('/', -1);
@@ -66,6 +122,8 @@ Snapshot snapshot(const QString &path, bool hash) {
         if (!digest.addData(&file) || file.size() != result.size || file.fileTime(QFileDevice::FileModificationTime).toMSecsSinceEpoch() != result.modified) return {};
         result.digest = digest.result().toHex();
     }
+    // The hash belongs to the still-open object, not a replacement at its name.
+    if (!DownloadCache::Detail::sameFile(file, path)) return {};
     return result;
 }
 struct Ledger {
@@ -95,6 +153,14 @@ struct Ledger {
                 error = text("The downloaded files index is invalid. Existing files were preserved."); return;
             }
             names.insert(name);
+            if (entry.contains("source") || entry.contains("source_sha256")) {
+                const auto source = entry.value("source").toObject();
+                const DownloadCache::Source identity{source.value("host").toString(), source.value("path").toString()};
+                if (!entry.value("source").isObject() || source.size() != 2 || !validSource(identity)
+                    || entry.value("source_sha256").toString().toLatin1() != sourceDigest(identity)) {
+                    error = text("The downloaded files index is invalid. Existing files were preserved."); return;
+                }
+            }
         }
     }
     bool save() {
@@ -153,6 +219,7 @@ Prepared prepare(const QString &directory) {
     if (!folder(root, true, error)) return {{}, error};
     QFileInfo index(QDir(root).filePath(Index));
     if (index.isSymbolicLink()) return {{}, text("The downloaded files index is a link.")};
+    { Ledger ledger(root); if (!ledger.error.isEmpty()) return {{}, ledger.error}; }
     QTemporaryFile file(QDir(root).filePath(".zerus-part-XXXXXX"));
     if (!file.open()) return {{}, text("Cannot prepare the local download.")};
     file.setAutoRemove(false);
@@ -160,7 +227,10 @@ Prepared prepare(const QString &directory) {
     pending->path = file.fileName(); file.close();
     return {pending, {}};
 }
-Result publish(const std::shared_ptr<Pending> &pending, const QString &originalName, qint64 now) {
+Result publish(const std::shared_ptr<Pending> &pending, const QString &originalName, qint64 now, const Source &source) {
+    const bool attributed = !source.host.isEmpty() || !source.path.isEmpty();
+    if (attributed && !validSource(source)) return {{}, text("The downloaded file source is invalid."), {}};
+    const auto identityDigest = attributed ? sourceDigest(source) : QByteArray();
     if (!pending || QFileInfo(pending->root).canonicalFilePath() != pending->canonicalRoot
         || QFileInfo(pending->path).absolutePath() != pending->root || !QFileInfo(pending->path).fileName().startsWith(".zerus-part-")) return {{}, text("The prepared download is unavailable."), {}};
     const auto data = snapshot(pending->path, true);
@@ -177,12 +247,50 @@ Result publish(const std::shared_ptr<Pending> &pending, const QString &originalN
         if (!occupied(candidate)) return {{}, text("Cannot save the downloaded copy in its cache folder."), {}};
     }
     if (destination.isEmpty()) return {{}, text("Cannot find an unused name for the downloaded copy."), {}};
-    ledger.entries.append(QJsonObject{{"name", QFileInfo(destination).fileName()}, {"bytes", data.size},
-        {"sha256", QString::fromLatin1(data.digest)}, {"saved", timeNow(now)}});
+    QJsonObject entry{{"name", QFileInfo(destination).fileName()}, {"bytes", data.size},
+        {"sha256", QString::fromLatin1(data.digest)}, {"saved", timeNow(now)}};
+    if (attributed) {
+        // Only the newest completed snapshot is attributed. Earlier copies stay
+        // in the cache and are never overwritten or inferred from their names.
+        for (qsizetype i = 0; i < ledger.entries.size(); ++i) {
+            auto prior = ledger.entries[i].toObject();
+            if (sameSource(prior, source, identityDigest)) { prior.remove("source"); prior.remove("source_sha256"); ledger.entries[i] = prior; }
+        }
+        entry.insert("source", QJsonObject{{"host", source.host}, {"path", source.path}});
+        entry.insert("source_sha256", QString::fromLatin1(identityDigest));
+    }
+    ledger.entries.append(entry);
     // Publish before cleanup: hashing older copies must not delay opening this one.
     ledger.clean(0, timeNow(now));
     const bool saved = ledger.save();
     return {destination, {}, saved ? QString() : ledger.error};
+}
+Result lookup(const QString &root, const Source &source, qint64 now) {
+    if (!validSource(source)) return {{}, text("The downloaded file source is invalid."), {}};
+    if (!occupied(root)) return {};
+    Ledger ledger(root); if (!ledger.error.isEmpty()) return {{}, ledger.error, {}};
+    const auto identityDigest = sourceDigest(source);
+    qsizetype selected = -1;
+    for (qsizetype i = 0; i < ledger.entries.size(); ++i) if (sameSource(ledger.entries[i].toObject(), source, identityDigest)) selected = i;
+    if (selected < 0) return {};
+    auto entry = ledger.entries[selected].toObject();
+    const auto path = QDir(ledger.root).filePath(entry.value("name").toString());
+    const auto current = snapshot(path, true);
+    const bool valid = ordinary(QFileInfo(path))
+        && current.size == entry.value("bytes").toInteger() && current.digest == entry.value("sha256").toString().toLatin1();
+    // Never adopt an older snapshot after the current copy was edited/removed.
+    // Retire only attribution; all files and legacy cache entries are preserved.
+    for (qsizetype i = 0; i < ledger.entries.size(); ++i) {
+        auto prior = ledger.entries[i].toObject();
+        if (!sameSource(prior, source, identityDigest)) continue;
+        // saved is the existing cache-recency/opening-grace timestamp, not a
+        // remote modification time. Older v1 trimmers honor this renewal too.
+        if (valid && i == selected) { prior.insert("saved", timeNow(now)); }
+        else { prior.remove("source"); prior.remove("source_sha256"); }
+        ledger.entries[i] = prior;
+    }
+    if (!ledger.save()) return {{}, ledger.error, {}};
+    return valid ? Result{path, {}, {}} : Result{};
 }
 Usage trim(const QString &root, qint64 limit, qint64 now) {
     if (!QFileInfo::exists(root)) return {};

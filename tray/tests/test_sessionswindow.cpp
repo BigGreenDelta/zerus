@@ -56,6 +56,7 @@
 #include <QWindow>
 #include <utility>
 #include "SessionsWindow.h"
+#include "DownloadCache.h"
 #include "ProcessView.h"
 #include "ActivityView.h"
 #include "AttachmentViewer.h"
@@ -334,6 +335,8 @@ private slots:
     void folderShellFollowsTheMachinePlatform();
     void remoteFileDownloads_data();
     void remoteFileDownloads();
+    void cachedRemoteFilesOpenAndRevealWithoutAnotherDownload();
+    void manualRemoteSaveRetiresTheOutstandingCacheLookup();
     void buttonFocusFollowsKeyboardAndNotClicks();
     void separatesConversationProcessAndTerminal();
     void activityEscapingAndActions();
@@ -6009,7 +6012,7 @@ void TestSessionsWindow::remoteFileDownloads()
         if (mode == 0 && qEnvironmentVariableIsSet("HGS_TEST_FILE_DIALOG_PREVIEW"))
             QVERIFY(dialog->grab().save(qEnvironmentVariable("HGS_TEST_FILE_DIALOG_PREVIEW")));
         auto *download = dialog->findChild<QPushButton *>(automatic ? "downloadOpenSessionFile" : "downloadSessionFile");
-        QVERIFY(download); QVERIFY(download->isEnabled());
+        QVERIFY(download); QTRY_VERIFY(download->isEnabled());
         if (!automatic) QTimer::singleShot(0, &window, [&] {
             auto *save = window.findChild<QFileDialog *>("sessionFileSaveDialog"); QVERIFY(save);
             if (mode == 3) { save->reject(); return; }
@@ -6065,6 +6068,205 @@ void TestSessionsWindow::remoteFileDownloads()
         } else QCOMPARE(args[5].toString(), destination);
         if (mode == 6) { QFile existing(QDir(cache).filePath(QFileInfo(path).fileName())); QVERIFY(existing.open(QIODevice::ReadOnly)); QCOMPARE(existing.readAll(), QByteArray("existing copy")); }
     } else { QVERIFY(opened.urls.isEmpty()); }
+}
+
+void TestSessionsWindow::cachedRemoteFilesOpenAndRevealWithoutAnotherDownload()
+{
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const auto cache = directory.filePath("Zerus Files"), fixture = directory.filePath("file-cache-hgs");
+    const auto previous = QSettings().value("downloads/folder");
+    const auto restore = qScopeGuard([&] {
+        if (previous.isValid()) QSettings().setValue("downloads/folder", previous);
+        else QSettings().remove("downloads/folder");
+    });
+    QSettings().setValue("downloads/folder", cache);
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray answer = R"PY(elif c=='download':
+ import pathlib
+ open(__file__+'.calls','a').write(json.dumps(sys.argv[1:])+'\n')
+ target=a[a.index('--output')+1];path=a[a.index('--path')+1]
+ pathlib.Path(target).write_bytes(b'synthetic image')
+ print(json.dumps(dict(host=sys.argv[1][1:],path=path,local_path=target,bytes=15)))
+)PY";
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    FolderUrlRecorder opened;
+    SessionsWindow window(FakeCli::program(fixture)); window.setFleet(fleet()); window.show();
+    window.showSession("mac", "claude/infra/review");
+    auto *activity = window.findChild<ActivityView *>("mainActivity"); QVERIFY(activity);
+    const QString remote = "/remote/project/report.png";
+    const auto activate = [&](const char *button, bool cached) {
+        QTimer::singleShot(0, &window, [&, button, cached] {
+            auto *dialog = window.findChild<QDialog *>("sessionFileDialog"); QVERIFY(dialog);
+            const auto close = qScopeGuard([&] { if (dialog->isVisible()) dialog->reject(); });
+            auto *action = dialog->findChild<QPushButton *>(button); QVERIFY(action);
+            if (cached) {
+                QTRY_VERIFY(dialog->findChild<QPushButton *>("showDownloadedSessionFile")->isVisible());
+                QVERIFY(dialog->findChild<QPushButton *>("openDownloadedSessionFile")->isVisible());
+                QCOMPARE(dialog->findChild<QPushButton *>("downloadOpenSessionFile")->text(), QString("Download again"));
+                QVERIFY(dialog->findChild<QLabel *>("sessionFileHint")->text().contains("downloaded copy"));
+            }
+            QTRY_VERIFY(action->isEnabled()); action->click();
+            QTRY_VERIFY(!dialog->isVisible());
+        });
+        activity->fileReferenceActivated(remote);
+    };
+    const auto transfers = [&] {
+        QFile calls(fixture + ".calls");
+        return calls.open(QIODevice::ReadOnly) ? calls.readAll().trimmed().split('\n').size() : 0;
+    };
+    activate("downloadOpenSessionFile", false);
+    QTRY_COMPARE(opened.urls.size(), 1);
+    const auto saved = opened.urls.first().toLocalFile(); QVERIFY(QFileInfo::exists(saved));
+    QCOMPARE(transfers(), 1);
+    activate("showDownloadedSessionFile", true);
+    QTRY_COMPARE(opened.revealed, QStringList{saved}); QCOMPARE(opened.urls.size(), 1); QCOMPARE(transfers(), 1);
+    activate("openDownloadedSessionFile", true);
+    QTRY_COMPARE(opened.urls.size(), 2); QCOMPARE(opened.urls.last().toLocalFile(), saved); QCOMPARE(transfers(), 1);
+    // Refresh is explicit and keeps the previously downloaded copy intact.
+    activate("downloadOpenSessionFile", true);
+    QTRY_COMPARE(opened.urls.size(), 3); QVERIFY(opened.urls.last().toLocalFile() != saved);
+    QCOMPARE(transfers(), 2); QVERIFY(QFileInfo::exists(saved));
+}
+
+void TestSessionsWindow::manualRemoteSaveRetiresTheOutstandingCacheLookup()
+{
+    const auto nativeDialogs = QApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+    const auto restoreDialogs = qScopeGuard([=] {
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, nativeDialogs);
+    });
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const auto cache = directory.filePath("Zerus Files");
+    const auto previous = QSettings().value("downloads/folder");
+    const auto restoreCache = qScopeGuard([&] {
+        if (previous.isValid()) QSettings().setValue("downloads/folder", previous);
+        else QSettings().remove("downloads/folder");
+    });
+    QSettings().setValue("downloads/folder", cache);
+    const QString remote = "/remote/project/report.png";
+    auto prepared = DownloadCache::prepare(cache);
+    QVERIFY2(prepared.error.isEmpty(), qPrintable(prepared.error)); QVERIFY(prepared.pending);
+    {
+        QFile file(prepared.pending->path); QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("old cached bytes"), qint64(16));
+    }
+    const auto cached = DownloadCache::publish(prepared.pending, remote, -1, {"mac", remote});
+    QVERIFY2(cached.error.isEmpty(), qPrintable(cached.error)); QVERIFY(!cached.path.isEmpty());
+    QVERIFY(QFileInfo::exists(cached.path));
+
+    const auto fixture = directory.filePath("stale-cache-hgs");
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray answer = R"PY(elif c=='download':
+ import pathlib
+ open(__file__+'.calls','a').write(json.dumps(sys.argv[1:])+'\n')
+ target=a[a.index('--output')+1];path=a[a.index('--path')+1]
+ data=b'manually saved bytes'
+ pathlib.Path(target).write_bytes(data)
+ print(json.dumps(dict(host=sys.argv[1][1:],path=path,local_path=target,bytes=len(data))))
+)PY";
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    const auto transfers = [&]() -> QList<QByteArray> {
+        QFile file(fixture + ".calls");
+        return file.open(QIODevice::ReadOnly) ? file.readAll().trimmed().split('\n') : QList<QByteArray>{};
+    };
+    FolderUrlRecorder opened;
+    SessionsWindow window(FakeCli::program(fixture)); window.setFleet(fleet()); window.show();
+    window.showSession("mac", "claude/infra/review");
+    auto *activity = window.findChild<ActivityView *>("mainActivity"); QVERIFY(activity);
+    auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
+
+    const QStringList actions{"showDownloadedSessionFile", "openDownloadedSessionFile"};
+    for (int index = 0; index < actions.size(); ++index) {
+        const auto destination = directory.filePath(QString("manual copy %1.png").arg(index));
+        const auto previousTransfers = transfers().size();
+        const auto previousUrls = opened.urls.size(), previousReveals = opened.revealed.size();
+        QSignalSpy downloaded(client, &HgsClient::fileDownloaded);
+        QSignalSpy failed(client, &HgsClient::fileDownloadFailed);
+        QSignalSpy checked(client, &HgsClient::fileCacheChecked);
+        QVERIFY(downloaded.isValid()); QVERIFY(failed.isValid()); QVERIFY(checked.isValid());
+        struct WorkerGate {
+            QSemaphore entered, release;
+            std::atomic<bool> expired{false};
+        };
+        const auto gate = std::make_shared<WorkerGate>();
+        QCOMPARE(DownloadCache::pool().maxThreadCount(), 1);
+        QVERIFY(DownloadCache::pool().waitForDone(5000));
+        // Shared state outlives every early assertion return and the worker itself.
+        const auto unblock = qScopeGuard([gate] {
+            gate->release.release();
+            QVERIFY2(DownloadCache::pool().waitForDone(5000), "Download cache worker did not drain");
+        });
+        DownloadCache::pool().start(QRunnable::create([gate] {
+            gate->entered.release();
+            gate->expired.store(!gate->release.tryAcquire(1, 5000));
+        }));
+        QVERIFY(gate->entered.tryAcquire(1, 5000));
+        QVERIFY(!gate->expired.load());
+        QPointer<QDialog> dialog;
+        QTimer::singleShot(0, &window, [&] {
+            dialog = window.findChild<QDialog *>("sessionFileDialog");
+            const QPointer<QDialog> active = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            const auto close = qScopeGuard([dialog, active] {
+                if (dialog && dialog->isVisible()) dialog->reject();
+                else if (active && active->isVisible()) active->reject();
+            });
+            QVERIFY(dialog);
+            auto *download = dialog->findChild<QPushButton *>("downloadSessionFile"); QVERIFY(download);
+            auto *automatic = dialog->findChild<QPushButton *>("downloadOpenSessionFile"); QVERIFY(automatic);
+            QVERIFY(download->isEnabled()); QVERIFY(!automatic->isEnabled());
+            QCOMPARE(checked.size(), 0);
+            QTimer::singleShot(0, &window, [&] {
+                QPointer<QFileDialog> save = window.findChild<QFileDialog *>("sessionFileSaveDialog");
+                const QPointer<QDialog> activeSave = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                const auto closeSave = qScopeGuard([save, activeSave] {
+                    if (save && save->isVisible()) save->reject();
+                    else if (activeSave && activeSave->isVisible()) activeSave->reject();
+                });
+                QVERIFY(save);
+                save->setOption(QFileDialog::DontConfirmOverwrite); save->selectFile(destination);
+                QVERIFY(QMetaObject::invokeMethod(save, "accept", Qt::DirectConnection));
+            });
+            download->click();
+            // Manual Save As uses raw CLI transfer, independent of the held cache pool.
+            QTRY_COMPARE(downloaded.size(), 1);
+            QCOMPARE(failed.size(), 0); QCOMPARE(checked.size(), 0);
+            QVERIFY(!gate->expired.load());
+            QCOMPARE(downloaded.first().at(1).toString(), destination);
+            QFile saved(destination); QVERIFY(saved.open(QIODevice::ReadOnly));
+            QCOMPARE(saved.readAll(), QByteArray("manually saved bytes"));
+            QCOMPARE(transfers().size(), previousTransfers + 1);
+            QVERIFY(dialog->isVisible());
+            // The stale hit must actually arrive after manual completion. A miss,
+            // cancellation or a lookup that won the race cannot satisfy this test.
+            gate->release.release();
+            QTRY_COMPARE(checked.size(), 1);
+            QCOMPARE(checked.first().at(1).toString(), cached.path);
+            QVERIFY(checked.first().at(2).toString().isEmpty());
+            QVERIFY(checked.first().at(0).toULongLong() != downloaded.first().at(0).toULongLong());
+            QVERIFY(!gate->expired.load());
+            QVERIFY(DownloadCache::pool().waitForDone(5000));
+            auto *action = dialog->findChild<QPushButton *>(actions[index]); QVERIFY(action);
+            QVERIFY(action->isVisible()); QVERIFY(action->isEnabled()); action->click();
+            QVERIFY(!dialog->isVisible());
+        });
+        activity->fileReferenceActivated(remote);
+        QVERIFY(dialog.isNull());
+        if (index == 0) {
+            QTRY_COMPARE(opened.revealed.size(), previousReveals + 1);
+            QCOMPARE(opened.revealed.last(), destination);
+            QCOMPARE(opened.urls.size(), previousUrls);
+        } else {
+            QTRY_COMPARE(opened.urls.size(), previousUrls + 1);
+            QCOMPARE(opened.urls.last(), QUrl::fromLocalFile(destination));
+            QCOMPARE(opened.revealed.size(), previousReveals);
+        }
+        QCOMPARE(downloaded.size(), 1); QCOMPARE(failed.size(), 0); QCOMPARE(checked.size(), 1);
+        const auto calls = transfers(); QCOMPARE(calls.size(), previousTransfers + 1);
+        QCOMPARE(QJsonDocument::fromJson(calls.last()).array(),
+                 (QJsonArray{"@mac", "download", "--path", remote, "--output", destination}));
+        QFile oldCopy(cached.path); QVERIFY(oldCopy.open(QIODevice::ReadOnly));
+        QCOMPARE(oldCopy.readAll(), QByteArray("old cached bytes"));
+    }
 }
 
 void TestSessionsWindow::activityAttachmentsOpenLikeDownloads()

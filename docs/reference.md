@@ -1033,8 +1033,16 @@ Windows computer with backslashes (`C:\work\a.cpp`); remote machines keep their
 references identify the host and offer **Download…**, **Download and open** and
 an SSH terminal. **Download…** asks where to save. **Download and open** saves
 automatically in the local Downloads folder under `Zerus Files`, then opens that
-copy. Each request downloads a fresh copy; existing names are preserved with
-numbered suffixes such as `report (1).pdf`, including simultaneous downloads.
+copy. A completed, unchanged copy recorded for that exact machine and remote path
+is reused without another transfer, including after restarting Zerus. The dialog
+then offers **Open local copy** and **Show file** (selected in Finder or the file
+manager), even when the remote machine is offline. **Download again** explicitly
+fetches an updated copy; opening a saved copy does not check whether the remote
+original has changed. Missing or edited cached files are not reused. Files saved
+by older versions without a recorded source are not guessed from their names.
+Fresh downloads preserve existing names with numbered suffixes such as
+`report (1).pdf`; simultaneous requests for the same source in one window share
+one transfer.
 Downloads use that machine's configured SSH profile and SFTP, stream directly to
 disk and publish the destination only after a successful transfer. Errors remain
 in the dialog; a saved copy can be opened with **Open local copy**. Offline or
@@ -1044,12 +1052,12 @@ an explicitly requested open still happens after successful saving. The
 120-second transfer deadline leaves an existing destination unchanged on failure.
 
 **Settings → Files** controls the local downloaded-copy cache. **Never clear** is
-the default. An optional size limit removes the oldest completed copies created
-by **Download and open**, without touching manual downloads, unrelated files or
+the default. An optional size limit removes the least recently used completed
+copies created by **Download and open**, without touching manual downloads, unrelated files or
 copies whose contents were edited. An internal index tracks ownership; files
 that have been moved or whose contents changed are no longer cleanup candidates.
-Transfers in progress and newly completed copies are protected for one minute so the default
-application can consume them. Usage may briefly exceed the limit, including a
+Transfers in progress and recently used or completed copies are protected for
+one minute so the default application can consume them. Usage may briefly exceed the limit, including a
 single oversized file; periodic cleanup runs while Zerus is open and on its next
 start. Enabling or reducing a limit requires confirmation. Cleanup and inventory
 run outside the UI thread.

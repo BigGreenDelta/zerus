@@ -233,7 +233,9 @@ public:
     quint64 requestAttachment(const QString &host, const QString &name, const QJsonObject &file,
                               const QString &conversation, const QString &archive = {}, const QString &agent = {});
     quint64 downloadFile(const QString &host, const QString &path, const QString &destination);
-    quint64 downloadFileToCache(const QString &host, const QString &path);
+    // A checked local snapshot only; no remote freshness is inferred. Always async.
+    quint64 findCachedFile(const QString &host, const QString &path);
+    quint64 downloadFileToCache(const QString &host, const QString &path, bool force = false);
     quint64 requestApprovalLog(const QString &operation, const QJsonObject &data = {});
     static constexpr qsizetype MaximumMessageBytes = 64 * 1024;
     static constexpr qsizetype MaximumAttachmentBytes = 10 * 1024 * 1024;
@@ -304,6 +306,8 @@ signals:
     void attachmentReady(quint64 request, const QJsonObject &file, const QByteArray &bytes);
     void fileDownloaded(quint64 request, const QString &destination);
     void fileDownloadFailed(quint64 request, const QString &error);
+    // Empty destination and error mean a cache miss.
+    void fileCacheChecked(quint64 request, const QString &destination, const QString &error);
     void downloadCacheWarning(const QString &error);
     void approvalLogFinished(quint64 request, const QString &operation, const QJsonObject &result, const QString &error);
     void attachmentFailed(quint64 request, const QString &detail);
@@ -374,7 +378,11 @@ private:
     quint64 m_archiveRequest = 0;
     QHash<QString,QObject *> m_archiveJobs;
     void transferFile(quint64 id, const QString &host, const QString &path, const QString &destination,
-                      const std::shared_ptr<DownloadCache::Pending> &pending = {});
+                      const std::shared_ptr<DownloadCache::Pending> &pending = {}, const QByteArray &cacheKey = {});
+    void prepareCachedDownload(const QByteArray &key, const QString &root, const QString &host, const QString &path);
+    void finishCachedDownload(const QByteArray &key, const QString &path, const QString &error, const QString &warning = {});
+    struct CachedDownload { QList<quint64> requests; bool force = false; };
+    QHash<QByteArray, CachedDownload> m_cachedDownloads;
     void scheduleDownloadCacheTrim();
     void trimDownloadCache();
     QTimer *m_downloadCacheTimer = nullptr;

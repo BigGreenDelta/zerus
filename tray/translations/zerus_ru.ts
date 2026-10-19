@@ -1976,8 +1976,8 @@ Sessions</source>
     </message>
     <message>
       <location filename="../src/DownloadCacheSettings.cpp" line="22" />
-      <source>Download and open saves a copy here and opens it immediately. Download… lets you choose where to save. Existing files are preserved; repeated names get a numbered suffix.</source>
-      <translation type="unfinished" />
+      <source>Download and open reuses a verified saved copy from the same machine and path. Show file selects it in your file manager. Download again gets a fresh copy; Download… lets you choose where to save. Existing files are preserved.</source>
+      <translation>«Скачать и открыть» использует проверенную сохранённую копию с той же машины и по тому же пути. «Показать файл» выделяет её в файловом менеджере. «Скачать заново» загружает новую копию, а «Скачать…» позволяет выбрать место сохранения. Существующие файлы сохраняются.</translation>
     </message>
     <message>
       <location filename="../src/DownloadCacheSettings.cpp" line="26" />
@@ -2011,8 +2011,8 @@ Sessions</source>
     </message>
     <message>
       <location filename="../src/DownloadCacheSettings.cpp" line="36" />
-      <source>Never clear is the default. With a limit, Zerus removes its oldest downloaded copies first. Files you add or edit are kept. Downloads in progress and copies downloaded in the last minute are protected, so usage can briefly exceed the limit. This setting applies to this computer.</source>
-      <translation type="unfinished" />
+      <source>Never clear is the default. With a limit, Zerus removes its least recently used downloaded copies first. Files you add or edit are kept. Downloads in progress and copies used in the last minute are protected, so usage can briefly exceed the limit. This setting applies to this computer.</source>
+      <translation>По умолчанию кэш не очищается. При ограничении размера Zerus сначала удаляет давно не использовавшиеся скачанные копии. Добавленные или изменённые вами файлы сохраняются. Незавершённые загрузки и копии, использованные за последнюю минуту, защищены, поэтому размер может ненадолго превышать лимит. Настройка действует на этом компьютере.</translation>
     </message>
     <message>
       <location filename="../src/DownloadCacheSettings.cpp" line="40" />
@@ -8811,7 +8811,27 @@ Send this voice message with the full conversation context?</source>
     <message>
       <location filename="../src/SessionsWindow.cpp" line="709" />
       <source>Open local copy</source>
-      <translation type="unfinished" />
+      <translation>Открыть сохранённую копию</translation>
+    </message>
+    <message>
+      <source>Show file</source>
+      <translation>Показать файл</translation>
+    </message>
+    <message>
+      <source>The file manager could not show the saved copy at %1.</source>
+      <translation>Файловому менеджеру не удалось показать сохранённую копию по пути %1.</translation>
+    </message>
+    <message>
+      <source>Download again</source>
+      <translation>Скачать заново</translation>
+    </message>
+    <message>
+      <source>Cannot check the downloaded copy: %1</source>
+      <translation>Не удалось проверить скачанную копию: %1</translation>
+    </message>
+    <message>
+      <source>Checking the downloaded copy…</source>
+      <translation>Проверяем скачанную копию…</translation>
     </message>
     <message>
       <location filename="../src/SessionsWindow.cpp" line="713" />
@@ -8847,8 +8867,10 @@ The download continues if you close this dialog.</source>
     </message>
     <message>
       <location filename="../src/SessionsWindow.cpp" line="759" />
-      <source>Saved on this computer: %1</source>
-      <translation type="unfinished" />
+      <source>Saved on this computer: %1
+Open the downloaded copy, or download again to get an updated file.</source>
+      <translation>Сохранено на этом компьютере: %1
+Откройте скачанную копию или скачайте заново, чтобы получить обновлённый файл.</translation>
     </message>
     <message>
       <location filename="../src/SessionsWindow.cpp" line="763" />

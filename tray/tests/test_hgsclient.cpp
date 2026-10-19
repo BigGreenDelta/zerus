@@ -8,6 +8,7 @@
 #include <QJsonObject>
 #include <QSettings>
 #include <QThread>
+#include <QPointer>
 #include <QUuid>
 #include <atomic>
 #include <memory>
@@ -91,6 +92,9 @@ private slots:
     void attachmentsUseCapturedIdentityAndValidateResponses();
     void downloadsRequireExactSavedFileReceipts();
     void cachedDownloadsPreserveRequestIdentityAndCleanFailures();
+    void repeatedCachedDownloadUsesOnePersistentSnapshot();
+    void cachedDownloadReuseCoalescesAndForceKeepsPriorCopy();
+    void cachedDownloadFanoutStopsWhenOwnerIsDestroyed();
     void gitStatusReadsAreSharedAndScopedToMachineAndFolder();
     void pollsLaunchOffTheGuiThreadAndReportOnIt();
     void destroyedClientKillsItsPolls();
@@ -171,6 +175,149 @@ print(json.dumps(dict(host=host,path=path,local_path=target,bytes=999 if path.en
     settings.setValue("downloads/folder", blocked);
     const auto prepFailed = client.downloadFileToCache("one", "/remote/same.txt");
     QTRY_COMPARE(failed.size(), 3); QCOMPARE(failed.last()[0].toULongLong(), prepFailed); QVERIFY(ready.isEmpty());
+}
+
+void TestHgsClient::repeatedCachedDownloadUsesOnePersistentSnapshot()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto fixture = dir.filePath("hgs"), root = dir.filePath("cache");
+    QSettings settings; const auto oldFolder = settings.value("downloads/folder"), oldLimit = settings.value("downloads/cacheBytes");
+    const auto restore = qScopeGuard([&] {
+        if (oldFolder.isValid()) settings.setValue("downloads/folder", oldFolder); else settings.remove("downloads/folder");
+        if (oldLimit.isValid()) settings.setValue("downloads/cacheBytes", oldLimit); else settings.remove("downloads/cacheBytes");
+    });
+    settings.setValue("downloads/folder", root); settings.setValue("downloads/cacheBytes", 0);
+    QVERIFY(FakeCli::install(fixture, R"PY(#!/usr/bin/env python3
+import sys,json,pathlib
+a=sys.argv[1:];host=a[0][1:];path=a[a.index('--path')+1];target=a[a.index('--output')+1]
+with open(__file__+'.calls','a') as f:f.write('transfer\n')
+pathlib.Path(target).write_bytes(b'snapshot')
+print(json.dumps(dict(host=host,path=path,local_path=target,bytes=8)))
+)PY"));
+    QString local;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        HgsClient client(FakeCli::program(fixture));
+        QSignalSpy ready(&client, &HgsClient::fileDownloaded), failed(&client, &HgsClient::fileDownloadFailed);
+        const auto id = client.downloadFileToCache("remote", "/remote/same.txt");
+        QTRY_COMPARE(ready.size(), 1); QVERIFY(failed.isEmpty()); QCOMPARE(ready[0][0].toULongLong(), id);
+        QFile calls(fixture + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
+        QCOMPARE(calls.readAll().count('\n'), 1);
+        if (attempt == 0) local = ready[0][1].toString();
+        else QCOMPARE(ready[0][1].toString(), local);
+    }
+}
+
+void TestHgsClient::cachedDownloadReuseCoalescesAndForceKeepsPriorCopy()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto root = dir.filePath("cache"), fixture = dir.filePath("hgs");
+    QSettings settings; const auto oldFolder = settings.value("downloads/folder"), oldLimit = settings.value("downloads/cacheBytes");
+    const auto restore = qScopeGuard([&] {
+        if (oldFolder.isValid()) settings.setValue("downloads/folder", oldFolder); else settings.remove("downloads/folder");
+        if (oldLimit.isValid()) settings.setValue("downloads/cacheBytes", oldLimit); else settings.remove("downloads/cacheBytes");
+    });
+    settings.setValue("downloads/folder", root); settings.setValue("downloads/cacheBytes", 0);
+    const auto write = [](const QString &path, const QByteArray &bytes) { QFile f(path); return f.open(QIODevice::WriteOnly) && f.write(bytes) == bytes.size(); };
+    const auto read = [](const QString &path) { QFile f(path); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); };
+    QVERIFY(write(fixture + ".payload", "first snapshot"));
+    QVERIFY(FakeCli::install(fixture, R"PY(#!/usr/bin/env python3
+import sys,json,pathlib,time
+a=sys.argv[1:];host=a[0][1:];path=a[a.index('--path')+1];target=a[a.index('--output')+1]
+with open(__file__+'.calls','a') as f:f.write(json.dumps([host,path,target])+'\n')
+pathlib.Path(__file__+'.started').touch()
+deadline=time.monotonic()+10
+while not pathlib.Path(__file__+'.release').exists():
+ if time.monotonic()>=deadline:sys.exit(8)
+ time.sleep(.01)
+data=pathlib.Path(__file__+'.payload').read_bytes();pathlib.Path(target).write_bytes(data)
+print(json.dumps(dict(host=host,path=path,local_path=target,bytes=len(data))))
+)PY"));
+    HgsClient client(FakeCli::program(fixture));
+    const auto release = qScopeGuard([&] { write(fixture + ".release", "release"); });
+    QSignalSpy ready(&client, &HgsClient::fileDownloaded), failed(&client, &HgsClient::fileDownloadFailed), checked(&client, &HgsClient::fileCacheChecked);
+    const auto missing = client.findCachedFile("remote", "/remote/same.txt");
+    QVERIFY(checked.isEmpty()); // Never signal inline, before callers can save the ID.
+    QTRY_COMPARE(checked.size(), 1); QCOMPARE(checked[0][0].toULongLong(), missing);
+    QVERIFY(checked[0][1].toString().isEmpty()); QVERIFY(checked[0][2].toString().isEmpty());
+    const auto one = client.downloadFileToCache("remote", "/remote/same.txt");
+    QTRY_VERIFY(QFileInfo::exists(fixture + ".started"));
+    const auto two = client.downloadFileToCache("remote", "/remote/same.txt"); QVERIFY(one != two);
+    QVERIFY(write(fixture + ".release", "release"));
+    QTRY_COMPARE(ready.size(), 2); QVERIFY(failed.isEmpty());
+    QCOMPARE((QSet<quint64>{ready[0][0].toULongLong(), ready[1][0].toULongLong()}), (QSet<quint64>{one, two}));
+    const auto first = ready[0][1].toString(); QCOMPARE(ready[1][1].toString(), first);
+    QCOMPARE(read(first), QByteArray("first snapshot"));
+    QCOMPARE(read(fixture + ".calls").count('\n'), 1);
+    ready.clear();
+    const auto again = client.downloadFileToCache("remote", "/remote/same.txt");
+    QTRY_COMPARE(ready.size(), 1); QCOMPARE(ready[0][0].toULongLong(), again); QCOMPARE(ready[0][1].toString(), first);
+    QCOMPARE(read(fixture + ".calls").count('\n'), 1);
+    checked.clear(); const auto local = client.findCachedFile("remote", "/remote/same.txt");
+    QTRY_COMPARE(checked.size(), 1); QCOMPARE(checked[0][0].toULongLong(), local); QCOMPARE(checked[0][1].toString(), first);
+    QVERIFY(checked[0][2].toString().isEmpty()); QCOMPARE(read(fixture + ".calls").count('\n'), 1);
+    // A new client has no process-local request/cache state to reuse.
+    { HgsClient restarted(FakeCli::program(fixture)); QSignalSpy restored(&restarted, &HgsClient::fileDownloaded);
+      const auto id = restarted.downloadFileToCache("remote", "/remote/same.txt"); QTRY_COMPARE(restored.size(), 1);
+      QCOMPARE(restored[0][0].toULongLong(), id); QCOMPARE(restored[0][1].toString(), first); }
+    QCOMPARE(read(fixture + ".calls").count('\n'), 1);
+    QVERIFY(write(fixture + ".payload", "new remote snapshot")); ready.clear();
+    const auto cachedThenRefresh = client.downloadFileToCache("remote", "/remote/same.txt");
+    const auto fresh = client.downloadFileToCache("remote", "/remote/same.txt", true);
+    QTRY_COMPARE(ready.size(), 2);
+    QCOMPARE((QSet<quint64>{ready[0][0].toULongLong(), ready[1][0].toULongLong()}), (QSet<quint64>{cachedThenRefresh, fresh}));
+    const auto second = ready[0][1].toString(); QVERIFY(first != second);
+    QCOMPARE(ready[1][1].toString(), second);
+    QCOMPARE(read(first), QByteArray("first snapshot")); QCOMPARE(read(second), QByteArray("new remote snapshot"));
+    QCOMPARE(read(fixture + ".calls").count('\n'), 2);
+    // Save As always transfers, even with a valid cached snapshot.
+    ready.clear(); const auto explicitPath = dir.filePath("explicit.txt");
+    const auto explicitId = client.downloadFile("remote", "/remote/same.txt", explicitPath);
+    QTRY_COMPARE(ready.size(), 1); QCOMPARE(ready[0][0].toULongLong(), explicitId); QCOMPARE(ready[0][1].toString(), explicitPath);
+    QCOMPARE(read(fixture + ".calls").count('\n'), 3); QCOMPARE(read(explicitPath), QByteArray("new remote snapshot"));
+    // An unreadable index never starts another payload, including explicit refresh.
+    QVERIFY(write(QDir(root).filePath(".zerus-files.json"), "invalid index")); checked.clear();
+    const auto corrupt = client.findCachedFile("remote", "/remote/same.txt");
+    QTRY_COMPARE(checked.size(), 1); QCOMPARE(checked[0][0].toULongLong(), corrupt); QVERIFY(!checked[0][2].toString().isEmpty());
+    ready.clear(); const auto blocked = client.downloadFileToCache("remote", "/remote/same.txt");
+    const auto forced = client.downloadFileToCache("remote", "/remote/same.txt", true);
+    QTRY_COMPARE(failed.size(), 2); QVERIFY(ready.isEmpty());
+    QCOMPARE((QSet<quint64>{failed[0][0].toULongLong(), failed[1][0].toULongLong()}), (QSet<quint64>{blocked, forced}));
+    QCOMPARE(read(fixture + ".calls").count('\n'), 3);
+    QCOMPARE(read(first), QByteArray("first snapshot")); QCOMPARE(read(second), QByteArray("new remote snapshot"));
+    failed.clear(); const auto forcedAlone = client.downloadFileToCache("remote", "/remote/same.txt", true);
+    QTRY_COMPARE(failed.size(), 1); QCOMPARE(failed[0][0].toULongLong(), forcedAlone);
+    QCOMPARE(read(fixture + ".calls").count('\n'), 3);
+}
+
+void TestHgsClient::cachedDownloadFanoutStopsWhenOwnerIsDestroyed()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid()); const auto fixture = dir.filePath("hgs");
+    QSettings settings; const auto oldFolder = settings.value("downloads/folder"), oldLimit = settings.value("downloads/cacheBytes");
+    const auto restore = qScopeGuard([&] {
+        if (oldFolder.isValid()) settings.setValue("downloads/folder", oldFolder); else settings.remove("downloads/folder");
+        if (oldLimit.isValid()) settings.setValue("downloads/cacheBytes", oldLimit); else settings.remove("downloads/cacheBytes");
+    });
+    settings.setValue("downloads/folder", dir.filePath("cache")); settings.setValue("downloads/cacheBytes", 0);
+    QVERIFY(FakeCli::install(fixture, R"PY(#!/usr/bin/env python3
+import sys,json,pathlib
+a=sys.argv[1:];host=a[0][1:];path=a[a.index('--path')+1];target=a[a.index('--output')+1]
+with open(__file__+'.calls','a') as f:f.write('transfer\n')
+pathlib.Path(target).write_bytes(b'snapshot')
+print(json.dumps(dict(host=host,path=path,local_path=target,bytes=8)))
+)PY"));
+    QPointer<HgsClient> client = new HgsClient(FakeCli::program(fixture));
+    const auto cleanup = qScopeGuard([&] { delete client.data(); });
+    QList<quint64> delivered; int failures = 0, warnings = 0;
+    connect(client.data(), &HgsClient::fileDownloadFailed, this, [&](quint64, const QString &) { ++failures; });
+    connect(client.data(), &HgsClient::downloadCacheWarning, this, [&](const QString &) { ++warnings; });
+    connect(client.data(), &HgsClient::fileDownloaded, this, [&](quint64 id, const QString &) {
+        delivered.append(id); delete client.data();
+    });
+    const auto first = client->downloadFileToCache("remote", "/remote/same.txt");
+    const auto second = client->downloadFileToCache("remote", "/remote/same.txt"); QVERIFY(first != second);
+    QTRY_VERIFY(client.isNull()); QCOMPARE(delivered, (QList<quint64>{first}));
+    QCOMPARE(failures, 0); QCOMPARE(warnings, 0);
+    QFile calls(fixture + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly)); QCOMPARE(calls.readAll().count('\n'), 1);
 }
 
 void TestHgsClient::cliVersionUsesConfiguredExecutableAndRefreshes()
