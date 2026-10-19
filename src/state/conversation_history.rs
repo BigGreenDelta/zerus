@@ -1934,6 +1934,38 @@ mod tests {
         }
     }
     #[test]
+    fn claude_compaction_rows_stay_out_and_a_framed_paste_merges_with_its_receipt() {
+        // The shape Claude 2.1.296 writes for /compact followed by a phone message with an image.
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("{conversation}.jsonl"));
+        let submitted = "Compare images\n\nInspect the attached image at \"/synthetic/request-one/image.png\"";
+        let user = |uuid: &str, second: u32, content: &str, flags: Value| {
+            let mut row = json!({"type":"user","uuid":uuid,"sessionId":conversation,
+                "timestamp":format!("2026-10-19T00:07:{second:02}Z"),"message":{"role":"user","content":content}});
+            for (key, value) in flags.as_object().unwrap() { row[key] = value.clone(); }
+            row.to_string() + "\n"
+        };
+        std::fs::write(&path, [
+            user("typed", 1, "/compact", json!({})),
+            user("command", 2, "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>", json!({})),
+            user("summary", 3, "This session is being continued from a previous conversation that ran out of context.",
+                json!({"isVisibleInTranscriptOnly":true,"isCompactSummary":true})),
+            user("output", 4, "<local-command-stdout>\u{1b}[2mCompacted (ctrl+o to see full summary)\u{1b}[22m</local-command-stdout>", json!({})),
+            user("pasted", 5, &format!("\n\n<pasted_content id=\"c9a0\">\n{submitted}\n</pasted_content id=\"c9a0\">\n"), json!({"origin":{"kind":"human"}})),
+        ].concat()).unwrap();
+        let native = json!({"agent":"claude","conversation_id":conversation,"transcript":path});
+        let db = database();
+        let (complete, _) = sources(&db, &native, &request(), &native).unwrap();
+        assert!(complete);
+        add(&db,"scope",attachment_row("receipt",submitted,100.),"attachment").unwrap();
+        for _ in 0..4 { reconcile(&db).unwrap(); }
+        let result = page(&db,&request(),true,Some(0),json!({})).unwrap();
+        let details: Vec<_> = result["events"].as_array().unwrap().iter().map(|row| row["detail"].clone()).collect();
+        assert_eq!(details, [json!("/compact"), json!("Compare images")]);
+        assert!(!result.to_string().contains("/synthetic/"));
+    }
+    #[test]
     fn delayed_attachment_retries_after_provider_and_journal_acknowledgements_reconcile() {
         let db = database();
         let submitted = "Compare images\n\nInspect the attached image at \"/synthetic/request-one/image.png\"";
