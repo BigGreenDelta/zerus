@@ -1,0 +1,24 @@
+
+  /work/example
+
+  Project-level MCP servers are disabled until you explicitly choose Trust.
+  Trust starts the listed project MCP targets and remembers this folder.
+  Project MCP targets:
+    local (stdio): command=node args=["server.js"]
+    tracker0 (stdio): command=uvx
+    args=["--from","example-mcp","example-mcp-0"]
+    cwd=/work/example
+    tracker1 (stdio): command=uvx
+    args=["--from","example-mcp","example-mcp-1"]
+    cwd=/work/example
+    tracker2 (stdio): command=uvx
+    args=["--from","example-mcp","example-mcp-2"]
+    cwd=/work/example
+
+   ❯ Trust this folder
+     Enable project MCP servers. Remembered for this folder.
+
+     Don't trust
+     Exit Kimi Code. Asked again next launch.
+
+ ──────────────────────────────────────────────────────────────────────────────
