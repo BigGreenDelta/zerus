@@ -23,7 +23,7 @@ schema touches one place in the source tree.
 | Replicas | Every computer holds every document; the phone holds the live tasks and the project settings |
 | Documents | One document per task; one small document per project for its settings; no index document |
 | Computers | Exchange through the existing swarm channel and `hgs-swarm` worker |
-| Phone | Syncs with any computer through relay → connector → hgs; the relay forwards and stores nothing |
+| Phone | Syncs with any computer through relay → Rust connector → hgs; the relay keeps an exchange two minutes at most |
 | Done tasks | Compacted on acceptance; the phone lists them from a computer and fetches one when it is opened |
 | Sends | Only the session's computer pastes; it never sends a task its copy shows In progress |
 | Rollout | Tasks first; the swarm catalog moves to Loro later |
@@ -164,14 +164,34 @@ an update, as for newer catalog kinds.
 ### Phone
 
 The phone syncs with whichever computer its relay connection reaches: relay →
-that computer's connector → `hgs replica exchange` with the payload on stdin.
-The relay forwards the request and stores nothing. The phone sends its
-inventory of live tasks and the project documents; the computer answers with
-the updates the phone lacks, live task documents it does not have, and the
-updates it accepts from the phone. Edits made offline wait on the phone until
-a computer is reachable. The operation is additive to mobile API v1, gated by
-a capability that the connector advertises only when its hgs supports it, and
-added to the mobile peer allowlist.
+that computer's Rust connector → `hgs task exchange --json` with the payload on
+stdin. The legacy Python connector does not offer it; a phone behind one works
+as before, without tasks. The exchange is the mobile operation `task_exchange`:
+additive to mobile API v1, scoped to a computer, gated by a capability that the
+connector advertises only when its hgs supports it, and admitted on the mobile
+peer allowlist. The relay and the connector keep it as a short read, two
+minutes at most, never as a mutation: a merge is idempotent, so a repeated
+exchange is safe and needs no durable request identity (owner decision,
+2026-10-19).
+
+- **What the phone holds.** The project document, every task that is not Done,
+  and any task it already holds. It sends its inventory and the updates the
+  computer lacks; the computer imports them and answers with the updates the
+  phone lacks of those documents and of live tasks it does not have.
+- **When it syncs.** Each computer's heartbeat carries, for every project, the
+  digest of that phone view (`hgs task digests --json`, read with the catalog).
+  While the app is open it exchanges a project whose digest differs from its
+  own, and right after its own edits; nothing runs in the background (owner
+  decision, 2026-10-19). Edits made offline wait on the phone until a computer
+  is reachable.
+- **Pages.** A request and an answer each stay within the relay's 1 MiB; Loro
+  bytes travel as base64. An answer carries at most 512 KiB of updates, and a
+  document whose updates are larger travels in parts the phone asks for one by
+  one, each naming the whole update's SHA-256 and its offset; a part of an update
+  that changed meanwhile starts it again.
+- **Storage.** The documents live in the app's `noBackupFilesDir`, which backups
+  and device transfer never include, without further encryption (owner
+  decision, 2026-10-19).
 
 ### Done tasks
 
