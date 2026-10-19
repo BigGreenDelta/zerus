@@ -132,6 +132,23 @@ pub fn sync_peer(config: &Config, alias: &str, identity: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Brings this project's tasks here and on the member behind `alias` to the
+/// same versions now, for a send or cancel that runs there.
+pub fn replicate(config: &Config, alias: &str, project: &str) -> Result<()> {
+    let identity = transport::remote(config, alias, "hello", None)
+        .map_err(|error| anyhow::anyhow!("{alias} cannot be reached: {error:#}"))?;
+    let store = LockedStore::load(config)?;
+    let peer = store
+        .data
+        .peers
+        .get(alias)
+        .ok_or_else(|| anyhow::anyhow!("{alias} is not a member of this swarm"))?;
+    ensure!(identity["node_id"] == peer.node, "the computer behind {alias} changed identity");
+    drop(store);
+    ensure!(identity["replica"]["protocol"] == PROTOCOL, "update Zerus on {alias} to send tasks there");
+    exchange_project(config, alias, project)
+}
+
 fn exchange_project(config: &Config, alias: &str, project: &str) -> Result<()> {
     let root = root(config);
     for _ in 0..MAX_PAGES {

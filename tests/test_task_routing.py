@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""Send now and Cancel for a session on another computer of the swarm: that
+computer gets the project's tasks, pastes and records, and its copy comes back.
+Isolated nodes behind a fake SSH client; node b runs a scripted agent on its
+own private tmux socket."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import time
+import unittest
+import uuid
+
+from tests import test_tasks
+
+REPO = Path(__file__).resolve().parents[1]
+HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "target/debug/hgs")).resolve()
+TMUX = shutil.which("tmux")
+SSH = '''#!/usr/bin/env python3
+import json, os, pathlib, shlex, subprocess, sys
+root = pathlib.Path(os.environ['ROUTING_ROOT'])
+alias = sys.argv[-2]
+if (root / ('offline-' + alias)).exists():
+    print('ssh: connect to host ' + alias + ': Connection timed out', file=sys.stderr); sys.exit(255)
+node = root / alias
+env = dict(os.environ, HOME=str(node / 'profile'), HGS_CONFIG_DIR=str(node / 'config'),
+           HGS_STATE_DIR=str(node / 'state'), TASK_FIXTURE=str(node))
+for name in ('HGS_SESSION', 'HGS_RUN_ID'):
+    env.pop(name, None)  # an SSH login is no agent
+args = shlex.split(sys.argv[-1])[1:]
+with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
+if (root / ('noreplica-' + alias)).exists():
+    # hgs from before task replication: no replica field in hello.
+    result = subprocess.run([os.environ['ROUTING_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout); output.pop('replica', None); print(json.dumps(output)); sys.exit(0)
+os.execve(os.environ['ROUTING_HGS'], [os.environ['ROUTING_HGS'], *args], env)
+'''
+
+
+@unittest.skipUnless(TMUX, "tmux is required for delivery")
+class TaskRouting(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="hgs-routing-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        ssh = self.root / "ssh"; ssh.write_text(SSH); ssh.chmod(0o755)
+        self.base = dict(os.environ, ROUTING_ROOT=str(self.root), ROUTING_HGS=str(HGS), HGS_SSH=str(ssh), HGS_TAB="0")
+        for name in ("TMUX", "TMUX_PANE", "HGS_RUN_ID", "HGS_SESSION", "HGS_EXECUTABLE", "HGS_SELF", "HGS_PEERS"):
+            self.base.pop(name, None)
+        for node, peer in (("a", "b"), ("b", "a")):
+            home = self.root / node / "profile/.local/bin"; home.mkdir(parents=True)
+            (self.root / node / "state").mkdir()
+            socket = self.root / node / "socket"
+            # hgs puts $HOME/.local/bin first on PATH: each node's tmux stays private.
+            shim = home / "tmux"; shim.write_text(f'#!/bin/sh\nexec {TMUX} -S "{socket}" -f /dev/null "$@"\n'); shim.chmod(0o755)
+            self.addCleanup(lambda socket=socket: subprocess.run([TMUX, "-S", str(socket), "kill-server"], capture_output=True))
+            config = self.root / node / "config"; config.mkdir()
+            (config / "config").write_text(f'HGS_SELF="{node}"\nHGS_PEERS="{peer}"\n')
+            (config / "machines.local.json").write_text(json.dumps({"machines": {peer: dict(hostname="host.invalid", enabled=True)}}))
+        projects = [{"id": "project-1", "name": "orchard", "color": "#123456", "folders": [], "sessions": []}]
+        self.swarm("a", "initialize", data={"projects": projects})
+        self.swarm("b", "initialize", data={"projects": []})
+        for node, peer in (("b", "a"), ("a", "b")):
+            preview = self.swarm(node, "preview", peer)
+            self.swarm(node, "join", peer, data=dict(node_id=preview["node_id"], swarm_id=preview["swarm_id"], project_map={}, prefer_peer_memberships=False))
+        self.start_agent()
+
+    def env(self, node, session=None):
+        env = dict(self.base, HOME=str(self.root / node / "profile"), HGS_CONFIG_DIR=str(self.root / node / "config"),
+                   HGS_STATE_DIR=str(self.root / node / "state"), TASK_FIXTURE=str(self.root / node))
+        if session:
+            env.update(HGS_SESSION=session, HGS_RUN_ID="run-test")
+        return env
+
+    def swarm(self, node, *args, data=None):
+        result = subprocess.run([str(HGS), "swarm", *args], input=json.dumps(data) if data is not None else None,
+                                env=self.env(node), text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def task(self, node, *args, text=None, ok=True, session=None):
+        result = subprocess.run([str(HGS), "task", *args], input=text, env=self.env(node, session), text=True,
+                                capture_output=True, timeout=60)
+        if ok:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        return result.stderr
+
+    def tmux(self, *args):
+        result = subprocess.run([str(self.root / "b/profile/.local/bin/tmux"), *args], env=self.env("b"),
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def start_agent(self):
+        """codex/remote on b: a scripted agent that records what it receives."""
+        node = self.root / "b"
+        (node / "agent.py").write_text(test_tasks.AGENT)
+        self.tmux("new-session", "-d", "-s", "codex/remote", "-x", "100", "-y", "30", "python3", str(node / "agent.py"))
+        for _ in range(200):
+            if (node / "agent-pid").exists() and (node / "agent-pid").read_text().strip():
+                break
+            time.sleep(.02)
+        pid = int((node / "agent-pid").read_text())
+        start = subprocess.check_output(["ps", "-p", str(pid), "-o", "lstart="], env=dict(os.environ, LC_ALL="C", TZ="UTC"), text=True).strip()
+        pane = self.tmux("display-message", "-p", "-t", "=codex/remote:", "#{pane_id}").strip()
+        run_id = str(uuid.uuid4())
+        self.tmux("set-option", "-t", "=codex/remote:", "@hgs_run", run_id)
+        record = node / "state" / (hashlib.sha256(b"codex/remote").hexdigest() + ".json")
+        record.write_text(json.dumps(dict(
+            version=1, name="codex/remote", agent="codex", run_id=run_id, conversation_id=str(uuid.uuid4()),
+            pane=pane, pid=pid, process_start=start, activity="idle", phase="idle", active_tools={},
+            subagents={}, last_event_at=time.time(), created=time.time())))
+        self.record = record
+
+    def confirm(self):
+        # The agent's next hook event confirms the pasted input.
+        record = json.loads(self.record.read_text())
+        record["last_event_at"] = record.get("input_pending_at", time.time()) + 1
+        self.record.write_text(json.dumps(record))
+
+    def received(self):
+        path = self.root / "b/received"
+        return path.read_bytes().decode(errors="replace") if path.exists() else ""
+
+    def wait_received(self, text):
+        for _ in range(250):
+            if text in self.received():
+                return
+            time.sleep(.02)
+        self.fail("the agent on b never received " + repr(text) + "; got " + repr(self.received()))
+
+    def add(self, text, *args):
+        return self.task("a", "add", "--project", "project-1", *args, text=text)["task"]
+
+    def get(self, node, task):
+        return self.task(node, "get", task["id"], "--project", "project-1")["task"]
+
+    def test_send_now_runs_on_the_sessions_computer(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        sent = self.task("a", "send", task["id"], "--project", "project-1")
+        self.assertEqual(sent["receipt"]["status"], "submitted")
+        self.wait_received("[Zerus task orchard/" + task["id"] + "]")
+        self.wait_received("Add rate limiting")
+        # Both copies show it In progress in b's session, sent by the person.
+        here, there = sent["task"], self.get("b", task)
+        self.assertEqual((here["stage"], here["session"]["session"], here["session"]["host"]), ("active", "codex/remote", "b"))
+        self.assertEqual((there["stage"], there["session"]["host"]), ("active", ""))
+        entry = next(e for e in there["log"] if e["kind"] == "sent")
+        self.assertEqual(entry["actor"]["kind"], "person")
+        calls = (self.root / "calls").read_text()
+        self.assertIn("b task send " + task["uuid"] + " --project project-1", calls)
+
+    def test_an_any_session_task_goes_to_the_session_named_there(self):
+        task = self.add("Document the setup")
+        self.task("a", "send", task["id"], "--project", "project-1", "--session", "codex/remote", "--host", "b")
+        self.wait_received("Document the setup")
+        view = self.get("a", task)
+        self.assertEqual((view["stage"], view["session"]["host"], view["target"]["kind"]), ("active", "b", "any"))
+
+    def test_cancel_runs_on_the_sessions_computer(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        self.task("a", "send", task["id"], "--project", "project-1")
+        self.wait_received("Add rate limiting")
+        self.confirm()
+        cancelled = self.task("a", "cancel", task["id"], "--project", "project-1", "--reason", "Wrong approach")
+        self.assertTrue(cancelled["cancel_message"]["sent"], cancelled)
+        self.wait_received("[Zerus task orchard/" + task["id"] + " cancelled]")
+        for node in "ab":
+            view = self.get(node, task)
+            self.assertEqual(view["stage"], "review", node)
+            self.assertIn("Wrong approach", [e.get("text") for e in view["log"]], node)
+
+    def test_an_unreachable_computer_refuses_and_records_nothing(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        (self.root / "offline-b").touch()
+        refused = self.task("a", "send", task["id"], "--project", "project-1", ok=False)
+        self.assertIn("b cannot be reached", refused)
+        self.assertEqual(self.get("a", task)["stage"], "todo")
+        (self.root / "offline-b").unlink()
+        self.task("a", "send", task["id"], "--project", "project-1")
+        self.wait_received("Add rate limiting")
+        (self.root / "offline-b").touch()
+        refused = self.task("a", "cancel", task["id"], "--project", "project-1", ok=False)
+        self.assertIn("b cannot be reached", refused)
+        self.assertEqual(self.get("a", task)["stage"], "active")
+
+    def test_a_task_its_computer_shows_in_progress_is_refused(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        self.swarm("b", "sync")
+        # b's person sends it there; a's copy has not heard of that yet.
+        self.task("b", "send", task["id"], "--project", "project-1")
+        self.wait_received("Add rate limiting")
+        self.assertEqual(self.get("a", task)["stage"], "todo")
+        refused = self.task("a", "send", task["id"], "--project", "project-1", ok=False)
+        self.assertIn("already In progress in codex/remote", refused)
+        self.assertEqual(self.received().count("Add rate limiting"), 1)
+
+    def test_an_agent_sends_as_itself(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        self.task("a", "send", task["id"], "--project", "project-1", session="codex/local")
+        self.wait_received("Add rate limiting")
+        entry = next(e for e in self.get("b", task)["log"] if e["kind"] == "sent")
+        self.assertEqual((entry["actor"]["kind"], entry["actor"]["session"], entry["actor"]["host"]), ("agent", "codex/local", "a"))
+
+    def test_a_computer_without_task_replication_is_named(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        (self.root / "noreplica-b").touch()
+        refused = self.task("a", "send", task["id"], "--project", "project-1", ok=False)
+        self.assertIn("update Zerus on b", refused)
+        self.assertEqual(self.get("a", task)["stage"], "todo")
+
+
+if __name__ == "__main__":
+    unittest.main()

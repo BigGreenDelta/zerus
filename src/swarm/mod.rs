@@ -17,6 +17,7 @@ use store::LockedStore;
 
 #[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
+pub(crate) use replica::replicate;
 #[cfg(unix)]
 pub(crate) use store::replace;
 
@@ -52,6 +53,12 @@ pub(crate) fn verified_bindings(
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `hgs ARGS…` on the swarm member behind `alias`; its JSON answer.
+pub(crate) fn remote_hgs(config: &Config, alias: &str, args: &[String]) -> Result<Value> {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    transport::run(config, alias, &words, None)
 }
 
 /// Shared preferences for `hgs ls --json --local`. Lock-free: the store is

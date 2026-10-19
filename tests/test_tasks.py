@@ -216,7 +216,8 @@ class TaskCommands(Fixture):
         self.assertEqual(moved["target"]["host"], "orchard-mac")
         listed = {t["id"]: t for t in self.hgs("list", "--project", "orchard")["tasks"]}
         self.assertEqual(listed[there["id"]]["target"]["host"], "orchard-mac")
-        self.assertIn("on another computer", self.hgs("send", there["ref"], ok=False))
+        # A send for it runs on that computer, which this fixture cannot reach.
+        self.assertIn("orchard-mac cannot be reached", self.hgs("send", there["ref"], ok=False))
 
     def test_a_project_name_with_a_slash(self):
         task = self.hgs("add", "--project", "team/web", text="Ship it")["task"]

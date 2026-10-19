@@ -35,6 +35,12 @@ pub struct Exchange {
 }
 
 pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>) -> Result<Value> {
+    run(config, alias, &["swarm", action], input)
+}
+
+/// `hgs WORDS…` on the member behind `alias`, with `input` as JSON on its
+/// standard input; its JSON answer.
+pub fn run(config: &Config, alias: &str, words: &[&str], input: Option<&Value>) -> Result<Value> {
     ensure!(
         config.peers.iter().any(|p| p == alias) && !config.is_self(alias),
         "choose a locally configured remote machine"
@@ -63,8 +69,8 @@ pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>)
         .args(crate::machines::ssh_options(config, alias))
         .arg(alias)
         .arg(format!(
-            "~/.local/bin/hgs swarm {}",
-            platform::quote(action)
+            "~/.local/bin/hgs {}",
+            words.iter().map(|word| platform::quote(word)).collect::<Vec<_>>().join(" ")
         ));
     let ssh = platform::spawn_ssh(&mut command, true, true, true).context("start swarm connection")?;
     let mut child = ssh.child;

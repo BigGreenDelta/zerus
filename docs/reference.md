@@ -1854,8 +1854,9 @@ older `hgs` must be updated before cleanup is available there.
 
 ## Project tasks
 
-`hgs task` keeps a project's task list on this computer: prompts that wait in
-Backlog or To do until someone sends them to a session. Every command prints
+`hgs task` keeps a project's task list: prompts that wait in Backlog or To do
+until someone sends them to a session. Every computer of the swarm holds every
+task and works with them offline. Every command prints
 JSON. Tasks belong to a catalog project, named by its ID or name; a task is
 `T-` plus six characters, and `PROJECT/T-xxxxxx` names it anywhere.
 
@@ -1863,7 +1864,7 @@ JSON. Tasks belong to a catalog project, named by its ID or name; a task is
 hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS]] [--position N] < prompt.txt
 hgs task list --project orchard [--stage todo]
 hgs task get orchard/T-a1b2c3
-hgs task send orchard/T-a1b2c3 [--session codex/api]
+hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
 hgs task report orchard/T-a1b2c3 < summary.txt
 hgs task cancel orchard/T-a1b2c3 [--reason "Wrong approach"]
 hgs task stage orchard/T-a1b2c3 backlog|todo|done
@@ -1874,8 +1875,8 @@ hgs task target orchard/T-a1b2c3 codex/api|any [--host ALIAS]
 hgs task settings --project orchard [--set < settings.json]
 ```
 
-Send pastes the task prompt into a session on this computer through the same
-input path as `hgs send`; the task becomes In progress, and Zerus does not
+Send pastes the task prompt into its session through the same input path as
+`hgs send`; the task becomes In progress, and Zerus does not
 check that the agent received it. The prompt asks the agent to report with
 `hgs task report`, which moves the task to In review. Cancel moves a task In
 progress to In review and pastes the cancel message without stopping the turn;
@@ -1886,8 +1887,12 @@ for that session, and the project settings can keep agents to their own
 session or limit how many tasks they start per hour. `settings --set` reads a
 JSON object and changes only the fields it names.
 
-`--host ALIAS` pins a task to a session on another computer of the swarm that
-this computer verified itself; sending there comes with replication. Listings
+`--host ALIAS` names a session on another computer of the swarm that this
+computer verified itself. A send or cancel for such a session runs on that
+computer: it gets the project's tasks first, refuses a task its own copy shows
+In progress, pastes and records there, and its copy comes back. When it cannot
+be reached, or its Zerus is too old to share tasks, the send or cancel is
+refused with the reason and nothing changes. Listings
 name the computer of every session reference (the target, the session, the
 author and each history entry's session and actor) as `host`: empty for this
 one, the alias of a verified member, or null. Windows keeps no verified
@@ -1895,7 +1900,12 @@ bindings yet, so there `--host` is refused and other computers read null.
 
 Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
 project; a task file that fails to load is listed under `damaged` and left in
-place. Replication between computers and the MCP tools come in later releases.
+place. The swarm worker replicates them with the catalog: after each catalog
+sync it compares every project's digest with the member's and exchanges only
+the changes each side lacks, in pages of at most 1 MiB, and a task changed
+here goes out within seconds. Changes made on several computers at once merge.
+A member whose Zerus does not share tasks keeps syncing the catalog and is
+named in the Swarm settings. The MCP tools come in a later release.
 
 In the desktop, the **Tasks** tab beside Activity and Terminal shows the open
 session's project. Stage tiles (In review, In progress, To do, Backlog, Done)
