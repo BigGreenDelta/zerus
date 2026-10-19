@@ -2,7 +2,7 @@
 
 Status: draft, 2026-10-18. This spec covers how tasks are stored and
 replicated across the user's computers and phone. The task model, the
-interface and the MCP tools are in
+interface and the agent commands are in
 `docs/superpowers/specs/2026-10-13-project-task-queue-design.md`. Loro
 (loro-dev/loro, MIT) becomes Zerus's replication foundation: tasks are its
 first user, and the swarm catalog moves to it later.
@@ -128,7 +128,7 @@ character; `project-id` names the project for people.
   each block with its length and a checksum, folded into the snapshot when it
   reaches a size bound. A block cut short by a crash ends the list, and the
   next save rewrites the snapshot without it. Writes are atomic and
-  happen under a per-project lock, so the GUI's commands, the MCP server and
+  happen under a per-project lock, so the GUI's commands, agents' commands and
   the worker never interleave.
 - **Done compaction.** When a task is accepted, its document is rewritten as
   one snapshot that keeps its full history (Loro's compressed snapshot). Later
@@ -187,12 +187,12 @@ the phone through the normal exchange.
 Pasting a prompt or the cancel message into a session can happen only on the
 computer that runs the session. So:
 
-- **Send now, `task_start` and Cancel** run on the session's computer. The
+- **Send now, `hgs task send` and Cancel** run on the session's computer. The
   desktop calls that computer's hgs (`hgs @alias task send …` over SSH, as
   other remote session actions do); the phone goes through the relay to that
-  computer's connector; an agent's MCP call is forwarded the same way. If the
-  computer cannot be reached, Send now and `task_start` are refused with the
-  reason. A Cancel goes through all the same: the task moves to In review on
+  computer's connector; an agent's `hgs task send` or `cancel` is forwarded the
+  same way. If the computer cannot be reached, Send now and `hgs task send` are
+  refused with the reason. A Cancel goes through all the same: the task moves to In review on
   this computer, its session gets no cancel message, and the session's
   computer receives the change when it syncs again.
 - **That computer checks its own copy first.** If the task is already In
@@ -205,15 +205,15 @@ computer that runs the session. So:
 Everything else (creating, editing, moving, commenting, Accept, Back to To do,
 settings) is a local edit on any replica, online or offline.
 
-## Desktop and MCP
+## Desktop and agents
 
 - **Desktop.** Every computer holds every task document, so the GUI reads the
   local replica through hgs commands with JSON output, and refreshes when the
   project's local revision changes. Tasks of sessions on other computers are
   already local; only side-effect actions go to another computer (see above).
-- **MCP.** `hgs mcp` on the agent's computer reads and edits the local replica;
-  actions with side effects on another computer's session are forwarded as
-  above.
+- **Agents.** `hgs task` in the agent's shell, on its computer, reads and edits
+  the local replica; actions with side effects on another computer's session
+  are forwarded as above.
 
 ## Android build
 
@@ -253,7 +253,7 @@ settings) is a local edit on any replica, online or offline.
 
 | Case | Result |
 |---|---|
-| The session's computer is unreachable | Send now and `task_start` are refused with the reason; Cancel moves the task to In review here without the cancel message; local edits still work |
+| The session's computer is unreachable | Send now and `hgs task send` are refused with the reason; Cancel moves the task to In review here without the cancel message; local edits still work |
 | Two computers send the same task before they meet | Both send; both reports are kept |
 | A replica holds a schema newer than it reads | Those tasks are read-only there, with "Update Zerus" |
 | A member without replica support | Skipped in exchanges and named in Settings |
@@ -282,7 +282,8 @@ settings) is a local edit on any replica, online or offline.
 2. **Computers.** Replica exchange in `hgs-swarm`; side-effect routing to the
    session's computer.
 3. **Desktop.** The Tasks view over the local replica.
-4. **MCP.** The `task_*` tools over the local replica.
+4. **Agents.** `hgs task` for agents: the proven session and its project,
+   one-line answers and the instructions at session start.
 5. **Android.** Rust in the Gradle build, UniFFI bindings, the phone replica,
    and the relay exchange.
 

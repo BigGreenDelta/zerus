@@ -1,7 +1,7 @@
 # Project task queue
 
-Status: draft, 2026-10-17. This spec covers the interface, the MCP tools and
-the task logic; the clickable prototype is `design/task-tracker/index.html`.
+Status: draft, 2026-10-17. This spec covers the interface, the agent commands
+and the task logic; the clickable prototype is `design/task-tracker/index.html`.
 Storage, replication (to be built on Loro), the mobile relay, phases and
 testing are being redesigned from a clean sheet and will get their own spec.
 
@@ -10,7 +10,7 @@ testing are being redesigned from a clean sheet and will get their own spec.
 Tasks are a convenient way to keep prompts and send them to agents by hand. A
 person or an agent files a task. It waits in Backlog or in the ordered To do
 list until the person sends it to a session with Send now, or an agent starts
-it. The session gets the task prompt, which names the MCP tool to report with;
+it. The session gets the task prompt, which names the command to report with;
 the agent's report moves the task to In review, and the person or an agent
 accepts it into Done or sends it back to To do. People and agents comment on
 tasks.
@@ -68,20 +68,20 @@ Backlog, To do, In progress, In review and Done. The order of To do is explicit;
 the person and agents change it (see Agent interface).
 
 ```
-backlog ⇄ todo ─(Send now, task_start)→ active ─(task_report, Cancel)→ review
+backlog ⇄ todo ─(Send now, hgs task send)→ active ─(report, Cancel)→ review
 review ─(Accept)→ done
 review ─(Back to To do)→ todo
 done ─(Back to To do)→ todo
 ```
 
 Done is reached only through In review. A task leaves In progress in two ways:
-the agent's `task_report`, or a Cancel; both lead to In review, where the
+the agent's report (`hgs task report`), or a Cancel; both lead to In review, where the
 person decides. Every step is open to the person in the UI and to agents
-through MCP.
+through `hgs task`.
 
 ## Sending
 
-A task is sent by the person with Send now, or by an agent with `task_start`.
+A task is sent by the person with Send now, or by an agent with `hgs task send`.
 It goes to the task's pinned session, or to the open session (the caller's
 own, for an agent) when the target is Any session.
 
@@ -89,7 +89,7 @@ Zerus renders the task prompt (see Task prompt) and pastes it through hgs's
 normal input path, the one the composer uses. If hgs refuses the input, for
 example because the agent is not running or a question is open, nothing
 changes and the reason is shown; Send now is disabled with the same reason
-while hgs reports it, and `task_start` returns it as an error. Otherwise the
+while hgs reports it, and `hgs task send` returns it as an error. Otherwise the
 task becomes In progress in that session and the send is logged. Zerus does
 not check that the agent received the prompt.
 
@@ -98,7 +98,7 @@ its turn ends, as with any message; so an agent may start a task in its own
 session. A session may have several tasks In progress.
 
 A computer never sends a task that its own copy already shows In progress:
-Send now and `task_start` refuse it there ("T-41 is already In progress in
+Send now and `hgs task send` refuse it there ("T-41 is already In progress in
 api"). Two computers that send the same task before their copies meet both
 send it; each agent works on it and reports, and the second report is added to
 the history (see Report).
@@ -112,7 +112,7 @@ longer exists — choose another session".
 ## Task prompt
 
 The prompt carries the task's text; everything else about the task the agent
-reads itself with `task_get`: earlier sends and their sessions, reports and
+reads itself with `hgs task get`: earlier sends and their sessions, reports and
 comments. The prompt is a template, editable per project. Placeholders:
 `{ref}`, `{author}`, `{prompt}`, `{tools}`, `{history}`. Default:
 
@@ -135,17 +135,16 @@ This task was sent before; read its history with {tools}.task_get
 orchard/T-41 before you start.
 ```
 
-`{tools}` names the MCP tools, or `hgs task` commands for an agent without the
-MCP server.
+`{tools}` names the `hgs task` commands.
 
 The rendered prompt follows hgs's input limits: at most 64 KiB, and it never
-starts with `/` or `!`. The task input, `task_add` and `task_edit` refuse a
+starts with `/` or `!`. The task input, `hgs task add` and `hgs task edit` refuse a
 text that would not fit; a template must start with its `[Zerus task …]` line,
 and the settings do not save one that does not.
 
 ## Report
 
-`task_report(ref, summary)` records the agent's summary and moves the task
+`hgs task report REF` records the agent's summary and moves the task
 from In progress to In review, both when the work is done and when the agent
 found it cannot be done; the summary says which. A report for a task that is
 not In progress, for example one already cancelled or reported, is added to
@@ -198,47 +197,42 @@ place is named.
 
 Nothing changes a task's target on its own: a send, a report, a cancel and
 Back to To do leave it as it was. Only the person (dragging, the settings) and
-an agent (`task_target`, or `task_start` with an explicit session) change it.
+an agent (`hgs task target`, or `hgs task send` with an explicit session) change it.
 The task's history names the session of every send, so another session knows
 the earlier changes are not in its working tree.
 
 ## Agent interface
 
-### MCP server `zerus`
+### Commands for agents
 
-`hgs mcp` serves the tools over stdio. Zerus attaches it when it launches or
-resumes a Claude Code or Codex session, on the command line of that start only
-(Claude Code `--mcp-config`, Codex `-c mcp_servers.zerus.…`); the agent's own
-configuration and saved resume commands never contain it. The server inherits
-the session's `HGS_SESSION` and `HGS_RUN_ID` from the agent (Codex is told to
-pass them on by name) and checks on every call that this run of the session is
-live on this computer; its project is the catalog project of that session. A
-server that cannot verify its session, or whose session belongs to no project,
-refuses every tool with the reason. The same command line allows the zerus
-tools, so the agent never asks the person before calling them; the project
-settings below bound what agents may do. A session started by an older Zerus
-gets the server at its next resume; until then its task prompts name the
-`hgs task` commands. Agents without MCP support use the same operations
-through `hgs task`, named in the task prompt. Other agents get the server only
-after their capabilities are reviewed.
+Agents use `hgs task` in their own shell, the commands the desktop uses. There
+is no MCP server (owner decision, 2026-10-19; every session runs with bypassed
+permissions). A command run inside an agent session acts as that session only
+when it can prove it, as `hgs self` does: the run is live on this computer and
+the command descends from its agent. The proof follows a rename to the
+session's current name. A command whose environment names a session it cannot
+prove is refused with the reason. Commands work on the session's catalog
+project unless a reference (`PROJECT/T-xxxxxx`) or `--project` names another; an
+agent of a session in no project names one. Texts (prompts, comments,
+reports) are read from stdin.
 
-| Tool | Purpose |
+| Command | Purpose |
 |---|---|
-| `task_add(text, when: backlog\|todo, position?)` | File a task for the calling agent's own session; it goes to the end unless a position is given |
-| `task_move(ref, position)` | Change the priority of any task in To do or Backlog |
-| `task_edit(ref, text)` | Edit the prompt of a task in To do or Backlog |
-| `task_stage(ref, stage)` | Move a task between To do and Backlog, Accept it (In review → Done) or send it Back to To do (from In review or Done) |
-| `task_target(ref, session\|any)` | Change the session of a task in To do or Backlog |
-| `task_cancel(ref, reason?)` | Cancel an In progress task of another session, as the person's Cancel does; the reason becomes a comment. An agent cannot cancel a task it was sent itself |
-| `task_start(ref, session?)` | Send a task as Send now does: to `session` if given (the task is then pinned to it), else to its pinned session, else, for an Any session task, to the caller's own session |
-| `task_list(state?)`, `task_get(ref)` | Read tasks; `task_get` returns the text, author, target, every send with its session, the reports, the comments and the log |
-| `task_comment(ref, text)` | Add a comment; it is never pasted into a session |
-| `task_report(ref, summary)` | Report the task, done or found impossible; it moves to In review either way. The summary is one to three sentences on what changed, how it was checked, and what is left undone or why it cannot be done. This is the only way an agent moves a task into In review |
+| `hgs task add [--backlog] [--position N]` | File a task for the calling agent's own session; it goes to the end of To do (or Backlog) unless a position is given |
+| `hgs task move REF --position N` (or `--top`, `--before REF`, `--after REF`) | Change the priority of any task in To do or Backlog |
+| `hgs task edit REF` | Edit the prompt of a task in To do or Backlog |
+| `hgs task stage REF todo\|backlog\|done` | Move a task between To do and Backlog, Accept it (In review → Done) or send it Back to To do (from In review or Done) |
+| `hgs task target REF SESSION\|any [--host ALIAS]` | Change the session of a task in To do or Backlog |
+| `hgs task cancel REF [--reason TEXT]` | Cancel an In progress task of another session, as the person's Cancel does; the reason becomes a comment. An agent cannot cancel a task it was sent itself |
+| `hgs task send REF [--session SESSION [--host ALIAS]]` | Send a task as Send now does: to the session if given (the task is then pinned to it), else to its pinned session, else, for an Any session task, to the caller's own session |
+| `hgs task list [--stage S]`, `hgs task get REF` | Read tasks as JSON; `get` returns the text, author, target, every send with its session, the reports, the comments and the log |
+| `hgs task comment REF` | Add a comment; it is never pasted into a session |
+| `hgs task report REF` | Report the task, done or found impossible; it moves to In review either way. The summary is one to three sentences on what changed, how it was checked, and what is left undone or why it cannot be done. This is the only way an agent moves a task into In review |
 
-A task filed by an agent is always pinned to that agent's session; `task_add`
-has no target.
+A task filed by an agent is always pinned to that agent's session; `add` takes
+no target from an agent.
 
-Agents act on any task of the project through MCP, as the person does in the
+Agents act on any task of the project through these commands, as the person does in the
 UI, without extra confirmation: priority, stage changes including Cancel and,
 when the person asked for it, Accept, starting tasks in any session, editing
 the prompt and the session. An agent cannot cancel a task it was sent itself;
@@ -249,55 +243,71 @@ marks it.
 Two project settings bound this:
 
 - **Agents may start and cancel tasks in other sessions**, on by default. When
-  it is off, `task_start` and `task_cancel` work only for the caller's own
-  session, and the tools say so.
+  it is off, `send` and `cancel` work only for the caller's own session, and
+  the commands say so.
 - **Limit on tasks started by agents**, off by default: at most N agent starts
-  per hour in the project; beyond it `task_start` is refused with the reason.
+  per hour in the project; beyond it `send` is refused with the reason.
 
-### Tool responses
+Sessions that run without bypassed permissions are outside this design: Claude
+Code asks before the first `hgs task` command, and Codex's sandbox keeps the
+command from writing the task store and from reaching other computers.
 
-Each response says what happened and what to do next:
+### Answers
 
-| Call | Response |
+Read commands print JSON. A change an agent makes prints one line that says
+what happened and what to do next; `--json` prints the task instead. The person's
+commands print JSON as before.
+
+| Command | Answer |
 |---|---|
-| `task_report` accepted | "orchard/T-41 is In review." |
-| `task_report` for a task not In progress | "orchard/T-41 is In review (cancelled at 14:06); your report was added to its history." |
-| `task_start` refused (error) | "orchard/web cannot take it now: <hgs reason>. Nothing was sent." |
-| `task_start` sent | "orchard/T-44 sent to orchard/web." |
-| `task_cancel` of a task sent to the caller (error) | "You cannot cancel orchard/T-41, a task you were sent. If it cannot be done, report what is left undone." |
-| `task_add` | "Filed orchard/T-51 in To do, position 5, for orchard/api." |
+| `report` accepted | "orchard/T-41 is In review." |
+| `report` for a task not In progress | "orchard/T-41 is In review (cancelled at 14:06); your report was added to its history." |
+| `send` refused (error) | "orchard/web cannot take it now: <hgs reason>. Nothing was sent." |
+| `send` sent | "orchard/T-44 sent to orchard/web." |
+| `cancel` | "orchard/T-41 is In review; orchard/web got the cancel message." |
+| `cancel` of a task sent to the caller (error) | "You cannot cancel orchard/T-41, a task you were sent. If it cannot be done, report what is left undone." |
+| `add` | "Filed orchard/T-51 in To do, position 5, for orchard/api." |
+| `move`, `edit`, `stage`, `target`, `comment` | "orchard/T-41 is position 2 in To do.", "orchard/T-41 has the new prompt.", "orchard/T-41 is in Backlog.", "orchard/T-41 now goes to orchard/web.", "Added your comment to orchard/T-41." |
 
-### Server instructions
+An empty text is refused with where it goes: "the report is empty; give it on
+stdin, for example: hgs task report REF <<'EOF'".
 
-The server sends these instructions to every agent it is attached to; the
-description of `task_add` repeats the Filing part, so the phrases are seen even
-when instructions are trimmed:
+### Instructions at session start
+
+Zerus's SessionStart hook gives Claude Code and Codex sessions these
+instructions each time the agent runs its SessionStart hooks: at the start, on
+resume and after a clear, and in Claude Code also after a compaction. Other
+agents get them once their hooks are reviewed. `hgs guide tasks` lists the
+commands.
 
 ```
-Zerus tasks are this project's shared task list.
+Zerus tasks are this project's shared task list. Run `hgs task` in your shell:
+it acts as your session, on your session's project; `hgs guide tasks` lists
+the commands. Texts go on stdin, for example
+hgs task report <ref> <<'EOF' ... EOF.
 
 Filing. When the person says "поставь таск", "добавь задачу", "запиши задачу",
 "в очередь", "на потом", "file a task", "add to the queue" or "for later",
-call task_add. Never put these into TodoWrite or your own plan. New tasks go
-to the end of To do unless the person names a place.
+file it with `hgs task add`. Never put these into TodoWrite or your own plan.
+New tasks go to the end of To do unless the person names a place (--backlog,
+--position N).
 
 Working. A message starting "[Zerus task <ref>]" is a task for you; do it like
 any request from the person. When the prompt says the task was sent before,
-read its history with task_get before you start. If you need the person, ask
-in this conversation as usual. When the work is done, or you find that it
-cannot be done, call task_report with that ref: what you changed, how you
-checked it, and what is left undone or why it cannot be done.
+read its history with `hgs task get <ref>` before you start. If you need the
+person, ask in this conversation as usual. When the work is done, or you find
+that it cannot be done, report with `hgs task report <ref>`: what you changed,
+how you checked it, and what is left undone or why it cannot be done.
 
 Cancelled. "[Zerus task <ref> cancelled]" means stop that task now and follow
 the message.
 
-Managing. task_list and task_get show tasks and their history; task_move,
-task_stage, task_target, task_edit, task_start and task_cancel change them as
-the person can. Accept a task (task_stage to Done) only when the person asks
-you to.
+Managing. `hgs task list` and `hgs task get` show tasks and their history;
+move, stage, target, edit, send and cancel change them as the person can.
+Accept a task (`hgs task stage <ref> done`) only when the person asks you to.
 
-Comments. task_comment adds a note for people and agents; it is never pasted
-into a session.
+Comments. `hgs task comment <ref>` adds a note for people and agents; it is
+never pasted into a session.
 ```
 
 ## Desktop interface
@@ -437,4 +447,4 @@ page shows the phone beside the desktop window, with the same tasks in both.
 
 - Storage, replication, the mobile relay and phases are specified in
   `docs/superpowers/specs/2026-10-18-task-replication-loro-design.md`.
-- Testing of the task logic, the interface and the MCP tools.
+- Testing of the task logic, the interface and the agent commands.
