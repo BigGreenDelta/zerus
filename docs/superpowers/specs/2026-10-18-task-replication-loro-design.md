@@ -177,7 +177,9 @@ exchange is safe and needs no durable request identity (owner decision,
 - **What the phone holds.** The project document, every task that is not Done,
   and any task it already holds. It sends its inventory and the updates the
   computer lacks; the computer imports them and answers with the updates the
-  phone lacks of those documents and of live tasks it does not have.
+  phone lacks of those documents and of live tasks it does not have. Once it
+  has nothing more for the phone, its answer names its own inventory of that
+  view, which tells the phone what to send.
 - **When it syncs.** Each computer's heartbeat carries, for every project, the
   digest of that phone view (`hgs task digests --json`, read with the catalog).
   While the app is open it exchanges a project whose digest differs from its

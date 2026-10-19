@@ -89,8 +89,12 @@ class Exchange(test_tasks.DeliveryFixture):
         self.fail("the exchange never finished")
 
     def push(self):
-        """What the phone holds and this computer lacks goes to this computer."""
-        sent = self.exchange({"schema": 1, "project": "project-1", "inventory": self.inventory(self.env)}, env=self.phone)
+        """What the phone holds and this computer lacks goes to this computer.
+        The answer with nothing more for the phone names what this computer
+        holds, which is all the phone learns of it."""
+        held = self.exchange({"schema": 1, "project": "project-1", "inventory": self.inventory(self.phone)})
+        self.assertEqual((held["updates"], held["more"]), ([], False))
+        sent = self.exchange({"schema": 1, "project": "project-1", "inventory": held["inventory"]}, env=self.phone)
         return self.exchange({"schema": 1, "project": "project-1", "inventory": self.inventory(self.phone),
                               "updates": sent["updates"]})
 
@@ -133,6 +137,24 @@ class Exchange(test_tasks.DeliveryFixture):
         here = self.hgs("list", "--project", "orchard")["tasks"]
         self.assertEqual([(t["text"], t["author"]["kind"]) for t in here], [("Filed on the phone", "person")])
         self.assertEqual(answer["digest"], self.digests()["project-1"])
+
+    def test_the_last_answer_names_what_this_computer_holds(self):
+        task = self.add("Add rate limiting")
+        self.pull()
+        # The phone's copy moves ahead; this computer has nothing it lacks.
+        commented = subprocess.run([str(HGS), "task", "comment", "orchard/" + task["id"]], input="From the phone",
+                                   env=self.phone, text=True, capture_output=True, timeout=30)
+        self.assertEqual(commented.returncode, 0, commented.stderr)
+        self.assertNotEqual(self.digests(self.phone)["project-1"], self.digests()["project-1"])
+        answer = self.exchange({"schema": 1, "project": "project-1", "inventory": self.inventory(self.phone)})
+        self.assertEqual(answer["updates"], [])
+        self.assertEqual(answer["inventory"], self.inventory(self.env))
+        self.push()
+        self.assertEqual(self.digests(self.phone)["project-1"], self.digests()["project-1"])
+        comments = [e for e in self.hgs("get", "orchard/" + task["id"])["task"]["log"] if e["kind"] == "comment"]
+        self.assertEqual(len(comments), 1)
+        # An answer that carries updates leaves the inventory out.
+        self.assertNotIn("inventory", self.exchange({"schema": 1, "project": "project-1", "inventory": EMPTY}))
 
     def test_a_task_the_phone_holds_follows_it_into_done(self):
         task = self.add("Add rate limiting", "--target", self.name)

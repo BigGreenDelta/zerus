@@ -124,8 +124,10 @@ fn part(update: &Update, offset: usize) -> Value {
 /// `hgs task exchange --json`: imports the phone's updates and answers with a
 /// page of what it lacks of the documents it holds and of the live tasks; an
 /// update larger than a page goes in parts. An answer with a part always has
-/// `more`: the phone asks again once it holds the whole update. Merges are
-/// idempotent, so a repeated request is safe.
+/// `more`: the phone asks again once it holds the whole update. An answer with
+/// nothing for the phone names what this computer holds of the phone's view,
+/// so the phone can send what it lacks. Merges are idempotent, so a repeated
+/// request is safe.
 pub(super) fn exchange(config: &Config) -> Result<Value> {
     let mut bytes = Vec::new();
     std::io::stdin()
@@ -194,6 +196,9 @@ pub(super) fn exchange(config: &Config) -> Result<Value> {
                 }
             }
         }
+    }
+    if answer.get("part").is_none() && answer["updates"].as_array().is_some_and(Vec::is_empty) {
+        answer["inventory"] = json!(ours);
     }
     answer["digest"] = json!(store.live_inventory().map_err(fail)?.0.digest());
     Ok(answer)

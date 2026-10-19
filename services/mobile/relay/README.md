@@ -508,6 +508,18 @@ in parts the phone asks for one by one. The connector invokes only
 `hgs task exchange --json` with the payload on stdin; hgs validates it again,
 and Loro merges are idempotent, so a repeated request changes nothing twice.
 
+The result names `imported` (documents the phone's updates changed),
+`refused` (`uuid` and `error` of each update that did not apply), `updates`
+(the same shape as the request's), `more` and `digest` (this computer's phone
+view after the import, as its heartbeat names it). A document larger than a
+page comes as `part` (`task`, `size`, `sha256` of the whole update, `offset`
+and base64 `bytes`) with no `updates`; the phone asks for the next part with
+`continue`, and a part of an update that changed meanwhile starts again at
+offset 0. An answer with a part always says `more`. An answer with neither
+updates nor a part also names `inventory`, what this computer holds of the
+phone's view, from which the phone computes the updates this computer lacks
+and sends them in its next request.
+
 The operation counts as a read, never reserves mutation capacity, and has its
 own `task_exchange_history` index with two-minute retention after completion;
 the established `read_history_v3` predicate stays unchanged. Apply the additive
