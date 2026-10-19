@@ -148,6 +148,179 @@ event("SessionEnd")
 '''
 
 
+def direct_signal_agent():
+    """Opt-in diagnostics for Archive's one Linux Codex signal case only.
+
+    Keep AGENT itself unchanged: all other cases still write its exact bytes.
+    A failed diagnostic append must never change the fake's signal behavior.
+    """
+    trace = r'''
+def signal_phase(phase):
+    try:
+        row = {"phase": phase, "pid": os.getpid(), "run": os.environ.get("HGS_RUN_ID", "")[:128],
+               "conversation": sid[:128], "at_ns": time.monotonic_ns()}
+        data = (json.dumps(row, separators=(",", ":")) + "\n").encode()
+        fd = os.open(home / "direct-signal-agent.jsonl",
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            if os.fstat(fd).st_size <= 8192 and len(data) <= 512:
+                os.write(fd, data)  # A short write remains an explicitly incomplete diagnostic.
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+'''
+    replacements = (
+        ('def stop(*args):', trace + '\ndef stop(*args):\n    signal_phase("handler_enter")'),
+        ('    event("SessionEnd", reason="exit" if agent == "kimi" else "other")',
+         '    signal_phase("SessionEnd_begin")\n'
+         '    event("SessionEnd", reason="exit" if agent == "kimi" else "other")\n'
+         '    signal_phase("SessionEnd_end")'),
+        ('    sys.exit(143)', '    signal_phase("handler_exit_143")\n    sys.exit(143)'),
+        ('signal.signal(signal.SIGTERM, stop)',
+         'signal.signal(signal.SIGTERM, stop)\nsignal_phase("handler_registered")'),
+        ('event("SessionStart")\nfor line in sys.stdin:',
+         'signal_phase("SessionStart_begin")\nevent("SessionStart")\n'
+         'signal_phase("SessionStart_end")\nfor line in sys.stdin:'),
+    )
+    source = AGENT
+    for before, after in replacements:
+        if source.count(before) != 1:
+            raise AssertionError("direct signal diagnostic source no longer matches AGENT")
+        source = source.replace(before, after, 1)
+    return source
+
+
+class DirectSignalTrace:
+    """Content-free samples for one already-selected synthetic child; no signalling.
+
+    This never gates success or adopts a replacement PID. Linux kernel metadata
+    is sampled only for the exact target and supervisor from the captured binding.
+    Every read is bounded; unknown evidence stays unknown, not a readiness proof.
+    """
+    def __init__(self, root):
+        self.root, self.samples = root, []
+
+    @staticmethod
+    def process(pid, expected=None):
+        if type(pid) is not int or pid <= 0:
+            return {"unknown": "invalid PID"}
+        try:
+            def identity():
+                with open(f"/proc/{pid}/stat", "rb") as file:
+                    data = file.read(4097)
+                if len(data) > 4096:
+                    raise ValueError("oversized stat")
+                fields = data.decode().rsplit(")", 1)[1].split()
+                return {"pid": pid, "ppid": int(fields[1]), "birth": int(fields[19])}
+            before = identity()
+            if expected is not None and before != expected:
+                return {"unknown": "identity changed"}
+            with open(f"/proc/{pid}/status", "rb") as file:
+                status = file.read(8193)
+            if len(status) > 8192:
+                raise ValueError("oversized status")
+            masks = {}
+            for line in status.decode().splitlines():
+                key, _, value = line.partition(":")
+                if key in ("SigBlk", "SigIgn", "SigCgt") and re.fullmatch(r"[0-9a-fA-F]{1,32}", value.strip()):
+                    masks[key] = value.strip()
+            if identity() != before:
+                return {"unknown": "identity changed during sample"}
+            return {"identity": before, "masks": masks}
+        except Exception as error:
+            return {"unknown": type(error).__name__}
+
+    def capture(self, phase, record, before=None):
+        # Capture once, then signal that same numeric target exactly as before.
+        # A different later binding is evidence, never permission to resend.
+        def field(value):
+            if value is None or type(value) is int and -(2 ** 63) <= value < 2 ** 63:
+                return value
+            if isinstance(value, str) and len(value) <= 128 and not any(ord(char) < 32 for char in value):
+                return value
+            return {"unknown": "invalid or oversized binding field"}
+
+        def process(pid, kind):
+            expected = (before or {}).get(kind, {}).get("identity")
+            if before is not None and expected is None:
+                return {"unknown": "no pre-signal identity"}
+            return self.process(pid, expected)
+
+        try:
+            supervisor = record.get("supervisor") or {}
+            # Sample the target last, immediately before returning to os.kill.
+            parent = process(supervisor.get("pid"), "supervisor")
+            child = process(record.get("pid"), "child")
+            sample = {"phase": phase, "at_ns": time.monotonic_ns(), "run": field(record.get("run_id")),
+                      "conversation": field(record.get("conversation_id")), "pane": field(record.get("pane")),
+                      "saved_pid": field(record.get("pid")), "saved_start": field(record.get("process_start")),
+                      "saved_supervisor": {key: field(supervisor.get(key)) for key in ("pid", "start")},
+                      "child": child, "supervisor": parent}
+        except Exception as error:
+            sample = {"phase": phase, "unknown": type(error).__name__}
+        self.samples.append(sample)
+        return sample
+
+    def failure(self):
+        """Retain before the usual fixture cleanup, without replacing its failure."""
+        try:
+            raw, trace_error = b"", None
+            try:
+                with open(self.root / "direct-signal-agent.jsonl", "rb") as file:
+                    raw = file.read(8705)
+            except Exception as error:
+                trace_error = type(error).__name__
+            phases, malformed = [], 0
+            lines = raw[:8704].split(b"\n")
+            for line in lines[:32]:
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    if (len(line) > 512 or not isinstance(row, dict)
+                            or set(row) != {"phase", "pid", "run", "conversation", "at_ns"}
+                            or row["phase"] not in ("handler_enter", "SessionEnd_begin", "SessionEnd_end",
+                                                     "handler_exit_143", "handler_registered",
+                                                     "SessionStart_begin", "SessionStart_end")
+                            or type(row["pid"]) is not int or row["pid"] <= 0
+                            or type(row["at_ns"]) is not int or row["at_ns"] < 0
+                            or any(not isinstance(row[key], str) or len(row[key]) > 128
+                                   or any(ord(char) < 32 for char in row[key]) for key in ("run", "conversation"))):
+                        raise ValueError("unexpected phase fields")
+                    phases.append(row)
+                except (ValueError, TypeError):
+                    malformed += 1
+            data = {"schema": 1, "samples": self.samples, "agent_phases": phases,
+                    "agent_trace_sha256": hashlib.sha256(raw).hexdigest(),
+                    "agent_trace_error": trace_error, "rows_omitted": max(0, len(lines) - 32),
+                    "malformed_or_incomplete_rows": malformed, "trace_truncated": len(raw) > 8704}
+            encoded = (json.dumps(data, sort_keys=True) + "\n").encode()
+            if len(encoded) > 24576:
+                raise ValueError("oversized signal diagnostic")
+            artifact, durable = None, "unknown"
+            try:
+                folder = REPO / "artifacts/test-results/python"
+                folder.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(prefix="direct-signal-", suffix=".json", dir=folder, delete=False) as file:
+                    artifact = Path(file.name).relative_to(REPO)
+                    file.write(encoded)
+                    file.flush()
+                    os.fsync(file.fileno())
+                fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                durable = "file and parent synced"
+            except Exception as error:
+                durable = "unknown: " + type(error).__name__
+            return (f"Direct signal diagnostics: artifact={artifact}, persistence={durable}\n"
+                    + encoded.decode()[:8000])
+        except Exception as error:
+            return "Direct signal diagnostics unavailable: " + type(error).__name__
+
+
 @unittest.skipUnless(TMUX, "tmux is required")
 class Harness(unittest.TestCase):
     def setUp(self):
@@ -2401,17 +2574,34 @@ class Archive(Harness):
     def test_pause_and_agent_signal_remain_saved(self):
         for agent in ("claude", "codex", "kimi"):
             with self.subTest(agent=agent):
-                name = self.start(agent)
-                sid = self.binding(name)["conversation_id"]
-                self.hgs("pause", name)
-                self.assertEqual(self.archived(name), [])
-                self.assertEqual(self.rows(name)[0]["state"], "paused")
-                self.resume(name)
-                os.kill(self.binding(name)["pid"], signal.SIGTERM)
-                self.wait_stopped(name)
-                self.assertEqual(self.archived(name), [])
-                self.assertEqual(self.rows(name)[0]["state"], "stopped")
-                self.assertEqual(self.binding(name)["conversation_id"], sid)
+                trace = DirectSignalTrace(self.root) if agent == "codex" and sys.platform == "linux" else None
+                if trace:
+                    self.script(agent, direct_signal_agent())
+                try:
+                    name = self.start(agent)
+                    sid = self.binding(name)["conversation_id"]
+                    self.hgs("pause", name)
+                    self.assertEqual(self.archived(name), [])
+                    self.assertEqual(self.rows(name)[0]["state"], "paused")
+                    self.resume(name)
+                    record = self.binding(name)
+                    before = trace.capture("before_SIGTERM", record) if trace else None
+                    try:
+                        os.kill(record["pid"], signal.SIGTERM)
+                    except Exception as error:
+                        if trace:
+                            trace.capture("SIGTERM_raised_" + type(error).__name__, record, before)
+                        raise
+                    if trace:
+                        trace.capture("after_SIGTERM_returned", record, before)
+                    self.wait_stopped(name)
+                    self.assertEqual(self.archived(name), [])
+                    self.assertEqual(self.rows(name)[0]["state"], "stopped")
+                    self.assertEqual(self.binding(name)["conversation_id"], sid)
+                except Exception as error:
+                    if trace:
+                        error.add_note(trace.failure())
+                    raise
 
     def test_supervisor_signal_reaches_real_child_without_archiving(self):
         name = self.start("kimi")
