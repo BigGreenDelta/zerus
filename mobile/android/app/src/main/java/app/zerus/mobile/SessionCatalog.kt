@@ -16,7 +16,7 @@ object SessionCatalogParser {
             fun values(name: String) = capabilities?.optJSONArray(name)?.let { array ->
                 (0 until array.length()).map { array.optString(it) }.toSet()
             }.orEmpty()
-            operations[key] = if (capabilities?.optInt("protocol_version") == 1) values("operations") else emptySet()
+            OperationCapabilities.parse(capabilities)?.let { operations[key] = it }
             features[key] = values("features")
             MachineCatalog.parse(connection.id, raw)
         }

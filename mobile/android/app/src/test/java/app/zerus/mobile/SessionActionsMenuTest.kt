@@ -53,6 +53,10 @@ class SessionActionsMenuTest {
         assertEquals("Terminal requires this exact live tracked tmux pane",item(unsupported,"terminal").reason)
         assertEquals("This native adapter does not provide remote Terminal.",item(facts().copy(supported = SessionActionPolicies.lifecycle),"terminal").reason)
         assertTrue(item(facts(raw = row().put("terminal_supported",true)),"terminal").enabled)
+        assertEquals(TerminalAvailability.unknownComputer,
+            item(facts().copy(terminalAccessReason = TerminalAvailability.unknownComputer),"terminal").reason)
+        assertEquals("This gateway does not support remote Terminal. Update the gateway.",
+            item(facts().copy(terminalAccessReason = "This gateway does not support remote Terminal. Update the gateway."),"terminal").reason)
     }
     @Test fun copyItemsNeedReportedValues() {
         val missing = facts().copy(reference = null,folder = "")
