@@ -37,6 +37,7 @@ private slots:
     void parsesSharedReadState();
     void readMarksUseStdinAndAcceptOnlyHostAnswers();
     void taskCommandsUseStdinAndReportFailures();
+    void sendsAndCancelsWaitForAnotherComputer();
     void cliVersionUsesConfiguredExecutableAndRefreshes();
     void parsesSavedSessions();
     void parsesActivityMetadata();
@@ -1780,6 +1781,14 @@ print('{"ok":true}')
     client.setPresence(5, false);
     QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 3, 10000);
     QVERIFY(finished[2][0].toString().contains("presence unavailable"));
+}
+
+void TestHgsClient::sendsAndCancelsWaitForAnotherComputer() {
+    // A send or cancel may run on another computer of the swarm, after exchanging its tasks.
+    QCOMPARE(HgsClient::taskTimeoutMs({"send", "uuid-1", "--project", "project-1"}), 90000);
+    QCOMPARE(HgsClient::taskTimeoutMs({"cancel", "uuid-1", "--project", "project-1"}), 90000);
+    QCOMPARE(HgsClient::taskTimeoutMs({"list", "--project", "project-1"}), 30000);
+    QCOMPARE(HgsClient::taskTimeoutMs({"edit", "uuid-1", "--project", "project-1"}), 30000);
 }
 
 QTEST_GUILESS_MAIN(TestHgsClient)

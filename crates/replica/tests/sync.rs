@@ -207,6 +207,32 @@ fn a_document_that_cannot_be_imported_is_refused_alone() {
     assert_eq!(texts(&b), ["Add rate limiting", "Still replicated"]);
 }
 
+#[test]
+fn a_damaged_copy_is_set_aside_for_a_good_one() {
+    let (here, there) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a, b) = (store(here.path()), store(there.path()));
+    let task = add(&a, "Add rate limiting");
+    replicate(&a, &b, 1 << 20);
+    let file = task_file(there.path(), task.uuid());
+    fs::write(&file, b"damaged").unwrap();
+    assert_eq!(b.inventory().unwrap().1.len(), 1);
+    // A member's whole copy replaces it; the damaged file stays on disk beside it.
+    replicate(&a, &b, 1 << 20);
+    assert_eq!(texts(&b), ["Add rate limiting"]);
+    assert!(b.inventory().unwrap().1.is_empty());
+    assert_eq!(
+        a.inventory().unwrap().0.digest(),
+        b.inventory().unwrap().0.digest()
+    );
+    let kept: Vec<_> = fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().contains(".damaged-"))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(fs::read(&kept[0]).unwrap(), b"damaged");
+}
+
 fn task_file(root: &Path, uuid: &str) -> std::path::PathBuf {
     root.join(format!("{:x}", Sha256::digest(b"project-1")))
         .join("tasks")

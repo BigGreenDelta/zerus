@@ -157,6 +157,15 @@ class TaskRouting(unittest.TestCase):
         calls = (self.root / "calls").read_text()
         self.assertIn("b task send " + task["uuid"] + " --project project-1", calls)
 
+    def test_a_send_to_a_computer_that_has_the_task_takes_four_calls(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        self.swarm("a", "sync")
+        (self.root / "calls").write_text("")
+        self.task("a", "send", task["id"], "--project", "project-1")
+        self.wait_received("Add rate limiting")
+        calls = [line.split()[1:3] for line in (self.root / "calls").read_text().splitlines()]
+        self.assertEqual(calls, [["swarm", "hello"], ["task", "send"], ["swarm", "replica-inventory"], ["swarm", "replica-exchange"]])
+
     def test_an_any_session_task_goes_to_the_session_named_there(self):
         task = self.add("Document the setup")
         self.task("a", "send", task["id"], "--project", "project-1", "--session", "codex/remote", "--host", "b")

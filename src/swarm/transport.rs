@@ -134,9 +134,13 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     if inventory {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
     }
-    // Project stores are opened after the catalog lock is released.
+    // Project stores are opened after the catalog lock is released. Tasks
+    // that cannot be read never stop the catalog.
     drop(store);
-    result["replica"] = replica::hello(config)?;
+    match replica::hello(config) {
+        Ok(replica) => result["replica"] = replica,
+        Err(error) => eprintln!("hgs swarm: tasks: {error:#}"),
+    }
     Ok(result)
 }
 
@@ -501,7 +505,7 @@ pub fn worker() -> Result<()> {
                 let peers: Vec<_> = store.data.peers.keys().cloned().collect();
                 drop(store);
                 // A local change to the catalog or to any task syncs at once.
-                let digest = catalog + &replica::fingerprint(&config)?;
+                let digest = catalog + &replica::fingerprint(&config).unwrap_or_default();
                 let changed = digest != last_digest;
                 for alias in peers {
                     let (due, failures) = schedule.get(&alias).copied().unwrap_or_default();
@@ -524,7 +528,7 @@ pub fn worker() -> Result<()> {
                         }
                     }
                 }
-                last_digest = LockedStore::load(&config)?.data.catalog.digest() + &replica::fingerprint(&config)?;
+                last_digest = LockedStore::load(&config)?.data.catalog.digest() + &replica::fingerprint(&config).unwrap_or_default();
                 Ok(())
             }) {
             Ok(()) => {}

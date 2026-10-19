@@ -1900,7 +1900,9 @@ bindings yet, so there `--host` is refused and other computers read null.
 
 Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
 project; a task file that fails to load is listed under `damaged` and left in
-place. The swarm worker replicates them with the catalog: after each catalog
+place until another computer of the swarm sends its copy, which replaces it;
+the damaged file stays beside it as `<file>.damaged-<time>`. The swarm worker
+replicates them with the catalog: after each catalog
 sync it compares every project's digest with the member's and exchanges only
 the changes each side lacks, in pages of at most 1 MiB, and a task changed
 here goes out within seconds. Changes made on several computers at once merge.

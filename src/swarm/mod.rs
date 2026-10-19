@@ -17,7 +17,7 @@ use store::LockedStore;
 
 #[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
-pub(crate) use replica::replicate;
+pub(crate) use replica::{exchange_project as exchange_tasks, replicate};
 #[cfg(unix)]
 pub(crate) use store::replace;
 

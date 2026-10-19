@@ -192,6 +192,9 @@ public:
     // `hgs task <arguments>` on this computer, whose replica holds the project's
     // tasks. A prompt, report or comment travels on stdin; the reply is the JSON object.
     quint64 requestTask(const QStringList &arguments, const QString &input = {});
+    // How long a task command may take: a send or cancel may run on another
+    // computer of the swarm after exchanging its tasks.
+    static int taskTimeoutMs(const QStringList &arguments);
     // `hgs session-host <action> --json` on this computer (Windows, spec D2):
     // install enables local sessions and stages the stable CLI and a host image.
     quint64 requestSessionHost(const QString &action);

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import time
@@ -111,9 +112,10 @@ class Swarm(unittest.TestCase):
     def tasks(self, node):
         return sorted(t['text'] for t in self.task(node, 'list', '--project', 'a')['tasks'])
 
-    def exchanges(self):
+    def exchanges(self, alias=''):
         calls = self.root / 'calls'
-        return sum('replica-exchange' in line for line in calls.read_text().splitlines()) if calls.exists() else 0
+        lines = calls.read_text().splitlines() if calls.exists() else []
+        return sum('replica-exchange' in line and line.startswith(alias) for line in lines)
 
     def join(self, node, peer, mapping=None, prefer_peer=False):
         preview = self.call(node, 'preview', peer)
@@ -497,6 +499,42 @@ class Swarm(unittest.TestCase):
             self.assertEqual(self.tasks('b'), ['Add rate limiting'])
         finally:
             worker.terminate(); worker.communicate(timeout=5)
+
+    def test_a_task_store_that_cannot_be_read_never_stops_the_catalog(self):
+        self.join('a', 'b'); self.join('b', 'a')
+        self.call('a', 'sync'); self.call('b', 'sync')
+        self.task('a', 'add', '--project', 'a', text='Add rate limiting')
+        # A directory of a's replicas that names no valid project.
+        broken = self.root / 'a/state/replica' / ('0' * 64)
+        broken.mkdir(parents=True); (broken / 'project-id').write_text('')
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        next(p for p in desired['projects'] if p['id'] == 'a')['name'] = 'Renamed beside a broken store'
+        self.patch('a', before, desired)
+        self.assertEqual(set(self.call('a', 'hello')['replica']['projects']), {'a'})
+        self.assertTrue(self.call('b', 'sync')['a']['ok'])
+        names = [p['name'] for p in self.call('b', 'get')['organization']['projects'] if p['id'] == 'a']
+        self.assertEqual(names, ['Renamed beside a broken store'])
+        self.assertEqual(self.tasks('b'), ['Add rate limiting'])
+
+    def test_refused_tasks_neither_stall_an_exchange_nor_stop_other_projects(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        # a holds more than a page of project b's tasks under project a too; b refuses them there.
+        for n in range(20):
+            self.task('a', 'add', '--project', 'b', text=noise(n, 60000))
+        replica = self.root / 'a/state/replica'
+        project_a = replica / hashlib.sha256(b'a').hexdigest()
+        (project_a / 'tasks').mkdir(parents=True, exist_ok=True)
+        (project_a / 'project-id').write_text('a')
+        for file in (replica / hashlib.sha256(b'b').hexdigest() / 'tasks').iterdir():
+            shutil.copy(file, project_a / 'tasks' / file.name)
+        self.task('a', 'add', '--project', 'c', text='Still replicated')
+        before = self.exchanges('a ')
+        self.assertTrue(self.call('b', 'sync')['a']['ok'])
+        # Project b's pages arrive; the refused page of project a is not asked for again and again.
+        self.assertLessEqual(self.exchanges('a ') - before, 6)
+        self.assertEqual(len(self.task('b', 'list', '--project', 'b')['tasks']), 20)
+        self.assertEqual([t['text'] for t in self.task('b', 'list', '--project', 'c')['tasks']], ['Still replicated'])
 
     def test_initial_join_can_keep_existing_swarm_session_placement(self):
         for node in ['a', 'b']:

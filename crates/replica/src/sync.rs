@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A document's version: each Loro peer that changed it (its ID as decimal
 /// text) and how many changes it made. Sorted, so equal versions compare and
@@ -270,18 +270,24 @@ impl ProjectStore {
             return Err(Error::new(format!("{uuid:?} is not a task UUID")));
         }
         let stored = self.snapshot_path(uuid).exists() || self.updates_path(uuid).exists();
-        let mut task = if stored {
-            let mut task = self.load(uuid)?;
-            let before = task.current_vv();
-            if !task.import_block(bytes) {
-                return Err(Error::new("the updates could not be applied"));
+        let (mut task, replacing) = if stored {
+            match self.load(uuid) {
+                Ok(mut task) => {
+                    let before = task.current_vv();
+                    if !task.import_block(bytes) {
+                        return Err(Error::new("the updates could not be applied"));
+                    }
+                    if task.current_vv() == before {
+                        return Ok(false);
+                    }
+                    (task, false)
+                }
+                // A copy here that does not load gives way to a whole document
+                // from another replica; its files are set aside, not removed.
+                Err(damaged) => (TaskDoc::from_bytes(bytes).map_err(|_| damaged)?, true),
             }
-            if task.current_vv() == before {
-                return Ok(false);
-            }
-            task
         } else {
-            TaskDoc::from_bytes(bytes)?
+            (TaskDoc::from_bytes(bytes)?, false)
         };
         if task.uuid() != uuid {
             return Err(Error::new("the update is for another task"));
@@ -290,7 +296,27 @@ impl ProjectStore {
         if view.project != self.project_id() {
             return Err(Error::new("the task belongs to another project"));
         }
+        if replacing {
+            self.set_aside(uuid)?;
+        }
         self.save(&mut task)?;
         Ok(true)
+    }
+
+    /// Renames a task's files that do not load to `<name>.damaged-<ms>`, kept on disk.
+    fn set_aside(&self, uuid: &str) -> Result<()> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        for path in [self.snapshot_path(uuid), self.updates_path(uuid)] {
+            if path.exists() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                fs::rename(
+                    &path,
+                    path.with_file_name(format!("{name}.damaged-{stamp}")),
+                )?;
+            }
+        }
+        Ok(())
     }
 }

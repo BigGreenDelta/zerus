@@ -510,12 +510,16 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
     return request;
 }
 
+int HgsClient::taskTimeoutMs(const QStringList &arguments) {
+    const QString action = arguments.value(0);
+    return action == QLatin1String("send") || action == QLatin1String("cancel") ? 90000 : 30000;
+}
+
 quint64 HgsClient::requestTask(const QStringList &arguments, const QString &input)
 {
     const quint64 request = ++m_taskRequest;
     QStringList args{QStringLiteral("task")}; args.append(arguments);
-    // A send waits for hgs to accept the paste; everything else is a local file.
-    auto call = processRequest(m_hgs, args); call.timeoutMs = 30000;
+    auto call = processRequest(m_hgs, args); call.timeoutMs = taskTimeoutMs(arguments);
     // stdin always closes, even empty: a command that reads a text never waits on the GUI.
     call.input = input.toUtf8();
     ProcessRunner::run(std::move(call), this, [this, request](const ProcessRunner::Result &result) {

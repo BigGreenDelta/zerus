@@ -219,6 +219,19 @@ class TaskCommands(Fixture):
         # A send for it runs on that computer, which this fixture cannot reach.
         self.assertIn("orchard-mac cannot be reached", self.hgs("send", there["ref"], ok=False))
 
+    def test_only_a_forwarded_command_names_its_agent(self):
+        task = self.add("Add rate limiting")
+        node = "00000000-0000-4000-8000-000000000001"
+        # An agent acts as its own session; it cannot speak for another one.
+        self.assertIn("--agent is for commands another computer forwards",
+                      self.hgs("cancel", task["ref"], "--agent", node + "/codex/web", session="codex/api", ok=False))
+        # It names a computer by its identity, and only send and cancel take it.
+        self.assertIn("--agent is NODE/SESSION", self.hgs("cancel", task["ref"], "--agent", "laptop/codex/web", ok=False))
+        self.assertIn("only send and cancel take --agent",
+                      self.hgs("comment", task["ref"], "--agent", node + "/codex/web", text="x", ok=False))
+        self.assertIn("only send and cancel take --agent",
+                      self.hgs("add", "--project", "orchard", "--agent", node + "/codex/web", text="x", ok=False))
+
     def test_a_project_name_with_a_slash(self):
         task = self.hgs("add", "--project", "team/web", text="Ship it")["task"]
         self.assertEqual(task["ref"], "team/web/" + task["id"])

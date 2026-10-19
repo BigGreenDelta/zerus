@@ -4,7 +4,7 @@
 //! Settings (docs/superpowers/specs/2026-10-18-task-replication-loro-design.md).
 use super::{store::LockedStore, transport};
 use crate::config::Config;
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -24,13 +24,18 @@ fn root(config: &Config) -> PathBuf {
     config.state.join("replica")
 }
 
-/// Each stored project's inventory digest.
+/// Each stored project's inventory digest. A project that cannot be read is
+/// left out and named in the log: it never stops the catalog or the others.
 fn digests(config: &Config) -> Result<BTreeMap<String, String>> {
     let root = root(config);
     let mut out = BTreeMap::new();
     for id in ProjectStore::stored(&root)? {
-        let store = ProjectStore::open(&root, &id)?;
-        out.insert(id, store.inventory()?.0.digest());
+        match ProjectStore::open(&root, &id).and_then(|store| store.inventory()) {
+            Ok((inventory, _)) => {
+                out.insert(id, inventory.digest());
+            }
+            Err(error) => eprintln!("hgs swarm: the tasks of {id:?} cannot be read: {error}"),
+        }
     }
     Ok(out)
 }
@@ -124,12 +129,16 @@ pub fn sync_peer(config: &Config, alias: &str, identity: &Value) -> Result<()> {
     let theirs: BTreeMap<String, String> =
         serde_json::from_value(remote["projects"].clone()).unwrap_or_default();
     let projects: BTreeSet<&String> = local.keys().chain(theirs.keys()).collect();
+    // A project that fails never keeps the others from their exchange.
+    let mut failed = None;
     for project in projects {
         if local.get(project) != theirs.get(project) {
-            exchange_project(config, alias, project)?;
+            if let Err(error) = exchange_project(config, alias, project) {
+                failed.get_or_insert(error);
+            }
         }
     }
-    Ok(())
+    failed.map_or(Ok(()), Err)
 }
 
 /// Brings this project's tasks here and on the member behind `alias` to the
@@ -146,10 +155,16 @@ pub fn replicate(config: &Config, alias: &str, project: &str) -> Result<()> {
     ensure!(identity["node_id"] == peer.node, "the computer behind {alias} changed identity");
     drop(store);
     ensure!(identity["replica"]["protocol"] == PROTOCOL, "update Zerus on {alias} to send tasks there");
+    // Copies that already agree need no exchange.
+    let ours = ProjectStore::open(&root(config), project)?.inventory()?.0.digest();
+    if identity["replica"]["projects"][project].as_str() == Some(ours.as_str()) {
+        return Ok(());
+    }
     exchange_project(config, alias, project)
 }
 
-fn exchange_project(config: &Config, alias: &str, project: &str) -> Result<()> {
+/// Exchanges one project's tasks with the member behind `alias`, page by page.
+pub fn exchange_project(config: &Config, alias: &str, project: &str) -> Result<()> {
     let root = root(config);
     for _ in 0..MAX_PAGES {
         let reply = transport::remote(config, alias, "replica-inventory", Some(&json!({"project": project})))?;
@@ -169,8 +184,10 @@ fn exchange_project(config: &Config, alias: &str, project: &str) -> Result<()> {
         )?;
         let updates = decode(serde_json::from_value(response["updates"].clone())?)?;
         ensure!(response["more"].is_boolean(), "{alias} sent an invalid replica exchange");
+        let mut changed = response["imported"].as_u64().unwrap_or(0) as usize;
         if !updates.is_empty() {
             let imported = ProjectStore::open(&root, project)?.import_updates(updates)?;
+            changed += imported.changed;
             // A refused document is named in the worker's log; the others are kept.
             for refused in imported.refused {
                 eprintln!("hgs swarm: {alias}: task {} of {project} was refused: {}", refused.uuid, refused.error);
@@ -179,6 +196,12 @@ fn exchange_project(config: &Config, alias: &str, project: &str) -> Result<()> {
         if !more_mine && response["more"] != true {
             return Ok(());
         }
+        // A page that changed nothing on either side would come again unchanged.
+        if changed == 0 {
+            eprintln!("hgs swarm: {alias}: the rest of the tasks of {project} were refused; the next sync tries again");
+            return Ok(());
+        }
     }
-    bail!("the tasks of {project} did not finish in {MAX_PAGES} pages; the next sync continues")
+    eprintln!("hgs swarm: {alias}: the tasks of {project} did not finish in {MAX_PAGES} pages; the next sync continues");
+    Ok(())
 }

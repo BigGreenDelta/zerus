@@ -142,19 +142,26 @@ impl Machines {
 
 /// The agent of the session that runs this command, as hooks know it (both
 /// `HGS_SESSION` and `HGS_RUN_ID`), or the person. A send or cancel another
-/// computer forwards names its agent with `--agent NODE/SESSION`.
-fn actor(here: &str, args: &[String]) -> Result<Actor> {
+/// computer forwards (`forwardable`) names its agent with `--agent NODE/SESSION`;
+/// an agent itself always acts as its own session.
+fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
+    let var = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
     if let Some(agent) = option(args, "--agent")? {
+        if !forwardable {
+            return Err(fail("only send and cancel take --agent"));
+        }
+        if var("HGS_SESSION").is_some() && var("HGS_RUN_ID").is_some() {
+            return Err(fail("--agent is for commands another computer forwards; an agent acts as its own session"));
+        }
         let (machine, session) = agent
             .split_once('/')
-            .filter(|(machine, session)| !machine.is_empty() && !session.is_empty())
-            .ok_or_else(|| fail("--agent is NODE/SESSION"))?;
+            .filter(|(machine, session)| uuid::Uuid::parse_str(machine).is_ok() && !session.is_empty())
+            .ok_or_else(|| fail("--agent is NODE/SESSION, NODE being a computer's identity"))?;
         return Ok(Actor::Agent(SessionKey {
             machine: machine.to_owned(),
             session: session.to_owned(),
         }));
     }
-    let var = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
     Ok(match (var("HGS_SESSION"), var("HGS_RUN_ID")) {
         (Some(session), Some(_)) => Actor::Agent(SessionKey {
             machine: here.to_owned(),
@@ -266,7 +273,7 @@ fn add(config: &Config, args: &[String]) -> Result<i32> {
         option(args, "--project")?.ok_or_else(|| fail(USAGE))?,
     )?;
     let machines = machines(config)?;
-    let author = actor(&machines.here, args)?;
+    let author = actor(&machines.here, args, false)?;
     let stage = if flag(args, "--backlog") {
         Stage::Backlog
     } else {
@@ -329,7 +336,7 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
     let (project_id, project_name) = (&r.project.0, &r.project.1);
     let machines = machines(config)?;
     let here = machines.here.as_str();
-    let who = actor(here, args)?;
+    let who = actor(here, args, matches!(action, "send" | "cancel"))?;
     let store = store(config, project_id)?;
     let mut task = store.find(&r.task).map_err(fail)?;
     // A send or cancel for a session another computer runs happens there.
@@ -472,8 +479,9 @@ fn forwarded(
     let reply = crate::swarm::remote_hgs(config, &alias, &remote).map_err(|e| {
         fail(format!("{e:#}").replacen(&format!("{alias}: hgs: "), &format!("{alias}: "), 1))
     })?;
-    // Its copy comes back now; when that fails the next sync brings it.
-    if let Err(error) = crate::swarm::replicate(config, &alias, &project.0) {
+    // Its copy comes back now (its identity was checked a moment ago); when
+    // that fails the next sync brings it.
+    if let Err(error) = crate::swarm::exchange_tasks(config, &alias, &project.0) {
         eprintln!("hgs: {error:#}");
     }
     let task = store(config, &project.0)?.find(uuid).map_err(fail)?;
