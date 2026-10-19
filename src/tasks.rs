@@ -22,6 +22,25 @@ mod answers;
 const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | report REF | comment REF [--json] | settings --project P [--set]
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin";
 
+/// What Claude Code and Codex sessions read about the project's tasks each time
+/// their SessionStart hooks run (spec "Instructions at session start").
+const AGENT_INSTRUCTIONS: &str = concat!(
+    "Zerus tasks are this project's shared task list. Run `hgs task` in your shell: it acts as your session, on your session's project; `hgs guide tasks` lists the commands. Texts go on stdin, for example hgs task report <ref> <<'EOF' ... EOF.\n\n",
+    "Filing. When the person says \"поставь таск\", \"добавь задачу\", \"запиши задачу\", \"в очередь\", \"на потом\", \"file a task\", \"add to the queue\" or \"for later\", file it with `hgs task add`. Never put these into TodoWrite or your own plan. New tasks go to the end of To do unless the person names a place (--backlog, --position N).\n\n",
+    "Working. A message starting \"[Zerus task <ref>]\" is a task for you; do it like any request from the person. When the prompt says the task was sent before, read its history with `hgs task get <ref>` before you start. If you need the person, ask in this conversation as usual. When the work is done, or you find that it cannot be done, report with `hgs task report <ref>`: what you changed, how you checked it, and what is left undone or why it cannot be done.\n\n",
+    "Cancelled. \"[Zerus task <ref> cancelled]\" means stop that task now and follow the message.\n\n",
+    "Managing. `hgs task list` and `hgs task get` show tasks and their history; move, stage, target, edit, send and cancel change them as the person can. Accept a task (`hgs task stage <ref> done`) only when the person asks you to.\n\n",
+    "Comments. `hgs task comment <ref>` adds a note for people and agents; it is never pasted into a session."
+);
+
+/// The SessionStart hook output that gives a session of `agent` the task
+/// instructions; other agents get them once their hooks are reviewed.
+pub(crate) fn session_context(agent: &str) -> Option<Value> {
+    matches!(agent, "claude" | "codex").then(|| {
+        json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": AGENT_INSTRUCTIONS}})
+    })
+}
+
 fn fail(message: impl std::fmt::Display) -> Error {
     Error::new(1, message.to_string())
 }
@@ -751,4 +770,27 @@ fn settings(config: &Config, args: &[String]) -> Result<Value> {
         store.save_project(&doc).map_err(fail)?;
     }
     Ok(json!({"project": {"id": id, "name": name}, "settings": doc.settings()}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_and_codex_read_the_instructions_others_do_not() {
+        for agent in ["claude", "codex"] {
+            let context = session_context(agent).unwrap();
+            assert_eq!(context["hookSpecificOutput"]["hookEventName"], "SessionStart");
+            let text = context["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+            for phrase in [
+                "Zerus tasks are this project's shared task list.",
+                "\"поставь таск\"",
+                "hgs task report <ref>",
+                "hgs guide tasks",
+            ] {
+                assert!(text.contains(phrase), "{phrase}");
+            }
+        }
+        assert!(session_context("kimi").is_none());
+    }
 }

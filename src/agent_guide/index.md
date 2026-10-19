@@ -12,6 +12,7 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
   hgs guide wait              wait for a result another session owes you
   hgs guide launch            start a session, here or on a peer
   hgs guide stop              interrupt, pause, kill or archive
+  hgs guide tasks             the project's task list: file, report, send
 
 Rules
 - inspect prints over 100 KB of JSON: always select fields, never print it all.

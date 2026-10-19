@@ -61,7 +61,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] inspect <session> [--archive <id>] [--after <cursor>]   activity as JSON
        hgs [@host] reference <session> --json [--archive ID] [--agent ID]   copy a session reference
        hgs self [--json]              the calling agent's own session reference
-       hgs [@host] guide [topic]      how agents message, wait for, launch and stop sessions
+       hgs [@host] guide [topic]      how agents message, wait for, launch and stop sessions and use tasks
        hgs inspect 'zerus://session?...'   resolve and inspect a referenced conversation
        hgs [@host] processes <session> [--archive <id>]   observed shell commands as JSON
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
