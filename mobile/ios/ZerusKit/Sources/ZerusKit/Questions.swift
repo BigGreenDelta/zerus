@@ -135,8 +135,8 @@ extension QuestionPolicies {
         }
     }
 
-    /// Submit appears only on a card that can be answered here; approvals use their own buttons.
-    public static func showsSubmit(_ question: Question) -> Bool { question.canAnswer && !question.approval }
+    /// Submit appears only on a card that can be answered here; approvals use their own buttons, except native choices.
+    public static func showsSubmit(_ question: Question) -> Bool { question.canAnswer && (!question.approval || nativeChoices(question)) }
 
     public static func approvalSupported(_ question: Question) -> Bool {
         guard question.approval, question.prompts.count == 1, let prompt = question.prompts.first, !prompt.multi else { return false }
@@ -144,7 +144,7 @@ extension QuestionPolicies {
     }
 
     /// An answerable OpenCode permission: Allow once, Reject and optionally Always allow, answered with those native ids.
-    /// Other approvals with native choices (Claude) stay on the computer; allow/deny approvals keep `approvalSupported`.
+    /// Approvals marked `approval_choices` keep `nativeChoices`; allow/deny approvals keep `approvalSupported`.
     public static func openCodePermission(_ question: Question) -> Bool {
         guard question.approval, question.source == "opencode_native", question.canAnswer, question.prompts.count == 1,
               let prompt = question.prompts.first, prompt.id == "permission", !prompt.multi else { return false }

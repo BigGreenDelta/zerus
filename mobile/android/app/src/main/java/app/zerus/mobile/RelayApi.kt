@@ -313,7 +313,7 @@ object NativeParser {
         Question(card.string("question_id"), card.string("question_hash"), card.optJSONArray("questions")?.objects().orEmpty().map { prompt ->
             fun bound(key: String, limit: Int) = (prompt.opt(key) as? Number)?.toLong()?.takeIf { it in 0..limit }?.toInt()
             Prompt(prompt.string("id"), prompt.string("question", "prompt"), prompt.optJSONArray("options")?.objects().orEmpty().map {
-                Choice(it.string("id"), it.string("label"), it.string("description"))
+                Choice(it.string("id"), it.string("label"), it.string("description"), it.string("scope"))
             }, prompt.optBoolean("multi_select"), prompt.optBoolean("required", true), prompt.optBoolean("allow_other", false),
                 prompt.string("header"), prompt.string("body"), prompt.string("other_label"), prompt.string("other_description"),
                 prompt.string("input_kind"), bound("min_length", 1_000_000), bound("max_length", 1_000_000), bound("min_items", 1000), bound("max_items", 1000),
@@ -324,6 +324,7 @@ object NativeParser {
         }, card.optBoolean("can_answer"), card.optBoolean("can_skip"), card.optBoolean("optional"),
             nativeDelivery?.status.orEmpty(), (card.opt("created_at") as? Number)?.toDouble()?.takeIf { it.isFinite() && it > 0 && it < 253402300800.0 } ?: 0.0,
             card.string("source"), card.optBoolean("approval"), card.optBoolean("trust_request"), card.string("answer_unavailable_reason", "unavailable_reason"),
-            card.string("run_id"), card.string("conversation_id"), card.string("tool_call_id"), nativeDelivery)
+            card.string("run_id"), card.string("conversation_id"), card.string("tool_call_id"), nativeDelivery,
+            card.optBoolean("approval_choices"))
     }
 }
