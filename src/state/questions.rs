@@ -319,6 +319,7 @@ fn collect(record: &Value, deadline: Option<std::time::Instant>) -> Result<Optio
     }
     let mut cards: Vec<_> = by_tool.into_values().collect();
     cards.extend(kimi_plan::recover(record, &events));
+    cards.extend(kimi_approval::recover(record, &events));
     match deadline {
         None => cards.extend(codex_questions::current(record)?),
         Some(deadline) => match codex_questions::current_until(record, deadline)? {
@@ -415,6 +416,17 @@ pub(super) fn inspection(record: &Value, live_pane: bool) -> Result<Value> {
                 }
                 if string(record, "agent") == "kimi" && string(card, "source") == kimi_plan::SOURCE {
                     match kimi_plan::available(record, card) {
+                        Ok(()) => {
+                            card["can_answer"] = json!(true);
+                            card["answer_transport"] = json!("kimi_tui");
+                            card["answer_unavailable_reason"] = json!("");
+                        }
+                        Err(error) => card["answer_unavailable_reason"] = json!(error),
+                    }
+                }
+                if string(record, "agent") == "kimi" && string(card, "source") == kimi_approval::SOURCE {
+                    kimi_approval::fit(record, card);
+                    match kimi_approval::available(record, card) {
                         Ok(()) => {
                             card["can_answer"] = json!(true);
                             card["answer_transport"] = json!("kimi_tui");
@@ -555,6 +567,9 @@ fn response_matches(question: &Value, answers: &Value, event: &Value) -> bool {
     if string(question, "source") == kimi_plan::SOURCE {
         return kimi_plan::response_matches(question, answers, event);
     }
+    if string(question, "source") == kimi_approval::SOURCE {
+        return kimi_approval::response_matches(question, answers, event);
+    }
     if string(event, "type") != "interaction.resolved" {
         return false;
     }
@@ -692,7 +707,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         if string(&question, "question_hash") != request.expected_question_hash {
             return Err("question changed; refresh before answering".into());
         }
-        if !(["codex_hooks_trust", "codex_update", "codex_goal_resume", "codex_folder_trust", "codex_async", "kimi_wire", kimi_plan::SOURCE, "kimi_cache_hint", "kimi_folder_trust", "claude_folder_trust", "claude_permission_mode", "claude_resume", "claude_usage_limit", "claude_tool_approval"]
+        if !(["codex_hooks_trust", "codex_update", "codex_goal_resume", "codex_folder_trust", "codex_async", "kimi_wire", kimi_plan::SOURCE, kimi_approval::SOURCE, "kimi_cache_hint", "kimi_folder_trust", "claude_folder_trust", "claude_permission_mode", "claude_resume", "claude_usage_limit", "claude_tool_approval"]
             .contains(&string(&question, "source"))
             || string(&record,"agent")=="claude" && string(&question,"source")=="hook")
         {
@@ -734,6 +749,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             kimi_cache_hint::available(&record, &question)?;
         } else if string(&question, "source") == kimi_plan::SOURCE {
             kimi_plan::available(&record, &question)?;
+        } else if string(&question, "source") == kimi_approval::SOURCE {
+            kimi_approval::available(&record, &question)?;
         } else {
             super::question_terminal::available(&record, &question)?;
         }
@@ -802,6 +819,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         kimi_cache_hint::answer(&record, &question, &answers)
     } else if string(&question, "source") == kimi_plan::SOURCE {
         kimi_plan::answer(&record, &question, &answers)
+    } else if string(&question, "source") == kimi_approval::SOURCE {
+        kimi_approval::answer(&record, &question, &answers)
     } else {
         super::question_terminal::answer(&record, &question, &answers)
     };
@@ -866,6 +885,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             }
             let response = if string(&question, "source") == kimi_plan::SOURCE {
                 kimi_plan::journal_response(&question, &response)
+            } else if string(&question, "source") == kimi_approval::SOURCE {
+                kimi_approval::journal_response(&question, &response)
             } else {
                 response
             };
@@ -990,6 +1011,27 @@ mod tests {
             text: "one\ntwo".into(),
         };
         assert!(validated_answers(&card, &[multiline]).is_err());
+    }
+    #[test]
+    fn kimi_tool_approvals_on_the_main_wire_are_listed() {
+        // No terminal: every screen-based card source sees a capture error.
+        struct Silent;
+        impl backend::TerminalBackend for Silent {}
+        let home = tempfile::tempdir().unwrap();
+        let wire = home.path().join("sessions/workspace/session_test/agents/main");
+        fs::create_dir_all(&wire).unwrap();
+        let request = json!({"type":"interaction.request","agentId":"main","id":"approval_test","kind":"approval",
+            "toolCallId":"tool_bash","request":{"id":"approval_test","sessionId":"session_test","agentId":"main","turnId":1,
+            "toolCallId":"tool_bash","toolName":"Bash","action":"Running: ls -la",
+            "display":{"kind":"command","command":"ls -la","cwd":"/workspace/example","language":"bash"}},"time":2000});
+        fs::write(wire.join("wire.jsonl"), format!("{request}\n")).unwrap();
+        let record = json!({"agent":"kimi","agent_home":home.path(),"run_id":"run","conversation_id":"session_test",
+            "active_tools":{"tool_bash":{"name":"Bash"}}});
+        let cards = backend::with_fake(&Silent, || current(&record)).unwrap();
+        let approvals: Vec<_> = cards.iter().filter(|card| card["source"] == "kimi_tool_approval").collect();
+        assert_eq!(approvals.len(), 1, "{cards:?}");
+        assert_eq!((approvals[0]["question_id"].clone(), approvals[0]["tool_call_id"].clone()),
+            (json!("approval_test"), json!("tool_bash")));
     }
     #[test]
     fn acknowledgement_must_contain_exact_answers() {
