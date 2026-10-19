@@ -97,6 +97,8 @@ public struct Choice: Codable, Hashable, Sendable {
     public var id: String
     public var label: String
     public var description: String
+    /// An approval option's reach: "once" for this request or "broader" for more; empty elsewhere.
+    public var scope = ""
 }
 
 public struct Prompt: Codable, Hashable, Sendable {
@@ -165,10 +167,14 @@ public struct Question: Codable, Hashable, Sendable, Identifiable {
     public var conversation: String
     public var toolCallId: String
     public var answerDelivery: NativeQuestionDelivery?
+    /// An approval answered with the agent's own options (`approval_choices`), such as a Claude terminal panel or a Kimi
+    /// tool approval; see `QuestionPolicies.nativeChoices`.
+    public var approvalChoices: Bool
 
     public init(id: String, hash: String, prompts: [Prompt], canAnswer: Bool, canSkip: Bool, optional: Bool, delivery: String,
                 createdAt: Double = 0, source: String = "", approval: Bool = false, trustRequest: Bool = false, unavailableReason: String = "",
-                run: String = "", conversation: String = "", toolCallId: String = "", answerDelivery: NativeQuestionDelivery? = nil) {
+                run: String = "", conversation: String = "", toolCallId: String = "", answerDelivery: NativeQuestionDelivery? = nil,
+                approvalChoices: Bool = false) {
         self.id = id
         self.hash = hash
         self.prompts = prompts
@@ -185,6 +191,7 @@ public struct Question: Codable, Hashable, Sendable, Identifiable {
         self.conversation = conversation
         self.toolCallId = toolCallId
         self.answerDelivery = answerDelivery
+        self.approvalChoices = approvalChoices
     }
 }
 
@@ -584,7 +591,9 @@ public enum NativeEvents {
             return Question(id: card.string("question_id"), hash: card.string("question_hash"),
                             prompts: card.objects("questions").map { prompt in
                                 Prompt(id: prompt.string("id"), text: prompt.string("question", "prompt"),
-                                       choices: prompt.objects("options").map { Choice(id: $0.string("id"), label: $0.string("label"), description: $0.string("description")) },
+                                       choices: prompt.objects("options").map {
+                                           Choice(id: $0.string("id"), label: $0.string("label"), description: $0.string("description"), scope: $0.string("scope"))
+                                       },
                                        multi: prompt.bool("multi_select"), required: prompt.bool("required", default: true),
                                        other: prompt.bool("allow_other"), header: prompt.string("header"), body: prompt.string("body"),
                                        otherLabel: prompt.string("other_label"), otherDescription: prompt.string("other_description"),
@@ -598,7 +607,7 @@ public enum NativeEvents {
                             delivery: delivery?.status ?? "", createdAt: created, source: card.string("source"), approval: card.bool("approval"),
                             trustRequest: card.bool("trust_request"), unavailableReason: card.string("answer_unavailable_reason", "unavailable_reason"),
                             run: card.string("run_id"), conversation: card.string("conversation_id"), toolCallId: card.string("tool_call_id"),
-                            answerDelivery: delivery)
+                            answerDelivery: delivery, approvalChoices: card.bool("approval_choices"))
         }
     }
 }
