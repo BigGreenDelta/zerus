@@ -47,9 +47,7 @@ fn hex(value: &Value) -> bool {
     })
 }
 fn uuid(value: &Value) -> bool {
-    value
-        .as_str()
-        .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok_and(|u| !u.is_nil() && u.to_string() == s))
+    zerus_relay::protocol::uuid(value, true).is_ok()
 }
 pub fn result_valid(operation: &str, result: &Value, payload: &Value, session: &str) -> bool {
     let Some(object) = result.as_object() else {
