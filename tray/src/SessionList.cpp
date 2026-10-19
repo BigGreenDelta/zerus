@@ -169,6 +169,9 @@ void SessionList::syncRowExpandButtons()
         unused.remove(pin);
         button->setProperty("sessionKey", index.data(SessionRoles::Key));
         button->setAccessibleName(tr("Expand session row: %1").arg(index.data(SessionRoles::Title).toString()));
+        button->setAccessibleDescription(SessionDelegate::compactDescription(option, index));
+        const auto tooltip = SessionDelegate::compactTooltip(option, index);
+        button->setToolTip(tooltip.isEmpty() ? tr("Expand session row") : tr("Expand session row") + '\n' + tooltip);
         if (!button->property("rowTheme").isValid() || button->property("rowTheme").toBool() != dark) {
             button->setProperty("rowTheme", dark);
             button->setIcon(workspaceIcon("expand-row", QColor(dark ? "#a1adbb" : "#647386")));
@@ -217,6 +220,13 @@ bool SessionList::viewportEvent(QEvent *event)
         const auto *help = static_cast<QHelpEvent *>(event);
         const auto *row = itemAt(help->pos());
         if (row) {
+            const auto index = indexFromItem(row);
+            if (SessionDelegate::rowCollapsed(index)) {
+                const auto text = SessionDelegate::compactTooltip(animationOption(index), index);
+                if (!text.isEmpty()) QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), visualItemRect(row));
+                else QToolTip::hideText();
+                return true;
+            }
             const auto question = SessionDelegate::optionalQuestionRect(visualItemRect(row), indexFromItem(row), font(),
                 property("compact").toBool(), row->isSelected());
             if (question.contains(help->pos())) {

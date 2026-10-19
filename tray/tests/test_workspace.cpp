@@ -17,6 +17,9 @@
 #include "SessionRowPreferences.h"
 #include <QAccessible>
 #include <QToolButton>
+#include <QHelpEvent>
+#include <QToolTip>
+#include <QTextDocument>
 #include <QDir>
 #include <algorithm>
 
@@ -59,6 +62,7 @@ private slots:
     void compactRowsKeepTheirGeometryAndHideDetails_data();
     void compactRowsKeepTheirGeometryAndHideDetails();
     void compactRowsHaveAccessibleExpandControls();
+    void compactRowsExposeElidedFields();
     void compactRowPreferencesKeepExactBoundedIdentities();
     void mutedAttentionUsesNeutralPresentation_data();
     void mutedAttentionUsesNeutralPresentation();
@@ -66,17 +70,18 @@ private slots:
 
 void TestWorkspace::compactRowsKeepTheirGeometryAndHideDetails_data()
 {
-    QTest::addColumn<bool>("dark"); QTest::addColumn<bool>("dense"); QTest::addColumn<int>("width"); QTest::addColumn<int>("scale");
+    QTest::addColumn<bool>("dark"); QTest::addColumn<bool>("dense"); QTest::addColumn<int>("width"); QTest::addColumn<int>("scale"); QTest::addColumn<QString>("agent");
     for (bool dark : {false, true}) for (bool dense : {false, true}) for (int width : {250, 320, 500}) for (int scale : {1, 2})
-        QTest::newRow(qPrintable(QString("%1-%2-%3-%4").arg(dark).arg(dense).arg(width).arg(scale))) << dark << dense << width << scale;
+        for (const auto &agent : {"codex", "sh", "claude", "kimi", "opencode", "dsh"})
+            QTest::newRow(qPrintable(QString("%1-%2-%3-%4-%5").arg(dark).arg(dense).arg(width).arg(scale).arg(agent))) << dark << dense << width << scale << QString(agent);
 }
 
 void TestWorkspace::compactRowsKeepTheirGeometryAndHideDetails()
 {
-    QFETCH(bool, dark); QFETCH(bool, dense); QFETCH(int, width); QFETCH(int, scale);
+    QFETCH(bool, dark); QFETCH(bool, dense); QFETCH(int, width); QFETCH(int, scale); QFETCH(QString, agent);
     ListProbe list; list.setProperty("hgsDark", dark); list.setProperty("compact", dense);
     auto *row = new QListWidgetItem(&list); row->setData(SessionRoles::Title, "A long session name to retain");
-    row->setData(SessionRoles::Agent, "claude"); row->setData(SessionRoles::Status, "Needs approval"); row->setData(SessionRoles::Attention, true);
+    row->setData(SessionRoles::Agent, agent); row->setData(SessionRoles::Status, "Needs approval"); row->setData(SessionRoles::Attention, true);
     row->setData(SessionRoles::RowCollapsed, true);
     const auto index = list.model()->index(0, 0); SessionDelegate delegate;
     QStyleOptionViewItem option; option.widget = &list; option.font = list.font(); option.font.setPixelSize(11 * scale);
@@ -88,12 +93,23 @@ void TestWorkspace::compactRowsKeepTheirGeometryAndHideDetails()
     }
     QVERIFY(layout.title.width() >= 60); QVERIFY(!layout.title.intersects(layout.status));
     QVERIFY(!layout.status.intersects(layout.provider)); QVERIFY(!layout.provider.intersects(layout.expand));
+    const auto providerFont = IdentityBadges::font(option.font, IdentityBadges::Provider);
+    const int providerLabelWidth = CachedText::width(providerFont, IdentityBadges::providerName(agent));
+    QVERIFY(layout.provider.adjusted(22, 0, -6, 0).width() >= providerLabelWidth);
     QCOMPARE(SessionDelegate::expandRowRect(option, index), layout.expand);
     const auto render = [&] {
         QImage image(QSize(width, 40) * scale, QImage::Format_ARGB32_Premultiplied); image.setDevicePixelRatio(scale);
         image.fill(dark ? QColor("#171c22") : QColor("#f3f6f8")); { QPainter painter(&image); delegate.paint(&painter, option, index); } return image;
     };
     const QImage compact = render();
+    // Check painted label pixels too: a nonempty badge alone can still contain
+    // only the shared Codex/Shell glyph when its text rectangle has no room.
+    const QRect providerText = layout.provider.adjusted(22, 2, -6, -2);
+    const QColor providerBackground(dark ? "#303942" : "#e5ebef"); int labelInk = 0;
+    for (int y = providerText.top() * scale; y <= providerText.bottom() * scale; ++y)
+        for (int x = providerText.left() * scale; x <= providerText.right() * scale; ++x)
+            if (compact.pixelColor(x, y) != providerBackground) ++labelInk;
+    QVERIFY(labelInk > 4);
     row->setData(SessionRoles::Meta, "hidden folder / branch"); row->setData(SessionRoles::MetaIcon, "git-branch");
     row->setData(SessionRoles::Detail, "hidden current action"); row->setData(SessionRoles::Model, "hidden model"); row->setData(SessionRoles::Effort, "high");
     row->setData(SessionRoles::Host, "hidden machine"); row->setData(SessionRoles::Children, "12"); row->setData(SessionRoles::HasChildren, true);
@@ -105,10 +121,39 @@ void TestWorkspace::compactRowsKeepTheirGeometryAndHideDetails()
     row->setData(SessionRoles::Muted, true);
     const auto muted = SessionDelegate::compactLayout(option, index); QVERIFY(!muted.mute.isEmpty());
     QVERIFY(!muted.provider.intersects(muted.mute)); QVERIFY(!muted.mute.intersects(muted.expand));
+    QVERIFY(muted.provider.adjusted(22, 0, -6, 0).width() >= providerLabelWidth);
+    QVERIFY(!muted.title.isEmpty()); QVERIFY(!muted.title.intersects(muted.status));
     row->setData(SessionRoles::RowCollapsed, false); QVERIFY(delegate.sizeHint(option, index).height() > 40);
     QVERIFY(SessionDelegate::expandRowRect(option, index).isEmpty());
     row->setData(SessionRoles::RowCollapsed, true); list.setProperty("expansion", 0.0);
     QVERIFY(delegate.sizeHint(option, index).height() > 40); QVERIFY(SessionDelegate::expandRowRect(option, index).isEmpty());
+}
+
+void TestWorkspace::compactRowsExposeElidedFields()
+{
+    ListProbe list; list.setItemDelegate(new SessionDelegate(&list)); list.resize(250, 120);
+    auto *row = new QListWidgetItem(&list); row->setData(SessionRoles::Key, "tooltip-session");
+    const QString name = "The complete long session title that cannot fit in the compact row";
+    const QString status = "Waiting for acceptance from another session on a remote computer";
+    row->setData(SessionRoles::Title, name); row->setData(SessionRoles::Status, status);
+    row->setData(SessionRoles::Agent, "codex"); row->setData(SessionRoles::RowCollapsed, true);
+    list.show(); QTRY_VERIFY(list.isVisible()); list.syncRowExpandButtons();
+    QStyleOptionViewItem option; list.initViewItemOption(&option); option.widget = &list; option.rect = list.visualItemRect(row);
+    const auto index = list.model()->index(0, 0);
+    const auto complete = SessionDelegate::compactTooltip(option, index);
+    QVERIFY(complete.contains(name)); QVERIFY(complete.contains(status)); QVERIFY(complete.contains("Codex"));
+    const auto buttons = list.findChildren<QToolButton *>("expandSessionRow"); QCOMPARE(buttons.size(), 1);
+    auto *accessible = QAccessible::queryAccessibleInterface(buttons.first()); QVERIFY(accessible);
+    QCOMPARE(accessible->text(QAccessible::Description), complete);
+    const auto point = SessionDelegate::compactLayout(option, index).title.center();
+    QHelpEvent help(QEvent::ToolTip, point, list.viewport()->mapToGlobal(point)); QApplication::sendEvent(list.viewport(), &help);
+    QCOMPARE(QToolTip::text(), Qt::convertFromPlainText(complete));
+    QTextDocument tooltip; tooltip.setHtml(QToolTip::text());
+    QCOMPARE(tooltip.toPlainText(), complete);
+    QToolTip::hideText();
+    row->setData(SessionRoles::Title, "One"); row->setData(SessionRoles::Status, "Ready");
+    option.rect.setWidth(640); QVERIFY(SessionDelegate::compactTooltip(option, index).isEmpty());
+    row->setData(SessionRoles::RowCollapsed, false); QVERIFY(SessionDelegate::compactTooltip(option, index).isEmpty());
 }
 
 void TestWorkspace::compactRowsHaveAccessibleExpandControls()

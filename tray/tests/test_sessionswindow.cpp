@@ -1896,7 +1896,9 @@ void TestSessionsWindow::markAllReadFromTheRailAndBesideDraftsSkipsReviewReminde
     QCOMPARE(action->text(), QString("Mark all as read (2)"));
     // Right-clicking the Sessions icon in the rail offers the same action.
     auto *railMenu = window.findChild<QMenu *>("sessionsNavMenu"); QVERIFY(railMenu);
-    QCOMPARE(railMenu->actions().size(), 1); QCOMPARE(railMenu->actions().constFirst(), action);
+    QCOMPARE(railMenu->actions().size(), 2); QCOMPARE(railMenu->actions().constFirst(), action);
+    auto *expandAll = window.findChild<QAction *>("expandAllCollapsedSessionRows"); QVERIFY(expandAll);
+    QCOMPARE(railMenu->actions()[1], expandAll);
     auto *rail = qobject_cast<QPushButton *>(railMenu->parent()); QVERIFY(rail); QCOMPARE(rail->property("glyph").toString(), QString("sessions"));
     QContextMenuEvent event(QContextMenuEvent::Mouse, QPoint(8, 8), rail->mapToGlobal(QPoint(8, 8))); QApplication::sendEvent(rail, &event);
     QTRY_VERIFY(railMenu->isVisible()); railMenu->close();
@@ -7186,7 +7188,8 @@ void TestSessionsWindow::batchActionsAndReturnToSessions()
     auto *menu = button->menu(); QVERIFY(menu);
     auto refreshMenu = [&]() { QMetaObject::invokeMethod(menu, "aboutToShow"); };
     refreshMenu();
-    QCOMPARE(menu->actions().size(), 5); // Machines, separator, mark-all-read and archive cleanup.
+    QCOMPARE(menu->actions().size(), 6); // Machines, separator, expand-all, mark-all-read and archive cleanup.
+    auto *expandAll = window.findChild<QAction *>("expandAllCollapsedSessionRows"); QVERIFY(expandAll); QVERIFY(menu->actions().contains(expandAll));
     auto *clear=window.findChild<QAction *>("clearArchive");QVERIFY(menu->actions().contains(clear));
     QVERIFY(clear->isVisible());QVERIFY(!clear->isEnabled()); // No archived entries yet.
     auto *arch = menu->actions()[0]->menu(); auto *mac = menu->actions()[1]->menu();

@@ -99,8 +99,11 @@ public:
         const int naturalProvider = agent.isEmpty() ? 0 : IdentityBadges::width(IdentityBadges::Provider, agent, option.font, 95);
         const int naturalStatus = SessionStatusBadge::width(status.caption, status.kind, option.font);
         const int room = qMax(0, right - left - muteWidth);
-        const int providerWidth = naturalProvider && room < naturalStatus + naturalProvider + 88 ? 26 : naturalProvider;
-        const int statusWidth = qMin(naturalStatus, qMax(32, room - providerWidth - 88));
+        // Provider glyphs alone do not distinguish every agent (Codex/Shell).
+        // Keep their short labels; a long status elides before the title does.
+        const int providerWidth = naturalProvider;
+        const int reservedTitle = qMin(60, CachedText::width(font, index.data(SessionRoles::Title).toString()));
+        const int statusWidth = qMin(naturalStatus, qMax(26, room - providerWidth - 12 - reservedTitle));
         const QRect provider = providerWidth ? QRect(right - muteWidth - providerWidth, option.rect.center().y() - 9, providerWidth, 18) : QRect();
         const QRect mute = muteWidth ? QRect(right - 16, option.rect.center().y() - 7, 14, 14) : QRect();
         const int statusRight = right - muteWidth - (providerWidth ? providerWidth + 6 : 0);
@@ -108,6 +111,21 @@ public:
         const QRect title(left, option.rect.center().y() - 11, qMax(0, badge.left() - left - 6), 22);
         return {title, badge, provider, mute, expand,
             CachedText::elided(font, index.data(SessionRoles::Title).toString(), Qt::ElideRight, title.width()), agent};
+    }
+    static QString compactDescription(const QStyleOptionViewItem &option, const QModelIndex &index) {
+        return QStringList{index.data(SessionRoles::Title).toString(), statusForView(option, index).caption,
+            IdentityBadges::providerName(index.data(SessionRoles::Agent).toString())}.join('\n');
+    }
+    static QString compactTooltip(const QStyleOptionViewItem &option, const QModelIndex &index) {
+        if (!rowCollapsed(index) || SessionStrip::expansion(option.widget) < 1) return {};
+        const auto layout = compactLayout(option, index);
+        const auto status = statusForView(option, index);
+        const auto providerFont = IdentityBadges::font(option.font, IdentityBadges::Provider);
+        const int labelWidth = CachedText::width(providerFont, IdentityBadges::providerName(layout.agent));
+        const bool elided = layout.text != index.data(SessionRoles::Title).toString()
+            || layout.status.width() < SessionStatusBadge::width(status.caption, status.kind, option.font)
+            || (!layout.agent.isEmpty() && layout.provider.width() - 28 < labelWidth);
+        return elided ? compactDescription(option, index) : QString();
     }
     static QRect expandRowRect(const QStyleOptionViewItem &option, const QModelIndex &index) {
         return rowCollapsed(index) && SessionStrip::expansion(option.widget) >= 1 ? compactLayout(option, index).expand : QRect();
