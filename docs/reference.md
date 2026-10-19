@@ -1964,9 +1964,14 @@ not ownership evidence. Automatic cleanup has bounded checks and never changes
 a successful archive into a failed termination. A lost removal acknowledgement
 is reported as unconfirmed, with no automatic replay.
 
-The desktop reports successful automatic cleanup, or keeps **Review remaining
-worktree…** with the reason for keeping it after Terminate/Archive. This action
-does not expire after a minute. Archives keep the exact branch/head needed to
+The desktop reports successful automatic cleanup, or keeps **Review worktree:
+<folder>** after Terminate/Archive (**Check worktree:** when the outcome is
+unconfirmed). This global reminder names the retained checkout; its tooltip and
+accessible description identify the source session, computer, full folder and
+reason. It can remain while another session is selected and does not expire
+after a minute. The action is hidden while another known session or a new run
+uses the folder. Review still checks the current files and requires explicit
+confirmation before removal. Archives keep the exact branch/head needed to
 recreate an automatically removed checkout on explicit **Restore**; a changed
 branch or occupied destination is refused. Browsing and dry runs never recreate
 a folder. Plain Pause never cleans up.

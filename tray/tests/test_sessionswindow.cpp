@@ -368,6 +368,11 @@ private slots:
     void archiveFiltersIdentityRestoreAndForget();
     void savedSessionsCanMoveToArchive();
     void archivingLastWorktreeSessionOffersCleanup();
+    void keptWorktreeFooterFitsAndNamesItsSource_data();
+    void keptWorktreeFooterFitsAndNamesItsSource();
+    void keptWorktreeReviewFollowsItsStoredTargetAndRechecksOccupants();
+    void keptWorktreeReviewUsesOnlyCurrentInspectionOccupancy();
+    void keptWorktreeReviewFormatsTheSourceMachinePath();
     void terminatingWorktreeSessionOffersRemainingCleanupAndConsumesExactNativeOutcome();
     void nativeCleanupCanSupplyAnUncachedFolderAndArchiveTransitionsExpireOnlyTheirRepository();
     void renameValidationCancelAndSelection();
@@ -6993,7 +6998,7 @@ void TestSessionsWindow::archivingLastWorktreeSessionOffersCleanup()
     for (const bool shared : {false, true}) {
         auto state = fleet(); auto box = state.local();
         for (auto &session : box.sessions) {
-            if (session.name == "codex/website/navigation") { session.gitWorktree = true; session.gitRoot = "/workspace/website-nav"; session.gitCommonDir = "/workspace/website/.git"; }
+            if (session.name == "codex/website/navigation") { session.runId = "archived-origin-run"; session.gitWorktree = true; session.gitRoot = "/workspace/website-nav"; session.gitCommonDir = "/workspace/website/.git"; }
             else if (shared && session.name == "codex/hgs/dashboard") session.gitRoot = "/workspace/website-nav";
         }
         state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
@@ -7013,10 +7018,183 @@ void TestSessionsWindow::archivingLastWorktreeSessionOffersCleanup()
     }
 }
 
+void TestSessionsWindow::keptWorktreeFooterFitsAndNamesItsSource_data()
+{
+    QTest::addColumn<QString>("theme"); QTest::addColumn<double>("scale");
+    for (const QString theme : {QString("dark"), QString("light")})
+        for (double scale : {0.75, 2.0}) QTest::newRow(qPrintable(theme + QString::number(scale))) << theme << scale;
+}
+
+void TestSessionsWindow::keptWorktreeFooterFitsAndNamesItsSource()
+{
+    QFETCH(QString, theme); QFETCH(double, scale);
+    QSettings settings; const auto oldTheme = settings.value("workspace/theme"), oldScale = settings.value("workspace/contentScale");
+    const auto restore = qScopeGuard([&] {
+        if (oldTheme.isValid()) settings.setValue("workspace/theme", oldTheme); else settings.remove("workspace/theme");
+        if (oldScale.isValid()) settings.setValue("workspace/contentScale", oldScale); else settings.remove("workspace/contentScale");
+    });
+    settings.setValue("workspace/theme", theme); settings.setValue("workspace/contentScale", scale);
+    auto state = fleet(); auto box = state.local();
+    for (auto &session : box.sessions) if (session.name == "codex/website/navigation") {
+        session.runId = "footer-origin-run"; session.gitWorktree = true;
+        session.gitRoot = "/workspace/kept-checkout"; session.gitCommonDir = "/workspace/project/.git";
+    }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.resize(1180, 820);
+    window.setFleet(state); window.show(); window.showSession({}, "codex/website/navigation");
+    auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
+    window.findChild<QAction *>("archiveSessionAction")->trigger(); QTRY_COMPARE(writes.size(), 1);
+    auto *offer = window.findChild<QPushButton *>("archivedWorktreeCleanup"); QTRY_VERIFY(offer->isVisible());
+    QCOMPARE(offer->text(), QString("Review worktree: kept-checkout"));
+    QVERIFY(offer->toolTip().contains("codex/website/navigation")); QVERIFY(offer->toolTip().contains("arch"));
+    QVERIFY(offer->toolTip().contains("/workspace/kept-checkout"));
+    QVERIFY(offer->accessibleName().contains("codex/website/navigation"));
+    auto *footer = window.findChild<QFrame *>("workspaceStatus"); QVERIFY(footer); QCOMPARE(footer->height(), 28);
+    QTRY_VERIFY(footer->rect().contains(QRect(offer->mapTo(footer, QPoint()), offer->size())));
+    QVERIFY2(offer->minimumSizeHint().height() <= 22, qPrintable(QString::number(offer->minimumSizeHint().height())));
+    QVERIFY(offer->fontMetrics().height() <= offer->height());
+    QVERIFY(offer->fontMetrics().horizontalAdvance(offer->text()) <= offer->width());
+}
+
+void TestSessionsWindow::keptWorktreeReviewFollowsItsStoredTargetAndRechecksOccupants()
+{
+    auto state = fleet(); auto box = state.local();
+    const QString source = "codex/website/navigation", root = "/workspace/retained-checkout", common = "/workspace/project/.git";
+    for (auto &session : box.sessions) if (session.name == source) {
+        session.runId = "ended-run"; session.gitWorktree = true; session.gitRoot = root; session.gitCommonDir = common;
+    }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(state); window.show(); window.showSession({}, source);
+    auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
+    window.findChild<QAction *>("archiveSessionAction")->trigger(); QTRY_COMPARE(writes.size(), 1);
+    auto *offer = window.findChild<QPushButton *>("archivedWorktreeCleanup"); QTRY_VERIFY(offer->isVisible());
+    // A global reminder names its source when another session is selected.
+    window.showSession({}, "codex/hgs/dashboard"); QVERIFY(offer->isVisible());
+    client->worktreeCleanupFinished({}, "archive " + source, {{"status", "kept"}, {"path", root}, {"common_dir", common}, {"reason", "Local edits remain"}});
+    QVERIFY(offer->isVisible()); QVERIFY(offer->toolTip().contains(source)); QVERIFY(offer->toolTip().contains(root));
+    QVERIFY(offer->toolTip().contains("Local edits remain")); QVERIFY(!offer->accessibleName().contains("dashboard"));
+    // A same-name newly started run may now own that checkout; never offer it as idle.
+    auto occupied = box;
+    for (auto &session : occupied.sessions) if (session.name == source) { session.runId = "new-live-run"; session.state = "running"; }
+    auto updated = state; updated.setLocal(occupied, QDateTime::currentMSecsSinceEpoch()); window.setFleet(updated);
+    QVERIFY(!offer->isVisible());
+    client->worktreeCleanupFinished({}, "archive " + source, {{"status", "unconfirmed"}, {"path", root}, {"common_dir", common}, {"reason", "Outcome unknown"}});
+    QVERIFY(!offer->isVisible());
+    // Once no live session uses the folder, the unresolved review remains reachable.
+    occupied.sessions.removeIf([&](const SessionInfo &session) { return session.name == source; });
+    updated.setLocal(occupied, QDateTime::currentMSecsSinceEpoch()); window.setFleet(updated);
+    QVERIFY(offer->isVisible()); QCOMPARE(offer->text(), QString("Check worktree: retained-checkout"));
+    QVERIFY(offer->toolTip().contains("Outcome unknown"));
+    auto shared = occupied;
+    for (auto &session : shared.sessions) if (session.name == "codex/hgs/dashboard") session.gitRoot = root;
+    updated.setLocal(shared, QDateTime::currentMSecsSinceEpoch()); window.setFleet(updated); QVERIFY(!offer->isVisible());
+    updated.setLocal(occupied, QDateTime::currentMSecsSinceEpoch()); window.setFleet(updated); QVERIFY(offer->isVisible());
+    QCOMPARE(writes.size(), 1); // Navigation/list updates never launch cleanup.
+    bool reviewed = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = window.findChild<QDialog *>("worktreeBatchCleanupDialog"); QVERIFY(dialog);
+        const auto close = qScopeGuard([&] { dialog->reject(); });
+        auto *list = dialog->findChild<QTreeWidget *>("batchCleanupList"); QVERIFY(list);
+        const auto target = list->topLevelItem(0)->data(0, Qt::UserRole).toJsonObject();
+        QCOMPARE(target["row"].toObject()["path"].toString(), root); QCOMPARE(target["common_dir"].toString(), common);
+        reviewed = true;
+    });
+    offer->click(); QVERIFY(reviewed); QVERIFY(!offer->isVisible()); QCOMPARE(writes.size(), 1);
+}
+
+void TestSessionsWindow::keptWorktreeReviewUsesOnlyCurrentInspectionOccupancy()
+{
+    const QString source = "codex/website/navigation", occupant = "kimi/docs/research";
+    const QString root = "/workspace/inspection-checkout", common = "/workspace/project/.git";
+    auto state = fleet(); auto box = state.local();
+    for (auto &session : box.sessions) {
+        if (session.name == source) {
+            session.runId = "ended-inspection-run"; session.conversationId = "source-conversation";
+            session.gitWorktree = true; session.gitRoot = root; session.gitCommonDir = common;
+        } else if (session.name == occupant) {
+            session.runId = "current-occupant-run"; session.conversationId = "occupant-conversation";
+            session.state = "running"; session.gitRoot.clear(); session.gitWorktree = false;
+        }
+    }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    const QJsonObject sourceDetails{{"tracked", true}, {"run_id", "ended-inspection-run"},
+        {"conversation_id", "source-conversation"}, {"git_root", root}, {"git_worktree", true},
+        {"events", QJsonArray{}}, {"cursor", 0}};
+    const QJsonObject clear{{"tracked", true}, {"run_id", "current-occupant-run"},
+        {"conversation_id", "occupant-conversation"}, {"activity", "idle"}, {"phase", "idle"},
+        {"events", QJsonArray{}}, {"cursor", 0}};
+    const auto fixture = m_dir->filePath("footer-inspection-occupancy-hgs");
+    const auto save = [&](const QJsonObject &details) {
+        return FakeCli::replace(fixture + ".details", QJsonDocument(QJsonObject{
+            {source, sourceDetails}, {occupant, details}}).toJson(QJsonDocument::Compact));
+    };
+    QVERIFY(save(clear));
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray answer = R"PY(elif c=='inspect':
+ with open(__file__+'.details',encoding='utf-8') as f:details=json.load(f)
+ print(json.dumps(details.get(a[1],{})))
+)PY";
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window);
+    window.setFleet(state); window.show(); window.showSession({}, source);
+    auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    QSignalSpy writes(client, &HgsClient::writeDone);
+    window.findChild<QAction *>("archiveSessionAction")->trigger(); QTRY_COMPARE(writes.size(), 1);
+    auto *offer = window.findChild<QPushButton *>("archivedWorktreeCleanup"); QTRY_VERIFY(offer->isVisible());
+    window.showSession({}, occupant); settleSelectedInspection(composer, client, {}, occupant, clear);
+    QVERIFY(offer->isVisible());
+    // Raw fleet has no Git root for this run. Fresh inspection alone proves use.
+    auto occupied = clear; occupied["git_root"] = root; occupied["git_worktree"] = true;
+    QVERIFY(save(occupied)); settleSelectedInspection(composer, client, {}, occupant, occupied);
+    QVERIFY(!offer->isVisible());
+    auto staleRun = occupied; staleRun["run_id"] = "unrelated-old-run";
+    QVERIFY(save(staleRun)); settleSelectedInspection(composer, client, {}, occupant, staleRun);
+    QVERIFY(offer->isVisible());
+    auto staleConversation = occupied; staleConversation["conversation_id"] = "unrelated-conversation";
+    QVERIFY(save(staleConversation)); settleSelectedInspection(composer, client, {}, occupant, staleConversation);
+    QVERIFY(offer->isVisible());
+    auto untracked = occupied; untracked["tracked"] = false;
+    QVERIFY(save(untracked)); settleSelectedInspection(composer, client, {}, occupant, untracked);
+    QVERIFY(offer->isVisible());
+    QVERIFY(save(occupied)); settleSelectedInspection(composer, client, {}, occupant, occupied);
+    QVERIFY(!offer->isVisible());
+    QVERIFY(save(clear)); settleSelectedInspection(composer, client, {}, occupant, clear);
+    QVERIFY(offer->isVisible());
+    client->inspectionReady("mac", occupant, occupied); QVERIFY(offer->isVisible());
+    client->inspectionReady({}, source, occupied); QVERIFY(offer->isVisible());
+    QCOMPARE(writes.size(), 1); // Inspection and navigation do not launch cleanup.
+}
+
+void TestSessionsWindow::keptWorktreeReviewFormatsTheSourceMachinePath()
+{
+    struct Context { QString host, path, platform, shown; };
+    const QList<Context> contexts{{{}, "C:/work/kept-checkout", "windows", "C:\\work\\kept-checkout"},
+        {{}, "/workspace/kept-checkout", "linux", "/workspace/kept-checkout"},
+        {"mac", "/remote/kept-checkout", "windows", "/remote/kept-checkout"}};
+    for (const auto &context : contexts) {
+        auto state = fleet(); auto local = state.local(); local.metrics["platform"] = context.platform;
+        auto box = context.host.isEmpty() ? local : *state.peer(context.host);
+        const auto source = context.host.isEmpty() ? QString("codex/website/navigation") : QString("claude/infra/review");
+        for (auto &session : box.sessions) if (session.name == source) {
+            session.state = "paused"; session.runId = "source-path-run"; session.gitWorktree = true;
+            session.gitRoot = context.path; session.gitCommonDir = context.path + "/.git";
+        }
+        if (context.host.isEmpty()) state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+        else { state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); state.setPeer(box, QDateTime::currentMSecsSinceEpoch()); }
+        SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(state); window.show(); window.showSession(context.host, source);
+        auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
+        window.findChild<QAction *>("archiveSessionAction")->trigger(); QTRY_COMPARE(writes.size(), 1);
+        auto *offer = window.findChild<QPushButton *>("archivedWorktreeCleanup"); QTRY_VERIFY(offer->isVisible());
+        QCOMPARE(offer->text(), QString("Review worktree: kept-checkout"));
+        QVERIFY(offer->toolTip().contains("Folder: " + context.shown));
+        QVERIFY(offer->accessibleDescription().contains("Folder: " + context.shown));
+    }
+}
+
 void TestSessionsWindow::terminatingWorktreeSessionOffersRemainingCleanupAndConsumesExactNativeOutcome()
 {
     auto state=fleet();auto box=state.local();
-    for(auto &session:box.sessions)if(session.name=="codex/hgs/dashboard"){session.gitWorktree=true;session.gitRoot="/workspace/owned";session.gitCommonDir="/workspace/project/.git";}
+    for(auto &session:box.sessions)if(session.name=="codex/hgs/dashboard"){session.runId="terminated-origin-run";session.gitWorktree=true;session.gitRoot="/workspace/owned";session.gitCommonDir="/workspace/project/.git";}
     state.setLocal(box,QDateTime::currentMSecsSinceEpoch());SessionsWindow window(program());window.setFleet(state);window.show();window.showSession({},"codex/hgs/dashboard");
     auto *client=window.findChild<HgsClient *>();auto *offer=window.findChild<QPushButton *>("archivedWorktreeCleanup");QSignalSpy writes(client,&HgsClient::writeDone);
     QTimer::singleShot(0,&window,[&]{auto *confirm=window.findChild<QMessageBox *>("terminateSessionConfirm");QVERIFY(confirm);confirm->done(QMessageBox::Yes);});

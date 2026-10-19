@@ -9177,6 +9177,30 @@ Refresh status or open Terminal to check the agent before trying again.</source>
       <translation type="unfinished" />
     </message>
     <message>
+      <source>Review worktree: %1</source>
+      <translation>Рабочая копия: %1</translation>
+    </message>
+    <message>
+      <source>Check worktree: %1</source>
+      <translation>Проверить копию: %1</translation>
+    </message>
+    <message>
+      <source>Review its files before deciding whether to remove it.</source>
+      <translation>Проверьте файлы рабочей копии, прежде чем решать, удалять ли её.</translation>
+    </message>
+    <message>
+      <source>Worktree cleanup for %1 on %2.
+Folder: %3
+%4</source>
+      <translation>Проверка рабочей копии сессии %1 на %2.
+Папка: %3
+%4</translation>
+    </message>
+    <message>
+      <source>Review worktree for %1 on %2</source>
+      <translation>Проверить рабочую копию сессии %1 на %2</translation>
+    </message>
+    <message>
       <location filename="../src/SessionsWindow.cpp" line="1564" />
       <location filename="../src/SessionsWindow.cpp" line="4946" />
       <source>Review remaining worktree…</source>

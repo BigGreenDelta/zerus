@@ -191,9 +191,12 @@ private:
     // Native lifecycle cleanup reports its result after Archive or Terminate.
     // Keep a review action for remaining work. Host, session, root, common dir.
     QStringList m_archivedWorktree;
+    QString m_archivedWorktreeRun, m_worktreeCleanupReason;
+    bool m_worktreeCleanupOffered = false, m_worktreeCleanupUnconfirmed = false;
     QPushButton *m_worktreeCleanup = nullptr;
     int m_worktreeCleanupRevision = 0;
     void offerWorktreeCleanup();
+    void updateWorktreeCleanupOffer();
     void cleanUpArchivedWorktree();
     void renameSession();
     void forkSession();
