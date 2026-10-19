@@ -19,8 +19,9 @@ use zerus_replica::{
 
 mod answers;
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | report REF | comment REF [--json] | settings --project P [--set]
-  REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin";
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | report REF | comment REF | settings --project P [--set]
+  REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
+  a change an agent makes prints one line, and --json prints the task";
 
 /// What Claude Code and Codex sessions read about the project's tasks each time
 /// their SessionStart hooks run (spec "Instructions at session start").
@@ -51,7 +52,7 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-fn stdin_text(what: &str, example: &str) -> Result<String> {
+fn stdin_text(what: &str) -> Result<String> {
     let mut bytes = Vec::new();
     std::io::stdin()
         .take(MAX_TEXT as u64 + 1)
@@ -60,14 +61,25 @@ fn stdin_text(what: &str, example: &str) -> Result<String> {
     if bytes.len() > MAX_TEXT {
         return Err(fail(format!("the {what} is longer than 64 KiB")));
     }
-    let text = String::from_utf8(bytes).map_err(|_| fail(format!("the {what} is not UTF-8")))?;
-    // Agents tend to pass texts as arguments; say where they go.
-    if text.trim().is_empty() && !example.is_empty() {
-        return Err(fail(format!(
-            "the {what} is empty; give it on stdin, for example: hgs task {example} <<'EOF'"
-        )));
+    String::from_utf8(bytes).map_err(|_| fail(format!("the {what} is not UTF-8")))
+}
+
+/// Refuses an agent's empty text with where it goes: agents tend to pass texts
+/// as arguments. The person's tools validate first and read the task's own
+/// refusal.
+fn agent_text(text: &str, action: &str, who: &Actor) -> Result<()> {
+    if !matches!(who, Actor::Agent(_)) || !text.trim().is_empty() {
+        return Ok(());
     }
-    Ok(text)
+    let (what, example) = match action {
+        "add" => ("prompt", "add"),
+        "edit" => ("prompt", "edit REF"),
+        "comment" => ("comment", "comment REF"),
+        _ => ("report", "report REF"),
+    };
+    Err(fail(format!(
+        "the {what} is empty; give it on stdin, for example: hgs task {example} <<'EOF'"
+    )))
 }
 
 fn option<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>> {
@@ -366,9 +378,10 @@ fn position_index(args: &[String]) -> Result<Option<usize>> {
 }
 
 fn add(config: &Config, args: &[String]) -> Result<Value> {
-    let text = stdin_text("prompt", "add")?;
+    let text = stdin_text("prompt")?;
     let machines = machines(config)?;
     let author = actor(&machines.here, args, false)?;
+    agent_text(&text, "add", &author)?;
     let (id, name) = project_arg(config, args, &author)?;
     let stage = if flag(args, "--backlog") {
         Stage::Backlog
@@ -415,14 +428,17 @@ fn add(config: &Config, args: &[String]) -> Result<Value> {
 
 fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
     let text = match action {
-        "edit" => Some(stdin_text("prompt", "edit REF")?),
-        "comment" => Some(stdin_text("comment", "comment REF")?),
-        "report" => Some(stdin_text("report", "report REF")?),
+        "edit" => Some(stdin_text("prompt")?),
+        "comment" => Some(stdin_text("comment")?),
+        "report" => Some(stdin_text("report")?),
         _ => None,
     };
     let machines = machines(config)?;
     let here = machines.here.as_str();
     let who = actor(here, args, matches!(action, "send" | "cancel"))?;
+    if let Some(text) = &text {
+        agent_text(text, action, &who)?;
+    }
     let r = reference(config, args, &who)?;
     let (project_id, project_name) = (&r.project.0, &r.project.1);
     // An agent reads a refused send as "SESSION cannot take it now: …"; a paste
@@ -452,7 +468,11 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
         _ => None,
     };
     if let Some((session, _)) = session.as_ref().filter(|(session, _)| session.machine != here) {
-        let to = session.session.clone();
+        // An agent reads the session with its computer: "codex/api on mac".
+        let to = match machines.alias(&session.machine) {
+            Some(alias) => format!("{} on {alias}", session.session),
+            None => session.session.clone(),
+        };
         // This computer's copy refuses first: a task it shows In progress, or
         // in a stage that is not sent, never reaches the other computer.
         if action == "send" {
@@ -619,7 +639,7 @@ fn forwarded(
                     && matches!(who, Actor::Agent(_))
                     && !refusal.starts_with("the prompt was sent") =>
             {
-                fail(answers::refused(&session.session, refusal))
+                fail(answers::refused(&format!("{} on {alias}", session.session), refusal))
             }
             Some(refusal) => fail(format!("{alias}: {refusal}")),
             // A connection that failed on the way may have failed after the
@@ -763,7 +783,7 @@ fn cancel(
 fn settings(config: &Config, args: &[String]) -> Result<Value> {
     let invalid = |e: &dyn std::fmt::Display| fail(format!("invalid settings: {e}"));
     let changes = if flag(args, "--set") {
-        match serde_json::from_str(&stdin_text("settings", "")?).map_err(|e| invalid(&e))? {
+        match serde_json::from_str(&stdin_text("settings")?).map_err(|e| invalid(&e))? {
             Value::Object(changes) => Some(changes),
             _ => return Err(invalid(&"expected a JSON object")),
         }

@@ -277,7 +277,7 @@ class TaskRouting(unittest.TestCase):
         self.task("b", "send", task["id"], "--project", "project-1")
         self.wait_received("Add rate limiting")
         refused = self.task("a", "send", task["id"], "--project", "project-1", ok=False, session="codex/local")
-        self.assertIn("codex/remote cannot take it now: ", refused)
+        self.assertIn("codex/remote on b cannot take it now: ", refused)
         self.assertIn("already In progress in codex/remote. Nothing was sent.", refused)
         self.assertEqual(refused.count("cannot take it now"), 1, refused)
 
@@ -301,7 +301,19 @@ class TaskRouting(unittest.TestCase):
         result = subprocess.run([str(HGS), "task", "send", task["id"], "--project", "project-1"],
                                 env=self.env("a", "codex/local"), text=True, capture_output=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "orchard/" + task["id"] + " sent to codex/remote.")
+        self.assertEqual(result.stdout.strip(), "orchard/" + task["id"] + " sent to codex/remote on b.")
+
+    def test_an_agents_cancel_whose_copy_cannot_come_back_says_so(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        self.task("a", "send", task["id"], "--project", "project-1")
+        self.wait_received("Add rate limiting")
+        self.confirm()
+        (self.root / "failexchange-b").touch()
+        result = subprocess.run([str(HGS), "task", "cancel", task["id"], "--project", "project-1"],
+                                env=self.env("a", "codex/local"), text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "orchard/" + task["id"] + " is In review; codex/remote on b got the cancel message."
+                         " This computer's copy follows with the next sync.")
 
     def test_a_computer_without_task_replication_is_named(self):
         task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")

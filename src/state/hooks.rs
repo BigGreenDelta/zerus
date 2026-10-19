@@ -1032,12 +1032,12 @@ pub(super) fn hook() -> Result<i32> {
         return Ok(0);
     };
     let event = stdin_json()?;
-    let main_start = string(&event, "hook_event_name") == "SessionStart"
-        && string(&event, "agent_id").is_empty();
-    let code = track(name, token, event)?;
+    let mut started = false;
+    let code = track(name, token, event, &mut started)?;
     // The project's task commands, in the agent's context from its first turn on
-    // (docs/superpowers/specs/2026-10-13-project-task-queue-design.md).
-    if code == 0 && main_start {
+    // (docs/superpowers/specs/2026-10-13-project-task-queue-design.md); only a
+    // start this run recorded as its own conversation's, never a nested CLI's.
+    if code == 0 && started {
         if let Some(context) =
             nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent))
         {
@@ -1047,8 +1047,9 @@ pub(super) fn hook() -> Result<i32> {
     Ok(code)
 }
 
-/// Records one hook event of the session `name`'s run `token`.
-fn track(name: String, token: String, mut event: Value) -> Result<i32> {
+/// Records one hook event of the session `name`'s run `token`; `started` says
+/// that it was the start of the run's own conversation.
+fn track(name: String, token: String, mut event: Value, started: &mut bool) -> Result<i32> {
     if nonempty_env("HGS_AGENT").as_deref() == Some("claude") {
         if let std::borrow::Cow::Owned(prompt) = journal::pasted_text(string(&event, "prompt")) {
             event["prompt"] = json!(prompt);
@@ -1197,6 +1198,7 @@ fn track(name: String, token: String, mut event: Value) -> Result<i32> {
     write(&mut record)?;
     if kind == "SessionStart" && string(&event, "agent_id").is_empty() {
         archive::confirm_restore(&mut record)?;
+        *started = true;
     }
     Ok(0)
 }

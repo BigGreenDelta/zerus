@@ -358,7 +358,9 @@ class AgentIdentity(Fixture):
 
 
 @unittest.skipUnless(TMUX, "tmux is required for delivery")
-class TaskDelivery(Fixture):
+class DeliveryFixture(Fixture):
+    """A scripted agent of `self.name` on a private tmux socket, which records
+    what is pasted and runs the commands handed to it."""
     def setUp(self):
         super().setUp()
         (self.root / "agent.py").write_text(AGENT)
@@ -441,6 +443,7 @@ class TaskDelivery(Fixture):
         settings.update(changes)
         self.hgs("settings", "--project", "orchard", "--set", text=json.dumps(settings))
 
+class TaskDelivery(DeliveryFixture):
     def test_send_report_and_a_second_send(self):
         task = self.add("Add rate limiting", "--target", self.name)
         sent = self.hgs("send", task["ref"])
@@ -520,7 +523,7 @@ class TaskDelivery(Fixture):
         self.assertEqual(out["task"]["log"][-1]["kind"], "note")
 
 
-class AgentAnswers(TaskDelivery):
+class AgentAnswers(DeliveryFixture):
     def setUp(self):
         super().setUp()
         self.env["TZ"] = "UTC"
@@ -577,11 +580,11 @@ class AgentAnswers(TaskDelivery):
         task = self.add("Add rate limiting")
         self.assertIn("the report is empty; give it on stdin, for example: hgs task report REF <<'EOF'",
                       self.hgs("report", task["ref"], text="", session="codex/api", ok=False))
+        # The person's tools validate first; they read the plain refusal.
+        refusal = self.hgs("comment", task["ref"], text="  ", ok=False)
+        self.assertIn("the comment is empty", refusal)
+        self.assertNotIn("stdin", refusal)
 
-
-# Only the delivery fixture is shared, not its tests.
-for _name in [n for n in vars(TaskDelivery) if n.startswith("test_")]:
-    setattr(AgentAnswers, _name, None)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,13 @@ class TaskContext(test_fork.Base):
                 # Tracking goes on: the session is still idle in its conversation.
                 self.assertEqual(self.binding(name)["activity"], "idle")
 
+    def test_a_start_hgs_did_not_record_reads_nothing(self):
+        name = self.start("claude", "unknown")
+        record = self.binding(name)
+        event = dict(session_id=record["conversation_id"], hook_event_name="SessionStart", source="startup")
+        env = dict(self.env, HGS_SESSION=name, HGS_RUN_ID="run-that-is-not-live", HGS_AGENT="claude")
+        self.assertEqual(self.hook(event, env).stdout, "")
+
     def test_subagents_other_agents_and_other_events_read_nothing(self):
         name = self.start("claude", "quiet")
         self.assertEqual(self.hook_output(name, "claude", agent_id="agent-1"), "")

@@ -32,9 +32,20 @@ fn clock(ms: i64) -> String {
         .map_or_else(String::new, |t| format!("{:02}:{:02}", t.hour(), t.minute()))
 }
 
+/// What an agent reads after a send or cancel on another computer whose copy
+/// could not come back yet.
+fn behind(out: &Value) -> &'static str {
+    if out["synced"] == false {
+        " This computer's copy follows with the next sync."
+    } else {
+        ""
+    }
+}
+
 /// The answer to `action` whose JSON is `out`. `place` is the task's place in
 /// its list (from 1) after an add or move, `caller` the agent's session and
-/// `destination` the session a send went to.
+/// `destination` the session a send went to, with its computer when that is
+/// another one ("codex/api on mac").
 pub(super) fn answer(action: &str, out: &Value, place: usize, caller: &str, destination: &str) -> String {
     let task = &out["task"];
     let it = name(task);
@@ -56,24 +67,19 @@ pub(super) fn answer(action: &str, out: &Value, place: usize, caller: &str, dest
             };
             format!("{it} is {}{when}; your report was added to its history.", label(task))
         }
-        "send" => {
-            // A send to another computer whose copy could not come back yet.
-            let behind = if out["synced"] == false {
-                " This computer's copy follows with the next sync."
-            } else {
-                ""
-            };
-            format!("{it} sent to {destination}.{behind}")
-        }
-        "cancel" if out["cancel_message"]["sent"] == true => {
-            format!("{it} is In review; {} got the cancel message.", session(&task["session"]))
-        }
+        "send" => format!("{it} sent to {destination}.{}", behind(out)),
+        "cancel" if out["cancel_message"]["sent"] == true => format!(
+            "{it} is In review; {} got the cancel message.{}",
+            session(&task["session"]),
+            behind(out)
+        ),
         "cancel" => format!(
-            "{it} is In review; the cancel message was not sent: {}.",
+            "{it} is In review; the cancel message was not sent: {}.{}",
             out["cancel_message"]["error"]
                 .as_str()
                 .unwrap_or("unknown reason")
-                .trim_end_matches('.')
+                .trim_end_matches('.'),
+            behind(out)
         ),
         _ => String::new(),
     }

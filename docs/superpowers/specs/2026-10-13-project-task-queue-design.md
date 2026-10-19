@@ -269,14 +269,20 @@ commands print JSON as before.
 | `add` | "Filed orchard/T-51 in To do, position 5, for orchard/api." |
 | `move`, `edit`, `stage`, `target`, `comment` | "orchard/T-41 is position 2 in To do.", "orchard/T-41 has the new prompt.", "orchard/T-41 is in Backlog.", "orchard/T-41 now goes to orchard/web.", "Added your comment to orchard/T-41." |
 
-An empty text is refused with where it goes: "the report is empty; give it on
+A session on another computer is named with it ("orchard/T-44 sent to
+orchard/web on mac."), and a send or cancel whose copy has not come back says
+"This computer's copy follows with the next sync." A refusal that the session's
+computer gave reads as above; a connection that failed on the way keeps its
+message, since the prompt may have been pasted. An agent's empty text is refused
+with where it goes: "the report is empty; give it on
 stdin, for example: hgs task report REF <<'EOF'".
 
 ### Instructions at session start
 
 Zerus's SessionStart hook gives Claude Code and Codex sessions these
-instructions each time the agent runs its SessionStart hooks: at the start, on
-resume and after a clear, and in Claude Code also after a compaction. Other
+instructions each time the agent runs its SessionStart hooks for the session's
+own conversation (not a nested agent CLI or a run Zerus did not record): at the
+start, on resume and after a clear, and in Claude Code also after a compaction. Other
 agents get them once their hooks are reviewed. `hgs guide tasks` lists the
 commands.
 

@@ -313,6 +313,11 @@ from Claude's status line input in `hgs inspect` for the exact run, conversation
 model: before the first reply, after a reply, after a session-only model change, a
 compaction and a clear, and in a resumed run. In a linked worktree whose repository's
 local settings set a status line, Claude keeps that status line and no window is reported.
+`tests/test_task_context_native.py` takes the exact bytes `hgs __state hook` prints
+for a start that a fake agent's tracked launch recorded, returns them from the real
+agent's SessionStart hook, and requires the task instructions in the request the
+real Claude Code (`claude -p`) or Codex (`codex exec`) sends to its loopback model;
+it runs with the Claude and the Codex suites.
 
 ### Unix tmux census
 
@@ -772,8 +777,8 @@ prints folders relative to the real one, which the suites place projects by.
 
 On Linux and macOS, Claude Code runs every `tests/test_claude_*_native.py` suite
 plus the Claude clear and compaction fixtures: exact input, questions, approvals,
-trust, resume, clear, compaction, session-only model settings and the status line
-context window. Each test launches the real TUI under `env -i`, or through a tracked
+trust, resume, clear, compaction, session-only model settings, the status line
+context window and the session-start task instructions. Each test launches the real TUI under `env -i`, or through a tracked
 `hgs` launch without the caller's `ANTHROPIC_` and `CLAUDE` variables, with a fixture
 API key, a loopback or local fake API and no nonessential traffic, so no account,
 telemetry or model request leaves the runner. On Windows each agent runs its class of
