@@ -92,18 +92,22 @@ no prompt appeared (`zerus-nbzl.23`).
 ## Pinned Qt
 
 `packaging/macos/qt.json` pins official Qt **6.11.2** (`qtbase`, `qtsvg`,
-`qtmultimedia`, `qttools`) by archive size and SHA-256. `qttools` supplies the
-build-time `lrelease` compiler for the optional interface catalog; it does not
-change the English default. Qt WebEngine and the modules only it
-needs (`qtdeclarative`, `qtwebchannel`, `qtpositioning`) are not part of the
-bundle: the embedded DeepSeek Native UI is an optional Linux plugin, so on macOS
+`qtmultimedia`, `qttools`, `qtdeclarative`) by archive size and SHA-256. `qttools`
+supplies the build-time `lrelease` compiler for the optional interface catalog;
+it does not change the English default. `lrelease` loads QtQml, so the build
+prefix also needs `qtdeclarative`; the GUI links neither module. Qt WebEngine and
+the other modules only it needs (`qtwebchannel`, `qtpositioning`) are not pinned:
+the embedded DeepSeek Native UI is an optional Linux plugin, so on macOS
 Native UI opens in the browser. `check-macos-bundle.py` rejects any Qt WebEngine
 file. `scripts/install-qt-macos.py` downloads the archives from
 `download.qt.io` (mirrors may serve them), verifies every archive before any
 extraction and extracts them with the system `bsdtar`, through
 `scripts/qt_archives.py`, which the [Windows build](ci-and-aur.md#windows-client-desktop-and-portable-zip)
-shares. Framework links must stay inside the prefix. The official Qt is
-relocatable and needs no path patching.
+shares. Framework links must stay inside the prefix. Before any Qt tool runs,
+the installer reads the Mach-O load commands of `qmake`, `lrelease`,
+`macdeployqt`, `moc` and `rcc` and stops when one of them, or a framework it
+loads, needs a Qt framework the prefix lacks. The official Qt is relocatable
+and needs no path patching.
 
 Qt 6.11.2 is the version macOS CI tests through Homebrew, supports macOS 14 and
 has public sources (`qt-everywhere-src-6.11.2`, `v6.11.2` tags) for the LGPL
