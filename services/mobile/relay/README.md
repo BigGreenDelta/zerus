@@ -490,3 +490,31 @@ coordinated runtime replacement (fresh backup and isolated restore qualification
 Update the native CLI and connector before enabling the relay capability, then
 update clients; an older relay/CLI is reported as unavailable, not an empty page.
 No native agent or phone read-mark migration is needed.
+
+### Phone task exchange
+
+`task_exchange` is an additive capability-gated, computer-scoped read (empty
+session) that only the Rust connector offers: the phone's replica of one
+project's tasks
+(`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md`, "Phone").
+The payload is exactly the request `hgs task exchange --json` reads on stdin:
+`schema` 1, `project` (at most 256 characters), `inventory` (`project` and
+`tasks` by UUID, each a map from decimal Loro peer IDs to change counts),
+optional `updates` (`task` UUID, or `null` for the project document, and base64
+`bytes`) and optional `continue` (`task`, the whole update's `sha256` and the
+`offset` of the next part). The ordinary 1 MiB request and result bounds apply;
+an answer carries at most 512 KiB of update bytes, and a larger document comes
+in parts the phone asks for one by one. The connector invokes only
+`hgs task exchange --json` with the payload on stdin; hgs validates it again,
+and Loro merges are idempotent, so a repeated request changes nothing twice.
+
+The operation counts as a read, never reserves mutation capacity, and has its
+own `task_exchange_history` index with two-minute retention after completion;
+the established `read_history_v3` predicate stays unchanged. Apply the additive
+index to both PostgreSQL workers during the normal coordinated runtime
+replacement. A phone exchanges only when both the relay's capabilities and the
+computer's heartbeat list the operation, and the relay refuses it (409) for a
+computer that does not, so the relay, hgs and the connector update in any order.
+Each computer's heartbeat also names every project's phone-view digest
+(`mobile_projects.projects[].tasks_digest`), which the relay keeps as part of
+the opaque snapshot.

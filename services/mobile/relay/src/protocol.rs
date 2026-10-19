@@ -28,6 +28,7 @@ pub const READS: &[&str] = &[
     "speech_status",
     "voice_profiles",
     "voice_status",
+    "task_exchange",
 ];
 /// Predicate of the persisted `read_history_v3` index and the one-hour read
 /// retention class. `attachment_read` is a read with its own shorter class
@@ -59,6 +60,9 @@ pub const SPEECH_READ_SQL: &str =
     "('speech_profiles','speech_stats','speech_status','voice_profiles','voice_status')";
 pub const SPEECH_AUDIO_MAX: usize = 16000 * 2 * 120;
 pub const COMPUTER: &[&str] = &["set_mobile_delivery"];
+/// Computer-scoped: the phone's task exchange, a short read that the computer
+/// answers from its own replica. Only the Rust connector offers it.
+pub const TASKS: &[&str] = &["task_exchange"];
 pub const MOBILE_DELIVERY: &[&str] = &[
     "immediate",
     "away",
@@ -115,6 +119,7 @@ pub const OPERATIONS: &[&str] = &[
     "terminate",
     "worktree_create",
     "worktrees",
+    "task_exchange",
 ];
 pub const FEATURES: &[&str] = &[
     "inspect_after",
@@ -305,7 +310,8 @@ pub fn request(v: &Value) -> Result<()> {
         op == "archive_list"
             || LAUNCH.contains(&op)
             || COMPUTER.contains(&op)
-            || SPEECH.contains(&op),
+            || SPEECH.contains(&op)
+            || TASKS.contains(&op),
     )?;
     if op == "archive_list" {
         if v["session"] != "" {
@@ -347,6 +353,11 @@ pub fn request(v: &Value) -> Result<()> {
             return Err(Error::BAD);
         }
         speech(op, p, id)?;
+    } else if TASKS.contains(&op) {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        task_exchange(p)?;
     } else if COMPUTER.contains(&op) {
         fields(p, &["value"], &[])?;
         if v["session"] != "" || !MOBILE_DELIVERY.iter().any(|x| p["value"] == *x) {
@@ -597,6 +608,62 @@ pub fn request(v: &Value) -> Result<()> {
         json::size(v, 6 * MIB)?;
     } else if op != "send" {
         json::size(v, MIB)?;
+    }
+    Ok(())
+}
+/// The request `hgs task exchange --json` reads on stdin: the phone's
+/// inventory of one project, its updates and the next part it asks for.
+fn task_exchange(p: &Value) -> Result<()> {
+    fields(
+        p,
+        &["schema", "project", "inventory"],
+        &["updates", "continue"],
+    )?;
+    if p["schema"] != 1 {
+        return Err(Error::BAD);
+    }
+    text(&p["project"], 256, false)?;
+    let inventory = &p["inventory"];
+    fields(inventory, &["project", "tasks"], &[])?;
+    version(&inventory["project"])?;
+    for (task, v) in inventory["tasks"].as_object().ok_or(Error::BAD)? {
+        uuid(&Value::from(task.as_str()), false)?;
+        version(v)?;
+    }
+    if let Some(updates) = p.get("updates") {
+        for update in updates.as_array().ok_or(Error::BAD)? {
+            fields(update, &["task", "bytes"], &[])?;
+            document(&update["task"])?;
+            STANDARD
+                .decode(update["bytes"].as_str().ok_or(Error::BAD)?)
+                .map_err(|_| Error::BAD)?;
+        }
+    }
+    if let Some(next) = p.get("continue") {
+        fields(next, &["task", "sha256", "offset"], &[])?;
+        document(&next["task"])?;
+        hex(&next["sha256"])?;
+        next["offset"].as_u64().ok_or(Error::BAD)?;
+    }
+    Ok(())
+}
+/// A Loro version: each peer's decimal ID and its change count.
+fn version(v: &Value) -> Result<()> {
+    for (peer, count) in v.as_object().ok_or(Error::BAD)? {
+        if peer.is_empty()
+            || peer.len() > 20
+            || !peer.bytes().all(|b| b.is_ascii_digit())
+            || count.as_u64().is_none_or(|n| n > i32::MAX as u64)
+        {
+            return Err(Error::BAD);
+        }
+    }
+    Ok(())
+}
+/// The project document (`null`) or a task by UUID.
+fn document(v: &Value) -> Result<()> {
+    if !v.is_null() {
+        uuid(v, false)?;
     }
     Ok(())
 }

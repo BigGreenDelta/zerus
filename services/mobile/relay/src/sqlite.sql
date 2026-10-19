@@ -68,3 +68,5 @@ CREATE INDEX IF NOT EXISTS speech_config_body_cleanup ON requests(updated,id) WH
 CREATE INDEX IF NOT EXISTS file_history ON requests(updated,id) WHERE operation='file_read' AND state IN ('completed','failed','uncertain');
 
 CREATE INDEX IF NOT EXISTS archive_history ON requests(updated,id) WHERE operation='archive_list' AND state IN ('completed','failed','uncertain');
+
+CREATE INDEX IF NOT EXISTS task_exchange_history ON requests(updated,id) WHERE operation='task_exchange' AND state IN ('completed','failed','uncertain');

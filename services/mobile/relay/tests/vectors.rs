@@ -283,8 +283,16 @@ fn operation_tables_match_the_python_connector() {
         items.sort();
         items
     };
-    assert_eq!(sorted(protocol::OPERATIONS), set(&["OPERATIONS"]));
-    assert_eq!(sorted(protocol::READS), set(&["READ_OPERATIONS"]));
+    // The phone's task exchange is the Rust connector's alone.
+    let python = |operations: &[&'static str]| -> Vec<&'static str> {
+        operations
+            .iter()
+            .copied()
+            .filter(|op| !protocol::TASKS.contains(op))
+            .collect()
+    };
+    assert_eq!(sorted(&python(protocol::OPERATIONS)), set(&["OPERATIONS"]));
+    assert_eq!(sorted(&python(protocol::READS)), set(&["READ_OPERATIONS"]));
     assert_eq!(sorted(protocol::LAUNCH), set(&["LAUNCH_OPERATIONS"]));
     assert_eq!(sorted(protocol::COMPUTER), set(&["COMPUTER_OPERATIONS"]));
     assert_eq!(

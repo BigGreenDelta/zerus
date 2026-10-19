@@ -144,7 +144,8 @@ async fn context_commands_are_gated_per_operation_and_protocol_version() {
     let f = Fixture::new().await;
     let n = f.node.id.clone();
     // The relay declares exactly the operations the Python connector
-    // advertises with every capability, as its golden vectors record them.
+    // advertises with every capability, as its golden vectors record them,
+    // and the phone's task exchange, which only the Rust connector offers.
     let vectors: Value =
         serde_json::from_str(include_str!("../../vectors/operations.json")).unwrap();
     let declared = protocol::capabilities(vec![])["operations"].clone();
@@ -155,10 +156,11 @@ async fn context_commands_are_gated_per_operation_and_protocol_version() {
             .map(|op| op.as_str().unwrap().to_string())
             .collect()
     };
-    assert_eq!(
-        set(&declared),
-        set(&vectors["capabilities"]["all"]["operations"])
-    );
+    let mut python = set(&declared);
+    for op in protocol::TASKS {
+        assert!(python.remove(*op));
+    }
+    assert_eq!(python, set(&vectors["capabilities"]["all"]["operations"]));
     assert_eq!(declared, json!(protocol::OPERATIONS));
     let compact = || command(&n, "compact_context", json!({}));
     let clear = || command(&n, "clear_context", json!({}));
