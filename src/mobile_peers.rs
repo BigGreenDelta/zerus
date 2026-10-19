@@ -346,6 +346,14 @@ fn validate(request: &LocalRequest) -> Result<()> {
             }
             no_payload()?;
         }
+        // The phone's task exchange (docs/superpowers/specs/2026-10-18-task-replication-loro-design.md, "Phone").
+        "task" => match rest {
+            [action, json] if action == "exchange" && json == "--json" => {
+                ensure!(request.payload.as_ref().is_some_and(Value::is_object), "the task exchange needs its JSON request");
+            }
+            [action, json] if action == "digests" && json == "--json" => no_payload()?,
+            _ => bail!("native operation is not allowed"),
+        },
         "worktrees" => {
             no_payload()?;
             let create = rest.first().is_some_and(|v| v == "create");
@@ -1136,6 +1144,23 @@ mod tests {
         }
         assert!(validate(&request(&["archives", "lookup", "--json", "--all"], Some(payload))).is_err());
         assert!(validate(&request(&argv, None)).is_err());
+    }
+
+    #[test]
+    fn the_phone_s_task_exchange_admits_only_its_two_json_commands() {
+        let payload = || Some(json!({"schema": 1, "project": "project-1", "inventory": {"project": {}, "tasks": {}}}));
+        assert!(validate(&request(&["task", "exchange", "--json"], payload())).is_ok());
+        assert!(validate(&request(&["task", "digests", "--json"], None)).is_ok());
+        for (args, body) in [
+            (vec!["task", "exchange"], payload()),
+            (vec!["task", "exchange", "--json"], None),
+            (vec!["task", "exchange", "--json", "extra"], payload()),
+            (vec!["task", "digests", "--json"], payload()),
+            (vec!["task", "send", "T-a1b2c3", "--json"], None),
+            (vec!["task", "list", "--project", "p"], None),
+        ] {
+            assert!(validate(&request(&args, body)).is_err(), "{args:?}");
+        }
     }
 
     #[test]

@@ -18,8 +18,9 @@ use zerus_replica::{
 };
 
 mod answers;
+mod phone;
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | report REF | comment REF | settings --project P [--set]
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | report REF | comment REF | settings --project P [--set] | digests --json | exchange --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -323,6 +324,14 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             change(config, action, args)
         }
         "settings" => settings(config, args),
+        // The phone's exchange through the relay; both take exactly --json.
+        "digests" | "exchange" if args.len() == 1 && args[0] == "--json" => {
+            if action == "digests" {
+                phone::digests(config)
+            } else {
+                phone::exchange(config)
+            }
+        }
         _ => Err(fail(USAGE)),
     }
 }
