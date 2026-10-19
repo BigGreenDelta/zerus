@@ -4,8 +4,8 @@
 use crate::render::{task_prompt, Tools};
 use crate::schema::{Actor, Stage, Target};
 use crate::store::{Position, ProjectStore};
-use crate::task::{NewTask, TaskDoc};
-use crate::{Error, Result};
+use crate::task::{check_new_stage, NewTask, TaskDoc};
+use crate::Result;
 
 impl ProjectStore {
     /// Refuses a task whose prompt could not be sent: the rendered prompt
@@ -33,9 +33,8 @@ impl ProjectStore {
         project_name: &str,
         now: i64,
     ) -> Result<TaskDoc> {
-        if !matches!(stage, Stage::Todo | Stage::Backlog) {
-            return Err(Error::new("a new task goes to To do or Backlog"));
-        }
+        // Before the rank: placing it in another stage could renumber that stage.
+        check_new_stage(stage)?;
         let rank = self.rank_for(stage, position, None)?;
         let id = self.unused_short_id()?;
         let task = TaskDoc::create(NewTask {
@@ -147,6 +146,7 @@ mod tests {
                 .err()
                 .unwrap();
             assert_eq!(error.kind(), ErrorKind::Refused);
+            assert_eq!(error.to_string(), "a new task goes to Backlog or To do");
         }
     }
 

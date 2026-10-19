@@ -44,7 +44,22 @@ val replicaSources = listOf(replicaCrate, rootProject.file("../../crates/replica
     listOf(it.resolve("src"), it.resolve("Cargo.toml"), it.resolve("Cargo.lock"))
 } + replicaCrate.resolve("uniffi.toml")
 val rustBuild = layout.buildDirectory.dir("rust")
-val hostLibraryName = if (System.getProperty("os.name").startsWith("Mac")) "libzerus_replica_ffi.dylib" else "libzerus_replica_ffi.so"
+val hostLibraryName = System.getProperty("os.name").let {
+    when {
+        it.startsWith("Mac") -> "libzerus_replica_ffi.dylib"
+        it.startsWith("Windows") -> "zerus_replica_ffi.dll"
+        else -> "libzerus_replica_ffi.so"
+    }
+}
+// A missing tool fails with what to install (mobile/android/README.md), not with a process
+// that could not start.
+fun requireTool(need: String, vararg command: String): String {
+    val output = runCatching {
+        val process = ProcessBuilder(*command).redirectErrorStream(true).start()
+        process.inputStream.bufferedReader().readText().takeIf { process.waitFor() == 0 }
+    }.getOrNull()
+    return output ?: throw GradleException("The task replica needs $need; see mobile/android/README.md, \"Build and install\".")
+}
 val hostLibrary = rustBuild.map { it.file("host/debug/$hostLibraryName") }
 val uniffiKotlin = layout.buildDirectory.dir("generated/uniffi/kotlin")
 val rustJniLibs = rustBuild.map { it.dir("jniLibs") }
@@ -54,6 +69,7 @@ val rustHostLibrary by tasks.registering(Exec::class) {
     inputs.files(replicaSources)
     outputs.file(hostLibrary)
     workingDir = replicaCrate
+    doFirst { requireTool("Rust $rustToolchain (rustup toolchain install $rustToolchain)", "cargo", "+$rustToolchain", "--version") }
     commandLine("cargo", "+$rustToolchain", "build", "--locked", "--target-dir", rustBuild.get().dir("host").asFile.path)
 }
 val uniffiBindings by tasks.registering(Exec::class) {
@@ -124,7 +140,16 @@ val rustAndroidLibraries by tasks.registering(Exec::class) {
     inputs.files(replicaSources)
     outputs.dir(rustJniLibs)
     workingDir = replicaCrate
-    environment("ANDROID_NDK_HOME", android.ndkDirectory.path)
+    val ndk = android.ndkDirectory
+    doFirst {
+        requireTool("cargo-ndk 4.1.2 (cargo install cargo-ndk --version 4.1.2 --locked)", "cargo", "+$rustToolchain", "ndk", "--version")
+        if (!ndk.isDirectory) throw GradleException("The task replica needs NDK ${android.ndkVersion} (sdkmanager 'ndk;${android.ndkVersion}'); see mobile/android/README.md, \"Build and install\".")
+        // Without rustup the targets cannot be listed; cargo then names what is missing.
+        val installed = runCatching { requireTool("rustup", "rustup", "target", "list", "--installed", "--toolchain", rustToolchain) }.getOrNull()
+        val missing = replicaAbis.values.filterNot { installed == null || installed.lines().contains(it) }
+        if (missing.isNotEmpty()) throw GradleException("The task replica needs the Rust targets ${missing.joinToString()} (rustup target add --toolchain $rustToolchain ${missing.joinToString(" ")}); see mobile/android/README.md, \"Build and install\".")
+    }
+    environment("ANDROID_NDK_HOME", ndk.path)
     commandLine("cargo", "+$rustToolchain", "ndk", "-t", "arm64-v8a", "-t", "armeabi-v7a", "-t", "x86_64",
         "--platform", "26", "-o", rustJniLibs.get().asFile.path, "build", "--release", "--locked",
         "--target-dir", rustBuild.get().dir("android").asFile.path)
@@ -145,6 +170,7 @@ androidComponents {
             inputs.file(replicaCrate.resolve("Cargo.lock"))
             inputs.dir(rootProject.file("../../packaging/rust-licenses"))
             executable = "python3"
+            doFirst { requireTool("python3", "python3", "--version") }
             argumentProviders.add(CommandLineArgumentProvider {
                 listOf(collector.path, outputDir.get().dir("rust-licenses").asFile.path,
                     "--manifest-path", replicaCrate.resolve("Cargo.toml").path) +
@@ -163,7 +189,8 @@ val checkReplicaPackaging by tasks.registering {
     doLast {
         ZipFile(apk.get().asFile).use { zip ->
             val entries: Set<String> = zip.entries().asSequence().map { entry -> entry.name }.toSet()
-            val missing = (replicaAbis.keys.map { "lib/$it/libzerus_replica_ffi.so" } + "assets/rust-licenses/inventory.json")
+            val notices = listOf("assets/rust-licenses/inventory.json", "assets/licenses/jna.txt", "assets/licenses/libffi.txt")
+            val missing = (replicaAbis.keys.map { "lib/$it/libzerus_replica_ffi.so" } + notices)
                 .filterNot { it in entries }
             require(missing.isEmpty()) { "The debug APK lacks ${missing.joinToString()}" }
             val others = entries.filter { it.startsWith("lib/") }.map { it.split('/')[1] }.toSet() - replicaAbis.keys

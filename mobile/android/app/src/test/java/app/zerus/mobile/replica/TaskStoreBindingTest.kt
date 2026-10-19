@@ -1,15 +1,18 @@
 package app.zerus.mobile.replica
 
-import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 /** The task replica through its generated bindings, on the host library the build made. */
 class TaskStoreBindingTest {
-    private fun store() = TaskStore(Files.createTempDirectory("zerus-replica").toString(), "project-1", "orchard")
+    @get:Rule val folders = TemporaryFolder()
+
+    private fun store() = TaskStore(folders.newFolder().path, "project-1", "orchard")
 
     @Test
     fun tasksAreFiledListedAndChanged() {
@@ -42,7 +45,7 @@ class TaskStoreBindingTest {
             store.add("Nope", TaskStage.DONE, TaskTarget.AnySession, TaskPosition.End)
             fail("a task was filed in Done")
         } catch (refused: ReplicaException.Refused) {
-            assertTrue(refused.message.orEmpty().contains("To do or Backlog"))
+            assertTrue(refused.message.orEmpty().contains("Backlog or To do"))
         }
     }
 

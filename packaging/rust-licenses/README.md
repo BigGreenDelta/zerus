@@ -26,4 +26,7 @@ URL and the checksum.
 Apache-2.0"; Zerus uses them under MIT, the license their repository carries.
 
 The `uniffi` crates (UniFFI 0.32.2, tag `v0.32.2`) are under MPL-2.0; the Android
-app's task replica links them (`crates/replica-ffi`).
+app's task replica links them (`crates/replica-ffi`). `uniffi_bindgen` and
+`uniffi_udl` are built only with that crate's `bindgen` feature, for the binding
+generator: the app's library never contains them, so its notices list them only
+when a collection includes the generator.

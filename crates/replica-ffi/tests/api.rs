@@ -90,7 +90,7 @@ fn refusals_and_failures_stay_apart() {
         TaskPosition::End,
     ) {
         Err(ReplicaError::Refused(message)) => {
-            assert!(message.contains("To do or Backlog"), "{message}")
+            assert!(message.contains("Backlog or To do"), "{message}")
         }
         other => panic!("expected a refusal, got {other:?}"),
     }

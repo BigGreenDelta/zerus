@@ -54,7 +54,7 @@ import kotlinx.coroutines.withContext
         Text("CommonMark Java 0.30.0 (BSD-2-Clause) and autolink-java 0.12.0 (MIT) — Robin Stocker and contributors.",style = MaterialTheme.typography.titleSmall)
         Text("Sources: github.com/commonmark/commonmark-java; github.com/robinst/autolink-java",style = MaterialTheme.typography.bodySmall)
         Text(markdownLicenses,style = MaterialTheme.typography.bodySmall)
-        Text("Task store — Loro, UniFFI and the other Rust crates of zerus-replica; JNA 5.17.0 (Apache License 2.0).",style = MaterialTheme.typography.titleSmall)
+        Text("Task store — Loro, UniFFI and the other Rust crates of zerus-replica; JNA 5.17.0 (Apache License 2.0) with libffi (MIT).",style = MaterialTheme.typography.titleSmall)
         Text("Sources: github.com/loro-dev/loro; github.com/mozilla/uniffi-rs; github.com/java-native-access/jna",style = MaterialTheme.typography.bodySmall)
         val notices = replicaNotices
         when {
@@ -93,12 +93,13 @@ internal fun crateNotices(inventory: String, files: (String) -> List<String>, re
     }
 }
 
-/** The task store's crates and then JNA, from the app's assets. */
+/** The task store's crates, then JNA and the libffi in its native library, from the app's assets. */
 private fun rustNotices(context: android.content.Context): List<CrateNotice> {
     val assets = context.assets
     fun read(path: String) = assets.open(path).bufferedReader().use { it.readText() }
     return crateNotices(read("rust-licenses/inventory.json"), { assetFiles(assets, it) }, ::read) +
-        CrateNotice("JNA 5.17.0 (Apache-2.0 OR LGPL-2.1-or-later)", read("licenses/jna.txt"))
+        CrateNotice("JNA 5.17.0 (Apache-2.0 OR LGPL-2.1-or-later)", read("licenses/jna.txt")) +
+        CrateNotice("libffi, in JNA's native library (MIT)", read("licenses/libffi.txt"))
 }
 
 /** The files below an asset folder, depth first: some crates keep notices in subfolders. */

@@ -51,11 +51,17 @@ fn decode<T: serde::de::DeserializeOwned>(map: &LoroMap, key: &str) -> Result<T>
     Ok(serde_json::from_str(&text)?)
 }
 
+/// Refuses a stage a new task cannot start in.
+pub(crate) fn check_new_stage(stage: Stage) -> Result<()> {
+    if !matches!(stage, Stage::Backlog | Stage::Todo) {
+        return Err(Error::new("a new task goes to Backlog or To do"));
+    }
+    Ok(())
+}
+
 impl TaskDoc {
     pub fn create(task: NewTask<'_>) -> Result<Self> {
-        if !matches!(task.stage, Stage::Backlog | Stage::Todo) {
-            return Err(Error::new("a new task goes to Backlog or To do"));
-        }
+        check_new_stage(task.stage)?;
         check_text(task.text, "prompt")?;
         if !ids::is_short_id(task.id) {
             return Err(Error::new(format!("invalid task ID {:?}", task.id)));
