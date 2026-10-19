@@ -42,10 +42,11 @@ AGENTS = {
         members={'linux-x64': 'package/vendor/x86_64-unknown-linux-musl/bin/codex',
                  WINDOWS: 'package/vendor/x86_64-pc-windows-msvc/bin/codex.exe'},
         coverage='clear, draft preservation, identity, resumed clear and pause before SessionStart, async question panels, '
-                 'two terminal sizes and animation modes',
+                 'two terminal sizes, animation modes and the session-start task instructions',
         timeout=180,
         suites=['test_clear_context_native.NativeCodexClear', 'test_codex_update.NativeCodexUpdate',
-                'test_external_agents_native.NativeExternalAgents', 'test_codex_async_questions_native'],
+                'test_external_agents_native.NativeExternalAgents', 'test_codex_async_questions_native',
+                'test_task_context_native.NativeCodexTaskContext'],
         windows=dict(suites=['test_windows_native_agents.NativeWindowsCodex'], timeout=900, coverage=HOST_COVERAGE)),
     'claude': dict(
         name='Claude Code', variable='HGS_CLAUDE_TEST_BIN', version_output='{} (Claude Code)',
@@ -53,11 +54,12 @@ AGENTS = {
         metadata='https://registry.npmjs.org/@anthropic-ai/claude-code-{target}/{version}', published='{version}',
         members={'linux-x64': 'package/claude', 'darwin-arm64': 'package/claude', WINDOWS: 'package/claude.exe'},
         coverage='input, questions, approvals, trust, resume, usage-limit choices, clear, compaction, session-only model settings and '
-                 'status line context capacity',
+                 'status line context capacity and the session-start task instructions',
         timeout=900,
         suites=['test_claude_input_native', 'test_claude_questions_native', 'test_claude_approval_native', 'test_claude_safety_native',
                 'test_claude_trust_native', 'test_claude_resume_native', 'test_claude_usage_limit_native', 'test_clear_context_native.NativeClearContext',
-                'test_compact_context_native', 'test_claude_settings_native', 'test_claude_statusline_native'],
+                'test_compact_context_native', 'test_claude_settings_native', 'test_claude_statusline_native',
+                'test_task_context_native.NativeClaudeTaskContext'],
         windows=dict(suites=['test_windows_native_agents.NativeWindowsClaude'], timeout=1200, coverage=HOST_COVERAGE)),
     # OpenCode 2 is accepted at or above a reviewed minimum (the pin); the canary
     # qualifies its newest release without moving the pin. Its x86_64 Linux package

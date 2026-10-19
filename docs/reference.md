@@ -1910,7 +1910,19 @@ sync it compares every project's digest with the member's and exchanges only
 the changes each side lacks, in pages of at most 1 MiB, and a task changed
 here goes out within seconds. Changes made on several computers at once merge.
 A member whose Zerus does not share tasks keeps syncing the catalog and is
-named in the Swarm settings. The MCP tools come in a later release.
+named in the Swarm settings.
+
+Agents use the same `hgs task` commands in their own shell. A command run inside
+an agent session acts as that session when it proves it as `hgs self` does (the
+run is live here and the command descends from the agent; renames are
+followed) and is refused when its environment names a session it cannot prove.
+It works on the session's catalog project unless a reference or `--project`
+names another. A change an agent makes prints one line saying what happened,
+for example `orchard/T-a1b2c3 sent to codex/api.`; `--json` prints the task, and
+reads print JSON. Claude Code and Codex sessions read the instructions for the
+task list from Zerus's SessionStart hook; `hgs guide tasks` lists the commands.
+There is no MCP server; sessions without bypassed permissions are not covered
+(Claude Code asks first, Codex's sandbox blocks the task store and SSH).
 
 In the desktop, the **Tasks** tab beside Activity and Terminal shows the open
 session's project. Stage tiles (In review, In progress, To do, Backlog, Done)
