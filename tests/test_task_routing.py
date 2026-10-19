@@ -186,19 +186,41 @@ class TaskRouting(unittest.TestCase):
             self.assertEqual(view["stage"], "review", node)
             self.assertIn("Wrong approach", [e.get("text") for e in view["log"]], node)
 
-    def test_an_unreachable_computer_refuses_and_records_nothing(self):
+    def test_an_unreachable_computer_refuses_a_send_and_records_nothing(self):
         task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
         (self.root / "offline-b").touch()
         refused = self.task("a", "send", task["id"], "--project", "project-1", ok=False)
         self.assertIn("b cannot be reached", refused)
         self.assertEqual(self.get("a", task)["stage"], "todo")
-        (self.root / "offline-b").unlink()
+
+    def test_a_cancel_goes_through_while_its_computer_is_out_of_reach(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
         self.task("a", "send", task["id"], "--project", "project-1")
         self.wait_received("Add rate limiting")
+        # b is offline: the task moves to In review here and its session is not told.
         (self.root / "offline-b").touch()
-        refused = self.task("a", "cancel", task["id"], "--project", "project-1", ok=False)
-        self.assertIn("b cannot be reached", refused)
-        self.assertEqual(self.get("a", task)["stage"], "active")
+        cancelled = self.task("a", "cancel", task["id"], "--project", "project-1", "--reason", "Wrong approach")
+        self.assertFalse(cancelled["cancel_message"]["sent"])
+        self.assertIn("b cannot be reached", cancelled["cancel_message"]["error"])
+        view = self.get("a", task)
+        self.assertEqual(view["stage"], "review")
+        texts = [e.get("text", "") for e in view["log"]]
+        self.assertIn("Wrong approach", texts)
+        self.assertTrue(any(text.startswith("Cancel message not sent: b cannot be reached") for text in texts), texts)
+        self.assertNotIn("cancelled]", self.received())
+        # Back online, b's copy follows.
+        (self.root / "offline-b").unlink()
+        self.swarm("a", "sync")
+        self.assertEqual(self.get("b", task)["stage"], "review")
+
+    def test_a_cancel_goes_through_for_a_computer_that_left_the_swarm(self):
+        task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")
+        self.task("a", "send", task["id"], "--project", "project-1")
+        self.wait_received("Add rate limiting")
+        self.swarm("a", "disconnect", "b")
+        cancelled = self.task("a", "cancel", task["id"], "--project", "project-1")
+        self.assertIn("b is not a member of this swarm", cancelled["cancel_message"]["error"])
+        self.assertEqual(self.get("a", task)["stage"], "review")
 
     def test_a_task_its_computer_shows_in_progress_is_refused(self):
         task = self.add("Add rate limiting", "--target", "codex/remote", "--host", "b")

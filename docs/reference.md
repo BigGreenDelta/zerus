@@ -1891,8 +1891,10 @@ JSON object and changes only the fields it names.
 computer verified itself. A send or cancel for such a session runs on that
 computer: it gets the project's tasks first, refuses a task its own copy shows
 In progress, pastes and records there, and its copy comes back. When it cannot
-be reached, or its Zerus is too old to share tasks, the send or cancel is
-refused with the reason and nothing changes. Listings
+be reached, or its Zerus is too old to share tasks, a send is refused with the
+reason and nothing changes, while a cancel goes through here: the task moves
+to In review, its session gets no cancel message, and that computer's copy
+follows when it syncs. Listings
 name the computer of every session reference (the target, the session, the
 author and each history entry's session and actor) as `host`: empty for this
 one, the alias of a verified member, or null. Windows keeps no verified

@@ -191,7 +191,10 @@ computer that runs the session. So:
   desktop calls that computer's hgs (`hgs @alias task send …` over SSH, as
   other remote session actions do); the phone goes through the relay to that
   computer's connector; an agent's MCP call is forwarded the same way. If the
-  computer cannot be reached, the action is refused with the reason.
+  computer cannot be reached, Send now and `task_start` are refused with the
+  reason. A Cancel goes through all the same: the task moves to In review on
+  this computer, its session gets no cancel message, and the session's
+  computer receives the change when it syncs again.
 - **That computer checks its own copy first.** If the task is already In
   progress there, it refuses: "T-a1b2c3 is already In progress in api". Two
   computers that send before their copies meet both send; each agent works and
@@ -250,7 +253,7 @@ settings) is a local edit on any replica, online or offline.
 
 | Case | Result |
 |---|---|
-| The session's computer is unreachable | Send now, `task_start` and Cancel are refused with the reason; local edits still work |
+| The session's computer is unreachable | Send now and `task_start` are refused with the reason; Cancel moves the task to In review here without the cancel message; local edits still work |
 | Two computers send the same task before they meet | Both send; both reports are kept |
 | A replica holds a schema newer than it reads | Those tasks are read-only there, with "Update Zerus" |
 | A member without replica support | Skipped in exchanges and named in Settings |

@@ -348,7 +348,13 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
     if let Some((session, _)) = session.as_ref().filter(|(session, _)| session.machine != here) {
         let uuid = task.uuid().to_owned();
         drop(store);
-        return forwarded(config, &machines, &r.project, &uuid, action, args, session, &who);
+        return match reach(config, &machines, project_id, session) {
+            Ok(alias) => forwarded(config, &machines, &r.project, &uuid, action, args, session, &alias, &who),
+            // A cancel goes through while that computer is out of reach: the task
+            // moves to In review here and its session is not told.
+            Err(reason) if action == "cancel" => cancel_here(config, &machines, &r.project, &uuid, args, &who, reason),
+            Err(reason) => Err(fail(reason)),
+        };
     }
     let text = text.unwrap_or_default();
     let mut extra = json!({});
@@ -409,7 +415,7 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<i32> {
             let (session, pin) = session.expect("a send has its session");
             extra = send(&store, &mut task, project_name, session, pin, &who)?;
         }
-        "cancel" => extra = cancel(&store, &mut task, project_name, args, &who)?,
+        "cancel" => extra = cancel(&store, &mut task, project_name, args, &who, None)?,
         _ => return Err(fail(USAGE)),
     }
     store.save(&mut task).map_err(fail)?;
@@ -447,10 +453,19 @@ fn send_session(task: &TaskDoc, args: &[String], who: &Actor, machines: &Machine
     }
 }
 
-/// Runs a send or cancel on the computer that runs `session`. That computer
-/// gets this project's tasks first, so it checks and records the action in its
-/// own copy and pastes in its session; its copy then comes back. Nothing
-/// happens when it cannot be reached.
+/// The alias of the computer that runs `session`, with this project's tasks
+/// exchanged with it, or why it cannot be reached now.
+fn reach(config: &Config, machines: &Machines, project: &str, session: &SessionKey) -> std::result::Result<String, String> {
+    let alias = machines
+        .alias(&session.machine)
+        .ok_or_else(|| format!("{} is on a computer this one has not verified", session.session))?;
+    crate::swarm::replicate(config, &alias, project).map_err(|e| format!("{e:#}"))?;
+    Ok(alias)
+}
+
+/// Runs a send or cancel on the computer behind `alias`, which runs `session`
+/// and now holds this project's tasks: it checks and records the action in its
+/// own copy and pastes in its session; its copy then comes back.
 #[allow(clippy::too_many_arguments)]
 fn forwarded(
     config: &Config,
@@ -460,12 +475,9 @@ fn forwarded(
     action: &str,
     args: &[String],
     session: &SessionKey,
+    alias: &str,
     who: &Actor,
 ) -> Result<i32> {
-    let alias = machines
-        .alias(&session.machine)
-        .ok_or_else(|| fail(format!("{} is on a computer this one has not verified", session.session)))?;
-    crate::swarm::replicate(config, &alias, &project.0).map_err(|e| fail(format!("{e:#}")))?;
     let mut remote: Vec<String> = vec!["task".into(), action.into(), uuid.into(), "--project".into(), project.0.clone()];
     if action == "send" && option(args, "--session")?.is_some() {
         remote.extend(["--session".into(), session.session.clone()]);
@@ -476,12 +488,12 @@ fn forwarded(
     if let Actor::Agent(agent) = who {
         remote.extend(["--agent".into(), format!("{}/{}", agent.machine, agent.session)]);
     }
-    let reply = crate::swarm::remote_hgs(config, &alias, &remote).map_err(|e| {
+    let reply = crate::swarm::remote_hgs(config, alias, &remote).map_err(|e| {
         fail(format!("{e:#}").replacen(&format!("{alias}: hgs: "), &format!("{alias}: "), 1))
     })?;
     // Its copy comes back now (its identity was checked a moment ago); when
     // that fails the next sync brings it.
-    if let Err(error) = crate::swarm::exchange_tasks(config, &alias, &project.0) {
+    if let Err(error) = crate::swarm::exchange_tasks(config, alias, &project.0) {
         eprintln!("hgs: {error:#}");
     }
     let task = store(config, &project.0)?.find(uuid).map_err(fail)?;
@@ -491,6 +503,27 @@ fn forwarded(
             out[key] = value.clone();
         }
     }
+    print(out)
+}
+
+/// Cancels here a task whose session's computer cannot be reached: it moves to
+/// In review, its session is not told, and that computer's copy follows with
+/// the next sync.
+fn cancel_here(
+    config: &Config,
+    machines: &Machines,
+    project: &(String, String),
+    uuid: &str,
+    args: &[String],
+    who: &Actor,
+    reason: String,
+) -> Result<i32> {
+    let store = store(config, &project.0)?;
+    let mut task = store.find(uuid).map_err(fail)?;
+    let extra = cancel(&store, &mut task, &project.1, args, who, Some(reason))?;
+    store.save(&mut task).map_err(fail)?;
+    let mut out = json!({"task": view(&task, &project.1, true, machines)?});
+    out["cancel_message"] = extra["cancel_message"].clone();
     print(out)
 }
 
@@ -536,13 +569,15 @@ fn send(
     Ok(json!({"receipt": receipt}))
 }
 
-/// Moves the task to In review and pastes the cancel message; the turn is not stopped.
+/// Moves the task to In review and pastes the cancel message; the turn is not
+/// stopped. `undelivered` says why the message cannot reach the session.
 fn cancel(
     store: &ProjectStore,
     task: &mut TaskDoc,
     project_name: &str,
     args: &[String],
     who: &Actor,
+    undelivered: Option<String>,
 ) -> Result<Value> {
     let session = task
         .view()
@@ -571,7 +606,10 @@ fn cancel(
         Tools::Cli,
     )
     .map_err(fail)?;
-    let pasted = crate::state::submit_task_text(&session.session, &message).map_err(|e| e.to_string());
+    let pasted = match undelivered {
+        Some(reason) => Err(reason),
+        None => crate::state::submit_task_text(&session.session, &message).map_err(|e| e.to_string()),
+    };
     Ok(match pasted {
         Ok(receipt) => json!({"cancel_message": {"sent": true, "receipt": receipt}}),
         Err(error) => {
