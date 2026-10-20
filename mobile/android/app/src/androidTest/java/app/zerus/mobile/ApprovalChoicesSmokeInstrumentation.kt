@@ -8,6 +8,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -24,6 +25,10 @@ import java.util.concurrent.atomic.AtomicReference
 /** Actual Compose/card/model paths, intercepted receipts only; never a native provider or connected workspace. */
 class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     private val cases = mutableListOf<String>()
+    private fun boundary(event: String, name: String) {
+        check(event in setOf("begin", "complete") && name in CASES)
+        Log.i("ZerusApprovalUI", "$event $name completed=${cases.size}")
+    }
     override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
     override fun onStart() {
         val result = Bundle()
@@ -181,20 +186,27 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 val session = Session(target, "Approval fixture", "kimi", "idle", "", "", 0, raw)
                 set(model, "setSessions", listOf(session)); set(model, "setSelected", session)
             }
+            boundary("begin", "countdown_once")
             open("countdown")
             reveal("Approve once"); tap("Approve once")
             check(!button("Send answer").isEnabled && count() == 0)
             reviewed(); expect("1"); tap("Send answer"); await("once receipt") { count() == 1 }
             cases += "countdown_once"
+            boundary("complete", "countdown_once")
 
+            boundary("begin", "broader_cancel")
             open("broader-cancel", "claude_tool_approval")
             reveal("Approve for this session"); tap("Approve for this session"); reviewed(); tap("Send answer")
             node("Confirm this option?"); node("Exact command for this session only"); check(count() == 1)
             tap("Cancel"); await("cancelled confirmation") { visible("Confirm this option?") == null }; check(count() == 1)
             cases += "broader_cancel"
+            boundary("complete", "broader_cancel")
+            boundary("begin", "broader_confirm")
             reviewed(); tap("Send answer"); node("Confirm this option?"); expect("2"); tap("Confirm")
             await("broader receipt") { count() == 2 }; cases += "broader_confirm"
+            boundary("complete", "broader_confirm")
 
+            boundary("begin", "card_replacement")
             open("replacement")
             reveal("Approve for this session"); tap("Approve for this session"); reviewed(); tap("Send answer"); node("Confirm this option?")
             open("replacement-new")
@@ -202,7 +214,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             reveal("Reject"); tap("Reject"); check(!button("Send answer").isEnabled && count() == 2)
             reviewed(); expect("3"); tap("Send answer"); await("new card reject receipt") { count() == 3 }
             cases += "card_replacement"
+            boundary("complete", "card_replacement")
 
+            boundary("begin", "feedback_keyboard")
             open("feedback")
             val editor = checkNotNull(find(uiAutomation.rootInActiveWindow) { it.isVisibleToUser && it.isEditable })
             check(editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Use a safer command") }))
@@ -211,7 +225,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             reviewed(); expect(text = "Use a safer command"); sendKeyDownUpSync(KeyEvent.KEYCODE_ENTER)
             await("one feedback receipt") { count() == 4 }; check(expected.get() == null)
             cases += "feedback_keyboard"
+            boundary("complete", "feedback_keyboard")
 
+            boundary("begin", "lifecycle_no_submit")
             open("background")
             reveal("Approve for this session"); tap("Approve for this session"); reviewed(); tap("Send answer"); node("Confirm this option?")
             // Real Activity/window lifecycle, not an injected foreground Boolean.
@@ -222,7 +238,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             node("Review synthetic background"); await("background retires confirmation") { visible("Confirm this option?") == null }
             check(count() == 4 && !button("Send answer").isEnabled)
             cases += "lifecycle_no_submit"
+            boundary("complete", "lifecycle_no_submit")
 
+            boundary("begin", "readonly_stale_identity")
             open("readonly", answerable = false); node("Synthetic read-only approval")
             check(!button("Approve once").isEnabled && count() == 4)
             open("stale-identity"); reveal("Approve once"); tap("Approve once"); reviewed()
@@ -231,6 +249,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             await("fresh identity refusal") { main { !model.activityVerified || model.error.isNotBlank() || model.drafts.any { it.questionId == "stale-identity" && it.status == "failed" } } }
             check(count() == 4 && expected.get() == null)
             cases += "readonly_stale_identity"
+            boundary("complete", "readonly_stale_identity")
             check(main { model.draft(target).text == "Keep unrelated composer" })
             check(synchronized(calls) { calls.map { it.string("request_id") }.distinct().size == 4 })
             screenshot("complete")

@@ -25,6 +25,11 @@ binding, four unique synthetic answer receipts, zero unexpected operations, and 
 Lifecycle uses the actual Activity and window, rather than an injected foreground Boolean. The stale-run case changes
 the intercepted inspection before the UI send; no answer is admitted in that case. The fixture cannot contact its
 reserved relay: every permitted request is completed inside the interceptor, while unknown operations throw.
+Case entry/completion breadcrumbs go only to the disposable emulator's `ZerusApprovalUI` log. After a failed approval
+instrumentation attempt, the driver tries one five-second bounded read of the last 400 crash/main/system log records,
+only while the owned emulator and ADB server remain live. This uses the original 1200-second end and 20-second cleanup
+reserve. Missing, late or failed diagnostics remain unknown and cannot replace the primary failure, qualify a missing
+case, relax the strict result parser, or authorize a retry. The instrumentation cap remains 90 seconds.
 
 Before dispatch, review this workflow and the SDK-free `tests/test_android_project_ui.py` and
 `tests/test_approval_ui_harness.py` controls. The new app/test are built under a fresh synthetic debug signer; this does

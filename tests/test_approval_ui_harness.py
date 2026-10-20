@@ -166,6 +166,40 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn("end = time.monotonic() + 900", source)
         self.assertIn("(0 if cleaning else 60)", source)
 
+    def test_android_failure_diagnostics_stay_owned_bounded_and_cannot_replace_failure(self):
+        self.ui.select_suite(["--approval-choices"])
+        device = ["/fixture/adb", "-H", "127.0.0.1", "-P", "5037", "-s", self.ui.SERIAL, "shell"]
+        calls = []
+        def capture(name, command, cap):
+            calls.append((name, command, cap))
+        def live():
+            calls.append("owned-alive")
+        self.assertEqual(self.ui.failure_diagnostics(capture, live, device)["status"], "captured")
+        self.assertEqual(calls, ["owned-alive", ("failure-logcat", [*device, "logcat", "-d", "-b", "crash", "-b", "main", "-b", "system", "-t", "400"], 5)])
+        for stage in ("ownership", "capture"):
+            calls.clear()
+            def refused():
+                raise TimeoutError("same original end")
+            def capture_refused(*arguments):
+                calls.append("attempted-once"); raise OSError("diagnostic unavailable")
+            result = self.ui.failure_diagnostics(capture_refused, refused if stage == "ownership" else live, device)
+            self.assertEqual(result["status"], "unknown")
+            self.assertEqual(result["error"], "TimeoutError" if stage == "ownership" else "OSError")
+            self.assertEqual(calls, [] if stage == "ownership" else ["owned-alive", "attempted-once"])
+        source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
+        self.assertIn('if RESULT_NAMESPACE == "approval" and instrumentation_started:', source)
+        self.assertIn('diagnostics = failure_diagnostics(run, alive, device)\n        raise', source)
+        self.assertIn('"primary_failure": primary_failure, "diagnostics": diagnostics', source)
+        self.assertIn('end = time.monotonic() + 1200', source)
+        self.assertIn('remaining = min(cap, end - time.monotonic() - 20)', source)
+        self.assertIn('"app.zerus.mobile.test/" + RUNNER], 90)', source)
+        with self.assertRaises(AssertionError):
+            self.ui.instrumentation_result("INSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: 0\n")
+        fixture = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        expected = [(event, name) for name in self.ui.CASES.split(",") for event in ("begin", "complete")]
+        self.assertEqual(re.findall(r'boundary\("(begin|complete)", "([a-z_]+)"\)', fixture), expected)
+        self.assertEqual(re.findall(r'cases \+= "([a-z_]+)"', fixture), self.ui.CASES.split(","))
+
 
 if __name__ == "__main__":
     unittest.main()

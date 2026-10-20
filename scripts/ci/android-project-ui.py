@@ -112,6 +112,16 @@ def instrumentation_result(text):
     return fields
 
 
+def failure_diagnostics(run, alive, device):
+    """One bounded read on the still-owned emulator; never replace the primary failure."""
+    try:
+        alive()
+        run("failure-logcat", [*device, "logcat", "-d", "-b", "crash", "-b", "main", "-b", "system", "-t", "400"], 5)
+        return {"status": "captured", "scope": "owned disposable emulator, last400 crash/main/system records only"}
+    except BaseException as error:
+        return {"status": "unknown", "error": type(error).__name__}
+
+
 def certificate_digest(text):
     lines = [line for line in text.splitlines() if "certificate SHA-256 digest:" in line]
     assert len(lines) == 1
@@ -224,6 +234,8 @@ def main():
     source_before = {}
     apk_before = {}
     success = False
+    instrumentation_started = False
+    primary_failure, diagnostics = None, None
 
     def save(name, value):
         with (evidence / name).open("x") as output:
@@ -382,10 +394,16 @@ def main():
             installed = run("install-" + label, [*adb_args, "-s", SERIAL, "install", "--no-streaming", apk], 60)
             assert len(re.findall(r"^Success$", installed, re.M)) == 1 and "Failure" not in installed
         alive()
+        instrumentation_started = True
         output = run("instrumentation", [*device, "am", "instrument", "-w", "-r", "app.zerus.mobile.test/" + RUNNER], 90)
         alive()
         save("instrumentation-result.json", instrumentation_result(output))
         success = True
+    except BaseException as error:
+        primary_failure = {"error": type(error).__name__, "message": str(error)[:2048]}
+        if RESULT_NAMESPACE == "approval" and instrumentation_started:
+            diagnostics = failure_diagnostics(run, alive, device)
+        raise
     finally:
         cleanup = []
         for entry in reversed(children):
@@ -413,6 +431,7 @@ def main():
         apk_equal = all(sha(path) == digest for path, digest in apk_before.items())
         success = success and equal and source_equal and apk_equal and time.monotonic() < end and all(row.get("reaped") for row in cleanup)
         save("outcome.json", {"qualified": success, "commands": results, "cleanup": cleanup, "tools_unchanged": equal, "source_unchanged": source_equal, "apks_unchanged": apk_equal,
+                              "primary_failure": primary_failure, "diagnostics": diagnostics,
                               "whole_end_retained": True, "scope": "synthetic " + RESULT_NAMESPACE + " UI only; no installed/provider/tool-closure proof"})
     assert success
 
