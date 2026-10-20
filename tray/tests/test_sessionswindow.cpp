@@ -330,6 +330,7 @@ private slots:
     void detailsPollingPreservesReadingPosition();
     void nativeGoalIsIndependentOfTurnState();
     void fileReferencesKeepMachineAndWorkspace();
+    void composerFileReferencesFollowHostAndChildSelection();
     void activityAttachmentsOpenLikeDownloads();
     void fileReferenceOpeningOutlivesDialog_data();
     void fileReferenceOpeningOutlivesDialog();
@@ -6129,6 +6130,94 @@ void TestSessionsWindow::fileReferencesKeepMachineAndWorkspace()
     activity->fileReferenceActivated("docs/README.md");
     QCOMPARE(copied.size(), 1); QCOMPARE(copied.takeFirst().at(0).toString(), QString("/Users/remote/project/docs/README.md"));
     QCOMPARE(ssh.size(), 1); QCOMPARE(ssh.takeFirst().at(0).toString(), QString("mac"));
+}
+
+void TestSessionsWindow::composerFileReferencesFollowHostAndChildSelection()
+{
+    const QJsonObject parent{{"tracked", true}, {"conversation_id", "conversation-one"}, {"run_id", "run-one"},
+        {"subagents", QJsonObject{{"child-1", QJsonObject{{"name", "Review"}, {"state", "working"}}}}}};
+    const QJsonObject childDetails{{"parent_conversation_id", "conversation-one"}, {"conversation_id", "child-one"},
+        {"run_id", "run-one"}, {"send_supported", true}};
+    SessionsWindow window(programInspecting("composer-file-reference-hgs", parent, childDetails));
+    keepDetailsPollsOut(window);
+    window.resize(1400, 900); window.setFleet(fleet()); window.show(); window.showSession("mac", "claude/infra/review");
+    auto *client = window.findChild<HgsClient *>();
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    setComposerText(composer, "Remote draft: ");
+    settleSelectedInspection(composer, client, "mac", "claude/infra/review", parent);
+    QSignalSpy sends(composer, &MessageComposer::sendRequested);
+    auto *reference = composer->findChild<QPushButton *>("referenceMessageFile");
+    QVERIFY(reference->isVisible()); QVERIFY(reference->isEnabled());
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = window.findChild<QDialog *>("fileReferenceDialog"); QVERIFY(dialog);
+        const auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        QVERIFY(!dialog->findChild<QPushButton *>("browseReferenceFile"));
+        QVERIFY(dialog->findChild<QLabel *>("fileReferenceHint")->text().contains("mac"));
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText("~/large existing.bin");
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    reference->click();
+    QVERIFY(composer->editor()->toPlainText().contains("\"~/large existing.bin\"")); QCOMPARE(sends.size(), 0);
+    window.showSession({}, "codex/hgs/dashboard");
+    setComposerText(composer, "Local parent draft");
+    settleSelectedInspection(composer, client, {}, "codex/hgs/dashboard", parent);
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = window.findChild<QDialog *>("fileReferenceDialog"); QVERIFY(dialog);
+        const auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        QVERIFY(dialog->findChild<QPushButton *>("browseReferenceFile"));
+    });
+    reference->click();
+    client->inspectionReady({}, "codex/hgs/dashboard", parent);
+    // A replacement run under the same row is a different reference context.
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = window.findChild<QDialog *>("fileReferenceDialog"); QVERIFY(dialog);
+        const auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText(script());
+        auto replacement = parent; replacement["run_id"] = "run-two";
+        client->inspectionReady({}, "codex/hgs/dashboard", replacement);
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    reference->click(); QCOMPARE(composer->editor()->toPlainText(), "Local parent draft");
+    client->inspectionReady({}, "codex/hgs/dashboard", parent);
+    // A new listing invalidates even while the accepted inspection is older.
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = window.findChild<QDialog *>("fileReferenceDialog"); QVERIFY(dialog);
+        const auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText(script());
+        auto replacement = fleet(); auto box = replacement.local();
+        for (auto &session : box.sessions) if (session.name == "codex/hgs/dashboard") session.runId = "run-listed-two";
+        replacement.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(replacement);
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    reference->click(); QCOMPARE(composer->editor()->toPlainText(), "Local parent draft");
+    window.setFleet(fleet()); client->inspectionReady({}, "codex/hgs/dashboard", parent);
+    // Main -> child -> main must invalidate the original main dialog too.
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = window.findChild<QDialog *>("fileReferenceDialog"); QVERIFY(dialog);
+        const auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText(script());
+        window.findChild<QTextBrowser *>("subagents")->anchorClicked(QUrl("hgs-agent:child-1"));
+        client->subagentInspectionReady({}, "codex/hgs/dashboard", "child-1", {}, childDetails);
+        window.findChild<QPushButton *>("subagentBack")->click();
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    reference->click(); QCOMPARE(composer->editor()->toPlainText(), "Local parent draft");
+    window.findChild<QTextBrowser *>("subagents")->anchorClicked(QUrl("hgs-agent:child-1"));
+    client->subagentInspectionReady({}, "codex/hgs/dashboard", "child-1", {}, childDetails);
+    auto *child = window.findChild<MessageComposer *>("subagentComposer"); setComposerText(child, "Child draft");
+    auto *childReference = child->findChild<QPushButton *>("referenceMessageFile");
+    QVERIFY(childReference->isVisible()); QVERIFY(childReference->isEnabled());
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = window.findChild<QDialog *>("fileReferenceDialog"); QVERIFY(dialog);
+        const auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        QVERIFY(dialog->findChild<QPushButton *>("browseReferenceFile"));
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText(script());
+        window.findChild<QPushButton *>("subagentBack")->click();
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    childReference->click();
+    QCOMPARE(child->editor()->toPlainText(), "Child draft");
+    QCOMPARE(composer->editor()->toPlainText(), "Local parent draft"); QCOMPARE(sends.size(), 0);
 }
 
 void TestSessionsWindow::remoteFileDownloads_data()

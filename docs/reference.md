@@ -914,6 +914,18 @@ sessions, even if the original attachment file is gone. Storage is a private
 directory next to the desktop's Qt settings file (`<settings-file>.drafts`),
 outside P2P configuration sync.
 
+Use **Reference an existing file** (the link button beside Attach, or its Files
+menu in a narrow column) when the file
+already exists on the agent's computer, including very large files. Locally,
+choose a file or enter its absolute path. For a remote session, enter an absolute
+path (including Windows drive or UNC paths) or `~/` path on the named remote
+computer; a file on your desktop is not uploaded
+or made accessible to that computer. Zerus inserts an editable, quoted path into
+the draft and saves it as ordinary message text. Review it and press Send when
+ready. This action does not read, copy or Base64-encode the file and has no file
+size limit. It refers to the existing file, whose contents may change; the agent
+decides how to use it. Ordinary attachment uploads retain their existing limits.
+
 Session refresh, connection and recovery errors appear on one line beside the
 attachment button, with the complete diagnostic in its tooltip and an explicit
 session refresh action. They do not move the Activity or Terminal tabs. A blocking

@@ -20,6 +20,7 @@
 #include <QDragLeaveEvent>
 #include <QDropEvent>
 #include <QFile>
+#include <QFileDialog>
 #include <QFontInfo>
 #include <QFrame>
 #include <QHelpEvent>
@@ -31,9 +32,11 @@
 #include <QJsonDocument>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QMenu>
 #include <QLineEdit>
 #include <QMimeData>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QProcess>
 #include <QSettings>
@@ -142,6 +145,28 @@ bool setSendingReady(MessageComposer &composer, const QString &key, bool preserv
     while (!result->has_value() && clock.elapsed() < 20000) QTest::qWait(1);
     return result->value_or(false);
 }
+
+void withReferenceDialog(MessageComposer &composer, const std::function<void(QDialog *)> &check)
+{
+    auto *button = composer.findChild<QPushButton *>("referenceMessageFile");
+    QVERIFY(button); QVERIFY(button->isEnabled());
+    bool handled = false;
+    QTimer::singleShot(0, &composer, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        // Failed assertions and rejected paths must never strand a modal loop.
+        const auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        handled = true; check(dialog);
+    });
+    button->click();
+    QVERIFY(handled);
+}
+
+QString quotedReference(const QString &path)
+{
+    const auto quoted = QJsonDocument(QJsonArray{path}).toJson(QJsonDocument::Compact);
+    return "Use the existing file at " + QString::fromUtf8(quoted.mid(1, quoted.size() - 2)) + '.';
+}
 }
 
 class TestMessageComposer : public QObject {
@@ -187,6 +212,20 @@ private slots:
     void inlineReferencesFollowCursorAndSurviveEditing();
     void escapeReleasesFocusWithoutChangingDraft();
     void attachmentLimits();
+    void existingLargeFileReferenceNeverUploadsAndSurvivesRestart();
+    void remoteFileReferenceUsesTheNamedComputerAndQuotedPath_data();
+    void remoteFileReferenceUsesTheNamedComputerAndQuotedPath();
+    void invalidFileReferencesPreserveTheDraft_data();
+    void invalidFileReferencesPreserveTheDraft();
+    void fileReferenceRefusesChangedContext_data();
+    void fileReferenceRefusesChangedContext();
+    void fileReferenceFitsNarrowComposerAndHonorsLocks();
+    void fileReferenceOwnerDeletionUnwindsModal_data();
+    void fileReferenceOwnerDeletionUnwindsModal();
+    void fileReferenceInsertionSeparatesSelectionBoundaries_data();
+    void fileReferenceInsertionSeparatesSelectionBoundaries();
+    void fileReferenceReplacementHonorsActualUtf8Limit_data();
+    void fileReferenceReplacementHonorsActualUtf8Limit();
     void textLimitCountsUtf8Bytes();
     void failureAndUncertaintyPreserveDraft();
     void sendingHidesPayloadAndRestoresFailedBackgroundDelivery();
@@ -221,6 +260,292 @@ private slots:
 private:
     QTemporaryDir m_settings;
 };
+
+void TestMessageComposer::existingLargeFileReferenceNeverUploadsAndSurvivesRestart()
+{
+    QTemporaryDir source; QVERIFY(source.isValid());
+    const auto path = source.filePath("large existing file.bin");
+    QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly));
+    QVERIFY(file.resize(64 * 1024 * 1024)); file.close();
+#ifdef Q_OS_UNIX
+    // Metadata remains available while opening the content is forbidden.
+    QVERIFY(file.setPermissions({}));
+    const auto restore = qScopeGuard([&] { file.setPermissions(QFile::ReadOwner | QFile::WriteOwner); });
+#endif
+    const QString key = "\nlarge-file-reference";
+    const QString expected = "Analyze this: " + quotedReference(path);
+    {
+        MessageComposer composer; QList<Submission> submissions; observe(composer, submissions);
+        setSessionReady(composer, key); composer.setAvailability(true); composer.setFileReferenceTarget(key, {}, "Local fixture");
+        composer.editor()->setPlainText("Analyze this: ");
+        auto cursor = composer.editor()->textCursor(); cursor.movePosition(QTextCursor::End); composer.editor()->setTextCursor(cursor);
+        withReferenceDialog(composer, [&](QDialog *dialog) {
+            QVERIFY(dialog->findChild<QPushButton *>("browseReferenceFile"));
+            dialog->findChild<QLineEdit *>("fileReferencePath")->setText(path);
+            dialog->findChild<QPushButton *>("insertFileReference")->click();
+        });
+        QCOMPARE(composer.editor()->toPlainText(), expected); QCOMPARE(submissions.size(), 0);
+        QVERIFY(composer.findChildren<QPushButton *>("removeAttachment").isEmpty());
+        ComposerDraftStore::flushWrites();
+    }
+    MessageComposer restored; QList<Submission> submissions; observe(restored, submissions);
+    setSessionReady(restored, key); restored.setAvailability(true);
+    QCOMPARE(restored.editor()->toPlainText(), expected);
+    sendButton(restored)->click(); QCOMPARE(submissions.size(), 1);
+    QCOMPARE(submissions.first().text, expected); QVERIFY(submissions.first().attachments.isEmpty());
+    restored.deliveryFinished(key, false, "Delivery unknown", true);
+    QCOMPARE(restored.editor()->toPlainText(), expected); QVERIFY(!sendButton(restored)->isEnabled());
+    QCOMPARE(QFileInfo(path).size(), qint64(64 * 1024 * 1024));
+}
+
+void TestMessageComposer::remoteFileReferenceUsesTheNamedComputerAndQuotedPath_data()
+{
+    QTest::addColumn<QString>("path");
+    QTest::newRow("posix-quotes") << "/not-a-local-fixture/large \"quoted\" report.bin";
+    QTest::newRow("home") << "~/large existing.bin";
+    QTest::newRow("windows-drive") << "C:\\not-a-local-fixture\\large \"quoted\" report.bin";
+    QTest::newRow("windows-forward") << "D:/not-a-local-fixture/large report.bin";
+    QTest::newRow("windows-unc") << "\\\\fixture-server\\share\\large report.bin";
+    QTest::newRow("windows-unc-forward") << "//fixture-server/share/large report.bin";
+}
+
+void TestMessageComposer::remoteFileReferenceUsesTheNamedComputerAndQuotedPath()
+{
+    QFETCH(QString, path);
+    MessageComposer composer; QList<Submission> submissions; observe(composer, submissions);
+    const QString key = "peer\nfixture\nconversation\nchild";
+    setSessionReady(composer, key); composer.setAvailability(true);
+    composer.setAttachmentAvailability(false, "This adapter cannot upload attachments");
+    composer.setFileReferenceTarget(key, "fixture-peer", "Remote fixture");
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        QVERIFY(!dialog->findChild<QPushButton *>("browseReferenceFile"));
+        const auto hint = dialog->findChild<QLabel *>("fileReferenceHint")->text();
+        QVERIFY(hint.contains("Remote fixture")); QVERIFY(hint.contains("fixture-peer")); QVERIFY(hint.contains("not on this computer"));
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText(path);
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    QCOMPARE(composer.editor()->toPlainText(), quotedReference(path)); QCOMPARE(submissions.size(), 0);
+    QVERIFY(!composer.canAttachFiles()); QVERIFY(sendButton(composer)->isEnabled());
+    sendButton(composer)->click(); QCOMPARE(submissions.size(), 1);
+    QCOMPARE(submissions[0].key, key); QCOMPARE(submissions[0].text, quotedReference(path)); QVERIFY(submissions[0].attachments.isEmpty());
+}
+
+void TestMessageComposer::invalidFileReferencesPreserveTheDraft_data()
+{
+    QTest::addColumn<QString>("path"); QTest::addColumn<bool>("local");
+    QTest::newRow("relative-remote") << "folder/file.bin" << false;
+    QTest::newRow("url") << "https://example.test/file.bin" << false;
+    QTest::newRow("drive-relative") << "C:desktop\\file.bin" << false;
+    QTest::newRow("windows-device") << "\\\\?\\C:\\desktop\\file.bin" << false;
+    QTest::newRow("newline") << "/tmp/first\nsecond" << false;
+    QTest::newRow("control") << QString("/tmp/first") + QChar(0x1b) + "second" << false;
+    QTest::newRow("missing-local") << "/missing-reference-fixture/file.bin" << true;
+}
+
+void TestMessageComposer::invalidFileReferencesPreserveTheDraft()
+{
+    QFETCH(QString, path); QFETCH(bool, local);
+    MessageComposer composer; setSessionReady(composer, "reference-invalid");
+    composer.setFileReferenceTarget(composer.sessionKey(), local ? QString() : QString("peer"), "Fixture");
+    composer.editor()->setPlainText("Keep this draft");
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText(path);
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+        QVERIFY(dialog->isVisible()); QVERIFY(!dialog->findChild<QLabel *>("fileReferenceError")->text().isEmpty());
+    });
+    QCOMPARE(composer.editor()->toPlainText(), "Keep this draft");
+}
+
+void TestMessageComposer::fileReferenceRefusesChangedContext_data()
+{
+    QTest::addColumn<QString>("change");
+    for (const auto *value : {"session", "round-trip", "host", "run", "conversation", "child-close", "draft", "lock"}) QTest::newRow(value) << QString(value);
+}
+
+void TestMessageComposer::fileReferenceRefusesChangedContext()
+{
+    QFETCH(QString, change);
+    MessageComposer composer; const QString key = "peer\nmain\nconversation\nchild";
+    setSessionReady(composer, key); composer.setFileReferenceTarget(key, "peer", "Remote", "run-one\nconversation-one");
+    composer.editor()->setPlainText("Original draft");
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText("~/large.bin");
+        if (change == "session" || change == "round-trip") {
+            composer.setSessionKey("peer\nother");
+            if (change == "round-trip") { composer.setSessionKey(key); composer.setFileReferenceTarget(key, "peer", "Remote"); }
+        } else if (change == "host") composer.setFileReferenceTarget(key, "other-peer", "Remote");
+        else if (change == "run") composer.setFileReferenceTarget(key, "peer", "Remote", "run-two\nconversation-one");
+        else if (change == "conversation") composer.setFileReferenceTarget(key, "peer", "Remote", "run-one\nconversation-two");
+        else if (change == "child-close") composer.setFileReferenceTarget({}, {}, {});
+        else if (change == "draft") composer.editor()->setPlainText("Newer draft");
+        else composer.setSessionStatus("Input blocked", true, true);
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    QVERIFY(!composer.editor()->toPlainText().contains("Use the existing file"));
+    setSessionReady(composer, key);
+    QCOMPARE(composer.editor()->toPlainText(), change == "draft" ? QString("Newer draft") : QString("Original draft"));
+}
+
+void TestMessageComposer::fileReferenceFitsNarrowComposerAndHonorsLocks()
+{
+    MessageComposer composer; setSessionReady(composer, "reference-layout");
+    composer.setFileReferenceTarget(composer.sessionKey(), "peer", "Remote");
+    composer.setModelSettings("a-very-long-model-name-in-the-catalog", "xhigh", {}, false, "Unavailable");
+    composer.resize(280, 220); composer.show(); QTest::qWait(20);
+    const auto *reference = composer.findChild<QPushButton *>("referenceMessageFile");
+    auto *attach = composer.findChild<QPushButton *>("attachMessageFile");
+    auto *referenceAction = composer.findChild<QAction *>("referenceExistingFileAction");
+    const auto *settings = composer.findChild<QPushButton *>("sessionModelSettings");
+    const auto *send = sendButton(composer);
+    QCOMPARE(composer.width(), 280); QVERIFY(!reference->isVisible()); QVERIFY(attach->menu());
+    QVERIFY(referenceAction->isEnabled()); QVERIFY(attach->geometry().right() < settings->geometry().left());
+    QVERIFY(send->geometry().right() < composer.width());
+    composer.setInterruptAvailability(true, true); QTest::qWait(20);
+    QCOMPARE(composer.width(), 280); QVERIFY(settings->isVisible());
+    QVERIFY(send->geometry().right() < composer.width());
+    composer.setAttachmentAvailability(false, "Uploads unavailable");
+    QVERIFY(attach->isEnabled()); QVERIFY(referenceAction->isEnabled()); QVERIFY(!composer.canAttachFiles());
+    composer.setRecording(true); QVERIFY(!reference->isEnabled());
+    QVERIFY(!referenceAction->isEnabled()); QVERIFY(!attach->isEnabled());
+    composer.setRecording(false); QVERIFY(reference->isEnabled());
+    composer.setSessionStatus("Blocked", true, true); QVERIFY(!reference->isEnabled());
+    composer.setSessionStatus({}); QVERIFY(reference->isEnabled());
+    composer.editor()->setPlainText("Waiting");
+    QVERIFY(composer.setWaitingToSend(composer.sessionKey(), "Pending start")); QVERIFY(!reference->isEnabled());
+    QVERIFY(!referenceAction->isEnabled());
+}
+
+void TestMessageComposer::fileReferenceOwnerDeletionUnwindsModal_data()
+{
+    QTest::addColumn<QString>("point");
+    for (const auto *value : {"dialog", "accepted", "browse"}) QTest::newRow(value) << QString(value);
+}
+
+void TestMessageComposer::fileReferenceOwnerDeletionUnwindsModal()
+{
+    QFETCH(QString, point);
+    const bool nativeDialogs = QApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+    const auto restoreDialogs = qScopeGuard([=] { QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, nativeDialogs); });
+    QPointer<MessageComposer> composer = new MessageComposer;
+    const auto cleanup = qScopeGuard([&] { delete composer.data(); });
+    setSessionReady(*composer, "reference-owner-deletion");
+    composer->setFileReferenceTarget(composer->sessionKey(), point == "browse" ? QString() : QString("peer"), "Fixture");
+    int sends = 0, observed = 0;
+    connect(composer, &MessageComposer::sendRequested, this, [&] { ++sends; });
+    QTimer::singleShot(0, this, [&] {
+        const QPointer<QDialog> dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        const auto close = qScopeGuard([dialog] { if (dialog && dialog->isVisible()) dialog->reject(); });
+        QVERIFY(dialog); ++observed;
+        if (point == "browse") {
+            QTimer::singleShot(0, this, [&] {
+                const auto dispose = qScopeGuard([&] { delete composer.data(); });
+                auto *picker = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+                QVERIFY(picker); QCOMPARE(picker->objectName(), "fileReferencePicker"); ++observed;
+            });
+            dialog->findChild<QPushButton *>("browseReferenceFile")->click();
+        } else if (point == "accepted") {
+            connect(dialog, &QDialog::accepted, this, [&] { delete composer.data(); });
+            dialog->findChild<QLineEdit *>("fileReferencePath")->setText("~/large.bin");
+            dialog->findChild<QPushButton *>("insertFileReference")->click();
+        } else delete composer.data();
+    });
+    composer->findChild<QPushButton *>("referenceMessageFile")->click();
+    QVERIFY(composer.isNull()); QCOMPARE(observed, point == "browse" ? 2 : 1); QCOMPARE(sends, 0);
+    QVERIFY(!QApplication::activeModalWidget());
+}
+
+void TestMessageComposer::fileReferenceInsertionSeparatesSelectionBoundaries_data()
+{
+    QTest::addColumn<QString>("before"); QTest::addColumn<int>("anchor"); QTest::addColumn<int>("position");
+    QTest::addColumn<QString>("expected"); QTest::addColumn<int>("expectedPosition");
+    const QString reference = "Use the existing file at \"/remote/report.bin\".";
+    const int length = int(reference.size());
+    QTest::newRow("empty") << "" << 0 << 0 << reference << length;
+    QTest::newRow("beginning") << "Analyze this" << 0 << 0 << reference + " Analyze this" << length + 1;
+    QTest::newRow("end") << "Analyze this" << 12 << 12 << "Analyze this " + reference << 13 + length;
+    QTest::newRow("middle") << "leftright" << 4 << 4 << "left " + reference + " right" << 6 + length;
+    QTest::newRow("selection") << "leftOLDright" << 4 << 7 << "left " + reference + " right" << 6 + length;
+    QTest::newRow("reverse-selection") << "leftOLDright" << 7 << 4 << "left " + reference + " right" << 6 + length;
+    QTest::newRow("existing-whitespace") << "left \nright" << 5 << 5 << "left " + reference + "\nright" << 5 + length;
+    QTest::newRow("replace-all") << "old draft" << 0 << 9 << reference << length;
+}
+
+void TestMessageComposer::fileReferenceInsertionSeparatesSelectionBoundaries()
+{
+    QFETCH(QString, before); QFETCH(int, anchor); QFETCH(int, position);
+    QFETCH(QString, expected); QFETCH(int, expectedPosition);
+    MessageComposer composer; const QString key = "reference-boundaries";
+    setSessionReady(composer, key); composer.setFileReferenceTarget(key, "peer", "Remote");
+    composer.editor()->setPlainText(before);
+    auto cursor = composer.editor()->textCursor(); cursor.setPosition(anchor); cursor.setPosition(position, QTextCursor::KeepAnchor);
+    composer.editor()->setTextCursor(cursor);
+    QSignalSpy sends(&composer, &MessageComposer::sendRequested);
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        QCOMPARE(composer.editor()->textCursor().anchor(), anchor); QCOMPARE(composer.editor()->textCursor().position(), position);
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText("/remote/report.bin");
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    QCOMPARE(composer.editor()->toPlainText(), expected);
+    QCOMPARE(composer.editor()->textCursor().position(), expectedPosition); QVERIFY(!composer.editor()->textCursor().hasSelection());
+    QCOMPARE(sends.size(), 0); QVERIFY(composer.findChildren<QPushButton *>("removeAttachment").isEmpty());
+    ComposerDraftStore::flushWrites();
+    MessageComposer restored; setSessionReady(restored, key);
+    QCOMPARE(restored.editor()->toPlainText(), expected); QCOMPARE(restored.editor()->textCursor().position(), expectedPosition);
+}
+
+void TestMessageComposer::fileReferenceReplacementHonorsActualUtf8Limit_data()
+{
+    QTest::addColumn<QString>("before"); QTest::addColumn<int>("anchor"); QTest::addColumn<int>("position");
+    QTest::addColumn<QString>("expectedInsertion"); QTest::addColumn<bool>("allowed");
+    const int maximum = int(HgsClient::MaximumMessageBytes);
+    const QString reference = "Use the existing file at \"/remote/report.bin\".";
+    const int length = reference.toUtf8().size();
+    const QString append = QString(maximum - length - 1, 'a') + ' ';
+    QTest::newRow("exact-append") << append << int(append.size()) << int(append.size()) << reference << true;
+    const QString overflow(maximum - length, 'a');
+    QTest::newRow("leading-padding-overflow") << overflow << int(overflow.size()) << int(overflow.size()) << ' ' + reference << false;
+    const QString full(maximum, 'x');
+    QTest::newRow("selection-reclaims-budget") << full << maximum - length - 1 << maximum << ' ' + reference << true;
+    QTest::newRow("two-boundaries-exact") << full << 10 << 10 + length + 2 << ' ' + reference + ' ' << true;
+    QTest::newRow("selection-one-byte-over") << full << maximum - length << maximum << ' ' + reference << false;
+    const QString multi = QString(maximum - 64 - 4, 'a') + QString(32, QChar(0xe9)) + "tail";
+    QTest::newRow("utf8-selection") << multi << maximum - 64 - 4 << maximum - 64 - 4 + 32 << ' ' + reference + ' ' << true;
+    const QString emoji = QString::fromUtf8("😀").repeated(maximum / 4);
+    QTest::newRow("surrogate-selection") << emoji << int(emoji.size()) - 40 << int(emoji.size()) << ' ' + reference << true;
+    const QString oversized(maximum + 100, 'x');
+    QTest::newRow("replace-all-reduces-oversize") << oversized << 0 << int(oversized.size()) << reference << true;
+}
+
+void TestMessageComposer::fileReferenceReplacementHonorsActualUtf8Limit()
+{
+    QFETCH(QString, before); QFETCH(int, anchor); QFETCH(int, position);
+    QFETCH(QString, expectedInsertion); QFETCH(bool, allowed);
+    MessageComposer composer; setSessionReady(composer, "reference-byte-budget");
+    composer.setFileReferenceTarget(composer.sessionKey(), "peer", "Remote"); composer.editor()->setPlainText(before);
+    auto cursor = composer.editor()->textCursor(); cursor.setPosition(anchor); cursor.setPosition(position, QTextCursor::KeepAnchor);
+    composer.editor()->setTextCursor(cursor);
+    bool inserted = false; QString error;
+    QSignalSpy sends(&composer, &MessageComposer::sendRequested);
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText("/remote/report.bin");
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+        inserted = !dialog->isVisible(); error = dialog->findChild<QLabel *>("fileReferenceError")->text();
+    });
+    QCOMPARE(inserted, allowed);
+    QString expected = before;
+    expected.replace(qMin(anchor, position), qAbs(position - anchor), expectedInsertion);
+    if (allowed) {
+        QVERIFY(expected.toUtf8().size() <= HgsClient::MaximumMessageBytes);
+        QCOMPARE(composer.editor()->toPlainText(), expected); QVERIFY(error.isEmpty());
+        QCOMPARE(composer.editor()->textCursor().position(), qMin(anchor, position) + expectedInsertion.size());
+    } else {
+        QVERIFY(expected.toUtf8().size() > HgsClient::MaximumMessageBytes);
+        QCOMPARE(composer.editor()->toPlainText(), before); QVERIFY(error.contains("64 KiB"));
+        QCOMPARE(composer.editor()->textCursor().anchor(), anchor); QCOMPARE(composer.editor()->textCursor().position(), position);
+    }
+    QCOMPARE(sends.size(), 0); QVERIFY(composer.findChildren<QPushButton *>("removeAttachment").isEmpty());
+}
 
 void TestMessageComposer::unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval()
 {
