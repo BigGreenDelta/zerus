@@ -23,16 +23,13 @@ QString concise(QString value, int limit)
 // transient empty listing, a resume or a connector restart must not announce
 // the same question again.
 constexpr qsizetype SeenQuestions = 64;
-QJsonObject suppressed(const SessionInfo &s) {
-    return s.sharedNotifications ? s.notificationPreferences.value("suppressed").toObject() : QJsonObject();
-}
-bool suppressedMain(const SessionInfo &s) {
-    const auto main = suppressed(s).value("main_attention").toObject();
+bool suppressedMain(const SessionInfo &s, const QJsonObject &baseline) {
+    const auto main = baseline.value("main_attention").toObject();
     return !main.isEmpty() && main.value("run_id").toString() == s.runId
         && SessionNotifications::matches(main, s.phase, s.attentionId, s.attentionStarted);
 }
-bool suppressedChild(const SessionInfo &s, const QString &id, const QJsonObject &child) {
-    const auto saved = suppressed(s).value("child_attention").toObject().value(id).toObject();
+bool suppressedChild(const QJsonObject &baseline, const QString &id, const QJsonObject &child) {
+    const auto saved = baseline.value("child_attention").toObject().value(id).toObject();
     return !saved.isEmpty() && SessionNotifications::matches(saved, SessionNotifications::childPhase(child),
         SessionNotifications::childRequest(child), SessionNotifications::childStarted(child));
 }
@@ -79,6 +76,12 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
         if (retained != previous) m_hosts[host] = retained;
         return changes;
     }
+    // A downgraded/offline host loses write authority, not its last validated
+    // suppression baseline. Validate once per row, independently of capability.
+    QHash<const SessionInfo *, QJsonObject> baselines;
+    for (const auto &s : box.sessions)
+        if (SessionNotifications::valid(s.notificationPreferences, s.conversationId))
+            baselines.insert(&s, s.notificationPreferences.value("suppressed").toObject());
     QJsonObject current;
     const auto notice = [&](const SessionInfo &s, const QString &key, const QString &phase,
                             const QString &request, const QString &reason, bool reply = false, bool silent = false) {
@@ -110,14 +113,15 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             changes.raised.append({token, reply ? QObject::tr("Zerus — New reply") : QObject::tr("Zerus — Needs attention"), body});
     };
     for (const auto &s : box.sessions) {
+        const auto baseline = baselines.value(&s);
         // Acknowledged here or on another device: the existing clear path withdraws it.
         if (s.needsAction()) {
             const QString reason = s.phase == "approval" ? QObject::tr("Approval needed")
                 : s.phase == "input" ? QObject::tr("Input needed")
                 : !s.recovery.value("reason").toString().isEmpty() ? concise(s.recovery.value("reason").toString(), 240)
                 : !s.activityDetail.isEmpty() ? concise(s.activityDetail, 240) : QObject::tr("Agent needs attention");
-            notice(s, identity(s), s.phase, s.sharedNotifications ? notificationRequest(s.attentionId, s.attentionStarted) : s.attentionId,
-                reason, false, s.attentionAcknowledged || suppressedMain(s));
+            notice(s, identity(s), s.phase, baselines.contains(&s) ? notificationRequest(s.attentionId, s.attentionStarted) : s.attentionId,
+                reason, false, s.attentionAcknowledged || suppressedMain(s, baseline));
         }
         // Read state comes from FleetState, not the raw CLI snapshot. Replies
         // belong to conversations so a rename/resume does not repeat a banner.
@@ -132,7 +136,7 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             // Hosts do not report routine ticks of a recurring scheduled job as
             // replies; consume any that arrive. The reply after the schedule
             // ends, or once its count is known, notifies as usual.
-            if (s.muted || suppressed(s).value("reply_id").toString() == s.replyId || (idle && s.replyScheduled && s.recurringSchedules > 0))
+            if (s.muted || baseline.value("reply_id").toString() == s.replyId || (idle && s.replyScheduled && s.recurringSchedules > 0))
                 notice(s, key, "reply", s.replyId, {}, true, true);
             else if (idle && (!s.replyScheduled || s.recurringSchedules == 0))
                 notice(s, key, "reply", s.replyId, QObject::tr("Agent has a new reply"), true);
@@ -147,9 +151,9 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             const auto request = SessionNotifications::childRequest(child);
             const auto label = child.value("label").toString(child.value("name").toString(it.key()));
             notice(s, "child:" + identity(s) + ':' + it.key(), phase,
-                s.sharedNotifications ? notificationRequest(request, SessionNotifications::childStarted(child)) : request,
+                baselines.contains(&s) ? notificationRequest(request, SessionNotifications::childStarted(child)) : request,
                 QObject::tr("Subagent %1: %2").arg(concise(label, 100), phase == "approval" ? QObject::tr("Approval needed") : QObject::tr("Input needed")),
-                false, s.attentionAcknowledged || suppressedChild(s, it.key(), child));
+                false, s.attentionAcknowledged || suppressedChild(baseline, it.key(), child));
         }
     }
     // Optional questions belong to conversations, like replies. Every listed row
@@ -170,12 +174,8 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
     for (auto it = optional.begin(); it != optional.end(); ++it) {
         auto old = previous.value(it.key()).toObject();
         const auto &s = *it->session;
-        const auto baseline = suppressed(s).value("optional_question_ids").toArray();
-        auto observed = old.value("seen").toArray();
-        for (const auto &id : baseline) if (!observed.contains(id)) observed.append(id);
-        while (observed.size() > SeenQuestions) observed.removeFirst();
+        const auto baseline = baselines.value(&s).value("optional_question_ids").toArray();
         if (!baseline.isEmpty()) {
-            old["seen"] = observed;
             const auto posted = target(old.value("token").toString());
             if (posted.value("host").toString() == host && posted.value("agent").toString() == s.cmd
                 && posted.value("conversation").toString() == s.conversationId && baseline.contains(posted.value("question"))) {
@@ -197,6 +197,9 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             known.insert(id.toString());
             if (!it->ids.contains(id.toString())) seen << id.toString();
         }
+        // Baseline membership suppresses old questions without evicting a newer
+        // observed question from the separately bounded seen-ID history.
+        for (const auto &id : baseline) known.insert(id.toString());
         for (const auto &id : it->ids) if (!known.contains(id)) fresh << id;
         seen = seen.mid(qMax<qsizetype>(0, seen.size() + it->ids.size() - SeenQuestions)) + it->ids;
         QJsonObject entry{{"seen", QJsonArray::fromStringList(seen)}};

@@ -38,6 +38,7 @@ inline bool attention(const QJsonObject &value, bool main) {
                           : QStringList{"phase", "request_id", "started_at"})) return false;
     if (main && !identity(value.value("run_id"), 128)) return false;
     if (!text(value.value("phase"), 256) || !text(value.value("request_id"), 65536, false, true) || !started(value.value("started_at"))) return false;
+    if (value.value("request_id").toString().isEmpty() && value.value("started_at").isNull()) return false;
     return main || QStringList{"approval", "input", "attention"}.contains(value.value("phase").toString());
 }
 inline bool valid(const QJsonObject &value, const QString &conversation) {
@@ -79,7 +80,7 @@ inline QJsonValue positive(const QJsonValue &value) {
 }
 inline bool matches(const QJsonObject &saved, const QString &phase, const QString &request, const QJsonValue &at) {
     return saved.value("phase").toString() == phase && saved.value("request_id").toString() == request
-        && (!request.isEmpty() || saved.value("started_at") == positive(at));
+        && (!request.isEmpty() || (!positive(at).isNull() && saved.value("started_at") == positive(at)));
 }
 inline QString childPhase(const QJsonObject &child) {
     const auto display = child.value("display_state").toString();

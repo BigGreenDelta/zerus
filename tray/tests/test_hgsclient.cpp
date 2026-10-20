@@ -38,6 +38,7 @@ private slots:
     void parsesSharedReadState();
     void parsesSharedNotificationsAndRejectsMalformedPreferences();
     void notificationsUseStdinAndRequireExactCasConfirmation();
+    void notificationsRequireLocalCapabilityEvenForANewPeer();
     void readMarksUseStdinAndAcceptOnlyHostAnswers();
     void cliVersionUsesConfiguredExecutableAndRefreshes();
     void parsesSavedSessions();
@@ -1879,6 +1880,8 @@ void TestHgsClient::parsesSharedNotificationsAndRejectsMalformedPreferences()
     QJsonArray excessive;for(int i=0;i<65;++i)excessive.append(QString::number(i).rightJustified(3,'0'));
     changeBaseline("optional_question_ids",excessive);
     changeBaseline("main_attention",QJsonObject{{"run_id","run"},{"phase","approval"},{"request_id","id"},{"started_at",0}});
+    changeBaseline("main_attention",QJsonObject{{"run_id","run"},{"phase","approval"},{"request_id",""},{"started_at",QJsonValue()}});
+    changeBaseline("child_attention",QJsonObject{{"child",QJsonObject{{"phase","input"},{"request_id",""},{"started_at",QJsonValue()}}}});
     changeBaseline("main_attention",QJsonObject{{"run_id","run\n"},{"phase","approval"},{"request_id","id"},{"started_at",QJsonValue()}});
     changeBaseline("main_attention",QJsonObject{{"run_id","run"},{"phase","approval\n"},{"request_id","id"},{"started_at",QJsonValue()}});
     changeBaseline("main_attention",QJsonObject{{"run_id","run"},{"phase","approval"},{"request_id","id\t"},{"started_at",QJsonValue()}});
@@ -1906,6 +1909,9 @@ void TestHgsClient::notificationsUseStdinAndRequireExactCasConfirmation()
     QVERIFY(FakeCli::install(path,R"PY(#!/usr/bin/env python3
 import json,pathlib,sys
 root=pathlib.Path(__file__).parent
+if sys.argv[1:]==['--help']:
+ print('session-notifications-v1')
+ sys.exit(0)
 payload=json.load(sys.stdin)
 with (root/'calls.jsonl').open('a') as output:output.write(json.dumps({'argv':sys.argv[1:],'payload':payload})+'\n')
 reply=json.loads((root/'reply.json').read_text())
@@ -1944,6 +1950,61 @@ sys.exit(reply['code'])
         before=done.size();client.requestNotifications({},name,bad);QTRY_COMPARE(done.size(),before+1);QVERIFY(!done.last()[1].toBool());
     }
     QVERIFY(calls.open(QIODevice::ReadOnly));QCOMPARE(calls.readAll(),recorded); // Invalid admission never invokes a helper; no automatic replay.
+}
+
+void TestHgsClient::notificationsRequireLocalCapabilityEvenForANewPeer()
+{
+    QTemporaryDir dir;QVERIFY(dir.isValid());const auto path=dir.filePath("hgs");
+    QVERIFY(FakeCli::install(path,R"PY(#!/usr/bin/env python3
+import json,pathlib,sys
+root=pathlib.Path(__file__).parent
+args=sys.argv[1:]
+with (root/'invocations.jsonl').open('a') as output:output.write(json.dumps(args)+'\n')
+if args==['--help']:
+ config=json.loads((root/'help.json').read_text())
+ sys.stdout.write(config['stdout'])
+ sys.stderr.write(config['stderr'])
+ sys.exit(config['code'])
+if args==['@peer','ls','--json','--no-archives']:
+ print((root/'listing.json').read_text())
+ sys.exit(0)
+(root/'mutation-dispatched').write_text(json.dumps(args))
+print((root/'reply.json').read_text())
+)PY"));
+    const auto write=[&](const QString &name,const QJsonObject &value){return FakeCli::replace(dir.filePath(name),QJsonDocument(value).toJson());};
+    const auto pref=notificationValue("conversation",false,0);
+    QVERIFY(write("listing.json",QJsonObject{{"host","peer"},{"ok",true},{"sessions",QJsonArray{QJsonObject{
+        {"name","codex/project/session"},{"cmd","codex"},{"run_id","run"},{"conversation_id","conversation"},{"notification_preferences",pref}}}}}));
+    HgsClient client(FakeCli::program(path));QList<BoxState> peers;
+    connect(&client,&HgsClient::peerReady,this,[&](const BoxState &box){peers<<box;});
+    client.requestPeer("peer");QTRY_COMPARE(peers.size(),1);
+    QVERIFY(peers.first().sessions.first().sharedNotifications); // An old local CLI can forward a new peer's preferences.
+    QSignalSpy done(&client,&HgsClient::notificationsFinished);
+    const QJsonObject payload{{"run_id","run"},{"conversation_id","conversation"},{"muted",true},{"expected_revision",0}};
+    const QList<QJsonObject> refused{
+        {{"stdout","old help\n"},{"stderr",""},{"code",0}},
+        {{"stdout","notifications (session-notifications-v1)\n"},{"stderr",""},{"code",0}},
+        {{"stdout"," session-notifications-v1\n"},{"stderr",""},{"code",0}},
+        {{"stdout","session-notifications-v1-extra\n"},{"stderr",""},{"code",0}},
+        {{"stdout",""},{"stderr","session-notifications-v1\n"},{"code",0}},
+        {{"stdout","session-notifications-v1\n"},{"stderr",""},{"code",1}},
+        {{"stdout",QString(256*1024+1,'x')},{"stderr",""},{"code",0}}};
+    for(const auto &help:refused) {
+        QVERIFY(write("help.json",help));const int before=done.size();
+        client.requestNotifications("peer","codex/project/session",payload);QTRY_COMPARE(done.size(),before+1);
+        QVERIFY(!done.last()[1].toBool());QVERIFY(!done.last()[3].toString().isEmpty());
+        QVERIFY(!QFileInfo::exists(dir.filePath("mutation-dispatched")));
+    }
+    QFile calls(dir.filePath("invocations.jsonl"));QVERIFY(calls.open(QIODevice::ReadOnly));
+    const auto rows=calls.readAll().trimmed().split('\n');calls.close();QCOMPARE(rows.size(),refused.size()+1);
+    for(int i=1;i<rows.size();++i)QCOMPARE(QJsonDocument::fromJson(rows[i]).array(),QJsonArray{"--help"});
+    QVERIFY(write("help.json",{{"stdout","help\r\nsession-notifications-v1\r\n"},{"stderr",""},{"code",0}}));
+    QVERIFY(write("reply.json",{{"ok",true},{"applied",true},{"run_id","run"},{"conversation_id","conversation"},
+        {"preferences",notificationValue("conversation",true,1)}}));
+    const int before=done.size();client.requestNotifications("peer","codex/project/session",payload);
+    QTRY_COMPARE(done.size(),before+1);QVERIFY(done.last()[1].toBool());
+    QFile mutation(dir.filePath("mutation-dispatched"));QVERIFY(mutation.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(mutation.readAll()).array(),(QJsonArray{"@peer","notifications","codex/project/session","--json"}));
 }
 
 void TestHgsClient::parsesSharedReadState()

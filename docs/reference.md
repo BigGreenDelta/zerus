@@ -446,7 +446,8 @@ host snapshot. A crossed-out bell and neutral gray or white attention and unread
 badges identify a muted session. The preference survives restart, rename and
 resume of the same conversation. Muting preserves the agent's actual state,
 unread replies, questions, approvals and review reminders. The menu requires an
-online host with shared notification preferences; older hosts show an explanation
+online host with shared notification preferences and a configured local `hgs`
+that advertises `session-notifications-v1`; older hosts show an explanation
 instead of a separate local-only preference. A pending or failed change never
 replaces the last confirmed host value.
 If a host later becomes unavailable or stops reporting this feature, its last

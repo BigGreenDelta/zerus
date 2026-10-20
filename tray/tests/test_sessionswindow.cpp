@@ -5584,7 +5584,8 @@ void TestSessionsWindow::sessionMuteMenuPersistsWithoutAcknowledging()
         {"revision",revision},{"suppressed",QJsonObject{{"reply_id",QJsonValue()},{"attention_signature",QJsonValue()},
         {"optional_question_ids",QJsonArray()},{"main_attention",QJsonValue()},{"child_attention",QJsonObject()}}}}; };
     const auto fixture=m_dir->filePath("shared-notifications");QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
-    const QByteArray behavior=R"PY(elif c=='notifications':
+    const QByteArray behavior=R"PY(elif c=='--help':print('session-notifications-v1')
+elif c=='notifications':
  import pathlib,time
  payload=json.load(sys.stdin)
  with open(__file__+'.calls','a') as output:output.write(json.dumps({'argv':sys.argv[1:],'payload':payload})+'\n')

@@ -2056,6 +2056,10 @@ Sessions</source>
   <context>
     <name>HgsClient</name>
     <message>
+      <source>Update the configured local hgs to support shared notification preferences.</source>
+      <translation>Обновите настроенный локальный hgs для поддержки общих настроек уведомлений.</translation>
+    </message>
+    <message>
       <source>The session notification identity is unavailable. Refresh the session.</source>
       <translation>Данные сессии для настройки уведомлений недоступны. Обновите сессию.</translation>
     </message>

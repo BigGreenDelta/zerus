@@ -91,13 +91,14 @@ void keepNotificationPreferences(QList<SessionInfo> &sessions, const QList<Sessi
 {
     QHash<QString, const SessionInfo *> known;
     for (const auto &old : before) if (SessionNotifications::valid(old.notificationPreferences, old.conversationId)) {
-        const auto key = old.conversationId; // The caller already scopes this list to one host.
+        const auto key = QString::fromUtf8(QJsonDocument(QJsonArray{old.cmd, old.conversationId}).toJson(QJsonDocument::Compact)); // Host-scoped by the caller.
         const auto found = known.value(key);
         if (!found || SessionNotifications::revision(found->notificationPreferences.value("revision"))
                 < SessionNotifications::revision(old.notificationPreferences.value("revision"))) known[key] = &old;
     }
     for (auto &next : sessions) {
-        const auto old = known.value(next.conversationId); if (!old) continue;
+        const auto key = QString::fromUtf8(QJsonDocument(QJsonArray{next.cmd, next.conversationId}).toJson(QJsonDocument::Compact));
+        const auto old = known.value(key); if (!old) continue;
         if (!next.sharedNotifications) {
             // Keep the last host-confirmed display through downgrade/unknown
             // snapshots, while leaving command authority explicitly disabled.

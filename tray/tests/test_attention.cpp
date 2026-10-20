@@ -14,6 +14,7 @@ QJsonObject sharedPreferences(const QString &conversation, bool muted, qint64 re
 #include "AttentionTracker.h"
 #include "FleetState.h"
 #include "SessionPresentation.h"
+#include "SessionNotifications.h"
 
 class TestAttention : public QObject {
     Q_OBJECT
@@ -49,6 +50,10 @@ private slots:
     void sharedUnmuteSuppressesEventsMissedWhileOffline();
     void sharedSuppressionKeepsTimestampAndRunBoundaries();
     void sharedSuppressionRetainsRawDshMultiRequestIdentity();
+    void sharedSuppressionSurvivesCapabilityDowngrade();
+    void sharedOptionalBaselineDoesNotEvictNewObservedQuestions();
+    void sharedPreferencesDoNotCrossProviders();
+    void sharedTimestampSuppressionRequiresKnownCurrentTime();
 };
 
 void TestAttention::muteWithdrawsOnlyMatchingOfflineBannersWithoutReplay()
@@ -259,6 +264,89 @@ void TestAttention::sharedSuppressionRetainsRawDshMultiRequestIdentity()
     BoxState box;box.ok=true;box.sessions={s};AttentionTracker tracker;
     QVERIFY(tracker.observe({},box,100,false).raised.isEmpty());
     box.sessions[0].attentionId="request-a\nrequest-c";QCOMPARE(tracker.observe({},box,101,false).raised.size(),1);
+}
+
+void TestAttention::sharedSuppressionSurvivesCapabilityDowngrade()
+{
+    for (const bool withIds : {true, false}) {
+        SessionInfo s;s.name="codex/project/session";s.cmd="codex";s.runId="run";s.conversationId="conversation";
+        s.state="running";s.activity="waiting";s.phase="approval";s.attentionId=withIds?"main-old":"";s.attentionStarted=10;
+        s.sharedNotifications=true;
+        const auto childId=withIds?QString("child-old"):QString();
+        s.subagents={{"child",QJsonObject{{"state","input"},{"attention_id",childId},{"attention_started",20}}}};
+        auto prefs=sharedPreferences(s.conversationId,false,2);auto baseline=prefs["suppressed"].toObject();
+        baseline["main_attention"]=QJsonObject{{"run_id",s.runId},{"phase",s.phase},{"request_id",s.attentionId},{"started_at",10}};
+        baseline["child_attention"]=QJsonObject{{"child",QJsonObject{{"phase","input"},{"request_id",childId},{"started_at",20}}}};
+        prefs["suppressed"]=baseline;s.notificationPreferences=prefs;
+        BoxState box;box.host="peer";box.ok=true;box.sessions={s};FleetState fleet;fleet.setPeer(box,0);AttentionTracker tracker;
+        QVERIFY(tracker.observe("peer",*fleet.peer("peer"),100,false).raised.isEmpty());
+        box.sessions[0].sharedNotifications=false;box.sessions[0].notificationPreferences={};
+        fleet.setPeer(box,1);const auto unknown=*fleet.peer("peer");
+        QVERIFY(!unknown.sessions.first().sharedNotifications);QVERIFY(!unknown.sessions.first().muted);
+        QCOMPARE(unknown.sessions.first().notificationPreferences,prefs);
+        QVERIFY(tracker.observe("peer",unknown,101,false).raised.isEmpty());
+        fleet.setPeer(box,2);QVERIFY(tracker.observe("peer",*fleet.peer("peer"),102,false).raised.isEmpty());
+        if(withIds)box.sessions[0].attentionId="main-new";else box.sessions[0].attentionStarted=11;
+        fleet.setPeer(box,3);QCOMPARE(tracker.observe("peer",*fleet.peer("peer"),103,false).raised.size(),1);
+        QVERIFY(tracker.observe("peer",*fleet.peer("peer"),104,false).raised.isEmpty());
+        auto child=box.sessions[0].subagents["child"].toObject();
+        if(withIds)child["attention_id"]="child-new";else child["attention_started"]=21;
+        box.sessions[0].subagents["child"]=child;fleet.setPeer(box,4);
+        QCOMPARE(tracker.observe("peer",*fleet.peer("peer"),105,false).raised.size(),1);
+        AttentionTracker restarted(tracker.state());
+        QVERIFY(restarted.observe("peer",*fleet.peer("peer"),106,false).raised.isEmpty());
+    }
+}
+
+void TestAttention::sharedOptionalBaselineDoesNotEvictNewObservedQuestions()
+{
+    SessionInfo s;s.name="codex/project/session";s.cmd="codex";s.runId="run";s.conversationId="conversation";
+    s.state="running";s.phase="working";s.activity="busy";s.sharedNotifications=true;
+    s.optionalQuestionsReported=true;s.optionalQuestions=1;s.optionalQuestionIds={"q-new"};
+    s.notificationPreferences=sharedPreferences(s.conversationId,false,0);
+    BoxState box;box.ok=true;box.sessions={s};AttentionTracker tracker;tracker.setOptionalQuestions(true);
+    QCOMPARE(tracker.observe({},box,100,false).raised.size(),1);
+    QJsonArray oldIds;for(int i=0;i<64;++i)oldIds.append(QString("old-%1").arg(i,2,10,QChar('0')));
+    auto prefs=sharedPreferences(s.conversationId,false,2);auto baseline=prefs["suppressed"].toObject();
+    baseline["optional_question_ids"]=oldIds;prefs["suppressed"]=baseline;box.sessions[0].notificationPreferences=prefs;
+    QVERIFY(tracker.observe({},box,101,false).raised.isEmpty());
+    auto seen=tracker.state().value("").toObject()["question:codex:conversation"].toObject()["seen"].toArray();
+    QVERIFY(seen.contains("q-new"));QVERIFY(seen.size()<=64);
+    box.sessions[0].optionalQuestionIds.append("old-00");box.sessions[0].optionalQuestions=2;
+    QVERIFY(tracker.observe({},box,102,false).raised.isEmpty()); // Baseline membership still suppresses its old questions.
+    box.sessions[0].optionalQuestionIds.append("q-newer");box.sessions[0].optionalQuestions=3;
+    QCOMPARE(tracker.observe({},box,103,false).raised.size(),1);
+    QVERIFY(tracker.observe({},box,104,false).raised.isEmpty());
+}
+
+void TestAttention::sharedPreferencesDoNotCrossProviders()
+{
+    SessionInfo codex;codex.name="codex/project/session";codex.cmd="codex";codex.runId="codex-run";codex.conversationId="opaque-id";
+    codex.sharedNotifications=true;codex.muted=true;codex.notificationPreferences=sharedPreferences("opaque-id",true,7);
+    SessionInfo kimi=codex;kimi.name="kimi/project/session";kimi.cmd="kimi";kimi.runId="kimi-run";
+    kimi.muted=false;kimi.notificationPreferences=sharedPreferences("opaque-id",false,0);
+    BoxState box;box.ok=true;box.sessions={codex,kimi};FleetState fleet;fleet.setLocal(box,0);
+    // Same opaque conversation ID is independent for each provider, including on downgrade.
+    for(auto &session:box.sessions){session.sharedNotifications=false;session.notificationPreferences={};session.muted=false;}
+    fleet.setLocal(box,1);const auto sessions=fleet.local().sessions;
+    QVERIFY(sessions[0].muted);QVERIFY(!sessions[1].muted);
+    QCOMPARE(sessions[0].notificationPreferences,codex.notificationPreferences);
+    QCOMPARE(sessions[1].notificationPreferences,kimi.notificationPreferences);
+    box.sessions={kimi};box.sessions[0].sharedNotifications=false;box.sessions[0].notificationPreferences={};
+    FleetState onlyCodex;BoxState prior;prior.ok=true;prior.sessions={codex};onlyCodex.setLocal(prior,0);onlyCodex.setLocal(box,1);
+    QVERIFY(!onlyCodex.local().sessions.first().muted);QVERIFY(onlyCodex.local().sessions.first().notificationPreferences.isEmpty());
+}
+
+void TestAttention::sharedTimestampSuppressionRequiresKnownCurrentTime()
+{
+    const QJsonObject valid{{"phase","input"},{"request_id",""},{"started_at",10}};
+    QVERIFY(SessionNotifications::matches(valid,"input",{},10));
+    for(const auto &unknown:QList<QJsonValue>{QJsonValue(),0,-1})
+        QVERIFY(!SessionNotifications::matches(valid,"input",{},unknown));
+    auto invalid=valid;invalid["started_at"]=QJsonValue();
+    QVERIFY(!SessionNotifications::attention(invalid,false));
+    QVERIFY(!SessionNotifications::matches(invalid,"input",{},QJsonValue()));
+    invalid["started_at"]=0;QVERIFY(!SessionNotifications::attention(invalid,false));
 }
 
 namespace {
