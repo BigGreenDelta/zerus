@@ -386,8 +386,9 @@ final class TasksModel {
             case .refused(let reason): reason
             case .uncertain(let reason): "It may have been sent: \(reason)"
             }
-            taskBusy = false
+            // Held before it stops being busy, so Send now never reads as ready for a task that may have been sent.
             heldSends = await taskSync.heldTasks()
+            taskBusy = false
             refreshTasks()
         }
     }

@@ -135,6 +135,11 @@ public struct TaskSyncError: Error, Equatable, CustomStringConvertible {
         case let error as TaskSyncError: error.message
         case let error as RelayError: error.message
         case let error as ZerusError: error.message
+        // UniFFI's own description names the case; the person reads the replica's message.
+        case let error as ReplicaError:
+            switch error {
+            case .Refused(let message), .Failed(let message): message
+            }
         case let error as LocalizedError: error.errorDescription ?? "\(error)"
         default: "\(error)"
         }

@@ -112,6 +112,14 @@ final class TaskSyncTests: XCTestCase {
         XCTAssertTrue(computer.envelopes.isEmpty)
     }
 
+    func testAReplicaRefusalReadsAsItsMessage() {
+        // The replica's own wording reaches the notice, as on Android.
+        XCTAssertEqual(TaskSyncError.reason(ReplicaError.Refused(message: "a task cannot go from To do to Done")),
+                       "a task cannot go from To do to Done")
+        XCTAssertEqual(TaskSyncError.reason(ReplicaError.Failed(message: "the project's tasks are busy; try again")),
+                       "the project's tasks are busy; try again")
+    }
+
     func testASlowExchangeStopsAtItsDeadline() async throws {
         let computer = FakeComputer(), replicas = try replicas()
         try computer.store.filed("Add rate limiting")

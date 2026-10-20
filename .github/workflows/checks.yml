@@ -392,7 +392,7 @@ jobs:
     needs: source
     if: needs.source.outputs.run_macos == 'true'
     runs-on: macos-15
-    timeout-minutes: 40
+    timeout-minutes: 60
     env:
       SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
     steps:
@@ -404,7 +404,12 @@ jobs:
         run: bash mobile/ios/scripts/select-xcode.sh
       - name: Rust for the project task replica
         run: rustup toolchain install 1.99.1 --profile minimal --target aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
+      # This check builds five Apple slices on every run: without the release profile's
+      # whole-program optimisation, which only TestFlight's smaller binary needs.
       - name: Project task replica library
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
         run: RUSTUP_TOOLCHAIN=1.99.1 bash mobile/ios/scripts/build-replica.sh
       - name: ZerusKit tests
         working-directory: mobile/ios/ZerusKit
