@@ -597,7 +597,17 @@ async fn the_catalog_wire_bound_counts_escaped_peer_names() {
     }
     // Both the projected catalog and HTTP envelope count twelve bytes per
     // escaped emoji and refuse before returning an oversized phone catalog.
-    assert_eq!(fleet.f.store.computers(&fleet.f.phone).await.unwrap_err().0.as_u16(),413);
+    assert_eq!(
+        fleet
+            .f
+            .store
+            .computers(&fleet.f.phone)
+            .await
+            .unwrap_err()
+            .0
+            .as_u16(),
+        413
+    );
     let server = Server::start(&fleet.f.store).await;
     let response = reqwest::Client::new()
         .get(server.at("/v1/computers"))

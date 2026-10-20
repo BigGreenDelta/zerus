@@ -1542,7 +1542,14 @@ async fn maintenance_rechecks_most_overdue_workspaces_first() {
     // Delivery now rechecks current state after acquiring the workspace lock.
     // This ordering fixture needs a live request, not an unknown snapshot.
     let snapshot = canonical(&json!({"sessions":[{"name":"example","run_id":"r","conversation_id":"c","phase":"input","activity":"waiting"}]})).unwrap();
-    f.store.db.exec("UPDATE nodes SET snapshot=?,last_seen=? WHERE id=?",args![&snapshot,at,&asleep.1]).await.unwrap();
+    f.store
+        .db
+        .exec(
+            "UPDATE nodes SET snapshot=?,last_seen=? WHERE id=?",
+            args![&snapshot, at, &asleep.1],
+        )
+        .await
+        .unwrap();
     let insert = "INSERT INTO alert_candidates(workspace_id,computer_id,session,kind,run_id,conversation_id,created,next_at) VALUES(?,?,'example','attention','r','c',?,?)";
     for (w, node) in &spaces[..33] {
         f.store

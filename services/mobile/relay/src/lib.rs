@@ -10,13 +10,13 @@ pub mod error;
 #[cfg(feature = "server")]
 pub mod http;
 pub mod json;
+#[cfg(feature = "server")]
+pub mod notification_highwater;
 pub mod protocol;
 #[cfg(feature = "server")]
 pub mod push;
 #[cfg(feature = "server")]
 pub mod registry;
-#[cfg(feature = "server")]
-pub mod notification_highwater;
 mod speech_config;
 #[cfg(feature = "server")]
 pub mod store;
