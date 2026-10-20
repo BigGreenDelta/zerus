@@ -804,6 +804,27 @@ explicit Start OpenCode action with its allowlisted catalog. Each test stops its
 private service with `opencode service stop`; the suite then fails if any process
 carrying its private root outlived it.
 
+The macOS Claude matrix schedules its unchanged named unittest suites across two
+private Python workers under the same original 900-second wall end, including
+discovery, both starts, collection and a ten-second cleanup reserve. Each worker
+gets short private HOME/XDG/TMP/state/config paths before importing fixtures and
+cannot write shared source bytecode. The workers read same-byte, mode-0500 copies
+of the already reviewed CLI and Claude image; neither caller binary is chmodded.
+Both workers must discover the same full ordered suite inventory before either
+runs. Whole original suite subtrees keep every occurrence, including imported
+duplicate Clear coverage. Qualification requires the exact assigned START/END
+orders, zero failures/errors/skips, agreeing result artifacts, and both direct
+worker exits. Per-worker raw logs and `default.workers.json` retain this proof;
+only the validated aggregate uses `ZERUS_NATIVE_RESULT`.
+
+Timeout, cancellation, partial startup, incomplete reports and cleanup errors fail
+the gate without replay. Cooperative cancellation runs the fixtures' existing
+owned cleanups inside that same wall end. Killing a Python worker never proves
+that a detached tmux/provider descendant exited; failed or unknown private roots
+are retained. This scheduling change identifies no particular cause of slow
+native startup, establishes no opaque provider-global-service isolation, and
+changes no Linux, Windows, Codex or OpenCode suite or assertion.
+
 Real native checks run at 95x47 and 110x35 terminal sizes with animations explicitly
 enabled and disabled. Animated 95x47 checks require the actual released settled
 idle logo before inspecting a Terminal clear; unknown or partial logo frames do
