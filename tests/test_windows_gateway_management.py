@@ -290,5 +290,107 @@ class ManagementTests(unittest.TestCase):
         self.assertFalse(manager.may_remove_root)
 
 
+    def test_both_pipe_close_errors_are_retained_without_publishing_success(self):
+        calls = []
+        errors = {name: OSError("synthetic " + name + " close") for name in ("stdout", "stderr")}
+        class Pipe(io.BytesIO):
+            def __init__(self, name):
+                super().__init__()
+                self.name = name
+            def close(self):
+                if self.closed:
+                    return
+                calls.append(self.name)
+                super().close()
+                raise errors[self.name]
+        process = Process()
+        process.stdout, process.stderr = Pipe("stdout"), Pipe("stderr")
+        manager = capture.ManagementCapture(self.root, lambda pipe: None)
+        with mock.patch.object(capture.subprocess, "Popen", return_value=process):
+            with self.assertRaises(OSError) as caught:
+                manager.run(["memory"], {}, {}, 0)
+        self.assertIs(caught.exception, errors["stdout"])
+        self.assertEqual(calls, ["stdout", "stderr"])
+        self.assertTrue(any("manager stderr close" in note for note in caught.exception.__notes__))
+        self.assertTrue(manager.failed)
+        self.assertFalse(manager.pipes_ended)
+        self.assertFalse(manager.may_remove_root)
+        self.assertEqual(process.kills, 0)
+
+    def test_each_private_file_close_error_keeps_failure_and_closes_later_files(self):
+        for target in ("stdin.json", "stdout", "stderr", "truncated.json"):
+            with self.subTest(target=target):
+                calls, files = [], {}
+                failure = OSError("synthetic private close")
+                class File(io.BytesIO):
+                    def __init__(self, name):
+                        super().__init__()
+                        self.name = name
+                    def close(self):
+                        if self.closed:
+                            return
+                        calls.append(self.name)
+                        self.retained = self.getvalue()
+                        super().close()
+                        if self.name == target:
+                            raise failure
+                def own_file(path):
+                    stream = File(path.name)
+                    files[path.name] = stream
+                    return stream
+                process = Process()
+                reader = (lambda pipe: b"x" * 65537) if target == "truncated.json" else (lambda pipe: None)
+                manager = capture.ManagementCapture(self.root, reader)
+                with mock.patch.object(capture.subprocess, "Popen", return_value=process), \
+                        mock.patch.object(capture, "exclusive", side_effect=own_file):
+                    if target == "truncated.json":
+                        with self.assertRaisesRegex(RuntimeError, "retained prefix truncated") as caught:
+                            manager.run(["memory"], {}, {}, 0)
+                        self.assertEqual(len(files["stdout"].retained), 65536)
+                    else:
+                        with self.assertRaises(OSError) as caught:
+                            manager.run(["memory"], {}, {}, 0)
+                        self.assertIs(caught.exception, failure)
+                expected = (["truncated.json"] if target == "truncated.json" else []) + ["stderr", "stdout", "stdin.json"]
+                self.assertEqual(calls, expected)
+                self.assertTrue(all(stream.closed for stream in files.values()))
+                self.assertTrue(process.stdout.closed and process.stderr.closed)
+                self.assertTrue(any("private " + target + " close" in note for note in caught.exception.__notes__))
+                self.assertTrue(manager.failed)
+                self.assertFalse(manager.pipes_ended)
+                self.assertFalse(manager.may_remove_root)
+
+    def test_original_timeout_survives_pipe_and_private_file_close_errors(self):
+        calls = []
+        original = subprocess.TimeoutExpired(["memory"], 15)
+        class Closing(io.BytesIO):
+            def __init__(self, name):
+                super().__init__()
+                self.name = name
+            def close(self):
+                if self.closed:
+                    return
+                calls.append(self.name)
+                super().close()
+                if self.name in ("pipe-stdout", "file-stderr"):
+                    raise OSError("synthetic close failure")
+        process = Process(waits=[original])
+        process.stdout, process.stderr = Closing("pipe-stdout"), Closing("pipe-stderr")
+        manager = capture.ManagementCapture(self.root)
+        with mock.patch.object(capture.subprocess, "Popen", return_value=process), \
+                mock.patch.object(capture, "exclusive", side_effect=lambda path: Closing("file-" + path.name)):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                manager.run(["memory"], {}, {}, 0)
+        self.assertIs(caught.exception, original)
+        self.assertEqual(calls, ["pipe-stdout", "pipe-stderr", "file-stderr", "file-stdout", "file-stdin.json"])
+        self.assertEqual(process.kills, 1)
+        self.assertEqual(process.waits[1], 5)
+        self.assertTrue(any("manager stdout close" in note for note in original.__notes__))
+        self.assertTrue(any("private stderr close" in note for note in original.__notes__))
+        self.assertTrue(manager.exited)
+        self.assertTrue(manager.failed)
+        self.assertFalse(manager.may_remove_root)
+
+
 if __name__ == "__main__":
     unittest.main()

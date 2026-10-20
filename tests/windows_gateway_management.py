@@ -67,71 +67,96 @@ class ManagementCapture:
             original.add_note("direct manager exit UNKNOWN: " + type(error).__name__)
 
     def run(self, argv, payload, env, creationflags):
-        # Regular private stdin avoids a separate potentially blocked writer.
-        # JSON uses its default ASCII escaping, exactly as the prior run(input=).
-        self.failed = True  # A partial file/setup failure also retains evidence.
-        with exclusive(self.folder / "stdin.json") as source, \
-                exclusive(self.folder / "stdout") as out, exclusive(self.folder / "stderr") as err:
+        # Keep failure latched until the command, EOF, deadline AND every close
+        # succeed. Manual ownership lets every finalizer run without replacing
+        # an earlier timeout/error with a later context-manager close error.
+        self.failed = True
+        files, primary, result = [], None, None
+        def own_file(name):
+            stream = exclusive(self.folder / name)
+            files.append((name, stream))
+            return stream
+        def close_error(label, error):
+            nonlocal primary
+            if primary is None:
+                primary = error
+            primary.add_note(label + ": " + type(error).__name__)
+        try:
+            # JSON keeps its prior ASCII escaping; regular stdin needs no writer.
+            source, out, err = own_file("stdin.json"), own_file("stdout"), own_file("stderr")
             source.write(json.dumps(payload or {}).encode("ascii"))
             source.flush()
             source.seek(0)
-            try:
-                self.process = subprocess.Popen(argv, stdin=source, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, env=env, creationflags=creationflags)
-                self.exited = False
-                deadline = time.monotonic() + SECONDS
-                def before_deadline():
-                    if time.monotonic() >= deadline:
+            self.process = subprocess.Popen(argv, stdin=source, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=env, creationflags=creationflags)
+            self.exited = False
+            deadline = time.monotonic() + SECONDS
+            def before_deadline():
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(argv, SECONDS)
+            self.process.wait(timeout=max(0, deadline - time.monotonic()))
+            self.exited = True
+            before_deadline()
+            buffers = [bytearray(), bytearray()]
+            pending = [("stdout", self.process.stdout, out, buffers[0]),
+                       ("stderr", self.process.stderr, err, buffers[1])]
+            while pending:
+                remaining = []
+                for name, pipe, retained, buffer in pending:
+                    before_deadline()
+                    data = self.read_available(pipe)
+                    if data:
+                        prefix = data[:OUTPUT_LIMIT - len(buffer)]
+                        observed = len(buffer) + len(data)
+                        retained.write(prefix)
+                        retained.flush()
+                        buffer.extend(prefix)
+                        if len(prefix) != len(data):
+                            metadata = own_file("truncated.json")
+                            metadata.write(json.dumps({"stream": name, "retained_bytes": len(buffer),
+                                "observed_at_least": observed, "truncated": True}).encode("ascii"))
+                            metadata.flush()
+                            before_deadline()
+                            raise RuntimeError("manager output exceeds its limit; retained prefix truncated")
+                    # Keep any collected bytes before refusing a late read/EOF.
+                    before_deadline()
+                    if data is None:
+                        continue
+                    remaining.append((name, pipe, retained, buffer))
+                pending = remaining
+                if pending:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
                         raise subprocess.TimeoutExpired(argv, SECONDS)
-                self.process.wait(timeout=max(0, deadline - time.monotonic()))
-                self.exited = True
-                before_deadline()
-                buffers = [bytearray(), bytearray()]
-                pending = [("stdout", self.process.stdout, out, buffers[0]),
-                           ("stderr", self.process.stderr, err, buffers[1])]
-                while pending:
-                    remaining = []
-                    for name, pipe, retained, buffer in pending:
-                        before_deadline()
-                        data = self.read_available(pipe)
-                        if data:
-                            prefix = data[:OUTPUT_LIMIT - len(buffer)]
-                            observed = len(buffer) + len(data)
-                            retained.write(prefix)
-                            retained.flush()
-                            buffer.extend(prefix)
-                            if len(prefix) != len(data):
-                                with exclusive(self.folder / "truncated.json") as metadata:
-                                    metadata.write(json.dumps({"stream": name, "retained_bytes": len(buffer),
-                                        "observed_at_least": observed, "truncated": True}).encode("ascii"))
-                                    metadata.flush()
-                                before_deadline()
-                                raise RuntimeError("manager output exceeds its limit; retained prefix truncated")
-                        # Keep any collected bytes before refusing a late read/EOF.
-                        before_deadline()
-                        if data is None:
-                            continue
-                        remaining.append((name, pipe, retained, buffer))
-                    pending = remaining
-                    if pending:
-                        left = deadline - time.monotonic()
-                        if left <= 0:
-                            raise subprocess.TimeoutExpired(argv, SECONDS)
-                        time.sleep(min(0.01, left))
-                before_deadline()
-                result = subprocess.CompletedProcess(argv, self.process.returncode,
-                    buffers[0].decode("utf-8"), buffers[1].decode("utf-8"))
-                before_deadline()
-                self.pipes_ended = True
-                self.failed = result.returncode != 0
-                return result
+                    time.sleep(min(0.01, left))
+            before_deadline()
+            result = subprocess.CompletedProcess(argv, self.process.returncode,
+                buffers[0].decode("utf-8"), buffers[1].decode("utf-8"))
+            before_deadline()
+        except BaseException as error:
+            primary = error
+            try:
+                self.stop_direct(primary)
             except BaseException as error:
-                self.failed = True
-                self.stop_direct(error)
-                raise
-            finally:
-                if self.process is not None:
-                    # No background reader holds these files' Python locks.
-                    for pipe in (self.process.stdout, self.process.stderr):
-                        if pipe is not None:
+                close_error("direct manager cleanup", error)
+        finally:
+            if self.process is not None:
+                # No reader thread holds these Python locks. Each pipe closes
+                # independently, even if its peer or a private file refuses.
+                for name, pipe in (("stdout", self.process.stdout), ("stderr", self.process.stderr)):
+                    if pipe is not None:
+                        try:
                             pipe.close()
+                        except BaseException as error:
+                            close_error("manager " + name + " close", error)
+            for name, stream in reversed(files):
+                try:
+                    stream.close()
+                except BaseException as error:
+                    close_error("private " + name + " close", error)
+        if primary is not None:
+            raise primary
+        before_deadline()  # Finalization cannot turn a late capture into success.
+        self.pipes_ended = True
+        self.failed = result.returncode != 0
+        return result
