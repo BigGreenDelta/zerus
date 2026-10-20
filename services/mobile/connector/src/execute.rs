@@ -159,26 +159,45 @@ impl<N: Native + 'static> Connector<N> {
             Value::Object(request) => request,
             _ => unreachable!(),
         };
-        let routed =
-            if journal_operation == "directory_create" && request.contains_key("gateway_route") {
-                let route = &request["gateway_route"];
-                let matches = route.as_object().is_some_and(|route| {
-                    request.get("computer_id").is_none_or(|computer| {
-                        py_eq(route.get("computer_id").unwrap_or(&Value::Null), computer)
-                    })
-                });
-                if matches {
-                    self.resolve(route).await
-                } else {
-                    Err(Failure::text(
-                        "directory creation computer does not match its immutable route",
-                    ))
-                }
-            } else if let Some(route) = request.get("gateway_route") {
+        let routed = if crate::session_projects::OPERATIONS.contains(&journal_operation.as_str())
+            && request.contains_key("gateway_route")
+        {
+            let route = &request["gateway_route"];
+            let matches = route.as_object().is_some_and(|route| {
+                request.get("computer_id").is_none_or(|computer| {
+                    py_eq(route.get("computer_id").unwrap_or(&Value::Null), computer)
+                }) && route.get("machine_id").is_some_and(|machine| {
+                    request
+                        .get("payload")
+                        .is_some_and(|payload| payload.get("expected_machine_id") == Some(machine))
+                })
+            });
+            if matches {
                 self.resolve(route).await
             } else {
-                Ok(Target::Here(None))
-            };
+                Err(Failure::text(
+                    "project assignment computer does not match its immutable route",
+                ))
+            }
+        } else if journal_operation == "directory_create" && request.contains_key("gateway_route") {
+            let route = &request["gateway_route"];
+            let matches = route.as_object().is_some_and(|route| {
+                request.get("computer_id").is_none_or(|computer| {
+                    py_eq(route.get("computer_id").unwrap_or(&Value::Null), computer)
+                })
+            });
+            if matches {
+                self.resolve(route).await
+            } else {
+                Err(Failure::text(
+                    "directory creation computer does not match its immutable route",
+                ))
+            }
+        } else if let Some(route) = request.get("gateway_route") {
+            self.resolve(route).await
+        } else {
+            Ok(Target::Here(None))
+        };
         let target = match routed {
             Ok(target) => target,
             Err(failure) => {
@@ -294,7 +313,7 @@ impl<N: Native + 'static> Connector<N> {
                 self.create(&validated, request_id, &mutation_started)
                     .await?
             } else {
-                self.run(&validated, request_id).await?
+                self.run(&validated, request_id, &mutation_started).await?
             };
             if validated.operation == "analytics_read" {
                 let local = self
@@ -526,6 +545,9 @@ impl<N: Native + 'static> Connector<N> {
         if operation == "archive_list" && !flags.archive {
             return Err(Failure::text(crate::archives::UNAVAILABLE));
         }
+        if crate::session_projects::OPERATIONS.contains(&operation) && !flags.session_projects {
+            return Err(Failure::text(crate::session_projects::UNAVAILABLE));
+        }
         if operation == "hooks_status" && !flags.hook_health {
             return Err(Failure::text(crate::hook_health::UNAVAILABLE));
         }
@@ -559,7 +581,12 @@ impl<N: Native + 'static> Connector<N> {
         Ok(self.native(call).await?.json())
     }
 
-    async fn run(&self, validated: &Validated, request_id: &str) -> Result<Value, Failure> {
+    async fn run(
+        &self,
+        validated: &Validated,
+        request_id: &str,
+        mutation_started: &Cell<bool>,
+    ) -> Result<Value, Failure> {
         let session = validated.session.as_str();
         let payload = validated.payload.as_ref();
         match validated.operation.as_str() {
@@ -618,6 +645,38 @@ impl<N: Native + 'static> Connector<N> {
                     .await?;
                 if !mark_read_result(&result, payload) {
                     return Err(Failure::text("native read acknowledgement did not match"));
+                }
+                Ok(result)
+            }
+            "project_assignment" | "project_assign" => {
+                let payload = payload.expect("validated");
+                if validated.operation == "project_assign" {
+                    if self.stopping.is_set() {
+                        return Err(Failure::Stopped);
+                    }
+                    // From the sole native write boundary, a lost/invalid acknowledgement
+                    // is uncertain. The original claimed UUID is never executed again.
+                    mutation_started.set(true);
+                }
+                let result = self
+                    .call(crate::session_projects::call(
+                        &validated.operation,
+                        payload,
+                        session,
+                    ))
+                    .await?;
+                if !crate::session_projects::result_valid(
+                    &validated.operation,
+                    &result,
+                    payload,
+                    session,
+                ) {
+                    return Err(Failure::text(
+                        "native project assignment acknowledgement did not match",
+                    ));
+                }
+                if validated.operation == "project_assign" && result["status"] == "assigned" {
+                    self.state.borrow_mut().project_next_poll = 0.0;
                 }
                 Ok(result)
             }

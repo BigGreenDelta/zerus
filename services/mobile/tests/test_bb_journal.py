@@ -13,7 +13,7 @@ from connector_harness import BlackBoxCase, RESTART_ERROR, STARTUP_FAILURE
 COLUMNS = ["request_id", "operation", "state", "response", "delivered", "request_hash",
            "created_at", "updated_at", "delivered_at", "response_expired"]
 INDEXES = {"analytics_delivered_reads", "archive_delivered_reads", "delivered_history", "terminal_delivered_reads", "attachment_delivered_reads", "file_delivered_reads",
-           "journal_operation", "delivered_reads", "mutation_retention"}
+           "journal_operation", "delivered_reads", "mutation_retention", "project_assignment_delivered_v1"}
 LEGACY = ("CREATE TABLE requests(request_id TEXT PRIMARY KEY,operation TEXT NOT NULL,"
           "state TEXT NOT NULL,response TEXT,delivered INTEGER NOT NULL DEFAULT 0)")
 

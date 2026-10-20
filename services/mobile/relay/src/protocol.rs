@@ -20,6 +20,7 @@ pub const READS: &[&str] = &[
     "hooks_status",
     "git_status",
     "process_output",
+    "project_assignment",
     "terminal_snapshot",
     "catalog",
     "dirs",
@@ -105,7 +106,9 @@ pub const OPERATIONS: &[&str] = &[
     "session_notifications",
     "pause",
     "process_output",
+    "project_assignment",
     "process_stop",
+    "project_assign",
     "recovery_action",
     "remove_queued",
     "rename",
@@ -132,6 +135,7 @@ pub const FEATURES: &[&str] = &[
     "inspect_agent",
     "opencode_launch_effort",
     "presence_alerts",
+    "session_project_assignment_v1",
     "send_agent",
     "voice_video",
 ];
@@ -189,6 +193,52 @@ fn analytics_day(value: &Value) -> Result<u32> {
         + previous / 400
         + months[..(month - 1) as usize].iter().sum::<u32>()
         + day)
+}
+
+/// Logical session grouping only: no directory, worktree, launch or full
+/// organization replacement can enter this additive, session-scoped ABI.
+pub fn session_project(payload: &Value, request_id: &str, mutation: bool) -> Result<()> {
+    let required = [
+        "request_id",
+        "expected_run_id",
+        "expected_conversation_id",
+        "expected_machine_id",
+    ];
+    let assignment = [
+        "swarm_id",
+        "membership_token",
+        "catalog_epoch",
+        "project_id",
+    ];
+    let mut all = required.to_vec();
+    if mutation {
+        all.extend(assignment);
+    }
+    fields(payload, &all, if mutation { &[] } else { &["cursor"] })?;
+    uuid(&payload["request_id"], true)?;
+    uuid(&payload["expected_machine_id"], true)?;
+    if payload["request_id"] != request_id {
+        return Err(Error::BAD);
+    }
+    let bounded = |key: &str, max: usize, empty: bool| -> Result<()> {
+        let value = payload[key].as_str().ok_or(Error::BAD)?;
+        if value.len() > max || (!empty && value.is_empty()) || value.chars().any(char::is_control)
+        {
+            return Err(Error::BAD);
+        }
+        Ok(())
+    };
+    bounded("expected_run_id", 128, false)?;
+    bounded("expected_conversation_id", 2048, true)?;
+    if mutation {
+        uuid(&payload["swarm_id"], true)?;
+        hex(&payload["membership_token"])?;
+        hex(&payload["catalog_epoch"])?;
+        bounded("project_id", 128, false)?;
+    } else if payload.get("cursor").is_some() {
+        bounded("cursor", 512, false)?;
+    }
+    Ok(())
 }
 
 /// Mobile analytics are strictly read-only and span at most 90 inclusive days.
@@ -465,6 +515,8 @@ pub fn request(v: &Value) -> Result<()> {
         if v["session"] != "" || !MOBILE_DELIVERY.iter().any(|x| p["value"] == *x) {
             return Err(Error::BAD);
         }
+    } else if matches!(op, "project_assignment" | "project_assign") {
+        session_project(p, id, op == "project_assign")?;
     } else if op == "inspect" {
         fields(
             p,

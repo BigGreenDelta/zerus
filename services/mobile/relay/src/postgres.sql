@@ -102,3 +102,6 @@ CREATE INDEX IF NOT EXISTS computer_notification_workspace ON computer_notificat
 
 -- Projection reads have their own class; the persisted read_history_v3 stays unchanged.
 CREATE INDEX IF NOT EXISTS history_projection_reads_v1 ON requests(updated,id) WHERE operation='history_projection' AND state IN ('completed','failed','uncertain');
+-- Additive index for session-project-v1 reads; legacy read_history_v3 and
+-- mutation UUID tombstones are deliberately unchanged on upgrade.
+CREATE INDEX IF NOT EXISTS project_assignment_history_v1 ON requests(updated,id) WHERE operation='project_assignment' AND state IN ('completed','failed','uncertain');

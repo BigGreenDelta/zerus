@@ -124,6 +124,7 @@ class Store:
         self.db.execute("CREATE INDEX IF NOT EXISTS push_expiry ON push_jobs(created)")
         self.db.execute("CREATE INDEX IF NOT EXISTS invitation_expiry ON invitations(expires)")
         self.db.execute("CREATE INDEX IF NOT EXISTS analytics_reads_history ON requests(updated,id) WHERE operation='analytics_read' AND state IN ('completed','failed','uncertain')")
+        self.db.execute("CREATE INDEX IF NOT EXISTS project_assignment_history_v1 ON requests(updated,id) WHERE operation='project_assignment' AND state IN ('completed','failed','uncertain')")
         self.db.execute(f"CREATE INDEX IF NOT EXISTS read_history_v3 ON requests(updated) WHERE operation IN {READ_SQL} AND state IN ('completed','failed','uncertain')")
         request_columns = {r[1] for r in self.db.execute("PRAGMA table_info(requests)")}
         with self.db:
@@ -246,6 +247,7 @@ class Store:
                 self.db.execute(f"UPDATE requests SET state='uncertain',error='node result timeout after claim',result_bytes=length('node result timeout after claim'),reserved_bytes=0,updated=? WHERE id IN (SELECT id FROM requests WHERE state='claimed' AND claimed<=? ORDER BY claimed LIMIT {batch_size})", (now, now - claim_ttl))
             # Read-only inspections can expire; mutations keep indefinite UUID
             # tombstones so an old command can never execute a second time.
+            self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests INDEXED BY project_assignment_history_v1 WHERE operation='project_assignment' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT {batch_size})", (now-120,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests INDEXED BY hook_health_history WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now - min(retention, 3600),))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests INDEXED BY history_projection_reads_v1 WHERE operation='history_projection' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT {batch_size})", (now - min(retention, 3600),))

@@ -7,7 +7,7 @@ import org.junit.Test
 
 class SessionActionsMenuTest {
     private val target = Target("00000000-0000-4000-8000-000000000001","codex/project/review","run","conversation","workspace")
-    private val supported = SessionActionPolicies.lifecycle + "terminal_snapshot"
+    private val supported = SessionActionPolicies.lifecycle + "terminal_snapshot" + SessionProjectProtocol.operations
     private fun row(vararg allowed: String) = JSONObject().put("allowed_actions",JSONArray(allowed.toList()))
         .put("action_reasons",JSONObject().put("pause","Wait for a confirmed idle live session before pausing"))
     private fun facts(state: String = "running", raw: JSONObject = row("pause","rename","fork","terminate","forget"), online: Boolean = true,
@@ -17,13 +17,13 @@ class SessionActionsMenuTest {
     private fun item(f: SessionMenuFacts, id: String) = items(f).single { it.id == id }
 
     @Test fun liveRunningSessionMirrorsDesktopOrder() {
-        assertEquals(listOf("terminal","review_later","session_notifications","pause","rename","fork","copy_name","copy_reference","copy_folder","terminate"),items(facts()).map { it.id })
+        assertEquals(listOf("terminal","review_later","session_notifications","project_assign","pause","rename","fork","copy_name","copy_reference","copy_folder","terminate"),items(facts()).map { it.id })
         assertTrue(items(facts()).filterNot { it.id==SessionNotificationPreferences.operation }.all { it.enabled })
         assertFalse(item(facts(),SessionNotificationPreferences.operation).enabled)
     }
     @Test fun savedSessionOffersResumeArchiveAndForgetButNotTerminate() {
         val saved = facts("paused",row("resume","archive","rename","fork","forget"))
-        assertEquals(listOf("terminal","review_later","session_notifications","resume","rename","fork","archive","copy_name","copy_reference","copy_folder","forget"),items(saved).map { it.id })
+        assertEquals(listOf("terminal","review_later","session_notifications","project_assign","resume","rename","fork","archive","copy_name","copy_reference","copy_folder","forget"),items(saved).map { it.id })
         assertEquals("Forget saved session…",item(saved,"forget").label)
         assertEquals("Move to archive…",item(saved,"archive").label)
         assertTrue(items(facts("stopped",row("resume","archive"))).any { it.id == "archive" })
@@ -59,6 +59,15 @@ class SessionActionsMenuTest {
             item(facts().copy(terminalAccessReason = TerminalAvailability.unknownComputer),"terminal").reason)
         assertEquals("This gateway does not support remote Terminal. Update the gateway.",
             item(facts().copy(terminalAccessReason = "This gateway does not support remote Terminal. Update the gateway."),"terminal").reason)
+    }
+    @Test fun projectGroupingRequiresExactCurrentCapabilitiesAndLiveParent() {
+        assertTrue(item(facts(),SessionProjectProtocol.assign).enabled)
+        assertFalse(item(facts().copy(supported=supported-SessionProjectProtocol.read),SessionProjectProtocol.assign).enabled)
+        assertEquals("Catalog identity changed",item(facts().copy(projectReason="Catalog identity changed"),SessionProjectProtocol.assign).reason)
+        assertEquals("The machine is offline.",item(facts(online=false),SessionProjectProtocol.assign).reason)
+        assertFalse(items(facts(t=target.copy(agentId="child"))).any { it.id==SessionProjectProtocol.assign })
+        assertFalse(items(facts(t=target.copy(archiveId="archive"))).any { it.id==SessionProjectProtocol.assign })
+        assertTrue(item(facts(),SessionProjectProtocol.assign).hint.contains("working folder"))
     }
     @Test fun copyItemsNeedReportedValues() {
         val missing = facts().copy(reference = null,folder = "")
