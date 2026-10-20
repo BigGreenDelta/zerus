@@ -117,6 +117,12 @@ fn strict_payload_and_receipt_types_bind_revision_and_exact_target() {
     noop["applied"] = json!(false);
     noop["preferences"]["revision"] = json!(0);
     assert!(session_notifications::result_valid(&noop, &payload()));
+    for applied in [json!(true), json!(false), Value::Null] {
+        assert!(!session_notifications::result_valid(
+            &json!({"ok":false,"error":"conflict","applied":applied}),
+            &payload()
+        ));
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

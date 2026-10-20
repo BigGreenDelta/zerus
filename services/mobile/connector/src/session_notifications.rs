@@ -17,7 +17,9 @@ pub fn validate(payload: &Value) -> Result<(), String> {
     }
     for (key, maximum) in [("run_id", 128), ("conversation_id", 256)] {
         if !payload[key].as_str().is_some_and(|s| {
-            !s.is_empty() && s.len() <= maximum && !s.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}')
+            !s.is_empty()
+                && s.len() <= maximum
+                && !s.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}')
         }) {
             return Err("invalid shared notification identity".into());
         }
@@ -34,17 +36,18 @@ pub fn validate(payload: &Value) -> Result<(), String> {
 
 pub fn result_valid(result: &Value, payload: &Value) -> bool {
     if result["ok"] == false {
-        return matches!(
-            result["error"].as_str(),
-            Some(
-                "not_found"
-                    | "stale_identity"
-                    | "conflict"
-                    | "baseline_unavailable"
-                    | "capacity"
-                    | "revision_exhausted"
-            )
-        );
+        return result.get("applied").is_none()
+            && matches!(
+                result["error"].as_str(),
+                Some(
+                    "not_found"
+                        | "stale_identity"
+                        | "conflict"
+                        | "baseline_unavailable"
+                        | "capacity"
+                        | "revision_exhausted"
+                )
+            );
     }
     let preference = &result["preferences"];
     let (Some(applied), Some(expected), Some(revision)) = (

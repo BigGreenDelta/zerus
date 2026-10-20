@@ -1861,7 +1861,7 @@ void TestHgsClient::parsesSharedNotificationsAndRejectsMalformedPreferences()
     const auto parse=[](const QJsonValue &preferences) {
         QJsonObject session{{"name","codex/project/session"},{"run_id","run"},{"conversation_id","conversation"}};
         if(!preferences.isUndefined())session["notification_preferences"]=preferences;
-        return HgsClient::parseBox(QJsonDocument(QJsonObject{{"host","arch"},{"ok",true},{"sessions",QJsonArray{session}}}).toJson()).sessions.first();
+        return HgsClient::parseBox(QJsonDocument(QJsonObject{{"host","arch"},{"ok",true},{"sessions",QJsonArray{session}}}).toJson(),nullptr).sessions.first();
     };
     const auto current=parse(good); QVERIFY(current.sharedNotifications); QVERIFY(current.muted); QCOMPARE(current.notificationPreferences,good);
     QList<QJsonValue> invalid{QJsonValue(QJsonValue::Undefined),QJsonValue(),QJsonArray()};

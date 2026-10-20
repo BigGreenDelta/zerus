@@ -231,8 +231,13 @@ impl Candidate {
                 return true;
             }
             if self.kind != "completed"
-                && self.attention_signature.is_some()
-                && baseline["attention_signature"].as_str() == self.attention_signature.as_deref()
+                && baseline["attention_signature"]
+                    .as_str()
+                    .is_some_and(|signature| {
+                        !signature.is_empty()
+                            && (Some(signature) == self.attention_signature.as_deref()
+                                || Some(signature) == current("attention_signature"))
+                    })
             {
                 return true;
             }

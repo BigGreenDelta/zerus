@@ -91,6 +91,21 @@ fn preference_only_changes_emit_plain_refresh_not_an_invented_attention_edge() {
 }
 
 #[test]
+fn unmute_suppresses_a_held_candidate_when_its_current_native_signature_was_captured() {
+    let original = row();
+    let held = Candidate::capture(&json!({"sessions":[original.clone()]}), "s", "attention");
+    let mut changed = original;
+    changed["attention_signature"] = json!("child-change");
+    assert!(!held.resolved(Some(&changed))); // A change alone is not an acknowledgement.
+    changed["notification_preferences"]["revision"] = json!(2);
+    changed["notification_preferences"]["suppressed"]["attention_signature"] =
+        json!("child-change");
+    assert!(held.resolved(Some(&changed)));
+    changed["notification_preferences"]["suppressed"]["attention_signature"] = Value::Null;
+    assert!(!held.resolved(Some(&changed)));
+}
+
+#[test]
 fn late_poll_cannot_roll_back_a_confirmed_revision_or_change_its_meaning() {
     let old = row();
     let mut muted = old.clone();
@@ -104,8 +119,11 @@ fn late_poll_cannot_roll_back_a_confirmed_revision_or_change_its_meaning() {
         !notification_revisions_current(Some(&known), &json!({"sessions":[conflict]})).unwrap()
     );
     for value in [Value::Null, json!({}), json!({"conversation_id":"other"})] {
-        let mut unknown = muted.clone(); unknown["notification_preferences"] = value;
-        assert!(!notification_revisions_current(Some(&known), &json!({"sessions":[unknown]})).unwrap());
+        let mut unknown = muted.clone();
+        unknown["notification_preferences"] = value;
+        assert!(
+            !notification_revisions_current(Some(&known), &json!({"sessions":[unknown]})).unwrap()
+        );
     }
     let mut resumed = muted.clone();
     resumed["run_id"] = json!("resumed");

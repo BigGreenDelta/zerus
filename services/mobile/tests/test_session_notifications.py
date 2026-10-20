@@ -62,6 +62,8 @@ class SharedMuteValidation(unittest.TestCase):
             bad = copy.deepcopy(good); bad["preferences"][field] = value
             self.assertFalse(result_valid(bad, payload()))
         self.assertTrue(result_valid({"ok": False, "error": "conflict"}, payload()))
+        for applied in (True, False, None):
+            self.assertFalse(result_valid({"ok": False, "error": "conflict", "applied": applied}, payload()))
         self.assertFalse(result_valid({"ok": False, "error": "unknown"}, payload()))
 
     def test_late_catalog_cannot_undo_a_host_confirmation_across_rename_or_resume(self):

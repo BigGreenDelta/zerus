@@ -22,7 +22,7 @@ def result_valid(result, payload):
     if not isinstance(result, dict) or type(result.get("ok")) is not bool:
         return False
     if result["ok"] is False:
-        return result.get("error") in {"not_found", "stale_identity", "conflict", "baseline_unavailable", "capacity", "revision_exhausted"}
+        return "applied" not in result and result.get("error") in {"not_found", "stale_identity", "conflict", "baseline_unavailable", "capacity", "revision_exhausted"}
     preference = result.get("preferences")
     applied = result.get("applied")
     return (type(applied) is bool
