@@ -34,11 +34,17 @@ pub(super) fn load() -> Value {
 /// Writers must not turn an unreadable store into an empty one. In particular,
 /// a current request is no authority to discard another owner's saved marks.
 fn load_writable(path: &Path) -> Result<Value> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
+    let mut file = match crate::platform::no_follow(fs::OpenOptions::new().read(true)).open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(json!({})),
         Err(error) => return Err(format!("Shared read marks could not be read: {error}")),
     };
+    if !crate::platform::verify_private_file(&file).map_err(|error| error.to_string())? {
+        return Err("Shared read marks could not be read; the store must be a private regular file".into());
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut file, &mut text)
+        .map_err(|error| format!("Shared read marks could not be read: {error}"))?;
     serde_json::from_str::<Value>(&text)
         .ok()
         .filter(|value| value["version"] == 1 && value["sessions"].is_object())
@@ -538,6 +544,37 @@ mod tests {
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         assert!(load_writable(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_storage_refuses_links_nonprivate_files_and_a_fifo_without_blocking() {
+        use std::os::unix::fs::{symlink, FileTypeExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("read-marks.json");
+        let target = dir.path().join("target.json");
+        atomic(&target, r#"{"version":1,"sessions":{}}"#).unwrap();
+        let unchanged = fs::read(&target).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(load_writable(&path).is_err());
+        assert_eq!(fs::read(&target).unwrap(), unchanged);
+        fs::remove_file(&path).unwrap();
+        symlink(dir.path().join("missing"), &path).unwrap();
+        assert!(load_writable(&path).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::hard_link(&target, &path).unwrap();
+        assert!(load_writable(&path).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::rename(&target, &path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_writable(&path).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(load_writable(&path).unwrap(), json!({}));
+        fs::remove_file(&path).unwrap();
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        assert!(load_writable(&path).is_err());
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
     }
 
     #[test]

@@ -50,7 +50,10 @@ new read edge. A changed accepted field retains the other field and updates
 
 Writers now refuse unreadable, malformed, unsupported-version or invalid-root
 storage instead of treating it as empty and overwriting other owners. Missing
-storage remains a first write. OpenCode's already-strict rename preflight uses
+storage remains a first write. Open is nonblocking and does not follow a final
+link; the open handle must be private, regular and single-link before reading,
+so a FIFO is refused without waiting and a dangling link is not treated as a
+new store. OpenCode's already-strict rename preflight uses
 the same decoder, and DeepSeek's transfer reuses that guard without changing
 its binding/read-writer order. Listing's existing unavailable-file behavior is
 unchanged; no legacy-format migration or repair is inferred from a read.
