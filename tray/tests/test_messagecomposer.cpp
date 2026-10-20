@@ -222,6 +222,10 @@ private slots:
     void fileReferenceFitsNarrowComposerAndHonorsLocks();
     void fileReferenceOwnerDeletionUnwindsModal_data();
     void fileReferenceOwnerDeletionUnwindsModal();
+    void fileReferenceInsertionSeparatesSelectionBoundaries_data();
+    void fileReferenceInsertionSeparatesSelectionBoundaries();
+    void fileReferenceReplacementHonorsActualUtf8Limit_data();
+    void fileReferenceReplacementHonorsActualUtf8Limit();
     void textLimitCountsUtf8Bytes();
     void failureAndUncertaintyPreserveDraft();
     void sendingHidesPayloadAndRestoresFailedBackgroundDelivery();
@@ -449,6 +453,98 @@ void TestMessageComposer::fileReferenceOwnerDeletionUnwindsModal()
     composer->findChild<QPushButton *>("referenceMessageFile")->click();
     QVERIFY(composer.isNull()); QCOMPARE(observed, point == "browse" ? 2 : 1); QCOMPARE(sends, 0);
     QVERIFY(!QApplication::activeModalWidget());
+}
+
+void TestMessageComposer::fileReferenceInsertionSeparatesSelectionBoundaries_data()
+{
+    QTest::addColumn<QString>("before"); QTest::addColumn<int>("anchor"); QTest::addColumn<int>("position");
+    QTest::addColumn<QString>("expected"); QTest::addColumn<int>("expectedPosition");
+    const QString reference = "Use the existing file at \"/remote/report.bin\".";
+    const int length = int(reference.size());
+    QTest::newRow("empty") << "" << 0 << 0 << reference << length;
+    QTest::newRow("beginning") << "Analyze this" << 0 << 0 << reference + " Analyze this" << length + 1;
+    QTest::newRow("end") << "Analyze this" << 12 << 12 << "Analyze this " + reference << 13 + length;
+    QTest::newRow("middle") << "leftright" << 4 << 4 << "left " + reference + " right" << 6 + length;
+    QTest::newRow("selection") << "leftOLDright" << 4 << 7 << "left " + reference + " right" << 6 + length;
+    QTest::newRow("reverse-selection") << "leftOLDright" << 7 << 4 << "left " + reference + " right" << 6 + length;
+    QTest::newRow("existing-whitespace") << "left \nright" << 5 << 5 << "left " + reference + "\nright" << 5 + length;
+    QTest::newRow("replace-all") << "old draft" << 0 << 9 << reference << length;
+}
+
+void TestMessageComposer::fileReferenceInsertionSeparatesSelectionBoundaries()
+{
+    QFETCH(QString, before); QFETCH(int, anchor); QFETCH(int, position);
+    QFETCH(QString, expected); QFETCH(int, expectedPosition);
+    MessageComposer composer; const QString key = "reference-boundaries";
+    setSessionReady(composer, key); composer.setFileReferenceTarget(key, "peer", "Remote");
+    composer.editor()->setPlainText(before);
+    auto cursor = composer.editor()->textCursor(); cursor.setPosition(anchor); cursor.setPosition(position, QTextCursor::KeepAnchor);
+    composer.editor()->setTextCursor(cursor);
+    QSignalSpy sends(&composer, &MessageComposer::sendRequested);
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        QCOMPARE(composer.editor()->textCursor().anchor(), anchor); QCOMPARE(composer.editor()->textCursor().position(), position);
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText("/remote/report.bin");
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    QCOMPARE(composer.editor()->toPlainText(), expected);
+    QCOMPARE(composer.editor()->textCursor().position(), expectedPosition); QVERIFY(!composer.editor()->textCursor().hasSelection());
+    QCOMPARE(sends.size(), 0); QVERIFY(composer.findChildren<QPushButton *>("removeAttachment").isEmpty());
+    ComposerDraftStore::flushWrites();
+    MessageComposer restored; setSessionReady(restored, key);
+    QCOMPARE(restored.editor()->toPlainText(), expected); QCOMPARE(restored.editor()->textCursor().position(), expectedPosition);
+}
+
+void TestMessageComposer::fileReferenceReplacementHonorsActualUtf8Limit_data()
+{
+    QTest::addColumn<QString>("before"); QTest::addColumn<int>("anchor"); QTest::addColumn<int>("position");
+    QTest::addColumn<QString>("expectedInsertion"); QTest::addColumn<bool>("allowed");
+    const int maximum = int(HgsClient::MaximumMessageBytes);
+    const QString reference = "Use the existing file at \"/remote/report.bin\".";
+    const int length = reference.toUtf8().size();
+    const QString append = QString(maximum - length - 1, 'a') + ' ';
+    QTest::newRow("exact-append") << append << int(append.size()) << int(append.size()) << reference << true;
+    const QString overflow(maximum - length, 'a');
+    QTest::newRow("leading-padding-overflow") << overflow << int(overflow.size()) << int(overflow.size()) << ' ' + reference << false;
+    const QString full(maximum, 'x');
+    QTest::newRow("selection-reclaims-budget") << full << maximum - length - 1 << maximum << ' ' + reference << true;
+    QTest::newRow("two-boundaries-exact") << full << 10 << 10 + length + 2 << ' ' + reference + ' ' << true;
+    QTest::newRow("selection-one-byte-over") << full << maximum - length << maximum << ' ' + reference << false;
+    const QString multi = QString(maximum - 64 - 4, 'a') + QString(32, QChar(0xe9)) + "tail";
+    QTest::newRow("utf8-selection") << multi << maximum - 64 - 4 << maximum - 64 - 4 + 32 << ' ' + reference + ' ' << true;
+    const QString emoji = QString::fromUtf8("😀").repeated(maximum / 4);
+    QTest::newRow("surrogate-selection") << emoji << int(emoji.size()) - 40 << int(emoji.size()) << ' ' + reference << true;
+    const QString oversized(maximum + 100, 'x');
+    QTest::newRow("replace-all-reduces-oversize") << oversized << 0 << int(oversized.size()) << reference << true;
+}
+
+void TestMessageComposer::fileReferenceReplacementHonorsActualUtf8Limit()
+{
+    QFETCH(QString, before); QFETCH(int, anchor); QFETCH(int, position);
+    QFETCH(QString, expectedInsertion); QFETCH(bool, allowed);
+    MessageComposer composer; setSessionReady(composer, "reference-byte-budget");
+    composer.setFileReferenceTarget(composer.sessionKey(), "peer", "Remote"); composer.editor()->setPlainText(before);
+    auto cursor = composer.editor()->textCursor(); cursor.setPosition(anchor); cursor.setPosition(position, QTextCursor::KeepAnchor);
+    composer.editor()->setTextCursor(cursor);
+    bool inserted = false; QString error;
+    QSignalSpy sends(&composer, &MessageComposer::sendRequested);
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText("/remote/report.bin");
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+        inserted = !dialog->isVisible(); error = dialog->findChild<QLabel *>("fileReferenceError")->text();
+    });
+    QCOMPARE(inserted, allowed);
+    QString expected = before;
+    expected.replace(qMin(anchor, position), qAbs(position - anchor), expectedInsertion);
+    if (allowed) {
+        QVERIFY(expected.toUtf8().size() <= HgsClient::MaximumMessageBytes);
+        QCOMPARE(composer.editor()->toPlainText(), expected); QVERIFY(error.isEmpty());
+        QCOMPARE(composer.editor()->textCursor().position(), qMin(anchor, position) + expectedInsertion.size());
+    } else {
+        QVERIFY(expected.toUtf8().size() > HgsClient::MaximumMessageBytes);
+        QCOMPARE(composer.editor()->toPlainText(), before); QVERIFY(error.contains("64 KiB"));
+        QCOMPARE(composer.editor()->textCursor().anchor(), anchor); QCOMPARE(composer.editor()->textCursor().position(), position);
+    }
+    QCOMPARE(sends.size(), 0); QVERIFY(composer.findChildren<QPushButton *>("removeAttachment").isEmpty());
 }
 
 void TestMessageComposer::unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval()

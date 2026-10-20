@@ -757,7 +757,14 @@ void MessageComposer::referenceFile()
         // These are draft instructions, never a shell command or an upload.
         const auto quoted = QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact);
         reference = tr("Use the existing file at %1.").arg(QString::fromUtf8(quoted.mid(1, quoted.size() - 2)));
-        if (owner->m_editor->toPlainText().toUtf8().size() + reference.toUtf8().size() > MaxTextBytes) {
+        const auto text = owner->m_editor->toPlainText();
+        const auto cursor = owner->m_editor->textCursor();
+        const auto begin = cursor.selectionStart(), end = cursor.selectionEnd();
+        if (begin > 0 && !text[begin - 1].isSpace()) reference.prepend(' ');
+        if (end < text.size() && !text[end].isSpace()) reference.append(' ');
+        auto result = text;
+        result.replace(begin, end - begin, reference);
+        if (result.toUtf8().size() > MaxTextBytes) {
             error->setText(tr("Message exceeds 64 KiB.")); return;
         }
         dialog->accept();
