@@ -2369,7 +2369,10 @@ episode returns to **Recovery in progress** with the same attempt count: nothing
 further is scheduled or delivered while it works, and its answer completes the
 episode. An account has one recovery request in flight at a time, until the agent
 accepts the continuation and makes progress, so a long working turn does not hold
-the account's other sessions at **Waiting to retry**.
+the account's other sessions at **Waiting to retry**. From that progress the job
+records `resumed_at`, and desktop and mobile show the turn as ordinary work rather
+than **Recovery in progress**. The episode stays open until the turn ends, so a
+further provider failure in that turn reschedules on the same attempt budget.
 
 Provider failures replace Working or Compacting with a specific state such as
 **Usage limit reached**, **Model at capacity** or **Sign-in failed** and appear

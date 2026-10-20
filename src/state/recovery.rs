@@ -350,17 +350,22 @@ fn working_on_continuation(job: &Value, s: &Value) -> bool {
         && job["attempt"].as_u64().unwrap_or(0) > 0
         && ["working", "tool", "compacting"].contains(&string(s, "phase"))
 }
+/// The agent accepted the continuation and the provider served it since.
+/// Turn-start markers that follow the accepted input (Kimi's TurnStarted) are
+/// not provider progress.
+fn resumed(job: &Value, s: &Value) -> bool {
+    job["acknowledged"] == true
+        && s["phase"] != "error"
+        && seconds(s, "provider_status_at") > seconds(job, "user_at").max(seconds(s, "turn_started"))
+}
 /// An account has one recovery request in flight at a time, until the agent
 /// accepts its continuation and then makes progress: from there the provider
 /// serves the account again, and a long working turn must not hold the
-/// account's other sessions at "Waiting to retry". Turn-start markers that
-/// follow the accepted input (Kimi's TurnStarted) are not provider progress.
+/// account's other sessions at "Waiting to retry".
 fn occupies(job: &Value, s: &Value) -> bool {
     match string(job, "state") {
         "dispatching" => true,
-        "retrying" => !(job["acknowledged"] == true
-            && s["phase"] != "error"
-            && seconds(s, "provider_status_at") > seconds(job, "user_at").max(seconds(s, "turn_started"))),
+        "retrying" => !resumed(job, s),
         _ => false,
     }
 }
@@ -374,6 +379,7 @@ fn schedule(job: &mut Value, s: &Value, time: f64) {
     let delays = job["delays"].as_array().cloned().unwrap_or_default();
     job["failure_id"] = json!(failure_id(s));
     job.as_object_mut().unwrap().remove("failure_ids");
+    job.as_object_mut().unwrap().remove("resumed_at");
     remember_failure_copies(job, s);
     job["failure_at"] = s["provider_error"]["at"].clone();
     job["class"] = json!(category);
@@ -496,6 +502,10 @@ fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
                     "uncertain",
                     "Delivery was not confirmed; inspect the native agent",
                 );
+            } else if job["resumed_at"].is_null() && resumed(&job, s) {
+                // The episode stays open until the turn ends so a further failure keeps
+                // its budget; clients show a resumed turn as ordinary work meanwhile.
+                job["resumed_at"] = json!(seconds(s, "provider_status_at"));
             }
             return job;
         } else if job["state"] == "waiting" {
@@ -930,7 +940,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             let mut job = load_job(string(&request, "name"));
             if job["id"] != request["id"] || job["state"] != "waiting" {
                 return Err(
-                    "This scheduled recovery is no longer current; refresh Activity".into(),
+                    "This scheduled recovery is no longer current; nothing was changed".into(),
                 );
             }
             match string(&request, "action") {
@@ -1058,7 +1068,7 @@ fn scoped_action(request: Value) -> Result<()> {
                 || job["identity"] != identity(&normalized)
             {
                 return Err(
-                    "Recovery job or exact native session identity changed; refresh Activity"
+                    "Recovery job or exact native session identity changed; nothing was changed"
                         .into(),
                 );
             }
@@ -1465,6 +1475,47 @@ mod tests {
             job["state"] = json!(state);
             assert!(!occupies(&job, &s), "{state}");
         }
+    }
+    #[test]
+    fn a_resumed_turn_is_marked_without_ending_the_episode_or_its_budget() {
+        let mut s = snapshot("codex");
+        let mut job = advance(Value::Null, &s, &on(), 11.0);
+        job["state"] = json!("retrying");
+        job["attempt"] = json!(1);
+        job["attempts"]["service"] = json!(1);
+        job["class_attempt"] = json!(1);
+        job["sent_at"] = json!(20.0);
+        job["acknowledged"] = json!(true);
+        job["user_at"] = json!(21.0);
+        s["phase"] = json!("tool");
+        s["provider_error"] = Value::Null;
+        s["recovery_user_at"] = json!(21.0);
+        s["turn_started"] = json!(21.0);
+        s["provider_status_at"] = json!(21.0);
+        assert!(advance(job.clone(), &s, &on(), 22.0)["resumed_at"].is_null(), "nothing followed the continuation yet");
+        s["provider_status_at"] = json!(25.0);
+        let resumed = advance(job.clone(), &s, &on(), 26.0);
+        assert_eq!((&resumed["state"], &resumed["resumed_at"]), (&json!("retrying"), &json!(25.0)));
+        for key in ["id", "attempt", "attempts", "class_attempt", "acknowledged", "sent_at", "user_at", "failure_id"] {
+            assert_eq!(resumed[key], job[key], "{key}");
+        }
+        // Later progress keeps the first resumption, so the stored job stays unchanged.
+        s["provider_status_at"] = json!(90.0);
+        assert_eq!(advance(resumed.clone(), &s, &on(), 91.0), resumed);
+        let mut unconfirmed = job.clone();
+        unconfirmed["acknowledged"] = json!(false);
+        assert!(advance(unconfirmed, &s, &on(), 26.0)["resumed_at"].is_null());
+        // A further failure in the same turn reschedules on the same budget and is no longer resumed.
+        let mut failed = s.clone();
+        failed["phase"] = json!("error");
+        failed["provider_error"] = json!({"source":"native","message_id":"error-2","at":100.0,"detail":"API Error: 529 Overloaded"});
+        let next = advance(resumed.clone(), &failed, &on(), 101.0);
+        assert_eq!((&next["state"], &next["class_attempt"]), (&json!("waiting"), &json!(1)));
+        assert!(next.get("resumed_at").is_none());
+        let mut done = s;
+        done["phase"] = json!("idle");
+        done["recovery_success_at"] = json!(120.0);
+        assert_eq!(advance(resumed, &done, &on(), 121.0)["state"], "succeeded");
     }
     #[test]
     fn a_turn_start_after_the_continuation_is_not_provider_progress() {

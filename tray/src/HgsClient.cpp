@@ -916,7 +916,7 @@ quint64 HgsClient::requestAttachment(const QString &host, const QString &name, c
         const auto decoded=QByteArray::fromBase64Encoding(encoded,QByteArray::AbortOnBase64DecodingErrors);
         if(out.size()>MaximumAttachmentBytes*4/3+8192 || object.value("request_id")!=file.value("request_id")
             || object.value("index")!=file.value("index") || !decoded || decoded.decoded.isEmpty() || decoded.decoded.size()>MaximumAttachmentBytes) {
-            emit attachmentFailed(id,tr("Invalid attachment response. Refresh Activity and try again."));return;
+            emit attachmentFailed(id,tr("Invalid attachment response. Try again."));return;
         }
         auto metadata=object;metadata.remove("data_base64");emit attachmentReady(id,metadata,decoded.decoded);
     },[this,id](const QString &,const QString &error){emit attachmentFailed(id,error);});

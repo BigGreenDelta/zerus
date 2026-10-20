@@ -152,7 +152,7 @@ pub(super) fn available(record: &Value, question: &Value) -> Result<()> {
     let record = kimi_tui_choice::identity(record)?;
     let screen = kimi_tui_choice::capture(&record)?;
     if snapshot(&record, &screen).map(|s| s.0) != Some(question["question_hash"].clone()) {
-        return Err("Codex's folder trust request changed; refresh Activity".into());
+        return Err("Codex's folder trust request changed; nothing was sent".into());
     }
     Ok(())
 }

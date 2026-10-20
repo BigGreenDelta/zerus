@@ -455,8 +455,9 @@ public struct NativeRecovery: Hashable, Sendable {
     public let notBefore: Double?
     public let history: [RecoveryAttempt]
     public let recorded: Bool
+    public let resumed: Bool
 
-    public func status(now: Double) -> String { RecoveryPresentation.status(state, acknowledged: acknowledged, due: dueAt, now: now) }
+    public func status(now: Double) -> String { RecoveryPresentation.status(state, acknowledged: acknowledged, due: dueAt, now: now, resumed: resumed) }
 
     public var attempts: String {
         guard let attempt else { return "Attempts not reported" }
@@ -483,7 +484,14 @@ public enum RecoveryPresentation {
         return NativeRecovery(id: job.string("id"), state: state, reason: job.string("reason"), action: job.string("action"), acknowledged: job.bool("acknowledged"),
                               attempt: integer(job["attempt"], 0, Int(Int32.max)), classAttempt: integer(job["class_attempt"], 0, Int(Int32.max)), delays: delays,
                               dueAt: time(job["due_at"]), notBefore: time(job["not_before"]), history: Array(history),
-                              recorded: !verified || !exact || !target.archiveId.isEmpty || !target.agentId.isEmpty)
+                              recorded: !verified || !exact || !target.archiveId.isEmpty || !target.agentId.isEmpty, resumed: resumed(job))
+    }
+
+    /// The agent accepted the continuation and the provider served it again. The episode stays
+    /// open until the turn ends only to keep its attempt budget; the turn is ordinary work.
+    public static func resumed(_ job: JSONObject?) -> Bool {
+        guard let job, job.string("state") == "retrying", job.bool("acknowledged") else { return false }
+        return (time(job["resumed_at"]) ?? 0) > 0
     }
 
     static func integer(_ value: JSON?, _ min: Int, _ max: Int) -> Int? {
@@ -496,13 +504,13 @@ public enum RecoveryPresentation {
         return number
     }
 
-    public static func status(_ state: String, acknowledged: Bool, due: Double?, now: Double) -> String {
+    public static func status(_ state: String, acknowledged: Bool, due: Double?, now: Double, resumed: Bool = false) -> String {
         switch state {
         case "waiting":
             if let due, Int64(max(due - now, 0).rounded(.up)) > 0 { return "Retry in \(Int64(max(due - now, 0).rounded(.up))) s" }
             return "Waiting to retry"
         case "dispatching": return "Sending recovery request…"
-        case "retrying": return acknowledged ? "Recovery in progress" : "Waiting for delivery confirmation…"
+        case "retrying": return !acknowledged ? "Waiting for delivery confirmation…" : resumed ? "Agent resumed after recovery" : "Recovery in progress"
         case "exhausted": return "Automatic attempts exhausted"
         case "uncertain": return "Check the agent before retrying"
         case "blocked": return "Automatic recovery needs attention"

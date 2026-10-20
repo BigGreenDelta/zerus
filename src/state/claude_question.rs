@@ -1034,7 +1034,7 @@ pub(super) fn available(record: &Value, card: &Value) -> Result<()> {
     let native = Native::new(record, card);
     let current = native.identity()?;
     if response(&current, card)?.is_some() {
-        return Err("This Claude question was already answered; refresh Activity".into());
+        return Err("This Claude question was already answered; nothing was sent".into());
     }
     // Inspection never edits Terminal. Explicit Submit clears/replaces native
     // Other from the authoritative GUI form after per-write identity checks.

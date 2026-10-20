@@ -1195,7 +1195,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             || error.trimmed() == "This turn is no longer working";
         if (ok) showNotice(tr("Interrupt sent to %1. Waiting for the agent to stop…").arg(target));
         else if (alreadyStopped) showNotice(tr("Stop %1: the turn already ended or is waiting for input. No action needed.").arg(target));
-        else showNotice(tr("Stop %1 failed: %2\nRefresh status or open Terminal to check the agent before trying again.").arg(target, error), true);
+        else showNotice(tr("Stop %1 failed: %2\nOpen Terminal to check the agent before trying again.").arg(target, error), true);
         if(m_selectedKey==m_interruptKey)inspect();
         emit refreshRequested();
         renderDetails();
@@ -3457,7 +3457,7 @@ void SessionsWindow::renderDetails()
     const auto recoveryState=recoveryDetails.value("recovery").toObject().value("state").toString();
     const bool providerFailure=recoveryDetails.value("phase")=="error" && !recoveryDetails.value("provider_error").toObject().isEmpty();
     auto *recoveryFocus=QApplication::focusWidget();
-    if(!providerFailure&&(recoveryState.isEmpty()||recoveryState=="succeeded")&&m_recovery->isVisible()&&recoveryFocus
+    if(!providerFailure&&(recoveryState.isEmpty()||recoveryState=="succeeded"||RecoveryUi::resumed(recoveryDetails.value("recovery").toObject()))&&m_recovery->isVisible()&&recoveryFocus
         &&(recoveryFocus==m_recovery||m_recovery->isAncestorOf(recoveryFocus)))m_composer->editor()->setFocus(Qt::OtherFocusReason);
     m_recovery->setState(recoveryDetails,entry && entry->online);
     m_markRead->setActive(entry && entry->session.state!="archived" && entryNeedsAttention(*entry));

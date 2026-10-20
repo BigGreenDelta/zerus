@@ -461,7 +461,7 @@ export function apply(ctx, config) {
         const started = fresh.page.records.findLast(row => row.event?.type === 'turn/start')?.event.time / 1000;
         // The registry may change while the inspection awaits.
         const live = topLevel(ctx.agents.get(p.sessionId));
-        if (!live || !(started > 0) || started !== p.turnStarted) throw new Error('DeepSeek turn changed; refresh Activity');
+        if (!live || !(started > 0) || started !== p.turnStarted) throw new Error('DeepSeek turn changed; nothing was stopped');
         ctx.goals.disarm(live);
         const compaction = compactions.get(p.sessionId);
         if (compaction?.public.status === 'compacting') {
