@@ -12,6 +12,8 @@
 #include "MachinePlatform.h"
 #include "LocalLaunchWarning.h"
 #include "OpenCodeEffort.h"
+#include "OpenCodeModelPicker.h"
+#include "OpenCodeModels.h"
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QToolButton>
@@ -20,6 +22,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QFrame>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
@@ -33,9 +36,68 @@
 namespace {
 using namespace AccountChoice;
 QLabel *plainLabel(const QString &text = {}) {auto *l=new QLabel(text);l->setTextFormat(Qt::PlainText);l->setWordWrap(true);return l;}
-// Each OpenCode model row keeps its validated variants for the effort choice.
-constexpr int EffortRole=Qt::UserRole+10,EffortLabelRole=Qt::UserRole+11;
+// Each OpenCode model row keeps its validated variants for the effort choice
+// and its label for the model button.
+constexpr int EffortRole=Qt::UserRole+10,EffortLabelRole=Qt::UserRole+11,LabelRole=Qt::UserRole+12;
 bool controlText(const QString &text) {return std::any_of(text.cbegin(),text.cend(),[](QChar c){return c.category()==QChar::Other_Control;});}
+bool readyCatalog(const QJsonObject &catalog) {return catalog["catalog_state"]=="ready";}
+// Valid OpenCode model entries (value, else id) the list does not have yet, at
+// most 256 per call, each with its valid and distinct variants.
+void addModelOptions(QComboBox *model,const QJsonArray &options)
+{
+    for(int index=0;index<qMin(256,options.size());++index){
+        const auto entry=options[index];
+        const auto option=entry.toObject();const auto id=option["value"].toString(option["id"].toString());
+        if(id.isEmpty()||id.toUtf8().size()>256||!id.contains('/')||controlText(id)||model->findData(id)>=0)continue;
+        auto label=option["label"].toString();if(label.size()>160||controlText(label))label={};
+        // Effort options are this model's variants: at most 16, each valid and distinct.
+        QStringList efforts,effortLabels;
+        const auto variants=option["effort_options"].toArray(),variantLabels=option["effort_labels"].toArray();
+        for(int variant=0;variant<qMin<qsizetype>(64,variants.size())&&efforts.size()<16;++variant){
+            const auto effort=variants[variant].toString();
+            if(!OpenCodeEffort::valid(effort)||efforts.contains(effort))continue;
+            auto effortLabel=variantLabels.at(variant).toString();if(effortLabel.isEmpty()||effortLabel.size()>80||controlText(effortLabel))effortLabel=effort;
+            efforts<<effort;effortLabels<<effortLabel;
+        }
+        model->addItem(label.isEmpty()||label==id?id:label+" ("+id+")",id);
+        model->setItemData(model->count()-1,efforts,EffortRole);model->setItemData(model->count()-1,effortLabels,EffortLabelRole);
+        model->setItemData(model->count()-1,label.isEmpty()?id:label,LabelRole);
+    }
+}
+// A confirmed favorite change in model entries (value, else id): the mark is set, or
+// removed as hgs leaves it out; every other field and entry stays as listed.
+QJsonArray markFavorite(QJsonArray entries,const QString &value,bool favorite)
+{
+    for(qsizetype index=0;index<entries.size();++index){
+        auto entry=entries.at(index).toObject();
+        if(entry.value("value").toString(entry.value("id").toString())!=value)continue;
+        if(favorite)entry.insert("favorite",true);else entry.remove("favorite");
+        entries.replace(index,entry);
+    }
+    return entries;
+}
+// The same change in a ready catalog: both model lists and its favorites, where a new
+// favorite is listed once, as hgs lists it ({value, available}).
+void markCatalogFavorite(QJsonObject &catalog,const QString &value,bool favorite)
+{
+    for(const auto *list:{"model_options","models"})
+        if(catalog.contains(list))catalog.insert(list,markFavorite(catalog.value(list).toArray(),value,favorite));
+    if(!catalog.contains("favorites"))return;
+    QJsonArray favorites;bool listed=false;
+    for(const auto &entry:catalog.value("favorites").toArray()){
+        const bool same=entry.toObject().value("value").toString()==value;
+        listed=listed||same;
+        if(!favorite&&same)continue;
+        favorites.append(entry);
+    }
+    if(favorite&&!listed){
+        const auto models=catalog.value("models").toArray();
+        const bool available=std::any_of(models.cbegin(),models.cend(),[&](const QJsonValue &model){
+            const auto entry=model.toObject();return entry.value("value").toString(entry.value("id").toString())==value;});
+        favorites.append(QJsonObject{{"value",value},{"available",available}});
+    }
+    catalog.insert("favorites",favorites);
+}
 // Folders of the selected computer: drive and UNC paths on the local Windows
 // machine (D16), POSIX paths elsewhere.
 MachinePlatform::Style folderStyle(const FleetState &fleet,const QString &host) {
@@ -114,9 +176,19 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_refreshAccounts=new QPushButton(workspaceIcon("refresh",iconColor),tr("Refresh"));m_refreshAccounts->setObjectName("refreshLaunchAccounts");m_refreshAccounts->setAutoDefault(false);
     m_refreshAccounts->setAccessibleName(tr("Refresh accounts"));accountStatusRow->addWidget(m_refreshAccounts);
     accountField->addLayout(accountStatusRow);form->addRow(tr("Account and agent"),accountField);
+    // The hidden combo keeps the selected model and its variants; the button opens
+    // OpenCode's grouped picker for the selected computer and folder.
     m_model=new QComboBox;m_model->setObjectName("launchModel");m_model->setAccessibleName(tr("Model"));m_model->setMinimumContentsLength(18);m_model->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    m_modelLabel=plainLabel(tr("Model"));form->addRow(m_modelLabel,m_model);
-    m_model->addItem(tr("Native default model"),QString());m_model->hide();m_modelLabel->hide();
+    m_modelButton=new QPushButton(tr("Native default model"));m_modelButton->setObjectName("launchModelButton");m_modelButton->setAccessibleName(tr("Model"));m_modelButton->setAutoDefault(false);
+    m_modelButton->setToolTip(tr("Models OpenCode offers on this computer. Native default uses OpenCode's configuration."));
+    auto *modelRow=new QHBoxLayout;modelRow->setSpacing(8);modelRow->addWidget(m_modelButton,1);modelRow->addWidget(m_model);
+    m_modelLabel=plainLabel(tr("Model"));form->addRow(m_modelLabel,modelRow);
+    m_model->addItem(tr("Native default model"),QString());m_model->hide();m_modelButton->hide();m_modelLabel->hide();
+    m_modelPopup=new QFrame(this,Qt::Popup);m_modelPopup->setObjectName("launchModelPopup");m_modelPopup->setFrameShape(QFrame::StyledPanel);
+    auto *popupLayout=new QVBoxLayout(m_modelPopup);popupLayout->setContentsMargins(10,10,10,10);popupLayout->setSpacing(8);
+    m_modelPicker=new OpenCodeModelPicker;m_modelPicker->setObjectName("launchModelPicker");popupLayout->addWidget(m_modelPicker,1);
+    auto *nativeModel=new QPushButton(tr("Use native default model"));nativeModel->setObjectName("launchModelDefault");nativeModel->setAutoDefault(false);
+    popupLayout->addWidget(nativeModel,0,Qt::AlignLeft);
     // Inspecting never starts OpenCode: a stopped service keeps the last known
     // models and offers this explicit start.
     m_openCodeService=new QWidget;m_openCodeService->setObjectName("launchOpenCodeService");
@@ -148,12 +220,32 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     connect(m_folder,&QComboBox::currentIndexChanged,this,[this]{
         m_prefillRequest=0;
         m_browsedFolders.remove(host());
-        loadAccounts();updateForm();updateWorktrees();
+        loadAccounts();updateModels();updateForm();updateWorktrees();
     });
     connect(m_folder,&QComboBox::activated,this,[this]{m_prefillRequest=0;updateForm();});
     connect(m_account,&QListWidget::currentItemChanged,this,[this]{m_preferredAgent=this->agent();m_preferredAccount=account();m_accountPreset=true;updateModels();updateForm();});
-    connect(m_refreshAccounts,&QPushButton::clicked,this,[this]{m_forceUsage=true;loadAccounts(true);});
+    connect(m_refreshAccounts,&QPushButton::clicked,this,[this]{
+        // Refresh asks again for folders whose last answer was not a ready catalog.
+        for(const auto &key:QStringList(m_folderOrder))
+            if(key.startsWith(host()+'\n')&&!readyCatalog(m_folderCatalogs.value(key))){m_folderOrder.removeOne(key);m_folderCatalogs.remove(key);}
+        m_forceUsage=true;loadAccounts(true);
+    });
     connect(m_model,&QComboBox::currentIndexChanged,this,&NewSessionDialog::updateEfforts);
+    connect(m_model,&QComboBox::currentIndexChanged,this,&NewSessionDialog::updateModelButton);
+    connect(m_modelButton,&QPushButton::clicked,this,&NewSessionDialog::openModelPicker);
+    connect(m_modelPicker,&OpenCodeModelPicker::chosen,this,&NewSessionDialog::chooseModel);
+    connect(m_modelPicker,&OpenCodeModelPicker::favoriteRequested,this,&NewSessionDialog::changeFavorite);
+    connect(m_modelPicker,&OpenCodeModelPicker::catalogRequested,this,[this]{
+        // All models is an explicit ask: it reads the folder again unless a ready catalog is here.
+        const auto machine=host().isEmpty()?m_fleet.local().host:host();
+        const auto *box=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
+        const auto stored=m_folderCatalogs.value(modelKey());
+        if(m_folder->currentData(Qt::UserRole+2).toString().isEmpty())m_modelPicker->setCatalogFailed(tr("Choose a working folder to list all of its models."));
+        else if(!box||!box->ok)m_modelPicker->setCatalogFailed(tr("%1 is offline.").arg(machine));
+        else if(readyCatalog(stored))m_modelPicker->setCatalog(stored);
+        else if(!m_folderRequests.key(modelKey(),0))requestFolderCatalog(true);
+    });
+    connect(nativeModel,&QPushButton::clicked,this,[this]{m_chosenModel={};m_modelPopup->hide();m_model->setCurrentIndex(0);});
     connect(m_startOpenCode,&QPushButton::clicked,this,&NewSessionDialog::startOpenCode);
     connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){refreshUsage();});
     auto *usageTimer=new QTimer(this);usageTimer->setInterval(60000);
@@ -195,6 +287,63 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         }
         if(id!=m_accountRequest||machine!=host())return;
         m_accountRequest=0;m_accountCatalogLoaded=true;m_forceUsage=false;updateAccounts();m_accountStatus->setText(tr("Could not load accounts: %1").arg(error));
+    });
+    // A folder catalog belongs to its own computer and folder: a late answer is
+    // kept for that folder and never shown in another one. Only the newest
+    // request issued for a folder answers it: an older answer is dropped, also
+    // when it arrives after the newest one was applied.
+    const auto newest=[this](quint64 request,const QString &key){
+        const bool latest=m_folderLatest.value(key)==request;
+        // With nothing pending for this folder, no older answer can arrive any more.
+        if(!m_folderRequests.key(key,0))m_folderLatest.remove(key);
+        return latest;
+    };
+    connect(&m_client,&HgsClient::openCodeModelsReady,this,[this,newest](quint64 request,const QString &machine,const QString &location,const QJsonObject &catalog){
+        if(!m_folderRequests.contains(request))return;
+        const auto key=m_folderRequests.take(request);if(!newest(request,key)||key!=machine+'\n'+location)return;
+        storeFolderCatalog(key,catalog);
+        if(key==modelKey()&&this->agent()=="opencode")updateModels();
+    });
+    connect(&m_client,&HgsClient::openCodeModelsFailed,this,[this,newest](quint64 request,const QString &machine,const QString &location,const QString &error){
+        if(!m_folderRequests.contains(request))return;
+        const auto key=m_folderRequests.take(request);if(!newest(request,key)||key!=machine+'\n'+location)return;
+        const auto failure=OpenCodeModels::errorText(error,machine.isEmpty()?m_fleet.local().host:machine);
+        // A failed refresh keeps a ready catalog; otherwise the failure is shown again, not asked again.
+        const bool kept=readyCatalog(m_folderCatalogs.value(key));
+        if(!kept)storeFolderCatalog(key,QJsonObject{{"failure",failure}});
+        if(key!=modelKey()||this->agent()!="opencode")return;
+        if(kept)m_modelPicker->setCatalogFailed(failure);else updateModels();
+    });
+    connect(&m_client,&HgsClient::openCodeFavoriteReady,this,[this](quint64 request,const QString &machine,const QJsonObject &){
+        if(!m_favoriteRequests.contains(request))return;
+        const auto change=m_favoriteRequests.take(request);
+        // Favorites belong to the computer: its other folders' catalogs are stale now.
+        for(const auto &key:QStringList(m_folderOrder))
+            if(key.startsWith(machine+'\n')&&key!=modelKey()){m_folderOrder.removeOne(key);m_folderCatalogs.remove(key);}
+        if(machine!=host())return;
+        loadAccounts(true);
+        // The answer for another folder or agent leaves this picker as it is.
+        if(change.key!=modelKey()||this->agent()!="opencode")return;
+        // updateModels passes the stored catalog and the account row again; they carry the
+        // confirmed change, or the picker's next short list would bring back the state before it.
+        if(auto stored=m_folderCatalogs.value(change.key);readyCatalog(stored)){
+            markCatalogFavorite(stored,change.value,change.favorite);m_folderCatalogs.insert(change.key,stored);
+        }
+        for(qsizetype index=0;index<m_accounts.size();++index){
+            auto profile=m_accounts.at(index).toObject();
+            if(profile.value("provider")!="opencode"||profile.value("id").toString()!=account()||!profile.contains("model_options"))continue;
+            profile.insert("model_options",markFavorite(profile.value("model_options").toArray(),change.value,change.favorite));
+            m_accounts.replace(index,profile);
+        }
+        m_modelPicker->setFavorite(change.value,change.favorite);requestFolderCatalog(true);
+    });
+    connect(&m_client,&HgsClient::openCodeFavoriteFailed,this,[this](quint64 request,const QString &machine,const QString &error){
+        if(!m_favoriteRequests.contains(request))return;
+        const auto change=m_favoriteRequests.take(request);
+        if(machine!=host()||change.key!=modelKey()||this->agent()!="opencode")return;
+        m_modelPicker->setFavoritePending(change.value,false);
+        const auto name=machine.isEmpty()?m_fleet.local().host:machine;
+        m_favoriteError=tr("Could not change the favorite on %1: %2").arg(name,OpenCodeModels::errorText(error,name));m_error->setText(m_favoriteError);
     });
     connect(&m_client,&HgsClient::worktreesReady,this,[this](quint64 request,const QString &machine,const QString &path,const QJsonObject &data){
         if(m_prefillRequest&&request==m_prefillRequest&&machine==host()&&path==m_prefillPath){
@@ -318,7 +467,7 @@ void NewSessionDialog::loadFolders(const QString &selectedPath)
     }
     for(int row=0;row<m_folder->count();++row)m_folder->setItemData(row,available,Qt::UserRole+3);
     m_folder->setCurrentIndex(index);
-    loadAccounts();updateForm();updateWorktrees();
+    loadAccounts();updateModels();updateForm();updateWorktrees();
 }
 void NewSessionDialog::browseFolder()
 {
@@ -378,7 +527,7 @@ void NewSessionDialog::updateForm()
     if(noMachine)m_error->setText(LocalSessionHost::canEnable(m_fleet.local())?enableOrRemote:remoteOnly);
     else if(m_error->text()==remoteOnly||m_error->text()==enableOrRemote)m_error->clear();
     m_openMachines->setVisible(noMachine);
-    updateOpenCodeService();
+    updateModelButton();updateOpenCodeService();
 }
 void NewSessionDialog::start()
 {
@@ -708,38 +857,68 @@ void NewSessionDialog::createWorktree()
     m_autoPreferred=false;selectPath(dialog.createdPath());
 }
 
+// The short list is the account row's, or the folder's catalog once it is ready.
+// Every change of computer, folder or agent first resets the picker (its
+// contract), then sets its list, catalog and current model in the same turn.
 void NewSessionDialog::updateModels()
 {
     const bool enabled=agent()=="opencode";
-    const auto selected=m_model->currentData().toString();
+    const auto row=openCodeProfile();
+    const auto key=modelKey();
+    const auto context=enabled?key:QString();
+    const bool changed=context!=m_modelContext;
+    if(changed){
+        m_modelContext=context;m_modelPopup->hide();m_modelPicker->setCatalog({});m_shownCatalog={};
+        // A choice belongs to its computer; another folder keeps it only when its ready catalog lists it.
+        const auto chosen=m_chosenModel.value("value").toString();const auto stored=m_folderCatalogs.value(key);
+        const auto listed=[&]{
+            for(const auto &list:{stored["models"].toArray(),stored["model_options"].toArray()})
+                for(const auto &entry:list){
+                    const auto option=entry.toObject();
+                    if(option["value"].toString(option["id"].toString())==chosen)return true;
+                }
+            return false;
+        };
+        if(m_chosenHost!=host())m_chosenModel={};
+        else if(enabled&&!chosen.isEmpty()&&m_chosenKey!=key){if(readyCatalog(stored)&&listed())m_chosenKey=key;else m_chosenModel={};}
+    }
+    // A new context starts from the choice it accepted above, else the native
+    // default; within one context the selected model stays, listed or not (an
+    // unstarred favorite included).
+    const auto selected=changed?m_chosenModel.value("value").toString():m_model->currentData().toString();
+    const QJsonObject kept{{"value",selected},{"label",m_model->currentData(LabelRole).toString()},
+        {"effort_options",QJsonArray::fromStringList(m_model->currentData(EffortRole).toStringList())},
+        {"effort_labels",QJsonArray::fromStringList(m_model->currentData(EffortLabelRole).toStringList())}};
+    const auto catalog=m_folderCatalogs.value(key);const bool ready=enabled&&readyCatalog(catalog);
     const QSignalBlocker blocker(m_model);
     m_model->clear();m_model->addItem(tr("Native default model"),QString());
-    if(enabled) for(const auto &value:m_accounts){
-        const auto account=value.toObject();
-        if(account["provider"]!="opencode"||account["id"].toString()!=this->account())continue;
-        const auto options=account["model_options"].toArray();
-        for(int index=0;index<qMin(256,options.size());++index){
-            const auto entry=options[index];
-            const auto option=entry.toObject();const auto id=option["value"].toString(option["id"].toString());
-            if(id.isEmpty()||id.toUtf8().size()>256||!id.contains('/')||controlText(id)||m_model->findData(id)>=0)continue;
-            auto label=option["label"].toString();if(label.size()>160||controlText(label))label={};
-            // Effort options are this model's variants: at most 16, each valid and distinct.
-            QStringList efforts,effortLabels;
-            const auto variants=option["effort_options"].toArray(),variantLabels=option["effort_labels"].toArray();
-            for(int variant=0;variant<qMin<qsizetype>(64,variants.size())&&efforts.size()<16;++variant){
-                const auto effort=variants[variant].toString();
-                if(!OpenCodeEffort::valid(effort)||efforts.contains(effort))continue;
-                auto effortLabel=variantLabels.at(variant).toString();if(effortLabel.isEmpty()||effortLabel.size()>80||controlText(effortLabel))effortLabel=effort;
-                efforts<<effort;effortLabels<<effortLabel;
-            }
-            m_model->addItem(label.isEmpty()||label==id?id:label+" ("+id+")",id);
-            m_model->setItemData(m_model->count()-1,efforts,EffortRole);m_model->setItemData(m_model->count()-1,effortLabels,EffortLabelRole);
+    if(enabled){
+        addModelOptions(m_model,row["model_options"].toArray());
+        if(ready)addModelOptions(m_model,catalog["model_options"].toArray());
+        if(!m_chosenModel.isEmpty())addModelOptions(m_model,QJsonArray{m_chosenModel});
+        if(!changed&&!selected.isEmpty())addModelOptions(m_model,QJsonArray{kept});
+        const auto &shortList=ready?catalog:row;
+        m_modelPicker->setShortList(shortList["model_options"].toArray(),shortList["model_options_truncated"].toBool());
+        // Another answer (a stopped service, a failure) shows its reason over the row's list.
+        if(catalog!=m_shownCatalog){
+            m_shownCatalog=catalog;
+            if(catalog.contains("failure"))m_modelPicker->setCatalogFailed(catalog["failure"].toString());
+            else if(!catalog.isEmpty())m_modelPicker->setCatalog(catalog);
+        }
+        const auto machine=host().isEmpty()?m_fleet.local().host:host();
+        const auto *box=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
+        const bool supported=OpenCodeModels::catalogSupported(row),online=box&&box->ok;
+        // Fleet polls reach here: stars are redrawn only when this changes.
+        const auto availability=QString::number(supported)+QString::number(online)+machine;
+        if(changed||availability!=m_pickerAvailability){
+            m_pickerAvailability=availability;
+            m_modelPicker->setAllModelsAvailable(supported,OpenCodeModels::updateText(machine));
+            m_modelPicker->setFavoritesAvailable(supported&&online,supported?tr("%1 is offline.").arg(machine):OpenCodeModels::updateText(machine));
         }
     }
     m_model->setCurrentIndex(qMax(0,m_model->findData(selected)));
-    m_model->setVisible(enabled);m_modelLabel->setVisible(enabled);
-    m_model->setToolTip(tr("Models configured on this computer. Native default uses OpenCode's configuration."));
-    updateEfforts();updateOpenCodeService();
+    m_modelButton->setVisible(enabled);m_modelLabel->setVisible(enabled);
+    updateEfforts();updateModelButton();updateOpenCodeService();
 }
 // A changed model keeps the chosen effort only when it offers that variant too.
 void NewSessionDialog::updateEfforts()
@@ -787,4 +966,63 @@ void NewSessionDialog::startOpenCode()
     m_serviceHost=host();m_accountStatus->clear();
     m_serviceStart=m_client.requestAccounts(m_serviceHost,{"start","native-opencode","--json"});
     updateOpenCodeService();
+}
+QString NewSessionDialog::modelKey() const {return host()+'\n'+m_folder->currentData(Qt::UserRole+2).toString();}
+// The button names the selected model. The picker opens only with this
+// computer's OpenCode row: until then its context is not complete.
+void NewSessionDialog::updateModelButton()
+{
+    const auto label=m_model->currentData(LabelRole).toString();
+    m_modelButton->setText(m_model->currentIndex()<=0?tr("Native default model"):label.isEmpty()?m_model->currentData().toString():label);
+    const bool ready=agent()=="opencode"&&!openCodeProfile().isEmpty()&&!m_validation&&!m_creation;
+    m_modelButton->setEnabled(ready);if(!ready)m_modelPopup->hide();
+    m_modelPicker->setCurrent(m_model->currentData().toString());
+}
+void NewSessionDialog::openModelPicker()
+{
+    if(!m_modelButton->isEnabled())return;
+    m_modelPopup->resize(qMax(440,m_modelButton->width()),420);
+    m_modelPopup->move(m_modelButton->mapToGlobal(QPoint(0,m_modelButton->height()+4)));
+    m_modelPopup->show();m_modelPicker->setFocus(Qt::PopupFocusReason);
+    // Opening asks once per computer and folder; a stored answer is shown again.
+    requestFolderCatalog(false);
+}
+// `account models` for the selected folder, only from an hgs that has it on an
+// online computer. Nothing here starts OpenCode or asks again on its own.
+void NewSessionDialog::requestFolderCatalog(bool refresh)
+{
+    const auto folder=m_folder->currentData(Qt::UserRole+2).toString(),key=modelKey();
+    const auto *box=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
+    if(agent()!="opencode"||folder.isEmpty()||!box||!box->ok||!OpenCodeModels::catalogSupported(openCodeProfile()))return;
+    if(!refresh&&(m_folderCatalogs.contains(key)||m_folderRequests.key(key,0)))return;
+    const auto request=m_client.requestOpenCodeModels(host(),folder);
+    m_folderRequests.insert(request,key);m_folderLatest.insert(key,request);
+}
+// Answers of at most four folders: a catalog can be large. The current one stays.
+void NewSessionDialog::storeFolderCatalog(const QString &key,const QJsonObject &answer)
+{
+    m_folderOrder.removeOne(key);m_folderOrder.append(key);m_folderCatalogs.insert(key,answer);
+    while(m_folderOrder.size()>4){
+        const auto oldest=m_folderOrder.first()==modelKey()?m_folderOrder.at(1):m_folderOrder.first();
+        m_folderOrder.removeOne(oldest);m_folderCatalogs.remove(oldest);
+    }
+}
+// The picker's choice is the only way its model becomes the selection.
+void NewSessionDialog::chooseModel(const QString &value)
+{
+    const auto model=m_modelPicker->model(value);if(!model||agent()!="opencode")return;
+    m_chosenModel=QJsonObject{{"value",model->value},{"label",model->label},
+        {"effort_options",QJsonArray::fromStringList(model->efforts)},{"effort_labels",QJsonArray::fromStringList(model->effortLabels)}};
+    m_chosenHost=host();m_chosenKey=modelKey();
+    addModelOptions(m_model,QJsonArray{m_chosenModel});
+    m_modelPopup->hide();m_model->setCurrentIndex(qMax(0,m_model->findData(value)));
+}
+// One request identity per star click (HgsClient makes it). A failure is shown, never retried.
+void NewSessionDialog::changeFavorite(const QString &value,bool favorite)
+{
+    const auto *box=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
+    if(agent()!="opencode"||!box||!box->ok||!OpenCodeModels::catalogSupported(openCodeProfile()))return;
+    if(!m_favoriteError.isEmpty()&&m_error->text()==m_favoriteError)m_error->clear();
+    m_favoriteError.clear();m_modelPicker->setFavoritePending(value,true);
+    m_favoriteRequests.insert(m_client.requestOpenCodeFavorite(host(),value,favorite),{modelKey(),value,favorite});
 }

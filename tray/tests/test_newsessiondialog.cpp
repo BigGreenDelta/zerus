@@ -2,6 +2,7 @@
 #include <memory>
 #include <QComboBox>
 #include <QFile>
+#include <QFrame>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
@@ -10,7 +11,10 @@
 #include <QPersistentModelIndex>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QTreeWidget>
+#include <QUuid>
 #include "NewSessionDialog.h"
+#include "OpenCodeModelPicker.h"
 #include "AccountUsageStore.h"
 #include "AccountUsage.h"
 #include "SessionsWindow.h"
@@ -53,6 +57,18 @@ class TestNewSessionDialog : public QObject {
         const auto *list=choices(dialog);for(int i=0;i<list->count();++i)if(list->item(i)->data(Qt::UserRole).toString()==id)return i;return -1;
     }
     static QString tip(NewSessionDialog &dialog,const QString &id) {const int at=row(dialog,id);return at<0?QString():choices(dialog)->item(at)->toolTip();}
+    // The picker's row for a model value, in any group.
+    static QTreeWidgetItem *row(QTreeWidget *tree,const QString &value) {
+        for(int g=0;g<tree->topLevelItemCount();++g)
+            for(int m=0;m<tree->topLevelItem(g)->childCount();++m)
+                if(tree->topLevelItem(g)->child(m)->data(0,Qt::UserRole).toString()==value)return tree->topLevelItem(g)->child(m);
+        return nullptr;
+    }
+    // Each call the fixture recorded in a file, one JSON line per call.
+    QStringList lines(const QString &name) const {
+        QFile f(m_fixture.filePath(name));if(!f.open(QIODevice::ReadOnly))return {};
+        return QString::fromUtf8(f.readAll()).split('\n',Qt::SkipEmptyParts);
+    }
 private slots:
     void initTestCase() {
         QVERIFY(m_settings.isValid());QCoreApplication::setOrganizationName("hgs-tests");QCoreApplication::setApplicationName("new-session-dialog");
@@ -60,7 +76,9 @@ private slots:
     }
     void init() {
         QSettings().clear();
-        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started","opencode-ids"})flag(name,false);
+        for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started","opencode-ids",
+            "model-calls","favorite-calls","favorite-fails","models-stopped","old-hgs","favorites","slow-models","slow-favorite","favorite-started",
+            "hold-next-models","models-held"})flag(name,false);
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -90,8 +108,16 @@ def catalog():
           'effort_options':['high','max','','bad value','x'*80,'max'],'effort_labels':['High','Maximum','','','','']},
          {'id':'fixture/many','value':'fixture/many','label':'Many fixture','provider':'fixture','provider_label':'fixture','free':False,'effort_options':many,'effort_labels':many}]
  if (root/'opencode-ids').exists():models.append(json.loads((root/'opencode-ids').read_text()))
- return {'model_options':models,'settings_model':'fixture/local','catalog_state':'not_running' if stopped else 'ready',
+ result={'model_options':models,'settings_model':'fixture/local','catalog_state':'not_running' if stopped else 'ready',
          'catalog_reason':'OpenCode is not running on '+(host or 'pc') if stopped else '','catalog_at':1791018000}
+ # An older hgs has neither `account models` nor `account favorite`, and never reports this.
+ if not (root/'old-hgs').exists():result['model_options_truncated']=False
+ return result
+# Waits, up to ten seconds, until the test releases the fixture.
+def hold():
+ for _ in range(500):
+  if (root/'released').exists():break
+  time.sleep(.02)
 if a[:2]==['account','start']:
  with open(root/'service-started','a') as calls:calls.write(json.dumps([host]+a)+'\n')
  (root/'opencode-stopped').unlink(missing_ok=True)
@@ -132,6 +158,45 @@ elif a[:2]==['account','inspect']:
    time.sleep(.02)
  if (root/'fail').exists():sys.exit(1)
  print(json.dumps({'id':i,'provider':p,'home':'/profiles/'+i,**status(i,p)}))
+elif a[:2]==['account','models']:
+ with open(root/'model-calls','a') as calls:calls.write(json.dumps([host]+a)+'\n')
+ if (root/'old-hgs').exists():sys.stderr.write('usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME\n');sys.exit(1)
+ location=a[a.index('--location')+1]
+ if (root/'slow-models').exists() and location=='/workspace/example':hold()
+ if (root/'models-stopped').exists():
+  print(json.dumps({'catalog_state':'not_running','catalog_reason':'OpenCode is not running on '+(host or 'pc'),'model_options':[],'models':[],'providers':[],
+                    'model_options_truncated':False,'providers_truncated':False,'models_truncated':False,'favorites':[]}));sys.exit(0)
+ starred=json.loads((root/'favorites').read_text()) if (root/'favorites').exists() else []
+ # Each folder has its own provider: this one's model only in /workspace/example.
+ # /workspace/nolocal does not offer the account row's fixture/local.
+ tag,name=('proj','Project model') if location=='/workspace/example' else ('other','Other folder model')
+ short=[m for m in catalog()['model_options'] if location!='/workspace/nolocal' or m['value']!='fixture/local']
+ short+=[{'id':'folderonly/'+tag,'value':'folderonly/'+tag,'label':name,'provider':'folderonly',
+          'provider_label':'Folder-only fixture','free':False,'effort_options':[],'effort_labels':[]}]
+ full=short+[{'id':'solo/solo-model','value':'solo/solo-model','label':'Solo model','provider':'solo','provider_label':'Solo fixture',
+        'free':False,'effort_options':['low'],'effort_labels':['low']}]
+ for entry in short+full:
+  if entry['value'] in starred:entry['favorite']=True
+ # hold-next-models: the next answer is built now, from this moment's favorites
+ # and with a model no other answer lists, and printed only after the release.
+ held=(root/'hold-next-models').exists() and not (root/'models-held').exists()
+ if held:short=short+[{'id':'stale/old','value':'stale/old','label':'Stale model','provider':'stale','provider_label':'Stale fixture',
+                       'free':False,'effort_options':[],'effort_labels':[]}]
+ answer=json.dumps({'catalog_state':'ready','catalog_reason':'','location':location,'model_options':short,'models':full,
+                    'providers':[{'id':'folderonly','label':'Folder-only fixture','kind':'config','credential_count':0,'model_count':1,'folder':True}],
+                    'model_options_truncated':False,'providers_truncated':False,'models_truncated':False,'favorites':[{'value':v} for v in starred]})
+ if held:(root/'models-held').touch();hold()
+ print(answer)
+elif a[:2]==['account','favorite']:
+ with open(root/'favorite-calls','a') as calls:calls.write(json.dumps([host]+a)+'\n')
+ (root/'favorite-started').touch()
+ if (root/'slow-favorite').exists():hold()
+ if (root/'favorite-fails').exists():sys.stderr.write('Account catalog is busy. Retry after the current operation finishes.\n');sys.exit(1)
+ model=a[a.index('--model')+1];on=a[a.index('--favorite')+1]=='on'
+ starred=json.loads((root/'favorites').read_text()) if (root/'favorites').exists() else []
+ starred=[v for v in starred if v!=model]+([model] if on else [])
+ (root/'favorites').write_text(json.dumps(starred))
+ print(json.dumps({'status':'applied','request_id':a[a.index('--request-id')+1],'model':model,'favorite':on,'favorites':starred}))
 elif a and a[0]=='dirs':print(json.dumps({'path':a[-1],'directories':[]}))
 elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]}))
 )PY"));
@@ -343,7 +408,8 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         auto *models=dialog.findChild<QComboBox *>("launchModel"),*effort=dialog.findChild<QComboBox *>("launchEffort");
         QVERIFY(models);QVERIFY(effort);QTRY_VERIFY(models->findData("fixture/local")>=0);
         QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("native-opencode"));
-        QVERIFY(models->isVisible());QCOMPARE(models->currentData().toString(),QString());QVERIFY(!effort->isVisible());
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");QVERIFY(button);
+        QVERIFY(button->isVisible());QCOMPARE(models->currentData().toString(),QString());QVERIFY(!effort->isVisible());
         const auto offered=[&]{QStringList result;for(int i=0;i<effort->count();++i)result<<effort->itemText(i);return result;};
         models->setCurrentIndex(models->findData("fixture/local"));QVERIFY(effort->isVisible());
         QCOMPARE(offered(),QStringList({"Default","low","medium","high"}));QCOMPARE(effort->currentData().toString(),QString());
@@ -360,7 +426,7 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         models->setCurrentIndex(models->findData("fixture/plain"));QVERIFY(!effort->isVisible());QCOMPARE(effort->currentData().toString(),QString());
         models->setCurrentIndex(models->findData("fixture/many"));QCOMPARE(effort->currentData().toString(),QString());
         // Other agents have no effort here.
-        choices(dialog)->setCurrentRow(row(dialog,"work"));QVERIFY(!effort->isVisible());QVERIFY(!models->isVisible());
+        choices(dialog)->setCurrentRow(row(dialog,"work"));QVERIFY(!effort->isVisible());QVERIFY(!button->isVisible());
         choices(dialog)->setCurrentRow(row(dialog,"native-opencode"));QTRY_VERIFY(models->findData("fixture/local")>=0);
         models->setCurrentIndex(models->findData("fixture/local"));effort->setCurrentIndex(effort->findData("high"));
         auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
@@ -422,6 +488,256 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QTRY_VERIFY(service->isVisible());QTRY_VERIFY(!dialog.findChild<QLabel *>("launchAccountStatus")->text().contains("Loading"));
         QVERIFY(!service->isEnabled());service->click();QTest::qWait(100);QVERIFY(!QFile::exists(m_fixture.filePath("service-started")));
         mac.ok=true;state.setPeer(mac,QDateTime::currentMSecsSinceEpoch());dialog.setFleet(state);QTRY_VERIFY(service->isEnabled());
+    }
+    // The model button opens the grouped picker with the selected folder's catalog.
+    void openCodePickerUsesTheSelectedFolderCatalog() {
+        flag("opencode");flag("opencode-models");
+        NewSessionDialog dialog(program(),fleet(),"mac","opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");QTRY_VERIFY(button&&button->isVisible()&&button->isEnabled());
+        QCOMPARE(button->text(),QString("Native default model"));
+        button->click();
+        auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");QVERIFY(picker);QTRY_VERIFY(picker->isVisible());
+        QTRY_VERIFY(picker->values().contains("folderonly/proj"));
+        QCOMPARE(QJsonDocument::fromJson(lines("model-calls").value(0).toUtf8()).array(),
+                 QJsonArray({"mac","account","models","native-opencode","--location","/workspace/example","--json"}));
+        auto *tree=picker->findChild<QTreeWidget *>("openCodeModelList");bool folder=false;
+        for(int g=0;g<tree->topLevelItemCount();++g)folder|=tree->topLevelItem(g)->text(0)=="Folder-only fixture · This folder";
+        QVERIFY(folder);
+        picker->select("folderonly/proj");QTRY_VERIFY(!picker->isVisible());QCOMPARE(button->text(),QString("Project model"));
+        QVERIFY(!dialog.findChild<QComboBox *>("launchEffort")->isVisible());
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][8].toString(),QString("folderonly/proj"));QCOMPARE(launched[0][9].toString(),QString());
+    }
+    // A model the account row does not list, from the short list or All models,
+    // stays chosen with its effort through an account refresh.
+    void openCodeChoicesOutsideTheRowSurviveAnAccountRefresh() {
+        flag("opencode");flag("opencode-models");
+        NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");QTRY_VERIFY(button->isEnabled());button->click();
+        auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");QTRY_VERIFY(picker->values().contains("folderonly/proj"));
+        picker->select("folderonly/proj");QTRY_COMPARE(button->text(),QString("Project model"));
+        const int before=lines("model-calls").size();
+        dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
+        QTest::qWait(300);
+        QCOMPARE(button->text(),QString("Project model"));
+        QCOMPARE(dialog.findChild<QComboBox *>("launchModel")->currentData().toString(),QString("folderonly/proj"));
+        button->click();QTRY_VERIFY(picker->values().contains("folderonly/proj"));QCOMPARE(lines("model-calls").size(),before);
+        // An All models choice is kept the same way, with its efforts.
+        picker->findChild<QPushButton *>("openCodeAllModels")->click();picker->select("solo/solo-model");
+        auto *effort=dialog.findChild<QComboBox *>("launchEffort");QTRY_VERIFY(effort->isVisible());effort->setCurrentIndex(effort->findData("low"));
+        dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();QTest::qWait(300);
+        QCOMPARE(button->text(),QString("Solo model"));QCOMPARE(effort->currentData().toString(),QString("low"));
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][8].toString(),QString("solo/solo-model"));QCOMPARE(launched[0][9].toString(),QString("low"));
+    }
+    void openCodeAllModelsSearchesTheFolderCatalog() {
+        flag("opencode");flag("opencode-models");
+        NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");QTRY_VERIFY(button->isEnabled());button->click();
+        auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");QTRY_VERIFY(picker->values().contains("folderonly/proj"));
+        picker->findChild<QPushButton *>("openCodeAllModels")->click();
+        picker->findChild<QLineEdit *>("openCodeModelSearch")->setText("solo");
+        QTRY_COMPARE(picker->values(),QStringList({"solo/solo-model"}));
+        QCOMPARE(lines("model-calls").size(),1);   // the folder catalog is fetched once
+        picker->select("solo/solo-model");auto *effort=dialog.findChild<QComboBox *>("launchEffort");
+        QVERIFY(effort->isVisible());QCOMPARE(effort->count(),2);
+    }
+    void openCodeStarSendsOneFavoriteRequestWithIdentity() {
+        flag("opencode");flag("opencode-models");
+        NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");QTRY_VERIFY(button->isEnabled());button->click();
+        auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");QTRY_VERIFY(picker->values().contains("fixture/plain"));
+        emit picker->favoriteRequested("fixture/plain",true);
+        QTRY_COMPARE(lines("favorite-calls").size(),1);
+        const auto args=QJsonDocument::fromJson(lines("favorite-calls")[0].toUtf8()).array();
+        QCOMPARE(args.toVariantList().mid(0,8),QVariantList({"","account","favorite","native-opencode","--model","fixture/plain","--favorite","on"}));
+        QCOMPARE(args[8].toString(),QString("--request-id"));QVERIFY(!QUuid::fromString(args[9].toString()).isNull());
+        QCOMPARE(args[10].toString(),QString("--json"));
+        // The folder catalog is fetched again, and it marks the favorite.
+        QTRY_COMPARE(lines("model-calls").size(),2);
+        auto *tree=picker->findChild<QTreeWidget *>("openCodeModelList");QTRY_COMPARE(row(tree,"fixture/plain")->text(1),QString("★"));
+        QVERIFY(picker->values().contains("folderonly/proj"));
+        flag("favorite-fails");
+        emit picker->favoriteRequested("fixture/other",true);
+        auto *error=dialog.findChild<QLabel *>("launchError");
+        QTRY_VERIFY(error->text().startsWith("Could not change the favorite on pc:"));
+        QCOMPARE(row(tree,"fixture/other")->text(1),QString("☆"));
+        // A failure is never sent again on its own.
+        QTest::qWait(200);QCOMPARE(lines("favorite-calls").size(),2);
+    }
+    void openCodeStoppedServiceKeepsTheRowListAndNeverStarts() {
+        flag("opencode");flag("opencode-models");flag("models-stopped");
+        NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");QTRY_VERIFY(button->isEnabled());button->click();
+        auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");
+        QTRY_COMPARE(picker->findChild<QLabel *>("openCodeModelNotice")->text(),QString("OpenCode is not running on pc"));
+        QVERIFY(picker->values().contains("fixture/local"));
+        QVERIFY(!QFile::exists(m_fixture.filePath("service-started")));
+        // Opening again shows that answer instead of asking again.
+        dialog.findChild<QFrame *>("launchModelPopup")->hide();button->click();QTRY_VERIFY(picker->isVisible());
+        QTest::qWait(200);QCOMPARE(lines("model-calls").size(),1);QVERIFY(!QFile::exists(m_fixture.filePath("service-started")));
+    }
+    void openCodeOlderComputerOffersNoStarsOrAllModels() {
+        flag("opencode");flag("opencode-models");flag("old-hgs");
+        NewSessionDialog dialog(program(),fleet(),"mac","opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");QTRY_VERIFY(button->isEnabled());button->click();
+        auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");QTRY_VERIFY(picker->values().contains("fixture/local"));
+        QTest::qWait(200);
+        QVERIFY(lines("model-calls").isEmpty());   // never asks an older hgs
+        auto *all=picker->findChild<QPushButton *>("openCodeAllModels");QVERIFY(!all->isEnabled());
+        QCOMPARE(all->toolTip(),QString("Update Zerus on mac to search all models and star favorites."));
+        QSignalSpy favorites(picker,&OpenCodeModelPicker::favoriteRequested);
+        auto *tree=picker->findChild<QTreeWidget *>("openCodeModelList");
+        emit tree->itemClicked(row(tree,"fixture/plain"),1);QCOMPARE(favorites.size(),0);
+        QCOMPARE(row(tree,"fixture/plain")->toolTip(1),QString("Update Zerus on mac to search all models and star favorites."));
+        picker->select("fixture/local");
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+        QVERIFY(lines("favorite-calls").isEmpty());
+    }
+    // A folder change closes and resets the picker and fills it for the new folder
+    // in the same turn. A late catalog of the previous folder is kept for that
+    // folder only: it never shows in the next one and is reused when it returns.
+    void openCodeLateFolderCatalogStaysWithItsFolder() {
+        flag("opencode");flag("opencode-models");flag("slow-models");
+        NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");QTRY_VERIFY(button->isEnabled());button->click();
+        auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");QTRY_VERIFY(picker->values().contains("fixture/local"));
+        QTRY_COMPARE(lines("model-calls").size(),1);
+        QSignalSpy answers(dialog.findChild<HgsClient *>(),&HgsClient::openCodeModelsReady);
+        auto *popup=dialog.findChild<QFrame *>("launchModelPopup");QVERIFY(popup->isVisible());
+        dialog.selectPath("/workspace/other",false);
+        QVERIFY(!popup->isVisible());QVERIFY(picker->values().contains("fixture/local"));
+        QVERIFY(!picker->values().contains("folderonly/proj"));QCOMPARE(picker->current(),QString());
+        QCOMPARE(button->text(),QString("Native default model"));
+        flag("released");QTRY_COMPARE(answers.size(),1);QTest::qWait(100);
+        QVERIFY(!picker->values().contains("folderonly/proj"));
+        button->click();QTRY_VERIFY(picker->values().contains("folderonly/other"));
+        QVERIFY(!picker->values().contains("folderonly/proj"));QCOMPARE(lines("model-calls").size(),2);
+        // Back in the first folder, its late catalog is shown without another request.
+        popup->hide();dialog.selectPath("/workspace/example",false);
+        QVERIFY(picker->values().contains("folderonly/proj"));QVERIFY(!picker->values().contains("folderonly/other"));
+        QCOMPARE(lines("model-calls").size(),2);
+    }
+    // A computer change clears the choice, the pending star and the list in the
+    // same turn. The previous computer's late favorite answer never marks this picker.
+    void openCodeLateFavoriteAnswerStaysWithItsComputer() {
+        flag("opencode");flag("opencode-models");flag("slow-favorite");
+        NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");QTRY_VERIFY(button->isEnabled());button->click();
+        auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");QTRY_VERIFY(picker->values().contains("folderonly/proj"));
+        picker->select("folderonly/proj");QTRY_COMPARE(button->text(),QString("Project model"));
+        button->click();QTRY_VERIFY(picker->isVisible());
+        auto *tree=picker->findChild<QTreeWidget *>("openCodeModelList");
+        QSignalSpy answers(dialog.findChild<HgsClient *>(),&HgsClient::openCodeFavoriteReady);
+        emit picker->favoriteRequested("fixture/plain",true);QCOMPARE(row(tree,"fixture/plain")->text(1),QString("…"));
+        QTRY_VERIFY(QFile::exists(m_fixture.filePath("favorite-started")));
+        auto *computer=dialog.findChild<QComboBox *>("launchComputer");computer->setCurrentIndex(computer->findData(QString("mac")));
+        QVERIFY(!dialog.findChild<QFrame *>("launchModelPopup")->isVisible());
+        QCOMPARE(button->text(),QString("Native default model"));QCOMPARE(picker->current(),QString());
+        QVERIFY(!picker->values().contains("folderonly/proj"));
+        QTRY_VERIFY(button->isEnabled());button->click();QTRY_VERIFY(picker->values().contains("fixture/plain"));
+        QCOMPARE(row(tree,"fixture/plain")->text(1),QString("☆"));
+        flag("released");QTRY_COMPARE(answers.size(),1);QTest::qWait(200);
+        QCOMPARE(row(tree,"fixture/plain")->text(1),QString("☆"));
+        QVERIFY(!dialog.findChild<QLabel *>("launchError")->text().startsWith("Could not change the favorite"));
+        QCOMPARE(lines("favorite-calls").size(),1);
+    }
+    // A model chosen from All models stays the current one through its own star
+    // and unstar, while the folder's catalog is read again after each change.
+    void openCodeCurrentModelSurvivesItsFavoriteChanges() {
+        flag("opencode");flag("opencode-models");
+        NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");QTRY_VERIFY(button->isEnabled());button->click();
+        auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");QTRY_VERIFY(picker->values().contains("folderonly/proj"));
+        picker->findChild<QPushButton *>("openCodeAllModels")->click();picker->select("solo/solo-model");
+        QTRY_COMPARE(button->text(),QString("Solo model"));button->click();QTRY_VERIFY(picker->isVisible());
+        auto *tree=picker->findChild<QTreeWidget *>("openCodeModelList");
+        for(const bool on:{true,false}){
+            const int calls=lines("model-calls").size();
+            emit picker->favoriteRequested("solo/solo-model",on);
+            QTRY_COMPARE(lines("model-calls").size(),calls+1);
+            QTRY_COMPARE(row(tree,"solo/solo-model")->text(1),QString(on?"★":"☆"));
+        }
+        // The catalog read after the star never overrides the later unstar.
+        QTest::qWait(300);QCOMPARE(row(tree,"solo/solo-model")->text(1),QString("☆"));
+        QCOMPARE(picker->current(),QString("solo/solo-model"));QCOMPARE(button->text(),QString("Solo model"));
+        QCOMPARE(dialog.findChild<QComboBox *>("launchModel")->currentData().toString(),QString("solo/solo-model"));
+        QCOMPARE(lines("favorite-calls").size(),2);
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][8].toString(),QString("solo/solo-model"));
+    }
+    // Only the newest read of a folder decides. An older answer, built before a
+    // later favorite change and released after the newer answer was applied,
+    // changes neither the catalog, the star nor the current model.
+    void openCodeOlderFolderAnswerNeverReplacesANewerOne() {
+        flag("opencode");flag("opencode-models");
+        NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/example",false);dialog.show();
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");QTRY_VERIFY(button->isEnabled());button->click();
+        auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");QTRY_VERIFY(picker->values().contains("folderonly/proj"));
+        picker->select("folderonly/proj");QTRY_COMPARE(button->text(),QString("Project model"));
+        button->click();QTRY_VERIFY(picker->isVisible());
+        auto *tree=picker->findChild<QTreeWidget *>("openCodeModelList");
+        QSignalSpy answers(dialog.findChild<HgsClient *>(),&HgsClient::openCodeModelsReady);
+        // The star's folder read is built at once, with the favorite on, and held.
+        flag("hold-next-models");emit picker->favoriteRequested("fixture/plain",true);
+        QTRY_VERIFY(QFile::exists(m_fixture.filePath("models-held")));QCOMPARE(row(tree,"fixture/plain")->text(1),QString("★"));
+        // The unstar's newer read answers first and is applied.
+        emit picker->favoriteRequested("fixture/plain",false);
+        QTRY_COMPARE(lines("favorite-calls").size(),2);QTRY_COMPARE(lines("model-calls").size(),3);QTRY_COMPARE(answers.size(),1);
+        QTRY_COMPARE(row(tree,"fixture/plain")->text(1),QString("☆"));QVERIFY(!picker->values().contains("stale/old"));
+        // The older answer arrives last and is dropped.
+        flag("released");QTRY_COMPARE(answers.size(),2);QTest::qWait(200);
+        QCOMPARE(row(tree,"fixture/plain")->text(1),QString("☆"));QVERIFY(!picker->values().contains("stale/old"));
+        QVERIFY(picker->values().contains("folderonly/proj"));
+        QCOMPARE(picker->current(),QString("folderonly/proj"));QCOMPARE(button->text(),QString("Project model"));
+        QCOMPARE(dialog.findChild<QComboBox *>("launchModel")->currentData().toString(),QString("folderonly/proj"));
+        // The folder's stored catalog is the newer one too.
+        dialog.findChild<QFrame *>("launchModelPopup")->hide();
+        dialog.selectPath("/workspace/other",false);dialog.selectPath("/workspace/example",false);
+        QVERIFY(picker->values().contains("folderonly/proj"));QVERIFY(!picker->values().contains("stale/old"));
+        QCOMPARE(row(tree,"fixture/plain")->text(1),QString("☆"));QCOMPARE(lines("model-calls").size(),3);
+    }
+    // A folder change keeps the chosen model only when the new folder's ready
+    // catalog offers it, even when the account row lists that model everywhere:
+    // a folder without a ready catalog, or one that does not offer it, starts
+    // from the native default, and the rejected choice does not come back.
+    void openCodeFolderChangeKeepsOnlyAChoiceTheNewFolderOffers() {
+        flag("opencode");flag("opencode-models");
+        NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/other",false);dialog.show();
+        auto *button=dialog.findChild<QPushButton *>("launchModelButton");
+        auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");
+        auto *popup=dialog.findChild<QFrame *>("launchModelPopup");auto *model=dialog.findChild<QComboBox *>("launchModel");
+        // Read two folders first: one offers the row's fixture/local, one does not.
+        QTRY_VERIFY(button->isEnabled());button->click();
+        QTRY_VERIFY(picker->values().contains("folderonly/other"));QVERIFY(picker->values().contains("fixture/local"));popup->hide();
+        dialog.selectPath("/workspace/nolocal",false);button->click();
+        QTRY_VERIFY(picker->values().contains("folderonly/other"));QVERIFY(!picker->values().contains("fixture/local"));popup->hide();
+        // Uncached: a folder without a ready catalog does not take the choice.
+        dialog.selectPath("/workspace/example",false);button->click();QTRY_VERIFY(picker->values().contains("folderonly/proj"));
+        picker->select("fixture/local");QTRY_COMPARE(button->text(),QString("Local fixture"));
+        dialog.selectPath("/workspace/fresh",false);
+        QCOMPARE(button->text(),QString("Native default model"));QCOMPARE(model->currentData().toString(),QString());
+        QCOMPARE(picker->current(),QString());
+        dialog.selectPath("/workspace/example",false);
+        QCOMPARE(button->text(),QString("Native default model"));QCOMPARE(picker->current(),QString());
+        // Not offering: a ready catalog without the model does not take it either.
+        button->click();QTRY_VERIFY(picker->isVisible());picker->select("fixture/local");QTRY_COMPARE(button->text(),QString("Local fixture"));
+        dialog.selectPath("/workspace/nolocal",false);
+        QCOMPARE(button->text(),QString("Native default model"));QCOMPARE(model->currentData().toString(),QString());
+        QCOMPARE(picker->current(),QString());
+        // Offering: a ready catalog that lists it keeps the choice, and the session starts with it.
+        dialog.selectPath("/workspace/example",false);button->click();QTRY_VERIFY(picker->isVisible());
+        picker->select("fixture/local");QTRY_COMPARE(button->text(),QString("Local fixture"));
+        dialog.selectPath("/workspace/other",false);
+        QCOMPARE(button->text(),QString("Local fixture"));QCOMPARE(model->currentData().toString(),QString("fixture/local"));
+        QCOMPARE(picker->current(),QString("fixture/local"));
+        QCOMPARE(lines("model-calls").size(),3);   // each folder was read once
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][2].toString(),QString("/workspace/other"));QCOMPARE(launched[0][8].toString(),QString("fixture/local"));
     }
     void emptyComputerCatalogOffersOnlyShell() {
         flag("empty-catalog");NewSessionDialog dialog(program(),fleet());dialog.show();

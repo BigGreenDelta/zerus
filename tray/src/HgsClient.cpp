@@ -465,6 +465,49 @@ quint64 HgsClient::requestAccounts(const QString &host, const QStringList &argum
     return request;
 }
 
+quint64 HgsClient::requestOpenCodeModels(const QString &host, const QString &location)
+{
+    const quint64 request = ++m_accountRequest;
+    QStringList args;
+    if (!host.isEmpty()) args << QLatin1Char('@') + host;
+    args << QStringLiteral("account") << QStringLiteral("models") << QStringLiteral("native-opencode")
+         << QStringLiteral("--location") << location << QStringLiteral("--json");
+    runHgs(m_hgs, args, 30000, this,
+        [this, request, host, location](const QByteArray &bytes) {
+            // hgs keeps the catalog within 4 MiB; a larger answer is not one.
+            if (bytes.size() > 5 * 1024 * 1024) {
+                emit openCodeModelsFailed(request, host, location, tr("The OpenCode model catalog is too large"));
+                return;
+            }
+            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
+            if (error.error != QJsonParseError::NoError || !data.isObject()) emit openCodeModelsFailed(request, host, location, tr("Invalid OpenCode model catalog response"));
+            else emit openCodeModelsReady(request, host, location, data.object());
+        }, [this, request, host, location](const QString &, const QString &error) { emit openCodeModelsFailed(request, host, location, error); });
+    return request;
+}
+
+quint64 HgsClient::requestOpenCodeFavorite(const QString &host, const QString &value, bool favorite)
+{
+    const quint64 request = ++m_accountRequest;
+    // hgs answers a repeated identity from its receipt, so every change gets its own.
+    const auto identity = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QStringList args;
+    if (!host.isEmpty()) args << QLatin1Char('@') + host;
+    args << QStringLiteral("account") << QStringLiteral("favorite") << QStringLiteral("native-opencode")
+         << QStringLiteral("--model") << value << QStringLiteral("--favorite") << (favorite ? QStringLiteral("on") : QStringLiteral("off"))
+         << QStringLiteral("--request-id") << identity << QStringLiteral("--json");
+    runHgs(m_hgs, args, 25000, this,
+        [this, request, host, value, favorite, identity](const QByteArray &bytes) {
+            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error); const auto receipt = data.object();
+            // The receipt must name this exact change.
+            if (error.error != QJsonParseError::NoError || !data.isObject() || receipt["status"] != "applied"
+                || receipt["request_id"] != identity || receipt["model"] != value || receipt["favorite"] != favorite)
+                emit openCodeFavoriteFailed(request, host, tr("Invalid favorite response"));
+            else emit openCodeFavoriteReady(request, host, receipt);
+        }, [this, request, host](const QString &, const QString &error) { emit openCodeFavoriteFailed(request, host, error); });
+    return request;
+}
+
 quint64 HgsClient::requestMobile(const QString &host, const QStringList &arguments)
 {
     const quint64 request = ++m_mobileRequest;
