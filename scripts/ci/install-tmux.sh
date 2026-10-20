@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the pinned official tmux release for Linux input-contract tests.
+# Build the pinned official tmux release for hosted input-contract tests.
 set -euo pipefail
 prefix="$(realpath -m "${1:?pass a disposable installation prefix}")"
 tmux_version=3.7c
@@ -13,7 +13,13 @@ curl -fsSL "https://github.com/tmux/tmux/releases/download/$tmux_version/tmux-$t
     printf '%s  %s\n' "$tmux_sha256" "tmux-$tmux_version.tar.gz" | sha256sum --check -
     tar xzf "tmux-$tmux_version.tar.gz"
     cd "tmux-$tmux_version"
-    ./configure --prefix="$prefix"
+    configure_args=()
+    # tmux refuses to configure on macOS without an explicit Unicode-library
+    # choice. Hosted macOS installs utf8proc; Linux keeps its original defaults.
+    if [ "$(uname -s)" = Darwin ]; then
+        configure_args+=(--enable-utf8proc)
+    fi
+    ./configure --prefix="$prefix" "${configure_args[@]}"
     make --jobs=2
     make install
 )

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import tarfile
@@ -57,6 +58,35 @@ class KimiNativeCI(unittest.TestCase):
         for content in ('{"a":1,"a":2}', '{"object":{"a":1,"a":2}}'):
             with self.assertRaisesRegex(ValueError, 'duplicate'):
                 ci.strict(content)
+
+    def test_tmux_installer_keeps_linux_defaults_and_explicitly_enables_macos_unicode(self):
+        # Only configure argv is under test. All network, archive, hash, make
+        # and tmux commands are stand-ins; no compiler or native image runs.
+        base = self.root()
+        tools, runtime, prefix = base / 'bin', base / 'tmp', base / 'prefix'
+        tools.mkdir(); runtime.mkdir(); (prefix / 'bin').mkdir(parents=True)
+        arguments = base / 'arguments'
+        configure = base / 'configure'
+        configure.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$FIXTURE_ARGUMENTS"\n')
+        configure.chmod(0o700)
+        scripts = dict(curl='exit 0', sha256sum='cat >/dev/null', make='exit 0',
+                       tar='mkdir tmux-3.7c; cp "$FIXTURE_CONFIGURE" tmux-3.7c/configure')
+        for name, body in scripts.items():
+            path = tools / name
+            path.write_text('#!/bin/sh\n' + body + '\n'); path.chmod(0o700)
+        tmux = prefix / 'bin/tmux'
+        tmux.write_text('#!/bin/sh\nprintf "tmux 3.7c\\n"\n'); tmux.chmod(0o700)
+        for system in ('Linux', 'Darwin'):
+            (tools / 'uname').write_text('#!/bin/sh\nprintf "' + system + '\\n"\n')
+            (tools / 'uname').chmod(0o700)
+            env = dict(PATH=str(tools) + ':/usr/bin:/bin', RUNNER_TEMP=str(runtime),
+                       FIXTURE_CONFIGURE=str(configure), FIXTURE_ARGUMENTS=str(arguments))
+            result = subprocess.run([shutil.which('bash'), str(ROOT / 'scripts/ci/install-tmux.sh'), str(prefix)],
+                                    env=env, text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(arguments.read_text().splitlines(), ['--prefix=' + str(prefix)] +
+                             (['--enable-utf8proc'] if system == 'Darwin' else []))
+            self.assertEqual(list(runtime.iterdir()), [])
 
     def test_only_reviewed_architectures_and_exact_eight_methods_are_selected(self):
         self.assertEqual(ci.target('Linux', 'x86_64'), 'linux-x64')
@@ -242,7 +272,13 @@ class KimiNativeCI(unittest.TestCase):
         self.assertIn('os: ["ubuntu-24.04", "macos-15"]', workflow)
         self.assertIn('CARGO_BUILD_JOBS: 2', workflow)
         for variable, directory in (('CARGO_TARGET_DIR', 'target'), ('CARGO_HOME', 'cargo'), ('RUSTUP_HOME', 'rustup')):
-            self.assertIn('echo "' + variable + '=$RUNNER_TEMP/kimi-' + directory + '" >> "$GITHUB_ENV"', workflow)
+            self.assertIn('echo "' + variable + '=$RUNNER_TEMP/kimi-' + directory + '"', workflow)
+        self.assertIn('} >> "$GITHUB_ENV"', workflow)
+        self.assertIn('brew install coreutils libevent ncurses utf8proc bison pkg-config', workflow)
+        self.assertIn('$(brew --prefix utf8proc)/lib/pkgconfig', workflow)
+        installer = (ROOT / 'scripts/ci/install-tmux.sh').read_text()
+        self.assertIn('if [ "$(uname -s)" = Darwin ]; then', installer)
+        self.assertIn('configure_args+=(--enable-utf8proc)', installer)
         self.assertIn('persist-credentials: false', workflow)
         exact_source = '${{ github.event.pull_request.head.sha || github.sha }}'
         self.assertIn('SOURCE_SHA: ' + exact_source, workflow)

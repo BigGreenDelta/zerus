@@ -55,9 +55,11 @@ jobs:
       - name: Keep Cargo and Rustup in this ephemeral runner's private temporary directory
         shell: bash
         run: |
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/kimi-target" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=$RUNNER_TEMP/kimi-cargo" >> "$GITHUB_ENV"
-          echo "RUSTUP_HOME=$RUNNER_TEMP/kimi-rustup" >> "$GITHUB_ENV"
+          {
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/kimi-target"
+            echo "CARGO_HOME=$RUNNER_TEMP/kimi-cargo"
+            echo "RUSTUP_HOME=$RUNNER_TEMP/kimi-rustup"
+          } >> "$GITHUB_ENV"
       - name: Refuse an unreviewed runner architecture before building
         run: python -c "import runpy; runpy.run_path('scripts/ci/kimi-native.py')['target']()"
       - name: Linux tmux build dependencies
@@ -65,13 +67,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config
       - name: macOS tmux build dependencies
         if: runner.os == 'macOS'
-        run: brew install coreutils libevent ncurses bison pkg-config
+        run: brew install coreutils libevent ncurses utf8proc bison pkg-config
       - name: Build the existing pinned tmux release privately
         shell: bash
         run: |
           if [ "$RUNNER_OS" = macOS ]; then
-            export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
-            export PKG_CONFIG_PATH="$(brew --prefix libevent)/lib/pkgconfig:$(brew --prefix ncurses)/lib/pkgconfig"
+            PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
+            PKG_CONFIG_PATH="$(brew --prefix libevent)/lib/pkgconfig:$(brew --prefix ncurses)/lib/pkgconfig:$(brew --prefix utf8proc)/lib/pkgconfig"
+            export PATH PKG_CONFIG_PATH
           fi
           bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/kimi-tmux"
       - name: Build the exact CLI once with pinned Rust and at most two jobs
