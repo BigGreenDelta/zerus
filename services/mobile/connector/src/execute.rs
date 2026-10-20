@@ -487,14 +487,25 @@ impl<N: Native + 'static> Connector<N> {
             }
             "catalog" => self.catalog(request_id).await,
             "task_exchange" => {
+                // hgs refuses on stdout with a failing exit status; the phone
+                // reads why, such as a project another command holds.
                 let call = Call::new(["task", "exchange", "--json"])
                     .payload(payload.expect("validated").clone())
-                    .timeout(TASK_EXCHANGE_TIMEOUT);
+                    .timeout(TASK_EXCHANGE_TIMEOUT)
+                    .failure_json();
                 let result = self.call(call).await?;
-                if !result.is_object() {
-                    return Err(Failure::text("native task exchange answer is invalid"));
+                let invalid = || Failure::text("native task exchange answer is invalid");
+                match result.get("ok") {
+                    Some(Value::Bool(false)) => {
+                        let error = result
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .ok_or_else(invalid)?;
+                        Err(Failure::text(error))
+                    }
+                    _ if result.is_object() => Ok(result),
+                    _ => Err(invalid()),
                 }
-                Ok(result)
             }
             "dirs" => {
                 let path = payload

@@ -10,14 +10,19 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
-use zerus_replica::{Document, Inventory, ProjectStore, Update};
+use zerus_replica::{ids, Document, Inventory, ProjectStore, Update, Version};
 
 /// The update bytes one answer carries; base64 and JSON keep it under the relay's 1 MiB.
 const PAGE: usize = 512 * 1024;
 /// The most a request may be: the relay's canonical 1 MiB.
 const MAX_REQUEST: u64 = 1 << 20;
-/// How long a command waits for a project another command holds.
+/// How long an exchange waits for a project another command holds.
 const PROJECT_WAIT: Duration = Duration::from_secs(2);
+/// How long the digests wait for each busy project: one held project is left
+/// out this time, and the others keep theirs within the connector's budget.
+const DIGEST_WAIT: Duration = Duration::from_millis(250);
+/// The most updates one request carries; a phone sends the rest in its next.
+const MAX_UPDATES: usize = 256;
 
 fn root(config: &Config) -> PathBuf {
     config.state.join("replica")
@@ -44,7 +49,7 @@ pub(super) fn digests(config: &Config) -> Result<Value> {
         projects.insert(id.clone(), json!({"digest": Inventory::default().digest()}));
     }
     for id in stored {
-        match ProjectStore::open_within(&root(config), &id, PROJECT_WAIT) {
+        match ProjectStore::open_within(&root(config), &id, DIGEST_WAIT) {
             Ok(Some(store)) => match store.live_inventory() {
                 Ok((inventory, _)) => {
                     projects.insert(id, json!({"digest": inventory.digest()}));
@@ -62,13 +67,60 @@ pub(super) fn digests(config: &Config) -> Result<Value> {
 struct Request {
     schema: u32,
     project: String,
-    /// Everything the phone holds of the project.
+    /// What the phone holds of the project within `range`.
     inventory: Inventory,
+    /// The task UUIDs this request covers; the whole project when absent.
+    #[serde(default)]
+    range: Option<Range>,
     #[serde(default)]
     updates: Vec<WireUpdate>,
     /// The next part of an update too large for one answer.
     #[serde(default, rename = "continue")]
     resume: Option<Continue>,
+}
+
+/// The tasks whose UUIDs lie after `after` and up to `through`, in text
+/// order, so a phone whose inventory is too large for one request sends it in
+/// parts. The project document belongs to the range without `after`.
+#[derive(Default, Deserialize)]
+struct Range {
+    after: Option<String>,
+    through: Option<String>,
+}
+
+impl Range {
+    fn check(&self) -> Result<()> {
+        for bound in self.after.iter().chain(&self.through) {
+            if !ids::is_uuid(bound) {
+                return Err(fail(format!(
+                    "the range bound {bound:?} is not a task UUID"
+                )));
+            }
+        }
+        if let (Some(after), Some(through)) = (&self.after, &self.through) {
+            if after >= through {
+                return Err(fail("an empty range"));
+            }
+        }
+        Ok(())
+    }
+
+    fn contains(&self, uuid: &str) -> bool {
+        self.after.as_deref().is_none_or(|after| uuid > after)
+            && self
+                .through
+                .as_deref()
+                .is_none_or(|through| uuid <= through)
+    }
+
+    /// `inventory` narrowed to this range.
+    fn narrow(&self, mut inventory: Inventory) -> Inventory {
+        inventory.tasks.retain(|uuid, _| self.contains(uuid));
+        if self.after.is_some() {
+            inventory.project = Version::new();
+        }
+        inventory
+    }
 }
 
 #[derive(Deserialize)]
@@ -137,10 +189,27 @@ pub(super) fn exchange(config: &Config) -> Result<Value> {
     if bytes.len() as u64 > MAX_REQUEST {
         return Err(fail("the exchange request exceeds 1 MiB"));
     }
-    let request: Request =
-        serde_json::from_slice(&bytes).map_err(|e| fail(format!("invalid exchange request: {e}")))?;
+    let request: Request = serde_json::from_slice(&bytes)
+        .map_err(|e| fail(format!("invalid exchange request: {e}")))?;
     if request.schema != 1 {
         return Err(fail(format!("unknown exchange schema {}", request.schema)));
+    }
+    let range = request.range.unwrap_or_default();
+    range.check()?;
+    if let Some(outside) = request
+        .inventory
+        .tasks
+        .keys()
+        .find(|uuid| !range.contains(uuid))
+    {
+        return Err(fail(format!(
+            "the inventory's task {outside:?} lies outside its range"
+        )));
+    }
+    if request.updates.len() > MAX_UPDATES {
+        return Err(fail(format!(
+            "an exchange carries at most {MAX_UPDATES} updates"
+        )));
     }
     let (alive, stored) = known(config)?;
     if !alive.contains(&request.project) && !stored.contains(&request.project) {
@@ -163,7 +232,7 @@ pub(super) fn exchange(config: &Config) -> Result<Value> {
         .ok_or_else(|| fail("the project's tasks are busy; try again"))?;
     let imported = store.import_updates(updates).map_err(fail)?;
     let theirs = request.inventory;
-    let ours = store.phone_inventory(&theirs).map_err(fail)?;
+    let ours = range.narrow(store.phone_inventory(&theirs).map_err(fail)?);
     let mut answer = json!({"schema": 1, "imported": imported.changed, "refused": imported.refused,
         "updates": [], "more": false});
     match request.resume {

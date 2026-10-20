@@ -129,6 +129,10 @@ pub const FEATURES: &[&str] = &[
     "send_agent",
     "voice_video",
 ];
+/// The most updates one `task_exchange` carries; a phone sends the rest next.
+pub const TASK_UPDATES_MAX: usize = 256;
+/// The longest project ID, in bytes, that the task replica stores.
+pub const TASK_PROJECT_MAX: usize = 128;
 /// Largest decoded chunk one `attachment_read` result may carry. Its base64
 /// form and metadata stay below the ordinary 1 MiB result limit.
 pub const ATTACHMENT_CHUNK_MAX: u64 = 512 * 1024;
@@ -618,21 +622,50 @@ pub fn task_exchange(p: &Value) -> Result<()> {
     fields(
         p,
         &["schema", "project", "inventory"],
-        &["updates", "continue"],
+        &["updates", "continue", "range"],
     )?;
     if p["schema"] != 1 {
         return Err(Error::BAD);
     }
-    text(&p["project"], 256, false)?;
+    // A project ID as the replica stores it.
+    let project = text(&p["project"], TASK_PROJECT_MAX, false)?;
+    if project.len() > TASK_PROJECT_MAX || project.chars().any(char::is_control) {
+        return Err(Error::BAD);
+    }
+    // The task UUIDs the request covers: after `after`, up to `through`.
+    let (mut after, mut through) = (None, None);
+    if let Some(range) = p.get("range") {
+        fields(range, &[], &["after", "through"])?;
+        for (key, bound) in [("after", &mut after), ("through", &mut through)] {
+            if !range[key].is_null() {
+                *bound = Some(uuid(&range[key], false)?);
+            }
+        }
+        if after
+            .zip(through)
+            .is_some_and(|(after, through)| after >= through)
+        {
+            return Err(Error::BAD);
+        }
+    }
     let inventory = &p["inventory"];
     fields(inventory, &["project", "tasks"], &[])?;
     version(&inventory["project"])?;
     for (task, v) in inventory["tasks"].as_object().ok_or(Error::BAD)? {
         uuid(&Value::from(task.as_str()), false)?;
+        let task = task.as_str();
+        if after.is_some_and(|after| task <= after) || through.is_some_and(|through| task > through)
+        {
+            return Err(Error::BAD);
+        }
         version(v)?;
     }
     if let Some(updates) = p.get("updates") {
-        for update in updates.as_array().ok_or(Error::BAD)? {
+        let updates = updates.as_array().ok_or(Error::BAD)?;
+        if updates.len() > TASK_UPDATES_MAX {
+            return Err(Error::BAD);
+        }
+        for update in updates {
             fields(update, &["task", "bytes"], &[])?;
             document(&update["task"])?;
             STANDARD

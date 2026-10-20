@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use zerus_mobile_connector::capabilities::Flags;
 use zerus_mobile_connector::execute::{Outcome, TOO_LARGE};
-use zerus_mobile_connector::journal::{Journal, JOURNAL};
+use zerus_mobile_connector::journal::{Journal, JOURNAL, TASK_READ_PRUNE};
 use zerus_mobile_connector::native::{self, Call, Native, NativeError, NativeResult, Output};
 use zerus_mobile_connector::runtime::{Connector, Settings};
 
@@ -26,11 +26,13 @@ struct Scripted {
     answers: RefCell<HashMap<Vec<String>, Value>>,
     calls: RefCell<Vec<Vec<String>>>,
     payloads: RefCell<Vec<Option<Value>>>,
+    failure_json: RefCell<Vec<bool>>,
 }
 
 impl Native for Scripted {
     async fn call(&self, call: Call) -> NativeResult {
         self.calls.borrow_mut().push(call.argv.clone());
+        self.failure_json.borrow_mut().push(call.failure_json);
         self.payloads.borrow_mut().push(call.payload.clone());
         match self.answers.borrow().get(&call.argv) {
             Some(answer) => Ok(Output::Json(answer.clone())),
@@ -199,6 +201,43 @@ async fn a_refused_or_failing_exchange_fails_without_or_after_hgs() {
     assert_eq!(
         harness.exchange(&id(6), "", request()).await["state"],
         "failed"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_refusal_from_hgs_reaches_the_phone_as_its_text() {
+    let harness = Harness::new("task-exchange-refusal", true);
+    let busy = "the project's tasks are busy; try again";
+    harness.answer(&EXCHANGE, json!({"schema": 1, "ok": false, "error": busy}));
+    let id = |n: u8| format!("7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c4e{n:02x}");
+    assert_eq!(harness.exchange(&id(1), "", request()).await, failed(busy));
+    // hgs answers its refusal on stdout with a failing exit status.
+    assert_eq!(*harness.connector.native.failure_json.borrow(), [true]);
+    harness.answer(
+        &EXCHANGE,
+        json!({"schema": 1, "ok": false, "error": ["not", "text"]}),
+    );
+    assert_eq!(
+        harness.exchange(&id(2), "", request()).await,
+        failed("native task exchange answer is invalid")
+    );
+}
+
+#[test]
+fn delivered_exchanges_are_found_by_their_operation_not_by_age() {
+    umask();
+    let scratch = Scratch::new("task-exchange-plan");
+    drop(Journal::open(&scratch.path("state"), "fixture-binding", EPOCH).unwrap());
+    let db = read_only(&scratch.path("state").join(JOURNAL));
+    let plan = query(
+        &db,
+        &format!("EXPLAIN QUERY PLAN {}", TASK_READ_PRUNE.replace('?', "0")),
+    );
+    // Thousands of delivered mutation tombstones are never walked for it.
+    assert!(
+        plan.iter()
+            .any(|row| row.to_string().contains("journal_operation")),
+        "{plan:?}"
     );
 }
 

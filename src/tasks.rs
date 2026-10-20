@@ -294,6 +294,19 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     if dry {
         return Err(fail("task commands do not support --dry-run"));
     }
+    // The phone's exchange refuses in JSON, which the connector passes on.
+    if args.first().is_some_and(|action| action == "exchange") && flag(args, "--json") {
+        return Ok(match execute(config, args) {
+            Ok(out) => {
+                println!("{out}");
+                0
+            }
+            Err(error) => {
+                println!("{}", json!({"schema": 1, "ok": false, "error": error.message}));
+                1
+            }
+        });
+    }
     let out = execute(config, args)?;
     // An agent reads one line saying what happened; --json prints the task.
     match out.get("answer").and_then(Value::as_str) {

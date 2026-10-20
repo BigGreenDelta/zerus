@@ -190,7 +190,9 @@ exchange is safe and needs no durable request identity (owner decision,
   bytes travel as base64. An answer carries at most 512 KiB of updates, and a
   document whose updates are larger travels in parts the phone asks for one by
   one, each naming the whole update's SHA-256 and its offset; a part of an update
-  that changed meanwhile starts it again.
+  that changed meanwhile starts it again. A request carries at most 256 updates.
+  An inventory too large for one request goes in ranges of task UUIDs, each
+  answered for its own tasks; the project document belongs to the first.
 - **Storage.** The documents live in the app's `noBackupFilesDir`, which backups
   and device transfer never include, without further encryption (owner
   decision, 2026-10-19).

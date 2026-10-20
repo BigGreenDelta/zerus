@@ -498,15 +498,26 @@ session) that only the Rust connector offers: the phone's replica of one
 project's tasks
 (`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md`, "Phone").
 The payload is exactly the request `hgs task exchange --json` reads on stdin:
-`schema` 1, `project` (at most 256 characters), `inventory` (`project` and
-`tasks` by UUID, each a map from decimal Loro peer IDs to change counts),
-optional `updates` (`task` UUID, or `null` for the project document, and base64
-`bytes`) and optional `continue` (`task`, the whole update's `sha256` and the
-`offset` of the next part). The ordinary 1 MiB request and result bounds apply;
-an answer carries at most 512 KiB of update bytes, and a larger document comes
-in parts the phone asks for one by one. The connector invokes only
+`schema` 1, `project` (at most 128 bytes, the replica's project ID),
+`inventory` (`project` and `tasks` by UUID, each a map from decimal Loro peer
+IDs to change counts), optional `updates` (at most 256, each a `task` UUID, or
+`null` for the project document, and base64 `bytes`), optional `continue`
+(`task`, the whole update's `sha256` and the `offset` of the next part) and
+optional `range`. The ordinary 1 MiB request and result bounds apply; an answer
+carries at most 512 KiB of update bytes, and a larger document comes in parts
+the phone asks for one by one. The connector invokes only
 `hgs task exchange --json` with the payload on stdin; hgs validates it again,
 and Loro merges are idempotent, so a repeated request changes nothing twice.
+
+Every process that writes a task adds a Loro peer to its version, so an
+inventory grows by roughly 30 bytes and two JSON values per edit of every task
+the phone holds. A phone whose inventory would not fit one request beside its
+updates (1 MiB and 50,000 JSON values in all) sends it in parts: `range`
+names the task UUIDs after `after` and up to `through` (canonical UUIDs in text
+order, either one left out at its end of the range), the inventory lists only
+tasks within it, and the computer answers only for that range. The project
+document belongs to the range without `after`. A computer refuses a request
+whose inventory lies outside its range.
 
 The result names `imported` (documents the phone's updates changed),
 `refused` (`uuid` and `error` of each update that did not apply), `updates`
@@ -517,8 +528,13 @@ and base64 `bytes`) with no `updates`; the phone asks for the next part with
 `continue`, and a part of an update that changed meanwhile starts again at
 offset 0. An answer with a part always says `more`. An answer with neither
 updates nor a part also names `inventory`, what this computer holds of the
-phone's view, from which the phone computes the updates this computer lacks
-and sends them in its next request.
+phone's view (within the range), from which the phone computes the updates
+this computer lacks and sends them in its next request. A refusal comes back as
+a failed receipt with hgs's reason, for example "the project's tasks are busy;
+try again", which a later exchange retries, or `no project "…" here`.
+`digest` and `tasks_digest` are the lowercase hexadecimal SHA-256 of the
+inventory as compact JSON with its keys sorted (`{"project":{…},"tasks":{…}}`),
+over the project document and every task that is not Done.
 
 The operation counts as a read, never reserves mutation capacity, and has its
 own `task_exchange_history` index with two-minute retention after completion;

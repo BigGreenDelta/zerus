@@ -62,6 +62,9 @@ pub const VOICE_READ_SQL: &str = "('voice_profiles','voice_status')";
 /// The phone's task exchange: a short read only this connector runs, outside
 /// the frozen Python predicates above.
 pub const TASK_READ_SQL: &str = "('task_exchange')";
+/// Delivered exchanges older than the short-read window, found by their
+/// operation: the age index would walk every delivered mutation tombstone.
+pub const TASK_READ_PRUNE: &str = "DELETE FROM requests INDEXED BY journal_operation WHERE operation IN ('task_exchange') AND delivered=1 AND state!='running' AND delivered_at<?";
 
 /// Delivered short-lived reads go after two minutes, other reads after an
 /// hour; a delivered mutation becomes a tombstone after seven days.
@@ -263,10 +266,7 @@ impl Journal {
             &format!("DELETE FROM requests WHERE operation='attachment_read' AND {delivered}"),
             [short],
         )?;
-        tx.execute(
-            &format!("DELETE FROM requests WHERE operation IN {TASK_READ_SQL} AND {delivered}"),
-            [short],
-        )?;
+        tx.execute(TASK_READ_PRUNE, [short])?;
         tx.execute(
             &format!("DELETE FROM requests WHERE operation='archive_list' AND {delivered}"),
             [now - 3600.0],

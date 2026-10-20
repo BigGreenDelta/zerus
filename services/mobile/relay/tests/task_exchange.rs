@@ -86,6 +86,54 @@ fn the_exchange_wire_is_a_strict_computer_scoped_read() {
     let mut large = value.clone();
     large["payload"]["updates"] = json!([{"task":null,"bytes":"A".repeat(1 << 20)}]);
     assert!(protocol::request(&large).is_err());
+    // At most 256 updates; the phone sends the rest in its next request.
+    let mut many = value.clone();
+    many["payload"]["updates"] = json!(vec![json!({"task": null, "bytes": ""}); 256]);
+    protocol::request(&many).unwrap();
+    many["payload"]["updates"] = json!(vec![json!({"task": null, "bytes": ""}); 257]);
+    assert!(protocol::request(&many).is_err());
+    // A project ID is at most 128 bytes, as the replica stores it.
+    let mut project = value.clone();
+    project["payload"]["project"] = json!("界".repeat(42));
+    protocol::request(&project).unwrap();
+    project["payload"]["project"] = json!("界".repeat(43));
+    assert!(protocol::request(&project).is_err());
+}
+
+#[test]
+fn a_range_names_task_uuids_in_order_and_holds_its_inventory() {
+    const LOW: &str = "00000000-0000-4000-8000-000000000001";
+    const HIGH: &str = "ffffffff-ffff-4fff-bfff-ffffffffffff";
+    let ranged = |range: Value| {
+        let mut value = command(&Uuid::new_v4().to_string());
+        value["payload"]["range"] = range;
+        value
+    };
+    // TASK lies after LOW and up to HIGH.
+    for range in [
+        json!({}),
+        json!({"after": LOW}),
+        json!({"through": HIGH}),
+        json!({"after": LOW, "through": TASK}),
+        json!({"after": null, "through": null}),
+    ] {
+        protocol::request(&ranged(range.clone())).unwrap_or_else(|_| panic!("refused {range}"));
+    }
+    for range in [
+        json!(null),
+        json!([]),
+        json!({"after": TASK}),
+        json!({"through": LOW}),
+        json!({"after": HIGH, "through": LOW}),
+        json!({"after": TASK, "through": TASK}),
+        json!({"after": "orchard"}),
+        json!({"after": LOW, "until": HIGH}),
+    ] {
+        assert!(
+            protocol::request(&ranged(range.clone())).is_err(),
+            "accepted {range}"
+        );
+    }
 }
 
 #[tokio::test]

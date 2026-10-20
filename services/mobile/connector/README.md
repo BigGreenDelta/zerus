@@ -204,9 +204,13 @@ advertised, for a peer as well when its hgs names it. The request, checked
 with the relay's own payload rules, runs `hgs task exchange --json` (30 s) with
 its payload on stdin on the machine the route names; its delivered receipt
 leaves the journal after two minutes as a short read (`TASK_READ_SQL`, beside
-the frozen Python predicates, so the journal schema is unchanged). With an
-initialized swarm catalog every 15 s, `hgs task digests --json` (5 s) adds
-each project's `tasks_digest`; a failed read leaves them out. After a rollback
+the frozen Python predicates, so the journal schema is unchanged; the prune
+finds them through `journal_operation`, never by walking delivered mutation
+tombstones). hgs answers a refusal on stdout with a failing exit status, and
+its reason becomes the receipt's error. With an initialized swarm catalog every
+15 s, `hgs task digests --json` (5 s) adds each project's `tasks_digest`. A
+project without one in a heartbeat is unknown this time (another command held
+it, or the read failed), not empty. After a rollback
 to Python only the exchanges of the last two minutes stay in the journal, as
 Python's mutation tombstones. `tests/task_exchange.rs` and
 `test_bb_task_exchange` pin it.

@@ -4,11 +4,14 @@ through the real CLI. A second replica with the same catalog stands in for the
 phone: what this computer answers goes into the phone's own exchange, which
 imports it, and what the phone answers is what it sends."""
 import base64
+import fcntl
 import hashlib
 import json
 import os
 import subprocess
+import time
 import unittest
+import uuid
 
 from tests import test_tasks
 
@@ -49,7 +52,24 @@ class Exchange(test_tasks.DeliveryFixture):
         return result.stderr
 
     def exchange(self, request, env=None, ok=True):
-        return self.run_hgs(["task", "exchange", "--json"], env or self.env, request, ok)
+        """An answer, or the text of the JSON refusal the connector passes on."""
+        result = subprocess.run([str(HGS), "task", "exchange", "--json"], input=json.dumps(request),
+                                env=env or self.env, text=True, capture_output=True, timeout=60)
+        if ok:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return json.loads(result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        refusal = json.loads(result.stdout)
+        self.assertEqual(sorted(refusal), ["error", "ok", "schema"])
+        self.assertEqual((refusal["schema"], refusal["ok"]), (1, False))
+        return refusal["error"]
+
+    def held(self, project):
+        """Holds `project`'s tasks as another command does, until the block ends."""
+        lock = self.state / "replica" / hashlib.sha256(project.encode()).hexdigest() / ".lock"
+        file = lock.open("a")
+        fcntl.flock(file, fcntl.LOCK_EX)
+        return file
 
     def digests(self, env=None):
         return {k: v["digest"] for k, v in self.run_hgs(["task", "digests", "--json"], env or self.env)["projects"].items()}
@@ -201,7 +221,7 @@ class Exchange(test_tasks.DeliveryFixture):
     def test_an_unknown_project_is_refused(self):
         stored = sorted((self.state / "replica").iterdir()) if (self.state / "replica").exists() else []
         error = self.exchange({"schema": 1, "project": "nowhere", "inventory": EMPTY}, ok=False)
-        self.assertIn('no project "nowhere" here', error)
+        self.assertEqual(error, 'no project "nowhere" here')
         after = sorted((self.state / "replica").iterdir()) if (self.state / "replica").exists() else []
         self.assertEqual(after, stored)
 
@@ -212,6 +232,57 @@ class Exchange(test_tasks.DeliveryFixture):
         self.assertIn("invalid base64", self.exchange(dict(base, updates=[{"task": None, "bytes": "%%%"}]), ok=False))
         self.assertIn("exceeds 1 MiB", self.exchange(dict(base, padding="x" * (1 << 20)), ok=False))
         self.assertIn("usage", self.run_hgs(["task", "exchange"], self.env, base, ok=False))
+        # At most 256 updates in one request; the phone sends more in the next.
+        many = [{"task": str(uuid.uuid4()), "bytes": ""} for _ in range(257)]
+        self.assertIn("at most 256 updates", self.exchange(dict(base, updates=many), ok=False))
+        self.assertEqual(self.exchange(dict(base, updates=many[:256]))["imported"], 0)
+        # A range names task UUIDs in order, and the inventory stays inside it.
+        low, high = "00000000-0000-4000-8000-000000000001", "ffffffff-ffff-4fff-bfff-ffffffffffff"
+        self.assertIn("an empty range", self.exchange(dict(base, range={"after": high, "through": low}), ok=False))
+        self.assertIn("not a task UUID", self.exchange(dict(base, range={"after": "orchard"}), ok=False))
+        outside = {"project": {}, "tasks": {low: {}}}
+        self.assertIn("outside its range",
+                      self.exchange(dict(base, inventory=outside, range={"after": low}), ok=False))
+
+    def test_a_busy_project_leaves_the_others_their_digest(self):
+        self.add("Add rate limiting")
+        self.hgs("add", "--project", "team/web", text="Measure first")
+        with self.held("project-2"):
+            started = time.monotonic()
+            digests = self.digests()
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertEqual(sorted(digests), ["project-1"])
+            refused = self.exchange({"schema": 1, "project": "project-2", "inventory": EMPTY}, ok=False)
+            self.assertEqual(refused, "the project's tasks are busy; try again")
+        self.assertEqual(sorted(self.digests()), ["project-1", "project-2"])
+
+    def test_an_inventory_in_ranges_covers_the_whole_project(self):
+        self.settings(agent_limit=3)
+        tasks = [self.add(f"Task {n}") for n in range(6)]
+        self.pull()
+        for task in tasks:
+            self.hgs("comment", task["ref"], text="Changed here")
+        later = self.add("Filed later")["uuid"]
+        held = self.inventory(self.phone)
+        self.assertTrue(held["project"])
+        uuids = sorted(held["tasks"])
+        split = uuids[2]
+        first = {"project": held["project"], "tasks": {u: v for u, v in held["tasks"].items() if u <= split}}
+        second = {"project": {}, "tasks": {u: v for u, v in held["tasks"].items() if u > split}}
+        a = self.exchange({"schema": 1, "project": "project-1", "inventory": first, "range": {"through": split}})
+        b = self.exchange({"schema": 1, "project": "project-1", "inventory": second, "range": {"after": split}})
+        sent = lambda answer: {update["task"] for update in answer["updates"]}
+        # Each range answers its own tasks, with a live task the phone lacks; the
+        # project document belongs to the first range only.
+        self.assertEqual(sent(a), {u for u in uuids if u <= split} | ({later} if later <= split else set()))
+        self.assertEqual(sent(b), {u for u in uuids if u > split} | ({later} if later > split else set()))
+        self.give(a["updates"] + b["updates"])
+        self.assertEqual(self.digests(self.phone)["project-1"], self.digests()["project-1"])
+        # With nothing left, a range's answer names what this computer holds of it.
+        held = self.inventory(self.phone)
+        second = {"project": {}, "tasks": {u: v for u, v in held["tasks"].items() if u > split}}
+        answer = self.exchange({"schema": 1, "project": "project-1", "inventory": second, "range": {"after": split}})
+        self.assertEqual((answer["updates"], answer["inventory"]), ([], second))
 
 
 if __name__ == "__main__":

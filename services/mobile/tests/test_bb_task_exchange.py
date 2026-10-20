@@ -5,6 +5,7 @@ A gateway runs `hgs task exchange --json` with the phone's payload on the
 machine the route names, only where that machine's hgs offers it, and every
 heartbeat project carries the tasks digest its hgs reports.
 """
+import json
 import unittest
 import uuid
 
@@ -77,6 +78,17 @@ class TaskDigestTests(RustOnly, BlackBoxCase):
         await self.until(lambda: self.digests() == ["ab" * 32, None], 20, "a heartbeat with the tasks digest",
                          process)
         self.assertIn("task_exchange", self.relay.heartbeats()[-1].body["snapshot"]["mobile_capabilities"]["operations"])
+
+    async def test_a_refusal_from_hgs_reaches_the_phone_as_its_text(self):
+        busy = "the project's tasks are busy; try again"
+        self.hgs.prepend({"argv": ["--help"], "stdout_text": HELP_TEXT + MARKER},
+                         {"argv": EXCHANGE, "stdout": {"schema": 1, "ok": False, "error": busy}, "exit": 1})
+        process = await self.launch()
+        request = {"request_id": str(uuid.uuid4()), "computer_id": self.relay.computer_id,
+                   "operation": "task_exchange", "session": "", "payload": REQUEST}
+        self.assertEqual(await self.submit(request, process), {"state": "failed", "result": None, "error": busy})
+        [call] = self.hgs.calls(*EXCHANGE)
+        self.assertEqual(json.loads(call["stdin"]), REQUEST)
 
     async def test_without_the_marker_hgs_is_never_asked(self):
         self.hgs.prepend({"argv": ["swarm", "get"], "stdout": SWARM})
