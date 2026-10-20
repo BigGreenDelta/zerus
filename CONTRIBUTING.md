@@ -306,8 +306,9 @@ after artwork changes.
 `test_windows_mobile_gateway.py` needs Git for Windows' `openssl` on PATH and
 runs outside a job that forbids breakaway, as do the other session-host suites.
 Before that fixture, the two `windows_management::tests` library cases exercise
-actual management-lock contention and expiry, and the five `windows_gateway`
-integration cases exercise private configuration, revision admission and ACLs.
+actual management-lock contention and expiry, and the six `windows_gateway`
+integration cases exercise private configuration, revision admission, ACLs and
+independent ownership of temporary fixture roots.
 They must execute on Windows; Linux excludes them and is not runtime evidence.
 It creates only a throwaway profile, tracked fake Codex session, copied gateway
 bundle and HTTPS loopback protocol fixture. It checks actual connector Start,

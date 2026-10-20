@@ -152,10 +152,11 @@ Set `CARGO_BUILD_JOBS=2` and `ZERUS_BUILD_JOBS=2` for the approved local gate.
 
 1. Build/lint the connector and CLI natively. Run the two
    `windows_management::tests` library cases explicitly for actual lock
-   contention and expiry, then the five `windows_gateway` integration cases,
+   contention and expiry, then the six `windows_gateway` integration cases,
    including the unsafe inheritable directory with private existing DB and lock
    files/absent sidecars, held Start revision A versus Save B, and same-revision
-   already-running Start. Retain both raw logs. Zero tests/skips do not qualify
+   already-running Start, plus independent temporary fixture roots. Retain both
+   raw logs. Zero tests/skips do not qualify
    either suite.
    Also select `-p zerus-windows-private --lib` through the connector manifest
    and its existing lockfile. Its two launch-builder cases must actually report
