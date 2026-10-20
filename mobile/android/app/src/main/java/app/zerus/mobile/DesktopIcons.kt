@@ -117,6 +117,33 @@ object DesktopIcons {
         moveTo(18f, 7.5f); lineTo(18f, 10f); curveTo(18f, 15f, 6f, 11f, 6f, 16.5f)
         circle(6f, 5f, 2.5f); circle(6f, 19f, 2.5f); circle(18f, 5f, 2.5f)
     }
+    val GitDiff = stroke("DesktopGitDiff") {
+        moveTo(13f, 3f); lineTo(5f, 3f); lineTo(5f, 21f); lineTo(19f, 21f); lineTo(19f, 9f); close()
+        moveTo(13f, 3f); lineTo(13f, 9f); lineTo(19f, 9f)
+        moveTo(8f, 11f); lineTo(12f, 11f); moveTo(10f, 9f); lineTo(10f, 13f)
+        moveTo(8f, 17f); lineTo(14f, 17f)
+    }
+    private fun gitTransfer(push: Boolean) = stroke(if (push) "DesktopGitPush" else "DesktopGitPull") {
+        moveTo(4f, 15f); lineTo(4f, 19f); quadTo(4f, 21f, 6f, 21f)
+        lineTo(18f, 21f); quadTo(20f, 21f, 20f, 19f); lineTo(20f, 15f)
+        moveTo(12f, 3f); lineTo(12f, 16f)
+        moveTo(7f, if (push) 8f else 11f); lineTo(12f, if (push) 3f else 16f); lineTo(17f, if (push) 8f else 11f)
+    }
+    val GitPush = gitTransfer(true)
+    val GitPull = gitTransfer(false)
+    private fun gitPublication(synced: Boolean) = ImageVector.Builder(
+        if (synced) "DesktopGitSynced" else "DesktopGitUnknown", 24.dp, 24.dp, 24f, 24f).apply {
+        path(fill = null, stroke = SolidColor(Color.Black), strokeLineWidth = 1.6f,
+            strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round) {
+            moveTo(6f, 19f); curveTo(0f, 19f, 0f, 10f, 6f, 10f)
+            curveTo(5f, 2f, 17f, 1f, 19f, 9f); curveTo(25f, 9f, 25f, 19f, 19f, 19f); close()
+            if (synced) { moveTo(8f, 13f); lineTo(11f, 16f); lineTo(16f, 11f) }
+            else { moveTo(10f, 10f); curveTo(10f, 7f, 15f, 7f, 15f, 10f); curveTo(15f, 12f, 12f, 11f, 12f, 14f) }
+        }
+        if (!synced) path(fill = SolidColor(Color.Black)) { circle(12f, 17f, .8f) }
+    }.build()
+    val GitSynced = gitPublication(true)
+    val GitUnknown = gitPublication(false)
     // SessionCardDelegate.h paints this subagent counter mark inline, centered here in 16 units.
     val Subagents = stroke("DesktopSubagents", 1.2f, 16f) {
         circle(5.5f, 5.75f, 2f); circle(11.5f, 6.75f, 2f)

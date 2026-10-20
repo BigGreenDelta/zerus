@@ -593,6 +593,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val context = LocalContext.current
     var sessionActions by remember { mutableStateOf<Session?>(null) }
     val listState = rememberLazyListState(model.sessionListIndex, model.sessionListOffset)
+    var machineDialog by remember { mutableStateOf(false) }
+    val gitViewport = rememberGitViewport(model.gitStatus, listState,
+        model.storageReady && !model.demo && filter != SessionFilter.Archive && sessionActions == null && !machineDialog)
     val scrollReset = model.sessionScrollReset
     val scrollScope = project?.key?.key.orEmpty()
     var appliedReset by remember { mutableLongStateOf(scrollReset) }
@@ -600,7 +603,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         if (appliedReset != scrollReset) { appliedReset = scrollReset; listState.scrollToItem(model.sessionListIndex, model.sessionListOffset) }
     }
     DisposableEffect(listState, scrollScope, scrollReset) { onDispose { model.saveSessionScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, scrollScope, scrollReset) } }
-    var machineDialog by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Column {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -662,6 +664,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             if (!collapsed) items(group.sessions, key = { "session:${it.target.key}" }) { session ->
                 val online = SessionFilters.online(session, model.machines)
                 val machine = model.machines.find { it.connectionId == session.target.connectionId && it.id == session.target.computerId }
+                val gitBadge = rememberGitBadge(model.gitStatus, GitStatusAccessPolicies.candidate(session),
+                    "session:${session.target.key}" in gitViewport)
                 Card(Modifier.sessionCardGestures(RoundedCornerShape(14.dp), onOpen = { model.open(session, preserveProject = true) }, onActions = { sessionActions = session }),
                     colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -685,7 +689,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             Box(Modifier.weight(1f)) { MachineLabel(machine?.name ?: session.target.computerId,colorHex = model.machineColor(MachineKey(session.target.connectionId,session.target.computerId))) }
                             SessionSubagentCounter(model, session, online)
                         }
-                        SessionCheckoutLine(session)
+                        SessionCheckoutLine(session, gitBadge)
                         SessionFilters.archiveDate(session).takeIf { it.isNotBlank() }?.let { archivedDate ->
                             Text("Archived $archivedDate", color = Muted, style = MaterialTheme.typography.labelSmall)
                         }
