@@ -209,6 +209,20 @@ exchange is safe and needs no durable request identity (owner decision,
   it tries a computer whose exchange failed again. An update of its own larger
   than 512 KiB, more than one request carries, is not sent; the exchange names
   it.
+- **Send now and Cancel from the phone.** The phone first exchanges the
+  project with the session's computer, so its own edits of the prompt and the
+  session reach it, and refuses with the reason when that exchange fails; then
+  it asks that computer to send (`task_send`) or cancel (`task_cancel`), and
+  exchanges again to show the result (owner decision, 2026-10-20). Both are
+  computer-scoped mutations of mobile API v1 with the relay's durable request
+  identity: the connector runs each identity once (`hgs task mobile-send` and
+  `mobile-cancel`), a refusal before anything happened is a failed receipt with
+  hgs's reason, and an outcome that cannot be confirmed is uncertain.
+- **Done on the phone.** As on the desktop: the last 7 days, then "Show older
+  (N)", in pages of 50 that the computer derives from its documents
+  (`task_done`, a short read, `hgs task mobile-done`), newest first (owner
+  decision, 2026-10-20). Opening a Done task fetches its document through the
+  exchange, which then keeps the copy the phone holds.
 
 ### Done tasks
 
@@ -329,5 +343,6 @@ Each phase gets its own implementation plan.
 
 ## Open questions
 
-- How many Done tasks the computers keep before archiving older ones, and how
-  the Done list pages on the phone.
+- None at present. Computers keep every Done task; bounded pages and Done
+  compaction keep the lists and documents small (owner decision, 2026-10-20).
+  Revisit when replicas grow large.
