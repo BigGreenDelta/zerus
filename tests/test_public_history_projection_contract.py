@@ -75,7 +75,7 @@ class PublicHistoryProjectionContract(unittest.TestCase):
     def test_resolved_retirement_refresh_and_unresolved_row_keep_the_exact_page_body(self):
         self.write_source([self.message(1, incoming=False), self.message(2)])
         head = self.complete()
-        row = next(row for row in head["events"] if row["type"] == "UserMessage")
+        row = next(row for row in head["events"] if row["type"] == "UserPromptSubmit")
         with closing(sqlite3.connect(self.index())) as db, db:
             for identity, change in [("a" * 64, "retired"), (row["history_id"], "refreshed"), ("b" * 64, "refreshed")]:
                 db.execute("INSERT INTO projection_changes(epoch,id,change) VALUES(?,?,?)", (head["history_epoch"], identity, change))
