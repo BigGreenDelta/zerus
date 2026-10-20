@@ -15,7 +15,7 @@ import re
 import shutil
 import subprocess
 
-from macos_notices import QT_NOTICES, copy_notices
+from macos_notices import QT_NOTICES, copy_notices, ffmpeg_findings, ffmpeg_provenance, ffmpeg_source_note
 
 ROOT = Path(__file__).resolve().parents[1]
 MINIMUM_SYSTEM = "14.0"
@@ -96,6 +96,7 @@ def main():
     qt = json.loads((args.qt / "zerus-qt.json").read_text())["qt_version"]
     if qt != json.loads((ROOT / "packaging/macos/qt.json").read_text())["qt_version"]:
         parser.error("the Qt prefix does not match packaging/macos/qt.json")
+    provenance = ffmpeg_provenance(ROOT)
     if not (args.licenses / "inventory.json").is_file():
         parser.error("collect Cargo dependency notices first")
     if args.output.exists() and any(args.output.iterdir()):
@@ -146,10 +147,14 @@ def main():
     shutil.copytree(args.licenses, licenses / "rust")
     copy_notices(ROOT, args.qt, qt, licenses / "qt")
     series = ".".join(qt.split(".")[:2])
-    (licenses / "qt/SOURCE.md").write_text(SOURCE_NOTE.format(version=qt, series=series))
+    (licenses / "qt/SOURCE.md").write_text(SOURCE_NOTE.format(version=qt, series=series)
+                                          + ffmpeg_source_note(provenance))
+    install(ROOT / "packaging/macos/ffmpeg.json", licenses / "qt/FFMPEG-SOURCE.json")
 
     # The official Qt frameworks are universal; ship Apple Silicon code only.
     thin_to_arm64(staged)
+    if findings := ffmpeg_findings(staged, provenance):
+        raise ValueError("\n".join(findings))
     bundle = args.output / "Zerus.app"
     run("ditto", staged, bundle)
     shutil.rmtree(work)

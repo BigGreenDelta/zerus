@@ -171,6 +171,112 @@ class QtNoticeChecks(unittest.TestCase):
                     self.assertTrue(macos_notices.notice_findings(directory))
 
 
+class FFmpegSourceChecks(unittest.TestCase):
+    def libraries(self, bundle):
+        info = macos_notices.ffmpeg_provenance()
+        directory = bundle / "Contents/Frameworks"
+        directory.mkdir(parents=True)
+        for name, offset in info["arm64_configuration_offsets"].items():
+            with (directory / name).open("wb") as stream:
+                stream.seek(offset)
+                stream.write(info["configuration"].encode() + b"\0")
+        version = info["arm64_version_info"]
+        with (directory / version["library"]).open("r+b") as stream:
+            stream.seek(version["code_offset"])
+            stream.write(bytes.fromhex(version["code_hex"]))
+            stream.seek(version["value_offset"])
+            stream.write(info["ffmpeg_version"].encode() + b"\0")
+        return info
+
+    def test_every_library_configuration_and_version_return_are_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary)
+            info = self.libraries(bundle)
+            self.assertEqual(macos_notices.ffmpeg_findings(bundle, info), [])
+            probes = [(name, offset) for name, offset in info["arm64_configuration_offsets"].items()]
+            probes += [(info["arm64_version_info"]["library"], info["arm64_version_info"][key])
+                       for key in ("code_offset", "value_offset")]
+            for name, offset in probes:
+                with self.subTest(library=name, offset=offset):
+                    path = bundle / "Contents/Frameworks" / name
+                    with path.open("r+b") as stream:
+                        stream.seek(offset)
+                        original = stream.read(1)
+                        stream.seek(offset)
+                        stream.write(bytes([original[0] ^ 1]))
+                    self.assertEqual(macos_notices.ffmpeg_findings(bundle, info),
+                                     [f"{name}: reviewed FFmpeg version/configuration differs at {offset}"])
+                    with path.open("r+b") as stream:
+                        stream.seek(offset)
+                        stream.write(original)
+            (bundle / "Contents/Frameworks/libavutil.59.dylib").unlink()
+            self.assertTrue(macos_notices.ffmpeg_findings(bundle, info))
+
+    def test_qt_version_or_archive_change_requires_a_new_source_review(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "packaging/macos"
+            directory.mkdir(parents=True)
+            (directory / "ffmpeg.json").write_bytes((ROOT / "packaging/macos/ffmpeg.json").read_bytes())
+            original = json.loads((ROOT / "packaging/macos/qt.json").read_text())
+            for changed in ({**original, "qt_version": "6.99.0"}, {**original, "archives": []}):
+                with self.subTest(qt=changed):
+                    (directory / "qt.json").write_text(json.dumps(changed))
+                    with self.assertRaisesRegex(ValueError, "Review the FFmpeg source tuple"):
+                        macos_notices.ffmpeg_provenance(root)
+
+    def test_packaging_emits_the_supplement_and_refuses_changed_bytes_before_signing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app, prefix, licenses = root / "input.app", root / "qt", root / "licenses"
+            (app / "Contents").mkdir(parents=True)
+            prefix.mkdir()
+            licenses.mkdir()
+            version = (ROOT / "VERSION").read_text().strip()
+            (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
+                "CFBundleIdentifier": "com.hgdev.hgs-tray.local", "CFBundleShortVersionString": version}))
+            (prefix / "zerus-qt.json").write_bytes((ROOT / "packaging/macos/qt.json").read_bytes())
+            QtNoticeChecks().documents(prefix, "MIT")
+            (licenses / "inventory.json").write_text("{}")
+            cli = root / "hgs"
+            cli.write_bytes(b"stand-in; never executed")
+            for altered in (False, True):
+                output = root / f"output-{altered}"
+                signed = []
+                def execute(*args):
+                    if args[0] == "ditto":
+                        shutil.copytree(args[1], args[2])
+                    elif args[0] == prefix / "bin/macdeployqt":
+                        self.libraries(args[1])
+                        if altered:
+                            library = args[1] / "Contents/Frameworks/libavutil.59.dylib"
+                            with library.open("r+b") as stream:
+                                stream.seek(496676)
+                                stream.write(b"7.1.3\0")
+                    else:
+                        self.assertEqual(args[0], "codesign")
+                        signed.append(args[-1])
+                argv = ["package-macos.py", "--qt", str(prefix), "--app", str(app),
+                        "--cli", str(cli), "--connector", str(cli), "--licenses", str(licenses),
+                        "--version", version, "--output", str(output)]
+                with self.subTest(altered=altered), mock.patch.object(sys, "argv", argv), \
+                        mock.patch.object(package, "run", side_effect=execute):
+                    if altered:
+                        with self.assertRaisesRegex(ValueError, "FFmpeg version/configuration differs"):
+                            package.main()
+                        self.assertEqual(signed, [])
+                    else:
+                        package.main()
+                        self.assertEqual(signed, [output / "Zerus.app"])
+                        notices = output / "Zerus.app/Contents/Resources/licenses/qt"
+                        self.assertEqual((notices / "FFMPEG-SOURCE.json").read_bytes(),
+                                         (ROOT / "packaging/macos/ffmpeg.json").read_bytes())
+                        note = (notices / "SOURCE.md").read_text()
+                        self.assertIn("FFmpeg 7.1.5", note)
+                        self.assertIn("lists 7.1.3", note)
+                        self.assertIn(macos_notices.ffmpeg_provenance()["source_sha256"], note)
+
+
 class BundleChecks(unittest.TestCase):
     def test_packaging_promotes_only_its_private_copy_to_the_public_identity(self):
         with tempfile.TemporaryDirectory(prefix="zerus-package-identity-") as temporary:

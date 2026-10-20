@@ -4,6 +4,7 @@ This conservative coverage rule also includes optional components and license
 alternatives in the module metadata; it does not assert that all are compiled.
 """
 import json
+from pathlib import Path
 import re
 import shutil
 
@@ -12,6 +13,76 @@ LICENSE_FIELDS = ("licenseConcluded", "licenseDeclared", "licenseInfoFromFiles",
                   "licenseInfoInFiles", "licenseInfoInSnippets")
 KEYWORDS = {"AND", "OR", "WITH", "NONE", "NOASSERTION"}
 IDENTIFIER = re.compile(r"(?:DocumentRef-[A-Za-z0-9.-]+:)?[A-Za-z0-9][A-Za-z0-9.+-]*")
+ROOT = Path(__file__).resolve().parents[1]
+FFMPEG_LIBRARIES = {"libavcodec.61.dylib", "libavformat.61.dylib", "libavutil.59.dylib",
+                    "libswresample.5.dylib", "libswscale.8.dylib"}
+
+
+def ffmpeg_provenance(root=ROOT):
+    """The reviewed dependency tuple, not a version inferred from stale SPDX."""
+    info = json.loads((root / "packaging/macos/ffmpeg.json").read_text())
+    qt = json.loads((root / "packaging/macos/qt.json").read_text())
+    if (info["qt_version"] != qt["qt_version"]
+            or info["qt_multimedia_archive_sha256"] not in {item["sha256"] for item in qt["archives"]
+                                                          if "qtmultimedia-" in item["path"]}
+            or set(info["arm64_configuration_offsets"]) != FFMPEG_LIBRARIES):
+        raise ValueError("Review the FFmpeg source tuple and byte ranges for this Qt dependency")
+    return info
+
+
+def ffmpeg_source_note(info):
+    return f"""
+## FFmpeg in this macOS bundle
+
+The official Qt {info['qt_version']} macOS libraries contain FFmpeg {info['ffmpeg_version']}.
+The unchanged module SPDX lists {info['upstream_spdx_ffmpeg_version']} from Qt's static
+attribution entry; its actual build comment instead names FFmpeg-n{info['ffmpeg_version']}.
+`FFMPEG-SOURCE.json` supplies the platform-specific source/configuration reference:
+
+- {info['source_url']}
+- Source SHA-256: `{info['source_sha256']}`
+- Qt's source SHA-1 pin: `{info['source_sha1']}`
+- FFmpeg tag `n{info['ffmpeg_version']}`, commit `{info['ffmpeg_commit']}`.
+
+Official Qt provisioning, commit `{info['qt5_commit']}`:
+
+- https://github.com/qt/qt5/blob/{info['qt5_commit']}/coin/provisioning/common/unix/ffmpeg-installation-utils.sh
+- https://github.com/qt/qt5/blob/{info['qt5_commit']}/coin/provisioning/common/macos/install-ffmpeg-macos.sh
+- https://github.com/qt/qt5/blob/{info['qt5_commit']}/coin/provisioning/common/shared/ffmpeg_config_options.txt
+
+The reviewed path downloads the pinned source, configures shared libraries,
+adjusts install-name references and joins the architectures. It contains no
+FFmpeg source-patch step. Zerus retains the arm64 slices and checks their fixed
+reviewed version/configuration byte ranges before signing. The source archive
+includes `COPYING.LGPLv2.1`, `LICENSE.md` and the component sources.
+These references do not claim an independently reproduced binary or historical
+Qt vendor build attestation; the original SPDX is preserved unchanged.
+"""
+
+
+def ffmpeg_findings(bundle, info):
+    """Check only reviewed fixed arm64 spans; never load or execute a library.
+
+    The pinned Qt archive and existing arm64 bundle check establish which
+    dependency these offsets address. This is not whole-library integrity or a
+    general Mach-O decoder. A new dependency requires new reviewed ranges.
+    """
+    probes = {name: [(offset, info["configuration"].encode() + b"\0")]
+              for name, offset in info["arm64_configuration_offsets"].items()}
+    version = info["arm64_version_info"]
+    probes[version["library"]] += [(version["code_offset"], bytes.fromhex(version["code_hex"])),
+                                   (version["value_offset"], info["ffmpeg_version"].encode() + b"\0")]
+    findings = []
+    for name, spans in sorted(probes.items()):
+        try:
+            with (bundle / "Contents/Frameworks" / name).open("rb") as stream:
+                for offset, expected in spans:
+                    stream.seek(offset)
+                    if stream.read(len(expected)) != expected:
+                        findings.append(f"{name}: reviewed FFmpeg version/configuration differs at {offset}")
+        except OSError as error:
+            findings.append(f"{name}: cannot check FFmpeg source provenance: {error}")
+    return findings
 
 
 def document_licenses(document):
