@@ -5,7 +5,7 @@ Requires HGS_TEST_CONNECTOR, HGS_TEST_BIN, HGS_TEST_FAKE_AGENT and openssl.
 Run outside a job that forbids breakaway, like the other Windows host tests.
 The relay here is a protocol fixture; production relay contracts run separately.
 """
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import ctypes
 import json
 import os
@@ -35,11 +35,15 @@ CN=synthetic-gateway-ca
 [ca]
 basicConstraints=critical,CA:TRUE
 keyUsage=critical,keyCertSign,cRLSign
+subjectKeyIdentifier=hash
+crlDistributionPoints=URI:{crl_url}
 [leaf]
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature
 extendedKeyUsage=serverAuth
 subjectAltName=IP:127.0.0.1
+authorityKeyIdentifier=keyid:always
+crlDistributionPoints=URI:{crl_url}
 """
 
 
@@ -69,18 +73,49 @@ class Gateway(LifecycleCase):
         self.mutex = threading.Lock()
         self.custody = None
         self.managers = []
+        self.crl_server = self.crl_thread = None
+        self.crl_closed = True
+        self.crl_der = None
+        self.crl_fetches = 0
+        self.addCleanup(self.close_crl_server)
         # Replace only this case's registered TemporaryDirectory cleanup. Its
         # GC finalizer must not bypass custody after an uncertain detached start.
         guard_root_cleanup(self, self.temp, lambda:
             (self.custody is None or self.custody.may_remove_root)
-            and all(manager.may_remove_root for manager in self.managers))
+            and all(manager.may_remove_root for manager in self.managers)
+            and self.crl_closed)
         tls = self.root / "tls"
         tls.mkdir()
+        crl_path = "/fixture-" + uuid.uuid4().hex + ".crl"
+        fixture = self
+        class CRLHandler(BaseHTTPRequestHandler):
+            def setup(self):
+                super().setup()
+                self.connection.settimeout(5)
+            def log_message(self, *_):
+                pass
+            def do_GET(self):
+                with fixture.mutex:
+                    data = fixture.crl_der if self.path == crl_path else None
+                    if data is not None:
+                        fixture.crl_fetches += 1
+                self.send_response(200 if data is not None else 404)
+                self.send_header("Content-Type", "application/pkix-crl")
+                self.send_header("Content-Length", str(len(data) if data is not None else 0))
+                self.end_headers()
+                if data is not None:
+                    self.wfile.write(data)
+        self.crl_closed = False
+        self.crl_server = HTTPServer(("127.0.0.1", 0), CRLHandler)
+        self.crl_thread = threading.Thread(target=self.crl_server.serve_forever,
+                                          kwargs={"poll_interval": 0.1}, daemon=True)
+        self.crl_thread.start()
+        crl_url = f"http://127.0.0.1:{self.crl_server.server_port}{crl_path}"
         config = tls / "openssl.cnf"
-        config.write_text(TLS)
-        def openssl(*args):
+        config.write_text(TLS.format(crl_url=crl_url))
+        def openssl(*args, cwd=None):
             subprocess.run(["openssl", *map(str, args)], capture_output=True, check=True,
-                           timeout=20, creationflags=HIDDEN)
+                           timeout=20, creationflags=HIDDEN, cwd=cwd)
         openssl("req", "-x509", "-config", config, "-newkey", "ec", "-pkeyopt",
                 "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", tls / "ca.key",
                 "-out", tls / "ca.pem", "-days", "2")
@@ -93,6 +128,36 @@ class Gateway(LifecycleCase):
         openssl("req", "-x509", "-config", config, "-newkey", "ec", "-pkeyopt",
                 "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", tls / "unrelated-ca.key",
                 "-out", self.unrelated_ca, "-days", "2", "-subj", "/CN=unrelated-synthetic-gateway-ca")
+        (tls / "index.txt").write_text("")
+        (tls / "serial").write_text("01\n")
+        (tls / "crlnumber").write_text("01\n")
+        (tls / "crl.cnf").write_text("""[ca]
+default_ca=fixture
+[fixture]
+database=index.txt
+new_certs_dir=.
+serial=serial
+private_key=ca.key
+certificate=ca.pem
+crlnumber=crlnumber
+default_md=sha256
+default_days=2
+default_crl_days=1
+crl_extensions=crl
+policy=fixture_policy
+[crl]
+authorityKeyIdentifier=keyid:always
+[fixture_policy]
+commonName=optional
+""")
+        openssl("ca", "-gencrl", "-batch", "-config", tls / "crl.cnf",
+                "-out", tls / "ca.crl.pem", cwd=tls)
+        openssl("crl", "-in", tls / "ca.crl.pem", "-outform", "DER", "-out", tls / "ca.crl.der")
+        with (tls / "ca.crl.der").open("rb") as source:
+            crl_der = source.read(65537)
+        self.assertTrue(0 < len(crl_der) <= 65536, "fixture CRL must be bounded DER")
+        with self.mutex:
+            self.crl_der = crl_der
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(tls / "leaf.pem", tls / "leaf.key")
         self.env.update(SSL_CERT_FILE=str(tls / "ca.pem"), CURL_CA_BUNDLE=str(tls / "ca.pem"))
@@ -156,6 +221,25 @@ class Gateway(LifecycleCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(5)
+
+    @gateway_phase("cleanup-crl-server")
+    def close_crl_server(self):
+        if self.crl_server is None:
+            self.crl_closed = True
+            return
+        try:
+            if self.crl_thread is not None and self.crl_thread.is_alive():
+                self.crl_server.shutdown()
+        finally:
+            try:
+                self.crl_server.server_close()
+            finally:
+                if self.crl_thread is not None and self.crl_thread.ident is not None:
+                    self.crl_thread.join(5)
+                    self.assertFalse(self.crl_thread.is_alive(), "fixture CRL server did not stop")
+        if self.crl_thread is not None:
+            self.assertIsNotNone(self.crl_thread.ident, "fixture CRL server start outcome unknown")
+        self.crl_closed = True
 
     @gateway_phase("manage")
     def manage(self, action, payload=None):
@@ -315,6 +399,9 @@ class Gateway(LifecycleCase):
         with self.diagnostics.phase("mobile-invite"):
             invitation = self.hgs("mobile", "invite", "--workspace", "synthetic-workspace", "--server", self.relay, "--json")
             self.assertTrue(json.loads(invitation.stdout)["pair_url"].startswith("zerus://pair?"))
+        with self.diagnostics.phase("crl-fetch"):
+            with self.mutex:
+                self.assertGreaterEqual(self.crl_fetches, 1)
         # The management process exited after Start; the independent connector
         # and session host both remain. Stop must leave the same host/session.
         with self.diagnostics.phase("graceful-stop"):
