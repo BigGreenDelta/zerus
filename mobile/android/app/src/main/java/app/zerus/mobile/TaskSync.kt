@@ -49,12 +49,17 @@ object TaskSyncPlan {
 /**
  * Exchanges a project's tasks with its computers through the relay: one project at a time
  * under its lock, one computer after another, and a computer whose exchange failed waits a
- * minute. The Rust exchange decides every request; this only carries its JSON.
+ * minute. After an exchange, the phone and the computer stay quiet until either digest
+ * changes: a heartbeat may still name the digest from before, and some projects cannot
+ * meet (a document the computer refuses, or one too large to send). The Rust exchange
+ * decides every request; this only carries its JSON.
  */
 class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplicas,
                private val clock: () -> Long = System::currentTimeMillis) {
     private val locks = ConcurrentHashMap<ProjectKey, Mutex>()
     private val waiting = ConcurrentHashMap<Pair<ProjectKey, String>, Long>()
+    /** After an exchange: the phone's digest, the heartbeat's it answered, and the computer's after it. */
+    private val quiet = ConcurrentHashMap<Pair<ProjectKey, String>, Triple<String, String, String>>()
 
     /** Exchanges `key`'s tasks with each of `peers` whose digest is not the phone's; the failures by computer. */
     suspend fun sync(connection: Connection, key: ProjectKey, name: String, peers: List<TaskPeer>): Map<String, String> =
@@ -65,9 +70,13 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
                 for (peer in peers.sortedBy { it.computerId }) {
                     val wait = key to peer.computerId
                     if (clock() < (waiting[wait] ?: 0L)) continue
-                    if (withContext(Dispatchers.IO) { store.liveDigest() } == peer.digest) continue
                     try {
-                        exchange(connection, store, peer.computerId)
+                        val mine = withContext(Dispatchers.IO) { store.liveDigest() }
+                        if (mine == peer.digest) continue
+                        val known = quiet[wait]
+                        if (known != null && known.first == mine && peer.digest in setOf(known.second, known.third)) continue
+                        val theirs = exchange(connection, store, peer.computerId)
+                        quiet[wait] = Triple(withContext(Dispatchers.IO) { store.liveDigest() }, peer.digest, theirs)
                         waiting.remove(wait)
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) {
@@ -87,12 +96,14 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
         finally { held.forEach { it.unlock() } }
     }
 
-    private suspend fun exchange(connection: Connection, store: TaskStore, computerId: String) {
+    /** One whole exchange with the computer; its live digest after the last answer. */
+    private suspend fun exchange(connection: Connection, store: TaskStore, computerId: String): String {
         val exchange = withContext(Dispatchers.IO) { store.exchange() }
         try {
             val target = Target(computerId, "", "", "", connection.id)
+            var digest = ""
             while (true) {
-                val payload = withContext(Dispatchers.IO) { exchange.nextRequest() } ?: return
+                val payload = withContext(Dispatchers.IO) { exchange.nextRequest() } ?: return digest
                 val relay = api()
                 val id = UUID.randomUUID().toString()
                 val receipt = relay.await(connection, relay.submit(connection, target, TaskSyncPlan.OPERATION, JSONObject(payload), id),
@@ -101,7 +112,7 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
                     receipt.string("error").ifBlank { "The computer did not answer the task exchange." }
                 }
                 val result = receipt.optJSONObject("result") ?: error("The computer's answer has no result.")
-                withContext(Dispatchers.IO) { exchange.accept(result.toString()) }
+                digest = withContext(Dispatchers.IO) { exchange.accept(result.toString()) }.digest
             }
         } finally { exchange.close() }
     }

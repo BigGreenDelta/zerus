@@ -548,6 +548,8 @@ pub struct ExchangeProgress {
     pub unsent: Vec<String>,
     /// The exchange has nothing left to do.
     pub finished: bool,
+    /// The computer's live digest after this answer.
+    pub digest: String,
 }
 
 /// The phone's exchange of one project's tasks with one computer, through
@@ -594,6 +596,7 @@ impl TaskExchange {
             refused_there: progress.refused_there.into_iter().map(Into::into).collect(),
             unsent: progress.unsent,
             finished: progress.finished,
+            digest: progress.digest,
         })
     }
 }

@@ -318,6 +318,8 @@ pub struct Progress {
     pub unsent: Vec<String>,
     /// The exchange has nothing left to do.
     pub finished: bool,
+    /// The computer's live digest after this answer.
+    pub digest: String,
 }
 
 /// A document that arrives in parts.
@@ -444,8 +446,11 @@ impl Exchange {
             .into_iter()
             .map(|update| update.decode("invalid base64 in an answer"))
             .collect::<Result<Vec<_>>>()?;
-        if let Some(part) = answer.part {
-            updates.extend(self.assemble(part)?);
+        match answer.part {
+            Some(part) => updates.extend(self.assemble(part)?),
+            // The request asked for the next part and none came: the computer no
+            // longer offers that document, so the phone stops waiting for it.
+            None => self.part = None,
         }
         let brought = updates.len();
         let imported = store.import_updates(updates)?;
@@ -493,6 +498,7 @@ impl Exchange {
             refused_there: answer.refused,
             unsent: self.unsent.iter().cloned().collect(),
             finished: self.ranges.is_empty(),
+            digest: answer.digest,
         })
     }
 

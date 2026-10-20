@@ -223,7 +223,7 @@ class MainActivity : ComponentActivity() {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(model, lifecycle, updater) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) model.flushDrafts()
+            if (event == Lifecycle.Event.ON_STOP) { model.flushDrafts(); model.stopTaskSync() }
             if (event == Lifecycle.Event.ON_RESUME) updater.recover()
         }
         lifecycle.addObserver(observer)

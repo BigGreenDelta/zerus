@@ -2007,6 +2007,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             finally { taskSyncRunning = false }
         }
     }
+    /** Nothing syncs in the background: the activity stops the running exchange when it stops; merges are idempotent. */
+    fun stopTaskSync() { taskSyncJob?.cancel() }
     fun openProject(project: ProjectSummary) { selectedProject = project }
     fun clearProject() { selectedProject = null }
     fun open(session: Session, preserveProject: Boolean = false) {

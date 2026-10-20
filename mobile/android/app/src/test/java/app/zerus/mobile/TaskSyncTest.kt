@@ -59,6 +59,14 @@ class TaskSyncTest {
     }
 
     private fun peer(computer: Computer) = TaskPeer("computer-1", computer.store.liveDigest())
+    private fun sha256(value: String) = java.security.MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
+        .joinToString("") { "%02x".format(it) }
+    /** Text that does not compress. */
+    private fun noise(seed: String, length: Int): String {
+        val out = StringBuilder()
+        while (out.length < length) out.append(sha256("$seed-${out.length}"))
+        return out.substring(0, length)
+    }
 
     @Test fun aPhonePullsAComputersTasksThroughTheRelay() = world { computer, connection, replicas ->
         listOf("Add rate limiting", "Measure first", "Document the limits").forEach {
@@ -96,6 +104,50 @@ class TaskSyncTest {
         val sent = computer.envelopes.size
         sync.sync(connection, key, "orchard", listOf(peer(computer)))
         assertEquals(sent, computer.envelopes.size)
+    }
+
+    @Test fun aStaleHeartbeatDigestSendsNothingAfterAnExchange() = world { computer, connection, replicas ->
+        computer.store.add("Add rate limiting", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End)
+        val sync = TaskSync({ RelayApi() }, replicas)
+        val heartbeat = peer(computer)
+        assertEquals(emptyMap<String, String>(), sync.sync(connection, key, "orchard", listOf(heartbeat)))
+        replicas.store(key, "orchard").use { it.comment(it.list().tasks.single().uuid, "From the phone") }
+        sync.sync(connection, key, "orchard", listOf(heartbeat))
+        val sent = computer.envelopes.size
+        // The heartbeat still names the digest from before the exchange; nothing changed since.
+        sync.sync(connection, key, "orchard", listOf(heartbeat))
+        assertEquals(sent, computer.envelopes.size)
+    }
+
+    @Test fun anUnconvergedProjectWaitsUntilADigestChanges() = world { computer, connection, replicas ->
+        val task = computer.store.add("Add rate limiting", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End)
+        val sync = TaskSync({ RelayApi() }, replicas)
+        sync.sync(connection, key, "orchard", listOf(peer(computer)))
+        // More than one request can carry: the phone keeps it, and the digests stay apart.
+        replicas.store(key, "orchard").use { phone ->
+            repeat(10) { n -> phone.comment(task.uuid, noise("comment-$n", 60_000)) }
+        }
+        sync.sync(connection, key, "orchard", listOf(peer(computer)))
+        replicas.store(key, "orchard").use { assertNotEquals(computer.store.liveDigest(), it.liveDigest()) }
+        val sent = computer.envelopes.size
+        sync.sync(connection, key, "orchard", listOf(peer(computer)))
+        assertEquals(sent, computer.envelopes.size)
+        // Something new on the computer: the phone exchanges again.
+        computer.store.add("Measure first", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End)
+        sync.sync(connection, key, "orchard", listOf(peer(computer)))
+        assertTrue(computer.envelopes.size > sent)
+        replicas.store(key, "orchard").use { assertEquals(2, it.list().tasks.size) }
+    }
+
+    @Test fun aReplicaThatCannotBeReadFailsOnlyItsExchange() = world { computer, connection, replicas ->
+        computer.store.add("Add rate limiting", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End)
+        // A damaged project document: the phone cannot read its own digest.
+        val project = java.io.File(replicas.folder(key), sha256(key.id))
+        project.mkdirs()
+        java.io.File(project, "project.loro").writeText("damaged")
+        val failures = TaskSync({ RelayApi() }, replicas).sync(connection, key, "orchard", listOf(peer(computer)))
+        assertEquals(setOf("computer-1"), failures.keys)
+        assertTrue(computer.envelopes.isEmpty())
     }
 
     @Test fun aFailedExchangeWaitsAMinute() = world { computer, connection, replicas ->

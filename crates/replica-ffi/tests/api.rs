@@ -191,6 +191,7 @@ fn two_stores_exchange_through_json() {
     }
     let last = last.unwrap();
     assert!(last.finished);
+    assert_eq!(last.digest, computer.live_digest().unwrap());
     assert_eq!(
         computer.live_digest().unwrap(),
         phone.live_digest().unwrap()

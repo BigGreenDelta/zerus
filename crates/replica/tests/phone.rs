@@ -300,8 +300,12 @@ fn a_fresh_phone_gets_every_live_task() {
     }
     let mut done = add(&computer, "Document the limits");
     accept(&computer, &mut done);
-    settled(run(&phone, &computer, Budget::default()));
+    let pulled = settled(run(&phone, &computer, Budget::default()));
     assert_eq!(live_digest(&phone), live_digest(&computer));
+    assert_eq!(
+        pulled.progress.last().unwrap().digest,
+        live_digest(&computer)
+    );
     assert_eq!(phone.inventory().unwrap().0.tasks.len(), 30);
 }
 
@@ -548,4 +552,29 @@ fn a_document_too_large_to_send_is_named_and_skipped() {
     assert_eq!(unsent, BTreeSet::from([task.uuid().to_owned()]));
     assert_eq!(comments(&computer, small.uuid()), 1);
     assert_eq!(comments(&computer, task.uuid()), 0);
+}
+
+#[test]
+fn a_document_that_leaves_while_in_parts_ends_the_exchange() {
+    let (_a, _b, phone, computer) = pair();
+    let task = add(&computer, "Add rate limiting");
+    for n in 0..5 {
+        comment(
+            &computer,
+            task.uuid(),
+            &noise(&format!("comment-{n}"), 60_000),
+        );
+    }
+    let mut exchange = Exchange::new();
+    let mut run = Run::default();
+    assert!(step(&mut exchange, &phone, &computer, &mut run));
+    assert_eq!(run.parts, 1);
+    // Accepted into Done before its last part: the phone never held it, so the
+    // computer no longer offers it.
+    let mut fresh = computer.load(task.uuid()).unwrap();
+    accept(&computer, &mut fresh);
+    while step(&mut exchange, &phone, &computer, &mut run) {}
+    let run = settled(run);
+    assert!(run.requests < 5, "{} requests", run.requests);
+    assert!(phone.inventory().unwrap().0.tasks.is_empty());
 }
