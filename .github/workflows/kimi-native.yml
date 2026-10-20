@@ -67,13 +67,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config
       - name: macOS tmux build dependencies
         if: runner.os == 'macOS'
-        run: brew install coreutils libevent ncurses utf8proc bison pkg-config
+        run: brew install coreutils libevent ncurses utf8proc jemalloc bison pkg-config
       - name: Build the existing pinned tmux release privately
         shell: bash
         run: |
           if [ "$RUNNER_OS" = macOS ]; then
             PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
-            PKG_CONFIG_PATH="$(brew --prefix libevent)/lib/pkgconfig:$(brew --prefix ncurses)/lib/pkgconfig:$(brew --prefix utf8proc)/lib/pkgconfig"
+            PKG_CONFIG_PATH="$(brew --prefix libevent)/lib/pkgconfig:$(brew --prefix ncurses)/lib/pkgconfig:$(brew --prefix utf8proc)/lib/pkgconfig:$(brew --prefix jemalloc)/lib/pkgconfig"
             export PATH PKG_CONFIG_PATH
           fi
           bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/kimi-tmux"

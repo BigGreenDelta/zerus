@@ -14,10 +14,10 @@ curl -fsSL "https://github.com/tmux/tmux/releases/download/$tmux_version/tmux-$t
     tar xzf "tmux-$tmux_version.tar.gz"
     cd "tmux-$tmux_version"
     configure_args=()
-    # tmux refuses to configure on macOS without an explicit Unicode-library
-    # choice. Hosted macOS installs utf8proc; Linux keeps its original defaults.
+    # tmux requires explicit Unicode and allocator choices on macOS. The hosted
+    # job installs both libraries; Linux keeps its original defaults.
     if [ "$(uname -s)" = Darwin ]; then
-        configure_args+=(--enable-utf8proc)
+        configure_args+=(--enable-utf8proc --enable-jemalloc)
     fi
     ./configure --prefix="$prefix" "${configure_args[@]}"
     make --jobs=2

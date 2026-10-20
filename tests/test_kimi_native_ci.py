@@ -86,7 +86,7 @@ class KimiNativeCI(unittest.TestCase):
                                     env=env, text=True, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(arguments.read_text().splitlines(), ['--prefix=' + str(prefix)] +
-                             (['--enable-utf8proc'] if system == 'Darwin' else []))
+                             (['--enable-utf8proc', '--enable-jemalloc'] if system == 'Darwin' else []))
             self.assertEqual(list(runtime.iterdir()), [])
 
     def test_only_reviewed_architectures_and_exact_eight_methods_are_selected(self):
@@ -275,11 +275,12 @@ class KimiNativeCI(unittest.TestCase):
         for variable, directory in (('CARGO_TARGET_DIR', 'target'), ('CARGO_HOME', 'cargo'), ('RUSTUP_HOME', 'rustup')):
             self.assertIn('echo "' + variable + '=$RUNNER_TEMP/kimi-' + directory + '"', workflow)
         self.assertIn('} >> "$GITHUB_ENV"', workflow)
-        self.assertIn('brew install coreutils libevent ncurses utf8proc bison pkg-config', workflow)
+        self.assertIn('brew install coreutils libevent ncurses utf8proc jemalloc bison pkg-config', workflow)
         self.assertIn('$(brew --prefix utf8proc)/lib/pkgconfig', workflow)
+        self.assertIn('$(brew --prefix jemalloc)/lib/pkgconfig', workflow)
         installer = (ROOT / 'scripts/ci/install-tmux.sh').read_text()
         self.assertIn('if [ "$(uname -s)" = Darwin ]; then', installer)
-        self.assertIn('configure_args+=(--enable-utf8proc)', installer)
+        self.assertIn('configure_args+=(--enable-utf8proc --enable-jemalloc)', installer)
         self.assertIn('persist-credentials: false', workflow)
         exact_source = '${{ github.event.pull_request.head.sha || github.sha }}'
         self.assertIn('SOURCE_SHA: ' + exact_source, workflow)
