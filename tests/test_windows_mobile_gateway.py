@@ -46,13 +46,13 @@ class Gateway(LifecycleCase):
         super().setUp()
         self.assertTrue(CONNECTOR.is_file(), "build the Windows Rust connector first")
         self.assertTrue(shutil.which("openssl"), "openssl is required for the throwaway TLS fixture")
-        self.env["HGS_CONFIG_DIR"] = str(self.root / "config")
         self.bundle = self.root / "gateway-bundle"
         self.bundle.mkdir()
         self.connector = self.bundle / "zerus-mobile-connector.exe"
         shutil.copy2(CONNECTOR, self.connector)
         shutil.copy2(HGS, self.bundle / "hgs.exe")
-        self.config = self.root / "config/mobile/connector.json"
+        # Keep the configuration root LifecycleCase enabled for local sessions.
+        self.config = self.home / ".config" / "hgs" / "mobile" / "connector.json"
         self.pending, self.results, self.snapshots = [], {}, []
         self.mutex = threading.Lock()
         self.custody = None
