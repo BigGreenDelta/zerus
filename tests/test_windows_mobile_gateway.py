@@ -65,6 +65,7 @@ class Gateway(LifecycleCase):
         # Keep the configuration root LifecycleCase enabled for local sessions.
         self.config = self.home / ".config" / "hgs" / "mobile" / "connector.json"
         self.pending, self.results, self.snapshots = [], {}, []
+        self.device_requests = 0
         self.mutex = threading.Lock()
         self.custody = None
         self.managers = []
@@ -88,6 +89,10 @@ class Gateway(LifecycleCase):
                 "-out", tls / "leaf.csr", "-subj", "/CN=127.0.0.1")
         openssl("x509", "-req", "-in", tls / "leaf.csr", "-CA", tls / "ca.pem", "-CAkey", tls / "ca.key",
                 "-CAcreateserial", "-out", tls / "leaf.pem", "-days", "2", "-extfile", config, "-extensions", "leaf")
+        self.unrelated_ca = tls / "unrelated-ca.pem"
+        openssl("req", "-x509", "-config", config, "-newkey", "ec", "-pkeyopt",
+                "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", tls / "unrelated-ca.key",
+                "-out", self.unrelated_ca, "-days", "2", "-subj", "/CN=unrelated-synthetic-gateway-ca")
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(tls / "leaf.pem", tls / "leaf.key")
         self.env.update(SSL_CERT_FILE=str(tls / "ca.pem"), CURL_CA_BUNDLE=str(tls / "ca.pem"))
@@ -109,6 +114,8 @@ class Gateway(LifecycleCase):
                         batch, fixture.pending = fixture.pending, []
                     self.answer({"requests": batch})
                 elif self.path == "/v1/node/devices":
+                    with fixture.mutex:
+                        fixture.device_requests += 1
                     self.answer({"workspace_id": "synthetic-workspace", "workspace_name": "Synthetic workspace", "devices": []})
                 else:
                     self.send_error(404)
@@ -292,9 +299,19 @@ class Gateway(LifecycleCase):
         with self.diagnostics.phase("input-once"):
             self.wait_for("the literal terminal input", lambda: "synthetic gateway input" in received_text())
             self.assertEqual(received_text().count("synthetic gateway input"), 1)
+        with self.diagnostics.phase("mobile-phones-untrusted-ca"):
+            with self.mutex:
+                before = self.device_requests
+            refused = self.hgs("mobile", "phones", "--json", rc=1,
+                               env={**self.env, "CURL_CA_BUNDLE": str(self.unrelated_ca)})
+            self.assertIn("curl: (60)", refused.stderr)
+            with self.mutex:
+                self.assertEqual(self.device_requests, before)
         with self.diagnostics.phase("mobile-phones"):
             phones = self.hgs("mobile", "phones", "--json")
             self.assertTrue(json.loads(phones.stdout)["configured"])
+            with self.mutex:
+                self.assertEqual(self.device_requests, before + 1)
         with self.diagnostics.phase("mobile-invite"):
             invitation = self.hgs("mobile", "invite", "--workspace", "synthetic-workspace", "--server", self.relay, "--json")
             self.assertTrue(json.loads(invitation.stdout)["pair_url"].startswith("zerus://pair?"))

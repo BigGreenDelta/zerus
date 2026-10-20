@@ -2075,6 +2075,12 @@ or revoke for another relay or workspace, and a code for another workspace is
 never shown. A revocation that fails or cannot be confirmed stays reported until
 **Refresh**; it is never retried automatically.
 
+On Windows, these phone-management commands pass a nonempty `CURL_CA_BUNDLE`
+path explicitly to curl's `--cacert`, so Schannel verifies the relay using that
+PEM CA bundle. If the variable is absent or empty, curl keeps its default
+trust behavior. An invalid bundle or failed certificate verification refuses
+the request; there is no fallback to an unverified connection.
+
 Multiple machine filters narrow both sessions and content search. Label color,
 Bright/Soft mode and appearance previews are local. Color pickers cancel on an
 outside click or Escape; only explicit confirmation saves a color. Project
