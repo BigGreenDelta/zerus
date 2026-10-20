@@ -2288,6 +2288,18 @@ async fn postgres_cross_worker_waiting_plans_leave_the_event_row_free() {
         s(&c, "node_id").to_owned(),
     );
     let at = now();
+    // The delivery claim rechecks the selected native snapshot. Give the
+    // delivering workspace a real waiting request; unknown state correctly
+    // holds a candidate and cannot exercise this event-lock control.
+    let snapshot = canonical(&json!({"sessions":[{"name":"example","run_id":"r","conversation_id":"c","phase":"input","activity":"waiting"}]})).unwrap();
+    f.store
+        .db
+        .exec(
+            "UPDATE nodes SET snapshot=?,last_seen=? WHERE id=?",
+            args![&snapshot, at, &f.node.id],
+        )
+        .await
+        .unwrap();
     f.store
         .db
         .exec(
