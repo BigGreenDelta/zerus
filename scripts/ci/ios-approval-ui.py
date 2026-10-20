@@ -52,6 +52,7 @@ def digest(path):
 
 def main():
     assert sys.platform == "darwin" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+    assert os.uname().machine == "arm64", "reviewed hosted process architecture"
     source = os.environ["EXPECTED_SOURCE"]
     runtime, device = os.environ["EXPECTED_RUNTIME"], os.environ["EXPECTED_DEVICE_TYPE"]
     expected_build = os.environ["EXPECTED_XCODE_BUILD"]
@@ -88,7 +89,8 @@ def main():
         remaining = min(cap, end - time.monotonic() - (0 if cleaning else 60))
         assert remaining > 0, "original whole deadline"
         save(label + ".command.json", {"argv": list(map(str, arguments)), "remaining": remaining})
-        command = {"label": label, "argv": list(map(str, arguments))}; commands.append(command)
+        command = {"label": label, "argv": list(map(str, arguments)), "started_monotonic": time.monotonic(),
+                   "whole_end_monotonic": end, "cap_seconds": cap}; commands.append(command)
         out, err = root / (label + ".stdout"), root / (label + ".stderr")
         value = bytearray()
         with out.open("xb") as stdout, err.open("xb") as stderr:
@@ -131,6 +133,8 @@ def main():
                 command["reaped"] = child.returncode is not None
                 for pipe in (child.stdout, child.stderr): pipe.close()
                 stdout.flush(); os.fsync(stdout.fileno()); stderr.flush(); os.fsync(stderr.fileno())
+                command["finished_monotonic"] = time.monotonic()
+                command["elapsed_seconds"] = command["finished_monotonic"] - command["started_monotonic"]
         return value.decode("utf-8", errors="strict")
 
     try:
@@ -144,7 +148,7 @@ def main():
         assert re.fullmatch(r"Xcode (?:2[6-9]|[3-9][0-9])(?:\.[0-9]+)*\nBuild version " + re.escape(expected_build) + r"\n", version)
         tools_before = {str(path): digest(path) for path in (developer / "usr/bin/xcodebuild", Path("/usr/bin/xcrun"))}
         save("tools.json", {"xcode": version, "developer": str(developer), "runtime": runtime, "device_type": device,
-                            "sha256": tools_before,
+                            "sha256": tools_before, "process_architecture": "arm64", "destination_architecture": "arm64",
                             "scope": "selected installed tools on disposable VM; not transitive closure"})
         runtimes = json.loads(run("runtimes", ["/usr/bin/xcrun", "simctl", "list", "runtimes", "--json"]))["runtimes"]
         assert len([row for row in runtimes if row.get("identifier") == runtime and row.get("isAvailable") is True]) == 1
@@ -161,7 +165,7 @@ def main():
         run("boot", ["/usr/bin/xcrun", "simctl", "boot", identifier])
         run("bootstatus", ["/usr/bin/xcrun", "simctl", "bootstatus", identifier, "-b"], 120)
         text = run("ui-test", ["/usr/bin/xcodebuild", "-project", root / "project/ApprovalUIFixture.xcodeproj", "-scheme", "ApprovalUIFixture",
-                   "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "platform=iOS Simulator,id=" + identifier,
+                   "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "platform=iOS Simulator,arch=arm64,id=" + identifier,
                    "-derivedDataPath", root / "derived", "-clonedSourcePackagesDirPath", root / "packages", "-packageCachePath", root / "package-cache",
                    "-disableAutomaticPackageResolution", "-disablePackageRepositoryCache", "-parallel-testing-enabled", "NO",
                    "-maximum-concurrent-test-simulator-destinations", "1", "-jobs", "2", "-test-timeouts-enabled", "YES",

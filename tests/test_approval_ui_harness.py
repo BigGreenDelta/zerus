@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """SDK-free admission/result/project controls; never count these as native UI results."""
 import importlib.util
+import os
 from pathlib import Path
 import re
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +75,7 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertNotIn("CODE_SIGNING_ALLOWED = YES", body)
             self.assertIn("CODE_SIGNING_ALLOWED = NO", body)
             self.assertIn("SUPPORTED_PLATFORMS = iphonesimulator", body)
+            self.assertIn("ONLY_ACTIVE_ARCH = YES", body)
             scheme = ET.parse(project / "xcshareddata/xcschemes/ApprovalUIFixture.xcscheme").getroot()
             testable = scheme.findall("./TestAction/Testables/TestableReference")
             self.assertEqual(len(testable), 1)
@@ -130,6 +134,16 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn("cache-mode: none", workflow)
         self.assertIn('test "$RUNNER_ENVIRONMENT" = github-hosted', workflow)
         self.assertNotIn("secrets.", workflow)
+
+    def test_non_arm64_process_refuses_before_allocation_or_tool_execution(self):
+        ios = module("ios_approval_ui", "scripts/ci/ios-approval-ui.py")
+        with patch.object(ios.sys, "platform", "darwin"), patch.dict(os.environ, {"RUNNER_ENVIRONMENT": "github-hosted"}, clear=True), \
+                patch.object(ios.os, "uname", return_value=SimpleNamespace(machine="x86_64"), create=True), \
+                patch.object(ios.Path, "mkdir") as allocate, patch.object(ios.subprocess, "Popen") as launch:
+            with self.assertRaisesRegex(AssertionError, "reviewed hosted process architecture"):
+                ios.main()
+            allocate.assert_not_called()
+            launch.assert_not_called()
 
 
 if __name__ == "__main__":

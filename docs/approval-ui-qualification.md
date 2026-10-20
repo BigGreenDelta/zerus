@@ -69,7 +69,7 @@ simulator=$(xcrun simctl create "Zerus approval $GITHUB_RUN_ID" "$EXPECTED_DEVIC
 xcrun simctl boot "$simulator"
 xcrun simctl bootstatus "$simulator" -b
 xcodebuild -project "$gate/project/ApprovalUIFixture.xcodeproj" -scheme ApprovalUIFixture \
-  -configuration Debug -sdk iphonesimulator -destination "platform=iOS Simulator,id=$simulator" \
+  -configuration Debug -sdk iphonesimulator -destination "platform=iOS Simulator,arch=arm64,id=$simulator" \
   -derivedDataPath "$gate/derived" -clonedSourcePackagesDirPath "$gate/packages" \
   -packageCachePath "$gate/package-cache" -disableAutomaticPackageResolution -disablePackageRepositoryCache \
   -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1 -jobs 2 \
@@ -84,6 +84,8 @@ Manual dispatch retains explicit required inputs. Both paths refuse absent or mi
 fallback, use read-only credentials and no caches, and run only on a disposable hosted VM. Review the workflow before
 publishing its PR; the shell lines above explain its commands and are not an alternative bypass. The driver requires the
 exact selected `DEVELOPER_DIR` and `EXPECTED_XCODE_BUILD`, not the existing product selector's newest-Xcode fallback.
+It refuses a non-arm64 hosted process before allocation, selects the arm64 simulator destination explicitly, and builds
+the separate Debug fixture with `ONLY_ACTIVE_ARCH=YES`, matching the production Debug configuration and local package.
 It imposes one original 900-second budget, reserves 60 seconds for cleanup, bounds boot to 120 seconds and build/test to
 600 seconds or the remaining shared budget, caps raw output at 32 MiB per command, owns the unreaped direct child before
 later fallible calls, and retains failures without retry. A forced child stop is failed/unknown, never passing cleanup
