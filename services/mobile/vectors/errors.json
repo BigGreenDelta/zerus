@@ -36,7 +36,8 @@
   "fleet",
   "projects",
   "accounts",
-  "managed_relay"
+  "managed_relay",
+  "session_projects"
  ],
  "provenance": "AST scan of raise statements in the zerus_mobile connector modules",
  "raises": [
@@ -120,6 +121,7 @@
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native notification preference acknowledgement did not match","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native ordinary inspection returned a different or archived target","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native process acknowledgement identity did not match","module":"connector"},
+  {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native project assignment acknowledgement did not match","module":"connector"},
   {"android":{"update_required":true},"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native public history ABI is unavailable","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native public history identity or envelope did not match","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector._execute_claimed","message":"native queue acknowledgement identity did not match","module":"connector"},
@@ -173,6 +175,7 @@
   {"count":1,"exception":"ConnectorError","function":"Connector.execute","message":"directory creation computer does not match its immutable route","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector.execute","message":"invalid native request JSON","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector.execute","message":"invalid request","module":"connector"},
+  {"count":1,"exception":"ConnectorError","function":"Connector.execute","message":"project assignment computer does not match its immutable route","module":"connector"},
   {"android":{"update_required":true},"count":1,"exception":"ConnectorError","function":"Connector.http","message":"relay is unavailable","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector.http","message":"relay response exceeds size limit","module":"connector"},
   {"count":1,"exception":"ConnectorError","function":"Connector.http","message":"relay returned invalid JSON","module":"connector"},
@@ -299,6 +302,7 @@
   {"count":1,"exception":"ValueError","function":"validate_recovery","message":"invalid recovery job UUID","module":"recovery"},
   {"count":1,"exception":"ValueError","function":"validate_recovery","message":"invalid recovery job action","module":"recovery"},
   {"count":1,"exception":"ValueError","function":"validate_recovery","message":"invalid scoped recovery fields","module":"recovery"},
+  {"count":3,"exception":"ValueError","function":"validate","message":"invalid scoped session project fields","module":"session_projects"},
   {"count":1,"exception":"ValueError","function":"identity","message":"invalid speech job identity","module":"speech"},
   {"count":2,"exception":"ValueError","function":"validate","message":"invalid speech audio encoding","module":"speech"},
   {"count":1,"exception":"ValueError","function":"validate","message":"invalid speech audio size","module":"speech"},

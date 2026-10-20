@@ -297,6 +297,12 @@ impl Store {
                 "requests INDEXED BY hook_health_history"
             };
             rows.extend(t.all(&format!("SELECT id,workspace_id FROM {diagnostics} WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?"),args![at-120.0,batch]).await?);
+            let project_reads = if self.db.postgres {
+                "requests"
+            } else {
+                "requests INDEXED BY project_assignment_history_v1"
+            };
+            rows.extend(t.all(&format!("SELECT id,workspace_id FROM {project_reads} WHERE operation='project_assignment' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?"),args![at-120.0,batch]).await?);
             // Keep the new read class separate from the persisted read_history_v3 predicate.
             let git_reads = if self.db.postgres {
                 "requests"
@@ -326,6 +332,7 @@ impl Store {
                     && (f(&r, "updated")
                         < at - match s(&r, "operation") {
                             "hooks_status"
+                            | "project_assignment"
                             | "analytics_read"
                             | "speech_config"
                             | "speech_config_status"

@@ -72,6 +72,8 @@ pub const IMPLEMENTED: &[&str] = &[
     "mark_read",
     "session_notifications",
     "process_output",
+    "project_assignment",
+    "project_assign",
     "speech_cancel",
     "speech_config",
     "speech_config_status",
@@ -108,6 +110,7 @@ const FEATURE_OPERATIONS: &[(&str, &str)] = &[
     ("send_agent", "send"),
     ("directory_create_v1", "directory_create"),
     ("launch_project", "launch"),
+    (crate::session_projects::FEATURE, "project_assign"),
     ("gateway_one_hop", "send"),
 ];
 
@@ -244,6 +247,7 @@ pub struct Flags {
     pub recovery: bool,
     pub history: bool,
     pub hook_health: bool,
+    pub session_projects: bool,
     pub launch: bool,
     pub project_launch: bool,
     pub worktree: bool,
@@ -278,6 +282,7 @@ impl Flags {
             recovery: has("recovery action --scoped-json"),
             history: has("history <session> --json"),
             hook_health: has(crate::hook_health::HELP_MARKER),
+            session_projects: crate::session_projects::from_help(help),
             launch: has("--launch-id"),
             project_launch: has("swarm assign-launch --json"),
             worktree: has("Mobile worktree ABI: worktrees-v1"),
@@ -363,6 +368,7 @@ impl Flags {
         remove(self.launch, &launch);
         remove(self.history, &["history"]);
         remove(self.hook_health, &["hooks_status"]);
+        remove(self.session_projects, crate::session_projects::OPERATIONS);
         remove(self.recovery, &["recovery_action"]);
         remove(self.read, &["mark_read"]);
         remove(self.session_notifications, &["session_notifications"]);
@@ -400,6 +406,9 @@ impl Flags {
         }
         if one_hop {
             features.insert("gateway_one_hop");
+        }
+        if self.session_projects {
+            features.insert(crate::session_projects::FEATURE);
         }
         if self.project_launch {
             features.insert("launch_project");

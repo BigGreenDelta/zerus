@@ -29,7 +29,7 @@ from .managed_relay import transport, identity_url
 from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
 from . import analytics, speech, speech_config, voice, session_notifications
-from . import attachment_reads, file_reads, archives, hook_health
+from . import attachment_reads, file_reads, archives, hook_health, session_projects
 from .recovery import validate_recovery
 from .history import validate_history
 from .context import CLEAR_CONTEXT_DISMISS_FEATURE, CLEAR_CONTEXT_DISMISS_HELP, validate_clear_context
@@ -179,6 +179,7 @@ class Journal:
                 self.db.execute("UPDATE requests SET state=?,response=?,updated_at=? WHERE request_id=?",
                                 (state, json.dumps(response), now, request_id))
         self.db.execute("CREATE INDEX IF NOT EXISTS delivered_history ON requests(delivered,delivered_at)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS project_assignment_delivered_v1 ON requests(delivered_at) WHERE operation='project_assignment' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS analytics_delivered_reads ON requests(delivered_at) WHERE operation='analytics_read' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running'")
         self.db.execute("CREATE INDEX IF NOT EXISTS archive_delivered_reads ON requests(delivered_at) WHERE operation='archive_list' AND delivered=1 AND state!='running'")
@@ -192,6 +193,7 @@ class Journal:
     def prune(self, *, now: float | None = None) -> None:
         now = time.time() if now is None else now
         with self.db:
+            self.db.execute("DELETE FROM requests WHERE operation='project_assignment' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute("DELETE FROM requests WHERE operation='hooks_status' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute("DELETE FROM requests WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute("DELETE FROM requests WHERE operation='analytics_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
@@ -307,6 +309,7 @@ class Connector:
         self.lifecycle_supported = False
         self.terminal_supported = False
         self.recovery_supported = False
+        self.session_projects_supported = False
         self.hook_health_supported = False
         self.clear_context_dismiss_supported = False
         self.history_supported = False
@@ -527,9 +530,9 @@ class Connector:
             snapshot["mobile_projects"]={**groups,"projects":[{k:v for k,v in p.items() if k!="archives"} for p in groups.get("projects",[]) if isinstance(p,dict)]}
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if self.analytics_supported else analytics.OPERATIONS) - (set() if getattr(self,"hook_health_supported",False) else {"hooks_status"})) - (set() if self.archive_supported else {"archive_list"}) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if getattr(self, "session_notifications_supported", False) else {"session_notifications"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
+        operations = (OPERATIONS - (set() if getattr(self,"session_projects_supported",False) else session_projects.OPERATIONS) - (set() if self.analytics_supported else analytics.OPERATIONS) - (set() if getattr(self,"hook_health_supported",False) else {"hooks_status"})) - (set() if self.archive_supported else {"archive_list"}) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if getattr(self, "session_notifications_supported", False) else {"session_notifications"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
-            "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({CLEAR_CONTEXT_DISMISS_FEATURE} if getattr(self, "clear_context_dismiss_supported", False) else set()) | ({voice.video.FEATURE} if self.voice_supported and self.video_supported else set()) | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
+            "operations": sorted(operations), "features": sorted(FEATURES | ({session_projects.FEATURE} if getattr(self,"session_projects_supported",False) else set()) | {"accounts_snapshot"} | ({CLEAR_CONTEXT_DISMISS_FEATURE} if getattr(self, "clear_context_dismiss_supported", False) else set()) | ({voice.video.FEATURE} if self.voice_supported and self.video_supported else set()) | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
                         **({} if self.terminal_supported else {"terminal": "Native CLI lacks the scoped Terminal ABI"})}}
 
@@ -543,6 +546,7 @@ class Connector:
         self.lifecycle_supported = False
         self.terminal_supported = False
         self.recovery_supported = False
+        self.session_projects_supported = False
         self.hook_health_supported = False
         self.clear_context_dismiss_supported = False
         self.history_supported = False
@@ -569,6 +573,7 @@ class Connector:
             self.terminal_supported = isinstance(help_text, str) and "terminal <session> --json" in help_text
             self.recovery_supported = isinstance(help_text,str) and "recovery action --scoped-json" in help_text
             self.history_supported = isinstance(help_text,str) and "history <session> --json" in help_text
+            self.session_projects_supported = session_projects.from_help(help_text)
             self.hook_health_supported = isinstance(help_text,str) and hook_health.HELP_MARKER in help_text
             self.clear_context_dismiss_supported = isinstance(help_text, str) and any(
                 line.strip() == CLEAR_CONTEXT_DISMISS_HELP for line in help_text.splitlines())
@@ -764,6 +769,9 @@ class Connector:
         if operation in voice.OPERATIONS:
             try: voice.validate(operation, payload, request["request_id"])
             except ValueError as error: raise ConnectorError(str(error)) from None
+        if operation in session_projects.OPERATIONS:
+            try: session_projects.validate(operation,payload,request["request_id"])
+            except ValueError as error: raise ConnectorError(str(error)) from None
         if operation == "hooks_status":
             try: hook_health.validate(payload,request["request_id"])
             except ValueError as error: raise ConnectorError(str(error)) from None
@@ -944,6 +952,11 @@ class Connector:
         if not self.journal.claim(request_id, journal_operation, request_hash):
             return self.journal.replay(request_id)
         try:
+            if operation in session_projects.OPERATIONS and "gateway_route" in request:
+                route=request["gateway_route"]
+                if (not isinstance(route,dict) or ("computer_id" in request and route.get("computer_id")!=request["computer_id"])
+                        or not isinstance(request.get("payload"),dict) or route.get("machine_id")!=request["payload"].get("expected_machine_id")):
+                    raise ConnectorError("project assignment computer does not match its immutable route")
             if operation == "directory_create" and "gateway_route" in request:
                 route = request["gateway_route"]
                 if (not isinstance(route, dict) or ("computer_id" in request
@@ -978,6 +991,8 @@ class Connector:
                 await self.context_preflight(operation, session, payload)
             if operation == "send" and "agent_id" in payload:
                 await self.child_send_preflight(session, payload)
+            if operation in session_projects.OPERATIONS and not getattr(self,"session_projects_supported",False):
+                raise ConnectorError(session_projects.UNAVAILABLE)
             if operation == "hooks_status" and not getattr(self,"hook_health_supported",False):
                 raise ConnectorError(hook_health.UNAVAILABLE)
             if operation == "history" and not self.history_supported:
@@ -1305,6 +1320,12 @@ class Connector:
                     raise ConnectorError("native speech acknowledgement did not match")
                 if operation in {"speech_submit", "speech_cancel"}:
                     result = {key: value for key, value in result.items() if key != "text"}
+            elif operation in session_projects.OPERATIONS:
+                result = await self.native(["swarm", "assign-session" if operation=="project_assign" else "session-project", "--json"], {**payload,"name":session}, timeout=10, max_output_bytes=session_projects.MAX_RESULT)
+                if not session_projects.result_valid(operation,result,payload,session):
+                    raise ConnectorError("native project assignment acknowledgement did not match")
+                if operation=="project_assign" and result.get("status")=="assigned":
+                    self.project_next_poll = 0.0
             elif operation == "hooks_status":
                 result = await self.native(["hooks",session,"--json"],payload,timeout=5,max_output_bytes=16*1024)
                 if not hook_health.result_valid(result,payload,session):

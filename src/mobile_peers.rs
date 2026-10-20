@@ -295,7 +295,12 @@ fn validate(request: &LocalRequest) -> Result<()> {
             }
         }
         "swarm" => {
-            if rest == ["assign-launch", "--json"] {
+            if rest == ["session-project", "--json"] || rest == ["assign-session", "--json"] {
+                let payload = request.payload.as_ref().context("project assignment request required")?;
+                crate::swarm::validate_session_project(payload, rest[0] == "assign-session")?;
+                ensure!(payload["expected_machine_id"] == request.target_machine_id, "project assignment target computer changed");
+                ensure!(payload["name"].as_str().is_some_and(session), "invalid native session");
+            } else if rest == ["assign-launch", "--json"] {
                 scoped(&request.payload)?;
                 ensure!(
                     request
@@ -1350,6 +1355,21 @@ mod tests {
         ))
         .is_ok());
         assert!(validate(&request(&["swarm", "assign-launch", "--json"], None)).is_err());
+    }
+
+    #[test]
+    fn project_grouping_peer_calls_keep_exact_fixed_commands_and_machine() {
+        for command in ["session-project","assign-session"] {
+            let argv=["swarm",command,"--json"];
+            let mut payload=scope();payload["name"]=json!("codex/example/task");payload["expected_machine_id"]=json!(ID);
+            if command=="assign-session" { payload["swarm_id"]=json!(ID);payload["project_id"]=json!("logical");payload["membership_token"]=json!("a".repeat(64));payload["catalog_epoch"]=json!("b".repeat(64)); }
+            assert!(validate(&request(&argv,Some(payload.clone()))).is_ok());
+            for (field,value) in [("directory",json!("/unexpected")),("organization",json!({})),("name",json!("@peer")),("expected_machine_id",json!("22222222-2222-4222-8222-222222222222"))] {
+                let mut bad=payload.clone();bad[field]=value;assert!(validate(&request(&argv,Some(bad))).is_err());
+            }
+            assert!(validate(&request(&["swarm",command,"--json","@next"],Some(payload))).is_err());
+            assert!(validate(&request(&argv,None)).is_err());
+        }
     }
 
     #[test]
