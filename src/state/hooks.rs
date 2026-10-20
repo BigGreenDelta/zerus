@@ -454,7 +454,8 @@ fn merge_json_mode(
         .any(owns_channel);
     // The group hgs wrote for AskUserQuestion alone also answers approvals
     // once it matches every tool: the same entry, changed in place. A group
-    // that holds anything else keeps its matcher.
+    // that holds anything else keeps its matcher. hgs never wrote that group
+    // on Windows.
     let narrowed = |group: &Value| {
         group.get("matcher").and_then(Value::as_str) == Some("AskUserQuestion")
             && group
@@ -477,9 +478,7 @@ fn merge_json_mode(
             }
         }
     }
-    // Windows keeps the terminal path until its native qualification.
     if channels && agent == "claude"
-        && !windows
         && !channel_installed
         && version().is_some_and(|version| version >= CLAUDE_ANSWER_CHANNEL)
     {
@@ -487,7 +486,10 @@ fn merge_json_mode(
             Some(entry) => entry.clone(),
             None => fresh()?,
         };
-        if let Some(channel) = base.channel() {
+        // On Windows only Claude's exec form runs the channel: Claude starts
+        // hgs itself, so the hook process is the waiting channel. The shell
+        // form puts Git Bash in between and keeps the terminal path.
+        if let Some(channel) = base.channel().filter(|channel| !windows || channel.args.is_some()) {
             hooks
                 .entry("PermissionRequest")
                 .or_insert_with(|| json!([]))
@@ -749,8 +751,13 @@ pub(super) fn health_events(agent: &str) -> Vec<&'static str> {
 
 /// Content-free registration inventory. Native trust/policy is deliberately not inferred.
 pub(super) fn health_document(original: &str, agent: &str, known: Option<(u64, u64, u64)>) -> Result<Value> {
+    health_document_mode(original, agent, known, cfg!(windows))
+}
+
+fn health_document_mode(original: &str, agent: &str, known: Option<Version>, windows: bool) -> Result<Value> {
     let mut present = std::collections::BTreeSet::new();
     let mut channel = false;
+    let mut channel_shell = false;
     let mut counts = std::collections::BTreeMap::<String,usize>::new();
     let mut conditional = false;
     if agent == "kimi" {
@@ -778,11 +785,14 @@ pub(super) fn health_document(original: &str, agent: &str, known: Option<(u64, u
                 if let Some(groups) = hooks.get(event) {
                     for group in groups.as_array().ok_or("Invalid hook configuration")? {
                         for hook in group.get("hooks").and_then(Value::as_array).ok_or("Invalid hook configuration")? {
-                            let tracking = Entry::owned(hook, cfg!(windows)).is_some();
+                            let tracking = Entry::owned(hook, windows).is_some();
                             let answer = owns_channel(hook);
                             if (tracking || answer) && hook.get("type").and_then(Value::as_str) != Some("command") { return Err("Invalid hook configuration".into()); }
                             if tracking { present.insert(event.to_owned()); *counts.entry(event.to_owned()).or_default() += 1; }
-                            if event == "PermissionRequest" && answer { channel = true; }
+                            if event == "PermissionRequest" && answer {
+                                channel = true;
+                                channel_shell |= hook.get("args") != Some(&json!(CHANNEL_ARGS));
+                            }
                             if (tracking || answer) && group.get("matcher").is_some_and(|value| value.as_str().is_none_or(|s| !s.is_empty() && s != "*")) {
                                 conditional = true;
                             }
@@ -797,7 +807,7 @@ pub(super) fn health_document(original: &str, agent: &str, known: Option<(u64, u
     let missing: Vec<_> = expected.iter().filter(|event| !present.contains(**event)).copied().collect();
     let incompatible: Vec<_> = versioned_events(agent).iter().filter(|(event, minimum)| present.contains(*event) && known.is_some_and(|version| version < *minimum)).map(|(event,_)| *event).collect();
     let duplicates: Vec<_> = counts.iter().filter(|(_,count)| **count > 1).map(|(event,_)| event).collect();
-    let channel_incompatible = channel && (cfg!(windows) || agent != "claude" || known.is_some_and(|v| v < CLAUDE_ANSWER_CHANNEL));
+    let channel_incompatible = channel && (windows && channel_shell || agent != "claude" || known.is_some_and(|v| v < CLAUDE_ANSWER_CHANNEL));
     Ok(json!({"state":if missing.is_empty(){"configured"}else if present.is_empty(){"missing"}else{"partial"},
         "expected_events":expected,"registered_events":present,"missing_events":missing,"duplicate_events":duplicates,"conditional_matchers":conditional,
         "answer_channel_registered":channel,"compatibility":{"state":if !incompatible.is_empty() || channel_incompatible {"incompatible"}else if known.is_some(){"compatible"}else{"unknown"},
@@ -1344,6 +1354,29 @@ mod tests {
         let original=json!({"hooks":{"PermissionRequest":[{"matcher":"AskUserQuestion","hooks":[{"type":"command","command":"hgs __state answer-channel"}]}]}});
         let merged=merge_json_mode(&original.to_string(),Path::new("/config"),"claude",false,&mut ||Ok(Entry::shell("hgs __state hook".into())),&mut ||Some((2,1,296)),false).unwrap().unwrap();
         let value:Value=serde_json::from_str(&merged).unwrap();assert_eq!(value["hooks"]["PermissionRequest"][0],original["hooks"]["PermissionRequest"][0]);
+        // The explicit tracking-only repair must not opt Windows into the
+        // newly supported channel either.
+        let exec=forms::claude_entry(STABLE,CLAUDE_EXEC_FORM,false).unwrap();
+        let repaired=merge_json_mode("{}",Path::new("/config"),"claude",true,&mut ||Ok(exec.clone()),&mut ||Some(CLAUDE_ANSWER_CHANNEL),false).unwrap().unwrap();
+        assert!(!health_document_mode(&repaired,"claude",Some(CLAUDE_ANSWER_CHANNEL),true).unwrap()["answer_channel_registered"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn health_accepts_the_windows_exec_channel_but_not_a_shell_channel() {
+        let exec = forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap();
+        let (registered, _) = versioned_merge("", "claude", true, exec, Some(CLAUDE_ANSWER_CHANNEL));
+        let registered = registered.unwrap();
+        let health = health_document_mode(&registered, "claude", Some(CLAUDE_ANSWER_CHANNEL), true).unwrap();
+        assert_eq!(health["state"], "configured");
+        assert_eq!(health["answer_channel_registered"], true);
+        assert_eq!(health["compatibility"]["state"], "compatible");
+        assert_eq!(health_document_mode(&registered, "claude", None, true).unwrap()["compatibility"]["state"], "unknown");
+        assert_eq!(health_document_mode(&registered, "claude", Some((2, 1, 295)), true).unwrap()["compatibility"]["state"], "incompatible");
+        let shell = json!({"hooks":{"PermissionRequest":[{"hooks":[
+            {"type":"command","command":"hgs __state answer-channel","timeout":86400}
+        ]}]}}).to_string();
+        assert_eq!(health_document_mode(&shell, "claude", Some(CLAUDE_ANSWER_CHANNEL), true).unwrap()["compatibility"]["state"], "incompatible");
+        assert_eq!(health_document_mode(&shell, "claude", Some(CLAUDE_ANSWER_CHANNEL), false).unwrap()["compatibility"]["state"], "compatible");
     }
 
     #[test]
@@ -2034,11 +2067,8 @@ mod tests {
         assert!(hook_entries(&merged, "PermissionRequest")
             .contains(&json!({"type": "command", "command": UNIX, "timeout": 5})));
         assert_eq!(versioned_merge(&merged, "claude", false, unix.clone(), None), (None, 0));
-        // Windows keeps the terminal path until the channel is qualified there.
-        let exec = forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap();
-        let (settings, _) = versioned_merge("", "claude", true, exec.clone(), Some(CLAUDE_ANSWER_CHANNEL));
-        assert!(channel_groups(&settings.unwrap()).is_empty());
         // Claude's exec form derives the channel's arguments.
+        let exec = forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap();
         let channel = exec.channel().unwrap().channel_group();
         assert_eq!(channel["hooks"][0]["command"], json!(exec.command));
         assert_eq!(channel["hooks"][0]["args"], json!(["__state", "answer-channel"]));
@@ -2047,6 +2077,39 @@ mod tests {
         let legacy = Entry::shell("python3 /opt/hgs_state.py hook".into());
         let (legacy, _) = versioned_merge("", "claude", false, legacy, Some(CLAUDE_ANSWER_CHANNEL));
         assert!(channel_groups(&legacy.unwrap()).is_empty());
+    }
+
+    #[test]
+    fn windows_runs_the_answer_channel_in_claude_exec_form_only() {
+        let exec = forms::claude_entry(STABLE, CLAUDE_EXEC_FORM, false).unwrap();
+        let channel = json!({"hooks": [{"type": "command", "command": exec.command,
+            "args": ["__state", "answer-channel"], "timeout": 86400}]});
+        // A new configuration, and one that an earlier hgs wrote without it.
+        let earlier = json_merge("", "claude", true, exec.clone()).unwrap();
+        assert!(channel_groups(&earlier).is_empty());
+        for original in ["", earlier.as_str()] {
+            let (merged, asked) =
+                versioned_merge(original, "claude", true, exec.clone(), Some(CLAUDE_ANSWER_CHANNEL));
+            assert_eq!(asked, 1);
+            let merged = merged.unwrap();
+            assert_eq!(channel_groups(&merged), std::slice::from_ref(&channel));
+            // The journaling entry keeps its own group and short timeout.
+            assert!(hook_entries(&merged, "PermissionRequest").contains(&json!({"type": "command",
+                "command": exec.command, "args": ["__state", "hook"], "timeout": 5})));
+            assert_eq!(versioned_merge(&merged, "claude", true, exec.clone(), None), (None, 0));
+            // An older version loses it before it starts.
+            let (pruned, _) = versioned_prune(&merged, "claude", true, Some((2, 1, 295)));
+            assert!(channel_groups(&pruned.unwrap()).is_empty());
+        }
+        for version in [None, Some((2, 1, 295))] {
+            assert_eq!(versioned_merge(&earlier, "claude", true, exec.clone(), version).0, None, "{version:?}");
+        }
+        // Claude Code runs the shell form under Git Bash, between Claude and
+        // hgs: no channel there.
+        let shell = forms::claude_entry(STABLE, (2, 1, 200), true).unwrap();
+        let kept = json_merge("", "claude", true, shell.clone()).unwrap();
+        let (merged, _) = versioned_merge(&kept, "claude", true, shell, Some(CLAUDE_ANSWER_CHANNEL));
+        assert!(channel_groups(&merged.unwrap()).is_empty());
     }
 
     #[test]

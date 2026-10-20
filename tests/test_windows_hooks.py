@@ -23,8 +23,9 @@ PowerShell, gets the PowerShell form.
 spaces, Cyrillic and parentheses and, with an isolated state directory and private
 agent homes, launches tracked sessions of native fake agents named `claude`,
 `codex` and `kimi`. hgs installs its hooks into
-their homes (Claude Code's exec form, Codex's shell form as `command` and
-PowerShell form as `commandWindows`, Kimi's block); each fake reads them and runs
+their homes (Claude Code's exec form, with its answer channel beside the
+PermissionRequest hook, Codex's shell form as `command` and PowerShell form as
+`commandWindows`, Kimi's block); each fake reads them and runs
 them as its agent does
 (`examples/fake_agent.rs`), and the hooks move the session's state: the
 conversation is confirmed, a prompt and its reply appear in `hgs inspect`, and a
@@ -232,8 +233,12 @@ class TrackedHooks(LifecycleCase):
         powershell = f'& "{self.stable}" __state hook; exit $LASTEXITCODE'
         settings = json.loads((self.homes["claude"] / "settings.json").read_text(encoding="utf-8"))
         for event, groups in settings["hooks"].items():
-            self.assertEqual(groups, [{"hooks": [{"type": "command", "command": self.stable,
-                                                  "args": ["__state", "hook"], "timeout": 5}]}], event)
+            expected = [{"hooks": [{"type": "command", "command": self.stable, "args": ["__state", "hook"], "timeout": 5}]}]
+            if event == "PermissionRequest":
+                # Beside it the answer channel, in the same exec form, for every tool.
+                expected.append({"hooks": [{"type": "command", "command": self.stable,
+                                            "args": ["__state", "answer-channel"], "timeout": 86400}]})
+            self.assertEqual(groups, expected, event)
         hooks = json.loads((self.homes["codex"] / "hooks.json").read_text(encoding="utf-8"))
         for event, groups in hooks["hooks"].items():
             self.assertEqual(groups, [{"hooks": [{"type": "command", "command": shell,

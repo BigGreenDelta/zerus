@@ -331,6 +331,25 @@ class Lifecycle(HostCase):
         self.assertEqual((details["width"], details["height"]), (120, 40))
         self.assertEqual(self.ok({"op": "list_clients", "target": None})["clients"], [])
 
+    def test_only_an_unviewed_pane_grows_until_a_client_attaches(self):
+        created, prompt = self.cmd("cmd/grow")
+        pane = created["pane"]
+        grow = lambda rows: self.ok({"op": "grow_unviewed", "target": {"pane": pane}, "rows": rows})
+        self.assertEqual(grow(60), {"grown": True})
+        details = self.info(pane)
+        self.assertEqual((details["width"], details["height"]), (100, 60))
+        # It never shrinks, and the console still runs at the new height.
+        self.assertEqual(grow(40), {"grown": False})
+        self.keys(pane, {"literal": "echo grown-pane"}, {"named": "Enter"})
+        self.wait_for("the echo", lambda: "grown-pane" in self.capture(pane).splitlines())
+        # The next client sets the size again, and it stays once it leaves.
+        self.attach({"target": {"pane": pane}, "size": {"cols": 90, "rows": 25}, "run_id": None},
+                    [{"wait_ms": 500}, {"detach": True}])
+        details = self.info(pane)
+        self.assertEqual((details["width"], details["height"]), (90, 25))
+        self.assertEqual(grow(50), {"grown": True})
+        self.assertEqual((self.info(pane)["width"], self.info(pane)["height"]), (90, 50))
+
 
 class Staged(HostCase):
     """`hgs session-host` and hosts started from the staged image (spec D2), in

@@ -32,6 +32,8 @@ private slots:
     void observedRowsKeepLocalOrderAndRenameWithoutClaimingMembership();
     void orderingAndRemoval();
     void invalidDataAndMoves();
+    void membershipIndexesFollowProjectAndSessionMutations();
+    void orderedMembersKeepTheLegacyDefaultAndStableOrder();
     void nativeDropPlacement();
     void pinningRestoresPreviousGroup();
     void projectsShareFoldersButOwnSessions();
@@ -749,6 +751,86 @@ void TestWorkspace::invalidDataAndMoves()
     model.moveSession("a", "missing"); model.moveSession("a", "two", "missing"); model.moveSession("a", "one", "a");
     model.moveGroup("one", "missing"); model.moveGroup("one", "one"); model.createGroup(" ");
     QCOMPARE(model.toJson(), before);
+}
+
+void TestWorkspace::membershipIndexesFollowProjectAndSessionMutations()
+{
+    SessionOrganization model(QJsonObject{{"groups", QJsonArray{
+        QJsonObject{{"id", "one"}, {"name", "One"}, {"sessions", QJsonArray{"a", "a", "b"}}},
+        QJsonObject{{"id", "two"}, {"name", "Two"}, {"sessions", QJsonArray{"a", "c"}}}}}});
+    const auto check = [&] {
+        const auto groups = model.groups();
+        QSet<QString> seen;
+        for (const auto &group : groups) {
+            QVERIFY(model.group(group.id));
+            QCOMPARE(model.group(group.id)->sessions, group.sessions);
+            for (const auto &session : group.sessions) {
+                QVERIFY(!seen.contains(session)); seen.insert(session);
+                QCOMPARE(model.groupFor(session), group.id);
+            }
+        }
+        QCOMPARE(model.groupFor("missing"), model.defaultProject());
+        QVERIFY(!model.group("missing"));
+        QCOMPARE(SessionOrganization(model.toJson()).toJson(), model.toJson());
+    };
+    check();
+    QCOMPARE(model.groupFor("a"), QString("one")); // First stored occurrence wins.
+    model.moveGroup("two", "one"); check();
+    model.moveSession("b", "two", "c"); check();
+    QCOMPARE(model.group("two")->sessions, QStringList({"b", "c"}));
+    model.renameSession("b", "renamed"); check();
+    QCOMPARE(model.groupFor("b"), model.defaultProject());
+    QCOMPARE(model.groupFor("renamed"), QString("two"));
+    // An implicit observed row yields to an explicit assignment already made
+    // for its next name, without keeping a stale index for the original name.
+    const auto implicit = model.observe("arch", "agent/old", "run"); check();
+    model.moveSession("arch\nagent/new", "one"); check();
+    const auto renamed = model.observe("arch", "agent/new", "run"); check();
+    QCOMPARE(model.groupFor(renamed), QString("one"));
+    QVERIFY(!model.group(model.defaultProject())->sessions.contains(implicit));
+    model.setDefaultProject("two"); check();
+    QVERIFY(model.removeGroup("one")); check();
+    QVERIFY(!model.group("one")); QCOMPARE(model.groupFor("a"), QString("two"));
+    const auto last = model.createGroup("Last"); check();
+    QVERIFY(model.removeGroup("two", last)); check();
+    QCOMPARE(model.defaultProject(), last);
+    model = SessionOrganization(model.toJson()); check();
+    const auto fresh = model.observe("mac", "agent/fresh", "fresh-run"); check();
+    QCOMPARE(model.groupFor(fresh), last);
+}
+
+void TestWorkspace::orderedMembersKeepTheLegacyDefaultAndStableOrder()
+{
+    SessionOrganization model(QJsonObject{{"default_project", "one"}, {"projects", QJsonArray{
+        QJsonObject{{"id", "one"}, {"name", "One"}, {"sessions", QJsonArray{"b", "a", "b"}}},
+        QJsonObject{{"id", "two"}, {"name", "Two"}, {"sessions", QJsonArray{"a", "c", "d"}}}}}});
+    const QStringList visible{"d", "unknown-first", "a", "c", "b", "a", "unknown-second"};
+    const auto check = [&] {
+        QHash<QString, QList<int>> expected;
+        for (const auto &group : model.groups()) {
+            QList<int> members;
+            for (int i = 0; i < visible.size(); ++i) {
+                QString owner = model.defaultProject();
+                for (const auto &candidate : model.groups())
+                    if (candidate.sessions.contains(visible[i])) { owner = candidate.id; break; }
+                if (owner == group.id) members.append(i);
+            }
+            std::stable_sort(members.begin(), members.end(), [&](int a, int b) {
+                return group.sessions.indexOf(visible[a]) < group.sessions.indexOf(visible[b]);
+            });
+            if (!members.isEmpty()) expected.insert(group.id, members);
+        }
+        QCOMPARE(model.orderedMembers(visible), expected);
+    };
+    check();
+    QCOMPARE(model.orderedMembers(visible).value("one"), QList<int>({1, 6, 4, 2, 5}));
+    model.moveSession("a", "two", "d"); check();
+    model.moveGroup("two", "one"); check();
+    model.renameSession("a", "b"); check();
+    model.setDefaultProject("two"); check();
+    QVERIFY(model.removeGroup("one")); check();
+    model = SessionOrganization(model.toJson()); check();
+    QVERIFY(model.orderedMembers({}).isEmpty());
 }
 
 void TestWorkspace::nativeDropPlacement()

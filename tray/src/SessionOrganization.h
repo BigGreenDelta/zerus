@@ -18,6 +18,9 @@ public:
     const QList<Group> &groups() const { return m_groups; }
     const Group *group(const QString &id) const;
     QString groupFor(const QString &session) const;
+    // Indices into the caller's list, in project order. Unknown identities stay
+    // first in the default project; ties keep the caller's original order.
+    QHash<QString, QList<int>> orderedMembers(const QStringList &sessions) const;
     QString createGroup(const QString &name);
     void renameGroup(const QString &id, const QString &name);
     bool removeGroup(const QString &id, const QString &destination = {});
@@ -47,8 +50,14 @@ public:
                     const QString &archive = {});
     QJsonObject toJson() const;
 private:
+    void indexGroups();
+    void indexSessions();
+    void appendSession(const QString &session, const QString &group);
     QString transferFolder(const QString &project, const QString &folder, const QString &destination, bool copy);
     QList<Group> m_groups;
+    // Derived only from m_groups, never persisted or retained after removal.
+    QHash<QString, int> m_groupIndexes;
+    QHash<QString, QString> m_sessionGroups;
     QJsonObject m_runs;
     QJsonObject m_runGroups;
     QHash<QString,QString> m_currentRun;
