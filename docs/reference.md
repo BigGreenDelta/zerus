@@ -1921,7 +1921,13 @@ phone's changes and answers a page of what the phone lacks, at most 512 KiB of
 updates, with a larger task in parts. A task the phone holds keeps coming to it
 after it becomes Done. A request may cover a range of task UUIDs, so a large
 inventory goes in parts; a refusal prints `{"schema": 1, "ok": false, "error":
-…}` with exit status 1. See `services/mobile/relay/README.md`.
+…}` with exit status 1. The phone's Send now and Cancel run on the session's
+computer as `hgs task mobile-send --json` and `mobile-cancel --json`, which do
+what `send` and `cancel` do and answer only the task's stage (a refusal says
+`"uncertain": true` when the prompt was pasted but could not be recorded);
+`hgs task mobile-done --json` answers a page of at most 50 Done tasks, newest
+first, with how many there are and how many from the last 7 days. See
+`services/mobile/relay/README.md`.
 
 Agents use the same `hgs task` commands in their own shell. A command run inside
 an agent session acts as that session when it proves it as `hgs self` does (the

@@ -79,9 +79,9 @@ class TaskExchangeEndToEnd(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
         self.fail(f"the computer's heartbeat never showed {what}")
 
-    async def exchange(self, payload: dict) -> dict:
+    async def submit(self, operation: str, payload: dict) -> dict:
         request_id = str(uuid.uuid4())
-        body = {"request_id": request_id, "computer_id": self.relay.node["node_id"], "operation": "task_exchange",
+        body = {"request_id": request_id, "computer_id": self.relay.node["node_id"], "operation": operation,
                 "session": "", "payload": payload}
         receipt = await self.call("POST", "/v1/requests", body, expected=202)
         for _ in range(400):
@@ -89,22 +89,31 @@ class TaskExchangeEndToEnd(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.05)
             receipt = await self.call("GET", "/v1/requests/" + request_id)
+        return receipt
+
+    async def exchange(self, payload: dict) -> dict:
+        receipt = await self.submit("task_exchange", payload)
         self.assertEqual(receipt["state"], "completed", receipt)
         return receipt["result"]
+
+    def connector(self):
+        """The Rust connector of this computer; its session listing comes from a
+        wrapper, everything else from the real hgs."""
+        listing = self.root / "bin/hgs"
+        if not listing.exists():
+            listing.parent.mkdir()
+            listing.write_text("#!/bin/sh\nif [ \"$1\" = ls ]; then\n"
+                               "  echo '{\"host\": \"Synthetic computer\", \"sessions\": []}'\n  exit 0\nfi\n"
+                               f"exec '{self.native}' \"$@\"\n")
+            listing.chmod(0o755)
+        config = {"server_url": self.relay.url, "node_token": self.relay.node["node_token"],
+                  "hgs_path": str(listing), "state_dir": str(self.root / "journal"), "poll_interval": 1}
+        return running("rust", config, self.root, self.computer)
 
     async def test_a_phone_exchanges_tasks_through_the_relay_and_the_rust_connector(self):
         self.assertIn("task_exchange", (await self.call("GET", "/v1/capabilities"))["operations"])
         self.hgs(self.computer, "task", "add", "--project", "orchard", text="Add rate limiting")
-        listing = self.root / "bin/hgs"
-        listing.parent.mkdir()
-        # The connector's session listing comes from here; everything else is the real hgs.
-        listing.write_text("#!/bin/sh\nif [ \"$1\" = ls ]; then\n"
-                           "  echo '{\"host\": \"Synthetic computer\", \"sessions\": []}'\n  exit 0\nfi\n"
-                           f"exec '{self.native}' \"$@\"\n")
-        listing.chmod(0o755)
-        config = {"server_url": self.relay.url, "node_token": self.relay.node["node_token"],
-                  "hgs_path": str(listing), "state_dir": str(self.root / "journal"), "poll_interval": 1}
-        async with running("rust", config, self.root, self.computer) as connector:
+        async with self.connector() as connector:
             def ready(snapshot):
                 projects = (snapshot.get("mobile_projects") or {}).get("projects") or []
                 operations = (snapshot.get("mobile_capabilities") or {}).get("operations") or []
@@ -137,6 +146,32 @@ class TaskExchangeEndToEnd(unittest.IsolatedAsyncioTestCase):
             await self.computer_snapshot(
                 lambda snapshot: snapshot["mobile_projects"]["projects"][0].get("tasks_digest") == changed,
                 "the changed tasks digest")
+            connector.check()
+
+
+    async def test_send_now_cancel_and_done_answer_through_the_relay(self):
+        for operation in ("task_send", "task_cancel", "task_done"):
+            self.assertIn(operation, (await self.call("GET", "/v1/capabilities"))["operations"])
+        task = self.hgs(self.computer, "task", "add", "--project", "orchard", text="Add rate limiting")["task"]
+        async with self.connector() as connector:
+            def ready(snapshot):
+                operations = (snapshot.get("mobile_capabilities") or {}).get("operations") or []
+                return {"task_send", "task_cancel", "task_done"} <= set(operations)
+            await self.computer_snapshot(ready, "the phone's task actions")
+            connector.check()
+            done = await self.submit("task_done", {"schema": 1, "project": "project-1", "limit": 50})
+            self.assertEqual(done["state"], "completed", done)
+            self.assertEqual((done["result"]["tasks"], done["result"]["total"], done["result"]["next"]), ([], 0, None))
+            # The computer's own hgs refuses before anything happens: the receipt says why.
+            sent = await self.submit("task_send", {"schema": 1, "project": "project-1", "task": task["uuid"],
+                                                    "session": "codex/nowhere"})
+            self.assertEqual(sent["state"], "failed", sent)
+            self.assertTrue(sent["error"], sent)
+            self.assertNotEqual(sent["error"], "native command failed")
+            cancelled = await self.submit("task_cancel", {"schema": 1, "project": "project-1", "task": task["uuid"]})
+            self.assertEqual((cancelled["state"], cancelled["error"]),
+                             ("failed", "only a task In progress can be cancelled"))
+            self.assertEqual(self.hgs(self.computer, "task", "get", task["ref"])["task"]["stage"], "todo")
             connector.check()
 
 

@@ -373,6 +373,12 @@ most 512 KiB of Loro updates, with a larger task in parts. The Python
 connector never offers it. The wire contract is in
 `relay/README.md` ("Phone task exchange").
 
+With `hgs task mobile-send|mobile-cancel|mobile-done --json` in native help, the
+Rust connector also offers the phone's Send now (`task_send`) and Cancel
+(`task_cancel`), computer-scoped mutations the journal runs once per identity,
+and its Done list (`task_done`), a short read in pages of 50 ("Phone task
+actions" in `relay/README.md`).
+
 Phone attachments use the existing native send payload:
 
 ```json
