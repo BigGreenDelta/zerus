@@ -303,8 +303,24 @@ at a time; a computer whose exchange failed waits a minute. The Rust exchange
 (`zerus-replica`'s `phone` module through `TaskExchange`) decides each request:
 ranges of task UUIDs that fit the relay, large documents in parts, and the
 phone's own changes the computer lacks; `TaskSync.kt` only carries its JSON.
-Tasks have no screen yet. See "Phone" in
-`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md`.
+
+The Tasks button in a conversation's tools row, after Terminal, opens the
+project's tasks full-screen (`TasksUi.kt`, modelled by `TasksPresentation.kt`);
+its badge counts the tasks In review. Edits are made in the phone's replica and
+exchanged with the project's computers at once. Send now first exchanges the
+project with the session's computer, then asks it for `task_send`, then
+exchanges again; a failed first exchange sends nothing. A task pinned to a
+session goes to the computer that runs it, an Any session task to the session
+chosen in the chips. A receipt the computer cannot confirm says the task may
+have been sent, and Send now for it waits until the next sync. Cancel goes to
+the session's computer, or to another online computer of the project, which
+cancels it there as `hgs task cancel` does. Done comes from a computer in
+pages of 50 through `task_done`: the last 7 days, then "Show older (N)";
+opening a Done task fetches it into the replica, where it stays. Tasks sends
+no notifications. See "Phone" in
+`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md` and
+"Android interface" in
+`docs/superpowers/specs/2026-10-13-project-task-queue-design.md`.
 
 ## Conversation history and native controls
 
