@@ -86,9 +86,13 @@ struct ApprovalFixtureScreen: View {
                 Button("Read-only card") { serial += 1; answerable = false }
                 Button("Unavailable card") { available = false }
             }.font(.caption)
-            if shown {
-                QuestionCard(target: target, question: question, available: available, display: $display,
-                             expanded: expanded, onReview: { _ in preconditionFailure("No receipt review in fixture") })
+            // Like the real conversation, the card has an actual parent scroll viewport. Its unchanged
+            // onScrollVisibilityChange must observe native visibility; the fixture never sets it directly.
+            ScrollView {
+                if shown {
+                    QuestionCard(target: target, question: question, available: available, display: $display,
+                                 expanded: expanded, onReview: { _ in preconditionFailure("No receipt review in fixture") })
+                }
             }
             Spacer(minLength: 0)
         }

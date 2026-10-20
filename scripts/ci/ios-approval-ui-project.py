@@ -51,7 +51,7 @@ def generate(root, output):
     object_("A00000000000000000000015", f"isa = PBXContainerItemProxy; containerPortal = {project_id}; proxyType = 1; remoteGlobalIDString = {app}; remoteInfo = ApprovalUIFixture;")
     object_("A00000000000000000000016", f"isa = PBXTargetDependency; target = {app}; targetProxy = A00000000000000000000015;")
     settings = 'CODE_SIGNING_ALLOWED = NO; CODE_SIGNING_REQUIRED = NO; CODE_SIGN_IDENTITY = ""; SDKROOT = iphonesimulator; SUPPORTED_PLATFORMS = iphonesimulator; IPHONEOS_DEPLOYMENT_TARGET = 18.0; SWIFT_VERSION = 6.0; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; GENERATE_INFOPLIST_FILE = YES; TARGETED_DEVICE_FAMILY = "1,2";'
-    object_("A00000000000000000000017", f'isa = XCBuildConfiguration; name = Debug; buildSettings = {{ {settings} PRODUCT_NAME = ApprovalUIFixture; PRODUCT_BUNDLE_IDENTIFIER = test.example.zerus.approval-fixture; INFOPLIST_KEY_UILaunchScreen_Generation = YES; }};')
+    object_("A00000000000000000000017", f'isa = XCBuildConfiguration; name = Debug; buildSettings = {{ {settings} PRODUCT_NAME = ApprovalUIFixture; PRODUCT_BUNDLE_IDENTIFIER = test.example.zerus.approval-fixture; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; INFOPLIST_KEY_UILaunchScreen_Generation = YES; }};')
     object_("A00000000000000000000018", f'isa = XCBuildConfiguration; name = Debug; buildSettings = {{ {settings} PRODUCT_NAME = ApprovalUIFixtureTests; PRODUCT_BUNDLE_IDENTIFIER = test.example.zerus.approval-fixture-tests; TEST_TARGET_NAME = ApprovalUIFixture; }};')
     object_("A00000000000000000000019", "isa = XCBuildConfiguration; name = Debug; buildSettings = { CLANG_ENABLE_MODULES = YES; }; ")
     for key, config in (("20", "17"), ("21", "18"), ("22", "19")):
