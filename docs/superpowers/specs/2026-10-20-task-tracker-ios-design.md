@@ -159,14 +159,15 @@ operations.
     `aarch64-apple-darwin` and `x86_64-apple-darwin`. The manifest's crate types
     do not change.
   - It joins the simulator pair and the macOS pair with `lipo`.
-  - It makes `zerus_replica_ffiFFI.xcframework` with the UniFFI header and its
-    module map.
-  - It generates the Swift bindings with the crate's own `uniffi-bindgen`, built
-    for the host with `--features bindgen`.
+  - It makes `ZerusReplicaFFI.xcframework` with the UniFFI header and its
+    module map (the configured module name gives the FFI module its name).
+  - It generates the Swift bindings with the crate's own `uniffi-bindgen`, from
+    a debug build for the host with `--features bindgen`, as the Android build
+    does: the release profile strips the UniFFI metadata.
 - **Outputs.**
   - Both outputs go to `mobile/ios/ZerusKit/Replica/`, which git ignores.
-  - A stamp of the crate sources, `Cargo.lock` and the toolchain skips a build
-    that would produce the same files.
+  - A stamp of the crate sources, the crate's own `Cargo.lock` and the
+    toolchain skips a build that would produce the same files.
   - `crates/replica-ffi/uniffi.toml` gets `[bindings.swift]`, so the module
     is named `ZerusReplica`.
 - **The package.** `ZerusKit/Package.swift` gains a `binaryTarget` for the
@@ -175,10 +176,11 @@ operations.
 - **Who runs the script.** Xcode resolves packages before any build phase, so
   the script runs first:
   - `dev-install.sh`;
-  - `remote-dev-install.sh`, which also copies `crates/replica`,
-    `crates/replica-ffi` and the workspace files to the Mac, and needs Rust with
-    those targets there;
-  - `testflight-upload.sh`;
+  - `remote-dev-install.sh`, which also copies `crates/replica` and
+    `crates/replica-ffi` to the Mac in the repository's layout, and needs Rust
+    with those targets there;
+  - the TestFlight workflow, in a step of its own before any signing secret is
+    in the environment, since cargo runs the dependencies' build scripts;
   - the CI `ios` job, after
     `rustup toolchain install 1.99.1 --profile minimal --target …`;
   - and once by hand before Xcode opens the project (README).

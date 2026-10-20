@@ -16,7 +16,9 @@ Design and roadmap: [iOS architecture and foundation](../../docs/superpowers/spe
 - `ZerusKit/` is a Swift package with the platform-neutral core: JSON values,
   protocol models, policies ported from the Kotlin client, the relay client and
   sealed persistence. It uses Foundation, CryptoKit, Security and
-  UniformTypeIdentifiers only, so its tests run on a Mac with `swift test`.
+  UniformTypeIdentifiers, plus the project task replica from
+  `crates/replica-ffi` (module `ZerusReplica`, built by
+  `scripts/build-replica.sh`), so its tests run on a Mac with `swift test`.
 - `Zerus/` holds the SwiftUI app and platform services. `Zerus.xcodeproj` uses
   file-system synchronized folders, so new files are picked up without editing
   the project.
@@ -46,9 +48,13 @@ and keeps no cookies or cached responses.
 
 ## Build and test
 
-Requires Xcode 26 or later.
+Requires Xcode 26 or later, and Rust 1.99.1 with the Apple targets for the
+project task replica, which ZerusKit links:
 
 ```sh
+rustup toolchain install 1.99.1 --profile minimal \
+  --target aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
+mobile/ios/scripts/build-replica.sh             # once, and after the replica's crates change
 cd mobile/ios/ZerusKit && swift test          # core tests on the Mac
 xcodebuild -project mobile/ios/Zerus.xcodeproj -scheme Zerus \
   -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
@@ -56,6 +62,38 @@ xcodebuild -project mobile/ios/Zerus.xcodeproj -scheme Zerus \
 
 The shared Android contract fixtures in
 `mobile/android/app/src/test/resources/` are read by the ZerusKit tests.
+
+`build-replica.sh` builds `crates/replica-ffi` as a static library for the
+iPhone, the simulator and macOS, wraps it in `ZerusReplicaFFI.xcframework` and
+generates its UniFFI Swift bindings (module `ZerusReplica`) into
+`ZerusKit/Replica/`, which git ignores. Xcode resolves the package before any
+build phase runs, so the library must exist first. `dev-install.sh`,
+`remote-dev-install.sh` (which also copies the crates to the Mac) and CI run
+the script; the TestFlight workflow runs it in a step of its own, before any
+signing secret is in the environment. An unchanged source and toolchain skip
+the build.
+
+## Project tasks
+
+The Tasks button in a conversation's tools row, after Terminal, opens the
+project's tasks full-screen, as on Android (`Zerus/Tasks/`, modelled by
+ZerusKit's `TasksPresentation`); its badge counts the tasks In review. The
+phone keeps a replica of every catalogued project's tasks in
+`Application Support/task-replicas-v1/`, one folder per connection and swarm,
+excluded from backup and protected until first unlock, without further
+encryption; removing a connection removes its replicas. While the app is
+active it checks every 15 seconds and exchanges a project with each online
+computer that advertises `task_exchange` and names another digest
+(`TaskSync`); edits are exchanged at once. Send now first exchanges the project
+with the session's computer, then asks it for `task_send`, then exchanges
+again; a receipt that cannot be confirmed, or a lost answer, holds Send now for
+that task until an exchange with that computer completes. Cancel falls back to
+another online computer of the project while the session's computer is out of
+reach, without the cancel message. Done comes from a computer in pages of 50
+(`task_done`): the last 7 days, then "Show older (N)", and with Only this
+session only the tasks sent to it; opening a Done task fetches it into the
+replica. The task input has no microphone, and tasks send no notifications.
+See `docs/superpowers/specs/2026-10-20-task-tracker-ios-design.md`.
 
 ## Dev builds on an attached iPhone
 
