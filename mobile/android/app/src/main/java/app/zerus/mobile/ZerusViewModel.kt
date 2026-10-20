@@ -412,11 +412,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     if(frame!=null) {
                         val revision=presentationRevision
                         val messages=outgoing.filter { it.belongsTo(target) }
+                        val questions=conversationQuestions
                         val display=withContext(Dispatchers.Default) { if(target.archiveId.isBlank()) ConversationMerge.merge(target,next.displayed,messages).events else next.displayed }
                         if(activeFrame===frame && historyWindows[target.key]===next && selected?.target==target &&
-                            presentationRevision==revision && outgoing.filter { it.belongsTo(target) }==messages) {
+                            presentationRevision==revision && outgoing.filter { it.belongsTo(target) }==messages && conversationQuestions==questions) {
                             presentationJob?.cancel();presentationRevision++
-                            val updated=frame.copy(events=next.displayed,window=next,presentation=Presentation(messages,display,conversationQuestions))
+                            val updated=frame.copy(events=next.displayed,window=next,presentation=Presentation(messages,display,questions))
                             activeFrame=updated;rememberFrame(updated)
                             conversationEvents=display
                         }
