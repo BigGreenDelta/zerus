@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicReference
 /** The real picker/controller with memory transport on a fresh disposable profile; no gateway or agent. */
 class SessionProjectSmokeInstrumentation : Instrumentation() {
     private var end = 0L
+    private val completed = mutableListOf<String>()
     override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
     override fun onStart() {
         val result = Bundle()
@@ -33,6 +34,9 @@ class SessionProjectSmokeInstrumentation : Instrumentation() {
             check(BuildConfig.DEBUG)
             end = SystemClock.elapsedRealtime() + 60_000
             smoke()
+            check(completed == listOf("current_selection", "close_no_write", "durable_single_post", "route_refusal", "original_receipt", "stale_navigation"))
+            result.putInt("project_cases", completed.size)
+            result.putString("project_case_ids", completed.joinToString(","))
             result.putString("stream", "Session project smoke passed: literal current project, selection and Close are read-only, durable one-time Move, uncertain receipt GET without POST replay, changed-route refusal, and stale navigation read rejection.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
@@ -171,12 +175,14 @@ class SessionProjectSmokeInstrumentation : Instrumentation() {
             tap(literalName)
             await("selected Move") { action("Move").isEnabled }
             check(main { network.writes == 0 && host.records.isEmpty() })
+            completed += "current_selection"
             val move = Rect().also { action("Move").getBoundsInScreen(it) }
             val close = Rect().also { action("Close").getBoundsInScreen(it) }
             check(close.centerY() > move.centerY() || close.centerX() > move.centerX()) { "Close is not last in the dialog actions" }
             tap("Close")
             node("Picker closed")
             check(main { network.writes == 0 && host.records.isEmpty() })
+            completed += "close_no_write"
 
             main { visible = true; host.barrier = CompletableDeferred(); network.lost = true }
             node(literalName)
@@ -189,14 +195,17 @@ class SessionProjectSmokeInstrumentation : Instrumentation() {
             node("Check original request")
             val original = main { host.records.single().also { check(it.status == "uncertain") }.requestId }
             check(main { network.writes == 1 && host.order == listOf("persist-sending", "post", "persist-uncertain") })
+            completed += "durable_single_post"
             main { host.connection = host.connection.copy(token = "changed-route") }
             tap("Check original request")
             node("The original connection or computer changed. This request has not been retried.")
             check(main { network.gets == 0 && network.writes == 1 })
+            completed += "route_refusal"
             main { host.connection = host.connection.copy(token = "synthetic-token") }
             tap("Check original request")
             await("same receipt completed") { main { host.records.single().status == "completed" } }
             check(main { network.gets == 1 && network.writes == 1 && host.records.single().requestId == original && host.refreshes == 1 })
+            completed += "original_receipt"
 
             tap("Close")
             node("Picker closed")
@@ -206,6 +215,7 @@ class SessionProjectSmokeInstrumentation : Instrumentation() {
             await("stale read rejected") { main { !controller.loading } }
             check(main { controller.catalog == null && network.writes == 1 && host.records.single().requestId == original })
             check(!action("Move").isEnabled)
+            completed += "stale_navigation"
         } finally {
             main { visible = false; controller.dismiss(); scope.cancel() }
             waitForIdleSync()
