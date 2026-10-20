@@ -3149,6 +3149,11 @@ from the screen first, so its old signature is no longer acknowledged. It prints
 an unknown session prints `{"ok": false, "error": "not_found"}` and exits with
 status 1. Marks live in `read-marks.json` in the hgs state directory, at most
 eight conversations per session, and follow `hgs rename`.
+Repeating an already-stored current mark reports it as applied without changing
+its timestamp or rewriting the file. Existing-owner writes retain other owners;
+admitting a new owner prunes abandoned entries using the current binding set.
+Unreadable or malformed existing storage is refused rather than reset. The
+global v1 JSON still has population-dependent parse and changed-write costs.
 OpenCode renames publish the new binding and its unchanged v1 read marks before
 retiring the old binding, in shared-read writer order. If a confirmed native title
 change is followed by a local persistence failure, the scoped action remains

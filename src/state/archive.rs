@@ -118,6 +118,55 @@ pub(super) fn reconcile() -> Result<()> {
     reconcile_locked(&live()?).map(drop)
 }
 
+/// Indexed membership for one current binding. The archive JSON stays
+/// authoritative: catalog() refreshes a changed archive directory before the
+/// lookup. This can rebuild that index, but never enumerates saved bindings.
+pub(super) fn contains_selected(record: &Value) -> Result<bool> {
+    if !root().join("archives").exists() {
+        return Ok(false);
+    }
+    archive_catalog::contains(&archive_catalog::catalog()?, record)
+}
+
+fn reconcile_candidate(record: &Value, snapshot: &Snapshot) -> bool {
+    !snapshot.contains_key(string(record, "name"))
+        && !process_alive(record)
+        && record.get("pausing").is_none()
+        && !record["paused"].as_bool().unwrap_or(false)
+        && string(record, "expected_id").is_empty()
+}
+
+fn clean_completion(record: &Value) -> bool {
+    record["termination_signal"].is_null()
+        && known_exit(record)
+        && ((string(record, "agent") == "claude"
+            && record.get("supervisor").is_none()
+            && string(record, "error").is_empty())
+            || (string(record, "completion_source") == "supervisor"
+                && string(record, "completion_reason") == "clean_exit"
+                && record["exit_code"] == 0))
+}
+
+/// Read-mark admission reconciles just its requested binding. Global lifecycle
+/// reconciliation remains in listings; an acknowledgement must not sweep every
+/// unrelated saved session while holding the shared-read writer.
+pub(super) fn reconcile_selected(name: &str) -> Result<()> {
+    if !root().exists() {
+        return Ok(());
+    }
+    let _guard = lock(None)?;
+    if !record_path(name).exists() {
+        return Ok(());
+    }
+    let record = read(name)?;
+    if reconcile_candidate(&record, &live()?)
+        && (contains_selected(&record)? || clean_completion(&record))
+    {
+        save(&record)?;
+    }
+    Ok(())
+}
+
 /// `reconcile` for a caller that holds the state lock and read `snapshot`
 /// under it. Returns the archives and the bindings as it leaves them.
 pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<Value>)> {

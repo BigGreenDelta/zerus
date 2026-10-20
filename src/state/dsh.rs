@@ -421,22 +421,35 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
         let list = hosts
             .entry(key)
             .or_insert_with(|| rpc(&record, "list", json!({})).unwrap_or(Value::Null));
-        let row = list["items"].as_array().and_then(|items| {
-            items
-                .iter()
-                .find(|v| v["sessionId"] == record["conversation_id"])
-        });
-        let row = row.unwrap_or(&Value::Null);
-        let failure = idle_failure(&record, row, &list["generation"]);
-        let mut value = normalize(&record, row, &json!({"provider_error":failure}));
-        child_summaries(&record, &mut value, list, &list["generation"]);
-        if !list.is_null() {
-            value["host_generation"] = list["generation"].clone();
-        }
+        let mut value = snapshot_from(&record, list);
         notifications::enrich(&mut value, preferences.as_ref(), journal::journal_name(&record));
         out.push(value);
     }
     Ok(out)
+}
+
+/// The same listing projection, without opening every saved DeepSeek binding.
+/// The host's existing list RPC and its generation semantics are unchanged.
+pub(super) fn snapshot(name: &str) -> Result<Value> {
+    let record = binding(name)?;
+    let list = rpc(&record, "list", json!({})).unwrap_or(Value::Null);
+    Ok(snapshot_from(&record, &list))
+}
+
+fn snapshot_from(record: &Value, list: &Value) -> Value {
+    let row = list["items"].as_array().and_then(|items| {
+        items
+            .iter()
+            .find(|v| v["sessionId"] == record["conversation_id"])
+    });
+    let row = row.unwrap_or(&Value::Null);
+    let failure = idle_failure(record, row, &list["generation"]);
+    let mut value = normalize(record, row, &json!({"provider_error":failure}));
+    child_summaries(record, &mut value, list, &list["generation"]);
+    if !list.is_null() {
+        value["host_generation"] = list["generation"].clone();
+    }
+    value
 }
 
 // A native turn can end unsuccessfully while the agent stays alive. Cache only
