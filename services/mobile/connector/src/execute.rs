@@ -782,7 +782,7 @@ impl<N: Native + 'static> Connector<N> {
         if let Some(after) = field("after") {
             argv.extend(["--after".into(), int_literal(after).unwrap_or_default()]);
         }
-        let result = self.call(Call::new(argv)).await?;
+        let mut result = self.call(Call::new(argv)).await?;
         if self.flags.get().windows_gateway
             && !crate::capabilities::windows_provider(&result["agent"])
         {
@@ -841,6 +841,7 @@ impl<N: Native + 'static> Connector<N> {
                 ));
             }
         }
+        crate::opencode_privacy::row(&mut result);
         let result = match result {
             Value::Object(result) => result,
             _ => unreachable!(),

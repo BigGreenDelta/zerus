@@ -29,7 +29,7 @@ from .managed_relay import transport, identity_url
 from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
 from . import analytics, speech, speech_config, voice, session_notifications
-from . import attachment_reads, file_reads, archives, hook_health, session_projects
+from . import attachment_reads, file_reads, archives, hook_health, session_projects, opencode_privacy
 from .recovery import validate_recovery
 from .history import validate_history, validate_history_projection, validate_projection_result
 from .context import CLEAR_CONTEXT_DISMISS_FEATURE, CLEAR_CONTEXT_DISMISS_HELP, validate_clear_context
@@ -299,6 +299,7 @@ class Connector:
     def _init_machine_context(self, fallback_id: str) -> None:
         """Initialize only machine caches; never open another durable journal."""
         self.sessions: set[str] = set()
+        self.opencode_sessions: set[str] = set()  # Current native cmd identities, per machine.
         self.archives: set[tuple[str, str]] = set()
         self.snapshot_seen_at = 0.0
         self.snapshot_ready = asyncio.Event()
@@ -519,12 +520,17 @@ class Connector:
         self.sessions = {row["name"] for row in snapshot["sessions"]
                          if isinstance(row, dict) and isinstance(row.get("name"), str)
                          and not is_archived(row)}
+        self.opencode_sessions = {row["name"] for row in snapshot["sessions"]
+                                  if isinstance(row, dict) and row.get("cmd") == "opencode"
+                                  and isinstance(row.get("name"), str)}
         self.archives = {(row["name"], row["archive_id"]) for row in snapshot["sessions"]
                          if isinstance(row, dict) and is_archived(row)
                          and isinstance(row.get("name"), str) and isinstance(row.get("archive_id"), str)}
         self.snapshot_seen_at = time.monotonic()
         self.snapshot_ready.set()
         await asyncio.gather(self.enrich_attention(snapshot), self.enrich_projects(snapshot))
+        for row in snapshot["sessions"]:
+            opencode_privacy.row(row)
         if self.archive_supported:
             # Archive membership is applied to explicit pages; thousands of IDs
             # do not belong in every live-session heartbeat.
@@ -1236,6 +1242,7 @@ class Connector:
                 try:
                     # GET's device envelope also adds request_id; leave room for
                     # that metadata below the ordinary one-MiB response bound.
+                    opencode_privacy.row(result)
                     result = await asyncio.to_thread(bound_inspection, result, MAX_RESULT - 1024)
                 except ValueError as error:
                     raise ConnectorError(str(error)) from None
@@ -1308,6 +1315,10 @@ class Connector:
                     self.sessions.add(target["name"])
                     if operation == "rename" and target["name"] != session:
                         self.sessions.discard(session)
+                        if session in self.opencode_sessions:
+                            self.opencode_sessions.remove(session)
+                            self.opencode_sessions.add(target["name"])
+                opencode_privacy.action(result, session in self.opencode_sessions)
             elif operation in voice.OPERATIONS:
                 result = await self.native(["voice", session, "--json"], {"action": voice.ACTIONS[operation], **payload}, timeout=30)
                 if not voice.result_valid(operation, result, payload):

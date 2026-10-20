@@ -28,6 +28,7 @@ pub mod launch;
 pub mod media;
 pub mod mutations;
 pub mod native;
+pub mod opencode_privacy;
 pub mod projects;
 pub mod pybase64;
 pub mod pyjson;
