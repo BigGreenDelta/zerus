@@ -52,6 +52,25 @@ when the service offers them. Effort is the selected model's variants. The
 service's default model is always offered. Models declared in a project's own
 `opencode.json` appear for that project folder.
 
+The account row lists a short list, not every model: the default model, then your
+favorites, then the models of providers you have configured, then free models.
+Each model appears once and the list holds at most 256 entries; when it is cut,
+`model_options_truncated` is true. Favorites are stored on the agent computer
+(`opencode-favorites.json` beside the hgs account catalog, at most 64). A
+favorite that OpenCode no longer lists stays until you remove it. The desktop's
+All models shows the full catalog.
+
+The row also lists up to 64 providers and stays within 32 KiB (measured as
+`json.dumps(row, ensure_ascii=True)`). Over that budget hgs drops short-list
+entries from the end (free, then configured, then favorites) while keeping the
+default model, then providers beyond the first 16, then the remaining providers
+until only the default model is left, and reports `model_options_truncated` and
+`providers_truncated`. A session's model picker
+uses its folder's list plus its current model. Phones list only model values of
+at most 120 characters, and only providers whose IDs use ASCII letters, digits,
+`_`, `.` and `-` (at most 80 bytes); choose other models on the desktop or with
+`hgs`.
+
 ### Configure a local model
 
 Install Ollama and load a model that supports tools on the same computer.
@@ -180,6 +199,24 @@ ZERUS_TEST_OPENCODE_NATIVE=1 HGS_TEST_BIN="$PWD/target/debug/hgs" \
 
 With `ZERUS_TEST_OPENCODE_NATIVE=1`, a missing OpenCode or one older than the
 minimum fails the suite; `ZERUS_TEST_OPENCODE_BIN` selects another executable.
+
+The native suite also covers the provider catalog. A configured model ID that
+contains `/` is checked first, before any newer catalog field or command, and
+is then launched, changed to and sent a turn under. The suite checks
+keyless free models, the default model first, allowlisted provider fields, and
+a provider that only one folder configures, which stays out of the home folder,
+the account row and other folders, also after that folder was read and launched
+in. A stopped service keeps the last short list without being started.
+Favorites change nothing in OpenCode's files, and a request identity reused for
+another model or flag is refused. A recording proxy in front of the private
+service shows that the catalog reads, inspection and favorites the suite makes
+never ask OpenCode for credentials, and that the fixture's key and base URL,
+which OpenCode does return, never reach hgs output.
+
+The suite turns off OpenCode's model fetch, autoupdate and LSP, but that does
+not make OpenCode hermetic: it can still look for local model servers such as
+Ollama or reach the network on its own. To exclude that, run the suite in a
+network namespace that has only loopback.
 
 See [contributing](../CONTRIBUTING.md) for the common CLI, Qt and Android
 gates. A skipped suite is not compatibility evidence.

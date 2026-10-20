@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QTabWidget>
+#include <QTreeWidget>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QTimer>
@@ -61,6 +62,7 @@ private slots:
     void nativeDefaultsAndMachineScopedActions();
     void openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations();
     void openCodeReasonsAndExplicitStart();
+    void openCodeProvidersShowConnectionAndCounts();
     void addAccountUsesProviderRows();
     void addAccountKeepsItsLayoutAcrossAgents();
     void repliesFromRemovedMachineAreIgnored();
@@ -170,6 +172,12 @@ if args[0]=='account':
       'model_options':[],'settings_model':'','catalog_state':state,'catalog_at':None,
       'catalog_reason':{'ready':'','not_running':'OpenCode is not running on '+where,'unreachable':'OpenCode on '+where+' did not answer'}.get(state,'')}
   if (root/'opencode-missing').exists():oc.update(installed=False,install_reason='OpenCode 2.0.31 is not supported; install OpenCode 2.0.32 or newer 2.x')
+  if (root/'opencode-providers').exists():
+   oc['providers']=[{'id':'opencode','label':'OpenCode','kind':'free','credential_count':0,'model_count':12},
+                    {'id':'keyed','label':'Keyed fixture','kind':'key','credential_count':2,'model_count':1},
+                    {'id':'solo','label':'Solo fixture','kind':'oauth','credential_count':1,'active_label':'Work','model_count':1}]
+   oc['providers_truncated']=(root/'opencode-truncated').exists()
+   if state=='not_running':oc['catalog_at']=1792267200
   profiles.append(oc)
  if (root/'portable-auth').exists():
   for p in profiles:
@@ -273,6 +281,29 @@ void TestAccountsPage::openCodeReasonsAndExplicitStart()
     QTRY_VERIFY(start->isVisible());QTRY_VERIFY(start->isEnabled());notices.clear();start->click();
     QTRY_VERIFY(std::any_of(notices.cbegin(),notices.cend(),[](const QList<QVariant> &n){return n[0].toString().contains("did not register a compatible service")&&n[1].toBool();}));
     QTRY_VERIFY(start->isEnabled());QVERIFY(start->isVisible());QCOMPARE(detail->text(),QString("OpenCode is not running on arch"));
+}
+
+void TestAccountsPage::openCodeProvidersShowConnectionAndCounts()
+{
+    const auto write=[&](const QString &name,const QByteArray &text={}){QVERIFY(FakeCli::replace(m_dir.filePath(name),text));};
+    write("opencode");write("opencode-providers");
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet(false));page.show();
+    auto *list=page.findChild<QListWidget *>("accountProfiles");QTRY_COMPARE(list->count(),5);
+    page.showAccount({},"native-opencode");QTRY_COMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject()["provider"].toString(),QString("opencode"));
+    auto *providers=page.findChild<QTreeWidget *>("openCodeProviders");QVERIFY(providers);QTRY_VERIFY(providers->isVisible());
+    QCOMPARE(providers->topLevelItemCount(),3);
+    const auto line=[&](int i){return QStringList{providers->topLevelItem(i)->text(0),providers->topLevelItem(i)->text(1),providers->topLevelItem(i)->text(2)};};
+    QCOMPARE(line(0),QStringList({"OpenCode","Free, no key","12 models"}));
+    QCOMPARE(line(1),QStringList({"Keyed fixture","API key · 2 accounts","1 model"}));
+    QCOMPARE(line(2),QStringList({"Solo fixture","Signed in · Work","1 model"}));
+    auto *note=page.findChild<QLabel *>("openCodeProvidersNote");QVERIFY(note);QVERIFY(!note->isVisible());
+    write("opencode-truncated");write("opencode-state","not_running");page.ensureCatalogs(true);
+    QTRY_VERIFY(note->isVisible());
+    QVERIFY(note->text().contains("Showing the first 3 providers."));
+    QVERIFY(note->text().contains("Last known catalog from"));
+    for(int i=0;i<providers->topLevelItemCount();++i)for(int c=0;c<3;++c)QVERIFY(!providers->topLevelItem(i)->text(c).contains("http"));
+    // Other accounts show no providers.
+    page.showAccount({},"native-codex");QTRY_VERIFY(!providers->isVisible());QVERIFY(!note->isVisible());
 }
 
 void TestAccountsPage::addAccountUsesProviderRows()

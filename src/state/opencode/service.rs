@@ -448,20 +448,21 @@ impl Service {
         )
     }
 
-    pub(super) fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
-        let response = self.raw(method, path, body)?;
+    /// A read with its own deadline, for reads that must not hold up a listing.
+    /// A refusal names only the status: catalog reads never repeat what the
+    /// service answered.
+    pub(super) fn call_within(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        limit: Duration,
+    ) -> Result<Value> {
+        let response = request(&self.reg, method, path, body, Instant::now() + limit)?;
         if (200..300).contains(&response.status) {
             return Ok(response.body);
         }
-        let reason = response.body["message"]
-            .as_str()
-            .or(response.body["data"]["message"].as_str())
-            .unwrap_or("Native operation refused");
-        Err(format!(
-            "OpenCode HTTP {}: {}",
-            response.status,
-            journal::clipped(&json!(reason), 300)
-        ))
+        Err(format!("OpenCode HTTP {}", response.status))
     }
 }
 
@@ -597,11 +598,17 @@ fn compatibility(service: &Service) -> Result<Vec<String>> {
         &root().join("opencode/compat"),
         &service.reg,
         &requirement_digest(),
-        || service.call("GET", "/openapi.json", None),
+        || fetch_description(service),
     )
 }
 
-fn compatibility_in(
+/// The API description. A refusal names only its status: the service's own
+/// text must not reach `catalog_reason`, which every account listing sends on.
+pub(super) fn fetch_description(service: &Service) -> Result<Value> {
+    service.call_within("GET", "/openapi.json", None, Duration::from_secs(10))
+}
+
+pub(super) fn compatibility_in(
     dir: &Path,
     reg: &Registration,
     digest: &str,
@@ -1099,7 +1106,10 @@ mod tests {
         let Err(why) = connect_from(RegistrationRead::Present(gone)) else {
             panic!("connected to a service that is gone");
         };
-        assert_eq!(why.reason("build-01"), "OpenCode is not running on build-01");
+        assert_eq!(
+            why.reason("build-01"),
+            "OpenCode is not running on build-01"
+        );
         // A live registered process that refuses connections: not responding.
         let silent = Registration {
             port,

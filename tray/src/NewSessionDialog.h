@@ -1,5 +1,6 @@
 #pragma once
 #include <QDialog>
+#include <QHash>
 #include <QMap>
 #include "FleetState.h"
 #include "MachinePlatform.h"
@@ -11,8 +12,10 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QAction;
+class QFrame;
 class QListWidget;
 class AccountUsageStore;
+class OpenCodeModelPicker;
 
 class NewSessionDialog : public QDialog {
     Q_OBJECT
@@ -62,6 +65,14 @@ private:
     QJsonObject openCodeProfile() const;
     void updateOpenCodeService();
     void startOpenCode();
+    // OpenCode's grouped picker for the selected computer and folder.
+    QString modelKey() const;
+    void updateModelButton();
+    void openModelPicker();
+    void requestFolderCatalog(bool refresh);
+    void storeFolderCatalog(const QString &key,const QJsonObject &answer);
+    void chooseModel(const QString &value);
+    void changeFavorite(const QString &value,bool favorite);
     QString agent() const;
     QString account() const;
     void updateForm();
@@ -95,6 +106,25 @@ private:
     QPushButton *m_startOpenCode;
     quint64 m_serviceStart=0;
     QString m_serviceHost;
+    // The hidden m_model keeps the selected model and its variants; this button
+    // names it and opens the picker.
+    QPushButton *m_modelButton;
+    QFrame *m_modelPopup;
+    OpenCodeModelPicker *m_modelPicker;
+    // `account models` answers per computer and folder, at most four: ready
+    // catalogs add their models; other states and failures are shown again
+    // instead of asked again.
+    QHash<QString, QJsonObject> m_folderCatalogs;
+    QStringList m_folderOrder;
+    QHash<quint64, QString> m_folderRequests;
+    // The newest request issued per folder, while any request of it is pending.
+    QHash<QString, quint64> m_folderLatest;
+    // The picker's context (computer and folder while OpenCode is chosen), the
+    // catalog it shows, and the last choice made in it with its computer and folder.
+    QString m_modelContext,m_chosenHost,m_chosenKey,m_favoriteError,m_pickerAvailability;
+    QJsonObject m_shownCatalog,m_chosenModel;
+    struct FavoriteChange {QString key,value;bool favorite=false;};
+    QHash<quint64, FavoriteChange> m_favoriteRequests;
     QPushButton *m_start,*m_browse,*m_autoWorktree,*m_plainFolder,*m_worktreeOptions,*m_cancel,*m_openMachines;
     QAction *m_worktrees,*m_newWorktree;
     QLabel *m_worktreeTarget;

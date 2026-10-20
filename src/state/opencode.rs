@@ -1,15 +1,27 @@
 //! OpenCode 2's shared background service, authenticated on loopback.
 //! Bindings hold Zerus and session identities, never provider keys.
 use super::*;
-#[allow(dead_code)] // the OpenCode 2 gate is consumed by later phase 1 tasks
+#[cfg_attr(not(unix), allow(dead_code))]
 mod catalog;
+#[cfg_attr(not(unix), allow(dead_code))]
+mod favorites;
 mod forms;
 mod history;
+#[cfg_attr(not(unix), allow(dead_code))]
+mod providers;
 mod service;
-pub(crate) use catalog::catalog;
-// Accounts reads the install state and starts the service only on Unix.
+#[cfg_attr(not(unix), allow(dead_code))]
+mod shortlist;
 #[cfg(unix)]
-pub(crate) use catalog::{install_state, start_from_accounts};
+pub(crate) use favorites::set_favorite;
+// Every platform validates a favorite change, so --dry-run answers alike.
+pub(crate) use favorites::validate as validate_favorite;
+// Accounts reads the catalog, the install state and starts the service only on Unix.
+#[cfg(unix)]
+pub(crate) use catalog::{catalog, install_state, models, start_from_accounts};
+// Accounts fits the OpenCode row only on Unix.
+#[cfg(unix)]
+pub(crate) use shortlist::{fit_row, ROW_BUDGET};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -818,8 +830,16 @@ fn parent_view(
             conversation_history::inspected_voice_messages(record, &result, None);
     }
     if detail == Detail::Full {
-        let cwd = PathBuf::from(string(record, "cwd"));
-        result["model_options"] = catalog(Some(&cwd))["model_options"].clone();
+        let pinned: Vec<String> = ["settings_model", "pending_model"]
+            .iter()
+            .filter_map(|key| result[*key].as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let pinned: Vec<&str> = pinned.iter().map(String::as_str).collect();
+        let options = catalog::session_options(&PathBuf::from(string(record, "cwd")), &pinned);
+        result["model_options"] = options["model_options"].clone();
+        result["model_options_truncated"] = options["model_options_truncated"].clone();
     }
     let questions = result["pending_questions"]
         .as_array()
@@ -848,6 +868,33 @@ fn notification_snapshot_with(native: &dyn Native, record: &Value, history: impl
     Ok((result, questions))
 }
 
+/// The short list a full answer carries when the session cannot be read.
+type CachedOptions = fn(&service::Unavailable, &Path, &[&str]) -> Value;
+/// An answer without the session's own state. A full one still carries the
+/// short list from the last home catalog, never read from the service, so
+/// clients do not mistake these details for an older hgs's.
+fn without_session(
+    record: &Value,
+    why: &service::Unavailable,
+    reason: String,
+    detail: Detail,
+    cached_options: CachedOptions,
+) -> Value {
+    let mut row = unavailable(record, reason);
+    if detail == Detail::Full {
+        let pinned: Vec<String> = ["settings_model", "pending_model"]
+            .iter()
+            .filter_map(|key| row[*key].as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let pinned: Vec<&str> = pinned.iter().map(String::as_str).collect();
+        let options = cached_options(why, &PathBuf::from(string(record, "cwd")), &pinned);
+        row["model_options"] = options["model_options"].clone();
+        row["model_options_truncated"] = options["model_options_truncated"].clone();
+    }
+    row
+}
 /// Inspects bindings against one service connection: at most one
 /// `/api/session/active` and one migration check per instance.
 struct Inspector {
@@ -858,6 +905,8 @@ struct Inspector {
     migration: Option<Reply>,
     verdicts: Option<Vec<String>>,
     verdicts_changed: bool,
+    /// The cached home short list; tests stand in for the cache.
+    cached_options: CachedOptions,
 }
 impl Inspector {
     /// Never starts the service.
@@ -869,6 +918,7 @@ impl Inspector {
             migration: None,
             verdicts: None,
             verdicts_changed: false,
+            cached_options: catalog::stopped_options,
         }
     }
     fn row(&mut self, record: &Value, detail: Detail) -> Value {
@@ -879,10 +929,12 @@ impl Inspector {
         row
     }
     fn view(&mut self, record: &Value, detail: Detail) -> Value {
+        let cached_options = self.cached_options;
         let service = match &self.service {
             Err(why) => {
                 let computer = self.computer.get_or_insert_with(service::computer);
-                return unavailable(record, why.reason(computer));
+                let reason = why.reason(computer);
+                return without_session(record, why, reason, detail, cached_options);
             }
             Ok(service) => service,
         };
@@ -898,8 +950,13 @@ impl Inspector {
             legacy_state(service, record, &mut self.migration)
         };
         let mut current = record.clone();
+        // A failed read keeps the cached short list, like a stopped service.
+        let failed = |reason: String| {
+            let why = service::Unavailable::Unreachable(reason.clone());
+            without_session(record, &why, reason, detail, cached_options)
+        };
         match state {
-            Err(reason) => return unavailable(record, reason),
+            Err(reason) => return failed(reason),
             Ok((Legacy::Unsupported, settled)) => {
                 if settled && !known {
                     let keys = self.verdicts.get_or_insert_with(load_verdicts);
@@ -919,10 +976,9 @@ impl Inspector {
         }
         let active = match self.active.get_or_insert_with(|| active_sessions(service)) {
             Ok(active) => active,
-            Err(reason) => return unavailable(record, reason.clone()),
+            Err(reason) => return failed(reason.clone()),
         };
-        parent_view(service, &current, active, detail)
-            .unwrap_or_else(|reason| unavailable(record, reason))
+        parent_view(service, &current, active, detail).unwrap_or_else(failed)
     }
     fn finish(self) {
         if self.verdicts_changed {
@@ -978,6 +1034,7 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
                 "attachment_messages",
                 "processes",
                 "model_options",
+                "model_options_truncated",
             ] {
                 map.remove(key);
             }
@@ -1977,6 +2034,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     #[test]
     fn new_ids_match_opencode_and_stored_ids_keep_the_existing_check() {
         for prefix in ["ses_", "msg_"] {
@@ -3615,9 +3673,11 @@ mod tests {
     }
     #[test]
     fn settings_validate_effort_against_the_model_variants() {
-        let rows = catalog::project(&fixture(include_bytes!(
-            "../../tests/fixtures/opencode2/models.json"
-        )));
+        let rows = catalog::project_all(
+            &fixture(include_bytes!("../../tests/fixtures/opencode2/models.json")),
+            &HashMap::new(),
+        )
+        .0;
         assert_eq!(
             catalog::model_ref(&rows, "fixture/local", "high").unwrap(),
             json!({"providerID": "fixture", "id": "local", "variant": "high"})
@@ -3828,6 +3888,85 @@ mod tests {
             ("GET /api/session/ses_A", 200, session_with(json!({}), "old")),
         ]);
         assert!(change_title(&stale, &bound(), "new").is_err());
+    }
+    /// Stands in for the cached home short list and echoes the folder asked for.
+    fn cached_stub(_: &service::Unavailable, location: &Path, _: &[&str]) -> Value {
+        json!({"model_options": [{"value": "cache/stub", "location": location}],
+            "model_options_truncated": false})
+    }
+    fn inspector(
+        service: std::result::Result<service::Service, service::Unavailable>,
+        migration: Option<Reply>,
+        active: Option<Result<Value>>,
+    ) -> Inspector {
+        Inspector {
+            service,
+            computer: Some("build-01".into()),
+            active,
+            migration,
+            verdicts: Some(Vec::new()),
+            verdicts_changed: false,
+            cached_options: cached_stub,
+        }
+    }
+    /// A registered service that refuses every connection before a byte is sent.
+    fn refusing() -> service::Service {
+        service::Service {
+            reg: service::Registration {
+                id: "a".into(),
+                version: "2.0.32".into(),
+                port: 0,
+                pid: 5,
+                password: None,
+            },
+        }
+    }
+    /// Clients take full details without `model_options_truncated` for an
+    /// older hgs, so every unavailable answer keeps the short-list keys.
+    #[test]
+    fn every_unavailable_session_detail_keeps_the_short_list_keys() {
+        let legacy = json!({"backend": "opencode", "name": "opencode/workspace/a",
+            "conversation_id": "ses_A", "cwd": "/home/example/project"});
+        let mut current = legacy.clone();
+        current["service"] = json!("opencode2");
+        let cases = [
+            (
+                "service stopped",
+                inspector(Err(service::Unavailable::NotRunning), None, None),
+                &current,
+            ),
+            (
+                "migration check failed",
+                inspector(Ok(refusing()), Some(Err("refused".into())), None),
+                &legacy,
+            ),
+            (
+                "activity read failed",
+                inspector(Ok(refusing()), None, Some(Err("OpenCode HTTP 500".into()))),
+                &current,
+            ),
+            (
+                "session read failed",
+                inspector(Ok(refusing()), None, Some(Ok(json!({})))),
+                &current,
+            ),
+        ];
+        let cached = json!([{"value": "cache/stub", "location": "/home/example/project"}]);
+        let mut wrong = Vec::new();
+        for (case, mut inspector, record) in cases {
+            let full = inspector.view(record, Detail::Full);
+            // Actions and listings never carry a model list.
+            let own = inspector.view(record, Detail::Own);
+            if full["inspection_unavailable"] != true
+                || full["model_options"] != cached
+                || full["model_options_truncated"] != false
+                || own["inspection_unavailable"] != true
+                || own.get("model_options_truncated").is_some()
+            {
+                wrong.push(case);
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
     }
     #[test]
     fn pause_and_resume_explain_that_there_is_no_process() {

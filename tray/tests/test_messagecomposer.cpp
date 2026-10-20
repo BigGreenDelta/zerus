@@ -1,4 +1,5 @@
 #include "MessageComposer.h"
+#include "OpenCodeModelPicker.h"
 #include "SessionCardDelegate.h"
 #include "AttachmentViewer.h"
 #include "ComposerToolbar.h"
@@ -169,6 +170,20 @@ QString quotedReference(const QString &path)
 }
 }
 
+// The shared contract's OpenCode short list (tests/fixtures/opencode-provider-catalog.json).
+static QJsonArray sharedShortList()
+{
+    QFile file(QStringLiteral(ZERUS_OPENCODE_PROVIDER_CATALOG)); if (!file.open(QIODevice::ReadOnly)) return {};
+    return QJsonDocument::fromJson(file.readAll()).object()["row"].toObject()["model_options"].toArray();
+}
+
+static QJsonArray withSolo(QJsonArray models)
+{
+    models.append(QJsonObject{{"id","solo/solo-model"},{"value","solo/solo-model"},{"label","Solo model"},{"provider","solo"},
+        {"provider_label","Solo fixture"},{"free",false},{"effort_options",QJsonArray{"low"}},{"effort_labels",QJsonArray{"Low"}}});
+    return models;
+}
+
 class TestMessageComposer : public QObject {
     Q_OBJECT
 private slots:
@@ -237,6 +252,15 @@ private slots:
     void modelSettingsPreserveDraftAndDistinguishPending();
     void openCodeModelSettingsOfferModelDefaultEffort();
     void openCodeEffortIdsFollowSharedRule();
+    void openCodePickerChoosesFromTheShortListAndAllModels();
+    void openCodeAllModelsChoiceSurvivesADetailsRefresh();
+    void openCodeStarRequestsAFavoriteForThisSession();
+    void openCodeOnAnOlderComputerOffersNoStarsOrAllModels();
+    void otherAgentsKeepThePlainModelList();
+    void openCodeLateAnswersStayWithTheirSession();
+    void openCodeConfirmedFavoriteOutlivesOlderListsAndCatalogs();
+    void openCodeAnotherFolderStartsThePickerAfresh();
+    void openCodeChoosingAgainTakesTheNewerDescription();
     void modelSettingsShowProviderNoticeBeforeApply();
     void modelSettingsUnavailableExplainsWhy();
     void modelSettingsFitNarrowColumn();
@@ -1324,6 +1348,268 @@ void TestMessageComposer::openCodeEffortIdsFollowSharedRule()
     composer.setModelSettings("fixture/ids", {}, options, true, {}, {}, {}, "now"); button->click();
     QStringList unchanged; for (const auto &id : ids) if (!id.toString().isEmpty()) unchanged << id.toString();
     QCOMPARE(offered(), unchanged);
+}
+
+void TestMessageComposer::openCodePickerChoosesFromTheShortListAndAllModels()
+{
+    const auto options = sharedShortList(); QCOMPARE(options.size(), 8);
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QSignalSpy changes(&composer, &MessageComposer::settingsRequested), catalogs(&composer, &MessageComposer::openCodeCatalogRequested);
+    composer.show(); QTest::qWait(20);
+    composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels"); QVERIFY(picker && picker->isVisible());
+    QVERIFY(!composer.findChild<QComboBox *>("sessionModelChoice")->isVisible());
+    picker->select("keyed/paid-model");
+    auto *apply = composer.findChild<QPushButton *>("applySessionSettings"); QVERIFY(apply->isEnabled()); apply->click();
+    QCOMPARE(changes[0], QVariantList({"opencode/session", "keyed/paid-model", ""}));
+    composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    picker->findChild<QPushButton *>("openCodeAllModels")->click();
+    QCOMPARE(catalogs.size(), 1); QCOMPARE(catalogs[0][0].toString(), QString("opencode/session"));
+    const QJsonObject catalog{{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}};
+    composer.setOpenCodeCatalog("other/session", catalog);
+    QVERIFY(!picker->values().contains("solo/solo-model"));
+    composer.setOpenCodeCatalog("opencode/session", catalog);
+    picker->select("solo/solo-model");
+    auto *efforts = composer.findChild<QComboBox *>("sessionEffortChoice");
+    QStringList shown; for (int i = 0; i < efforts->count(); ++i) shown << efforts->itemText(i);
+    QCOMPARE(shown, QStringList({"Default", "Low"}));
+    efforts->setCurrentIndex(1); apply->click();
+    QCOMPARE(changes[1], QVariantList({"opencode/session", "solo/solo-model", "low"}));
+}
+
+void TestMessageComposer::openCodeAllModelsChoiceSurvivesADetailsRefresh()
+{
+    const auto options = sharedShortList();
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    picker->findChild<QPushButton *>("openCodeAllModels")->click();
+    composer.setOpenCodeCatalog("opencode/session", {{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}});
+    picker->select("solo/solo-model");
+    // SessionsWindow calls setModelSettings on every details refresh with the session's own list.
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    auto *apply = composer.findChild<QPushButton *>("applySessionSettings");
+    QCOMPARE(composer.findChild<QComboBox *>("sessionModelChoice")->currentData().toString(), QString("solo/solo-model"));
+    QVERIFY(apply->isEnabled());
+    QVERIFY(!composer.findChild<QComboBox *>("sessionModelChoice")->isVisible());
+    QSignalSpy changes(&composer, &MessageComposer::settingsRequested); apply->click();
+    QCOMPARE(changes[0], QVariantList({"opencode/session", "solo/solo-model", ""}));
+}
+
+void TestMessageComposer::openCodeStarRequestsAFavoriteForThisSession()
+{
+    const auto options = sharedShortList();
+    MessageComposer composer; setSessionReady(composer, "opencode/session");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QSignalSpy favorites(&composer, &MessageComposer::openCodeFavoriteRequested);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    emit picker->favoriteRequested("fixture/alternate", true);
+    QCOMPARE(favorites[0], QVariantList({"opencode/session", "fixture/alternate", true}));
+    composer.setOpenCodeFavorite("other/session", "fixture/alternate", true, {});
+    QVERIFY(!picker->model("fixture/alternate")->favorite);
+    composer.setOpenCodeFavorite("opencode/session", "fixture/alternate", true, {});
+    QVERIFY(picker->model("fixture/alternate")->favorite);
+    composer.setOpenCodeContext(true, false, false, "arch");
+    emit picker->favoriteRequested("fixture/local", true); QCOMPARE(favorites.size(), 1);
+}
+
+void TestMessageComposer::openCodeOnAnOlderComputerOffersNoStarsOrAllModels()
+{
+    MessageComposer composer; setSessionReady(composer, "opencode/session");
+    composer.setModelSettings("fixture/local", {}, sharedShortList(), true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(false, false, true, "mac");
+    QSignalSpy catalogs(&composer, &MessageComposer::openCodeCatalogRequested), favorites(&composer, &MessageComposer::openCodeFavoriteRequested);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    auto *all = picker->findChild<QPushButton *>("openCodeAllModels"); QVERIFY(!all->isEnabled());
+    QCOMPARE(all->toolTip(), QString("Update Zerus on mac to search all models and star favorites."));
+    all->click(); emit picker->favoriteRequested("fixture/local", true);
+    QCOMPARE(catalogs.size(), 0); QCOMPARE(favorites.size(), 0);
+}
+
+void TestMessageComposer::otherAgentsKeepThePlainModelList()
+{
+    MessageComposer composer; setSessionReady(composer, "claude/session");
+    composer.setModelSettings("opus", {}, QJsonArray{QJsonObject{{"id","opus"},{"label","Opus"}}}, true, {}, {}, {}, "now", false);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    QVERIFY(composer.findChild<QComboBox *>("sessionModelChoice")->isVisible());
+    QVERIFY(!composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels")->isVisible());
+}
+
+// Another session starts the picker afresh in the same call: its own list and current
+// model, no catalog, All models off. The first session's late answers never show there,
+// and back in the first session nothing of before is pending.
+void TestMessageComposer::openCodeLateAnswersStayWithTheirSession()
+{
+    const auto options = sharedShortList();
+    const QJsonObject catalog{{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}};
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/first");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QSignalSpy catalogs(&composer, &MessageComposer::openCodeCatalogRequested), favorites(&composer, &MessageComposer::openCodeFavoriteRequested);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    picker->findChild<QPushButton *>("openCodeAllModels")->click(); QCOMPARE(catalogs.size(), 1);
+    emit picker->favoriteRequested("fixture/alternate", true); QCOMPARE(favorites.size(), 1);
+    setSessionReady(composer, "opencode/second");
+    const QJsonArray second{QJsonObject{{"id","fixture/plain"},{"value","fixture/plain"},{"label","Plain fixture"},
+        {"provider","fixture"},{"provider_label","fixture"}}};
+    composer.setModelSettings("fixture/plain", {}, second, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QCOMPARE(picker->values(), QStringList({"fixture/plain"})); QCOMPARE(picker->current(), QString("fixture/plain"));
+    QVERIFY(!picker->showingAll());
+    composer.setOpenCodeCatalog("opencode/first", catalog);
+    composer.setOpenCodeFavorite("opencode/first", "fixture/alternate", true, {});
+    composer.setOpenCodeCatalogFailed("opencode/first", "A late failure");
+    QCOMPARE(picker->values(), QStringList({"fixture/plain"})); QVERIFY(!picker->showingAll());
+    QVERIFY(picker->findChild<QLabel *>("openCodeModelNotice")->text().isEmpty());
+    // A choice made in the second session stays there.
+    composer.findChild<QPushButton *>("sessionModelSettings")->click(); picker->select("fixture/plain");
+    setSessionReady(composer, "opencode/first");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QVERIFY(!picker->showingAll()); QVERIFY(!picker->values().contains("solo/solo-model"));
+    QCOMPARE(picker->current(), QString("fixture/local"));
+    QVERIFY(!picker->model("fixture/alternate")->favorite);
+    composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    QCOMPARE(composer.findChild<QComboBox *>("sessionModelChoice")->findData("fixture/plain"), -1);
+    QCOMPARE(catalogs.size(), 1); QCOMPARE(favorites.size(), 1);
+}
+
+// A confirmed favorite outlives lists and catalogs read before it: a details refresh
+// and a late All models answer still show the change. A failure keeps the state and
+// says why; nothing is sent again.
+void TestMessageComposer::openCodeConfirmedFavoriteOutlivesOlderListsAndCatalogs()
+{
+    const auto options = sharedShortList();
+    const QJsonObject olderCatalog{{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}};
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QSignalSpy favorites(&composer, &MessageComposer::openCodeFavoriteRequested);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    picker->findChild<QPushButton *>("openCodeAllModels")->click();
+    QVERIFY(!picker->model("fixture/alternate")->favorite);
+    emit picker->favoriteRequested("fixture/alternate", true);
+    composer.setOpenCodeFavorite("opencode/session", "fixture/alternate", true, {});
+    QVERIFY(picker->model("fixture/alternate")->favorite);
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    QVERIFY(picker->model("fixture/alternate")->favorite);
+    composer.setOpenCodeCatalog("opencode/session", olderCatalog);
+    QVERIFY(picker->model("solo/solo-model")); QVERIFY(picker->model("fixture/alternate")->favorite);
+    // Unstarring a favorite the older list still marks works the same way.
+    QVERIFY(picker->model("keyed/paid-model")->favorite);
+    emit picker->favoriteRequested("keyed/paid-model", false);
+    composer.setOpenCodeFavorite("opencode/session", "keyed/paid-model", false, {});
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeCatalog("opencode/session", olderCatalog);
+    QVERIFY(!picker->model("keyed/paid-model")->favorite); QVERIFY(picker->model("fixture/alternate")->favorite);
+    emit picker->favoriteRequested("fixture/local", true); QCOMPARE(favorites.size(), 3);
+    composer.setOpenCodeFavorite("opencode/session", "fixture/local", false, "Account catalog is busy.");
+    QVERIFY(!picker->model("fixture/local")->favorite);
+    QVERIFY(composer.findChild<QLabel *>("sessionSettingsHint")->text().contains("Account catalog is busy."));
+    QTest::qWait(50); QCOMPARE(favorites.size(), 3);
+}
+
+// The shown session on another computer or in another folder starts its picker afresh,
+// as another session does: the catalog, a loading request, All models, a failure and the
+// choices made for the place before are gone, while its current model stays listed. A
+// refresh of the same context keeps them; the next explicit All models asks once.
+void TestMessageComposer::openCodeAnotherFolderStartsThePickerAfresh()
+{
+    const auto options = sharedShortList();
+    const QJsonObject catalog{{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}};
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session");
+    // As SessionsWindow renders details: the context first, then the session's list.
+    const auto details = [&](const QString &host, const QString &folder, const QString &model) {
+        composer.setOpenCodeContext(true, false, true, "arch", host, folder);
+        composer.setModelSettings(model, {}, options, true, {}, {}, {}, "now", true);
+    };
+    details("arch", "/workspace/project", "fixture/local");
+    QSignalSpy catalogs(&composer, &MessageComposer::openCodeCatalogRequested), changes(&composer, &MessageComposer::settingsRequested);
+    composer.show();
+    auto *open = composer.findChild<QPushButton *>("sessionModelSettings"); open->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    auto *all = picker->findChild<QPushButton *>("openCodeAllModels");
+    auto *notice = picker->findChild<QLabel *>("openCodeModelNotice");
+    auto *models = composer.findChild<QComboBox *>("sessionModelChoice");
+    auto *hint = composer.findChild<QLabel *>("sessionSettingsHint");
+    all->click(); QCOMPARE(catalogs.size(), 1); composer.setOpenCodeCatalog("opencode/session", catalog);
+    picker->select("solo/solo-model"); composer.findChild<QPushButton *>("applySessionSettings")->click(); QCOMPARE(changes.size(), 1);
+    // The session now runs solo, which its own list lacks: a refresh of the same context keeps its description.
+    const auto generation = composer.openCodeGeneration();
+    details("arch", "/workspace/project", "solo/solo-model");
+    QCOMPARE(composer.openCodeGeneration(), generation);
+    open->click(); QVERIFY(picker->showingAll()); QCOMPARE(models->currentText(), QString("Solo model"));
+    composer.setOpenCodeFavorite("opencode/session", "fixture/alternate", false, "Account catalog is busy.");
+    QVERIFY(hint->text().contains("Account catalog is busy."));
+    // In another folder only the current model stays, described by its value.
+    details("arch", "/workspace/moved", "solo/solo-model");
+    QVERIFY(composer.openCodeGeneration() != generation); QVERIFY(!picker->isVisible());
+    QVERIFY(!picker->showingAll()); QCOMPARE(picker->current(), QString("solo/solo-model"));
+    QCOMPARE(picker->model("solo/solo-model")->label, QString("solo/solo-model"));
+    open->click(); QCOMPARE(models->currentText(), QString("solo/solo-model")); QVERIFY(!hint->text().contains("Account catalog is busy."));
+    // A request still loading when the computer changes is gone too; the next All models asks once.
+    all->click(); QCOMPARE(catalogs.size(), 2); QCOMPARE(notice->text(), QString("Loading all models…"));
+    const auto loading = composer.openCodeGeneration();
+    details("mac", "/workspace/moved", "solo/solo-model");
+    QVERIFY(composer.openCodeGeneration() != loading); QVERIFY(!picker->showingAll()); QVERIFY(notice->text().isEmpty());
+    open->click(); all->click(); QCOMPARE(catalogs.size(), 3); composer.setOpenCodeCatalog("opencode/session", catalog);
+    QVERIFY(picker->showingAll()); QVERIFY(picker->values().contains("solo/solo-model")); QVERIFY(notice->text().isEmpty());
+    // A return to the same session, computer and folder is a new context as well.
+    const auto shown = composer.openCodeGeneration();
+    setSessionReady(composer, "opencode/other"); details("mac", "/workspace/moved", "fixture/local");
+    setSessionReady(composer, "opencode/session"); details("mac", "/workspace/moved", "solo/solo-model");
+    QVERIFY(composer.openCodeGeneration() > shown + 1); QVERIFY(!picker->showingAll());
+    QCOMPARE(catalogs.size(), 3); QCOMPARE(changes.size(), 1);
+}
+
+// Chosen again, a model takes its newest description: a newer catalog of the same context
+// renames it and offers another variant. The combo, the efforts and a later details refresh
+// show it, and nothing is sent before Apply.
+void TestMessageComposer::openCodeChoosingAgainTakesTheNewerDescription()
+{
+    const auto options = sharedShortList();
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session");
+    composer.setOpenCodeContext(true, false, true, "arch", {}, "/workspace/project");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    QSignalSpy changes(&composer, &MessageComposer::settingsRequested);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    auto *models = composer.findChild<QComboBox *>("sessionModelChoice");
+    auto *efforts = composer.findChild<QComboBox *>("sessionEffortChoice");
+    const auto shown = [&] { QStringList items; for (int i = 0; i < efforts->count(); ++i) items << efforts->itemText(i); return items; };
+    picker->findChild<QPushButton *>("openCodeAllModels")->click();
+    composer.setOpenCodeCatalog("opencode/session", {{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}});
+    picker->select("solo/solo-model"); efforts->setCurrentIndex(efforts->findData("low"));
+    QCOMPARE(shown(), QStringList({"Default", "Low"})); QCOMPARE(efforts->currentData().toString(), QString("low"));
+    // The same context's newer catalog: solo has another label and only another variant.
+    auto newer = withSolo(options); auto solo = newer.last().toObject();
+    solo["label"] = "Solo model renamed"; solo["effort_options"] = QJsonArray{"high"}; solo["effort_labels"] = QJsonArray{"High"};
+    newer.replace(newer.size() - 1, solo);
+    composer.setOpenCodeCatalog("opencode/session", {{"catalog_state","ready"},{"models",newer},{"model_options",options}});
+    picker->select("solo/solo-model");
+    QCOMPARE(models->currentText(), QString("Solo model renamed")); QCOMPARE(shown(), QStringList({"Default", "High"}));
+    // A details refresh of the session's own list keeps the newer description.
+    composer.setOpenCodeContext(true, false, true, "arch", {}, "/workspace/project");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    QCOMPARE(models->currentData().toString(), QString("solo/solo-model")); QCOMPARE(changes.size(), 0);
+    efforts->setCurrentIndex(efforts->findData("high")); composer.findChild<QPushButton *>("applySessionSettings")->click();
+    QCOMPARE(changes.size(), 1); QCOMPARE(changes[0], QVariantList({"opencode/session", "solo/solo-model", "high"}));
+    // Reported as pending, the reopened popup describes it from the kept choice.
+    composer.setOpenCodeContext(true, false, true, "arch", {}, "/workspace/project");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, "solo/solo-model", "high", "ready", true);
+    composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    QCOMPARE(models->currentData().toString(), QString("solo/solo-model")); QCOMPARE(models->currentText(), QString("Solo model renamed"));
+    QCOMPARE(shown(), QStringList({"Default", "High"})); QCOMPARE(efforts->currentData().toString(), QString("high"));
+    QCOMPARE(changes.size(), 1);
 }
 
 void TestMessageComposer::modelSettingsShowProviderNoticeBeforeApply()

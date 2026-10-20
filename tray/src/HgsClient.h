@@ -192,6 +192,11 @@ public:
     // Directory request IDs let views discard replies to superseded navigation.
     void requestProjects(const QString &host = {});
     quint64 requestAccounts(const QString &host, const QStringList &arguments = {QStringLiteral("ls")}, const QByteArray &input = {});
+    // `hgs [@host] account models native-opencode --location DIR --json`: 30 s, at most 5 MiB of output.
+    quint64 requestOpenCodeModels(const QString &host, const QString &location);
+    // `hgs [@host] account favorite native-opencode --model VALUE --favorite on|off --request-id UUID --json`:
+    // a fresh request identity per call. A failure is reported, never retried.
+    quint64 requestOpenCodeFavorite(const QString &host, const QString &value, bool favorite);
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     // hgs [@host] mobile …: phones of the workspace that host's mobile connection
     // reaches. Probes the host CLI first, so an older one is never asked.
@@ -326,6 +331,10 @@ signals:
     void searchFailed(quint64 request, const QString &host, const QString &error);
     void accountsReady(quint64 request, const QString &host, const QJsonObject &result);
     void accountsFailed(quint64 request, const QString &host, const QString &error);
+    void openCodeModelsReady(quint64 request, const QString &host, const QString &location, const QJsonObject &catalog);
+    void openCodeModelsFailed(quint64 request, const QString &host, const QString &location, const QString &error);
+    void openCodeFavoriteReady(quint64 request, const QString &host, const QJsonObject &receipt);
+    void openCodeFavoriteFailed(quint64 request, const QString &host, const QString &error);
     void mobileReady(quint64 request, const QString &host, const QJsonObject &result);
     void mobileFailed(quint64 request, const QString &host, const QString &error);
     void machinesReady(quint64 request, const QJsonObject &result);
