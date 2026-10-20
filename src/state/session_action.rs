@@ -94,6 +94,9 @@ impl Scope {
     pub(super) fn was_changing(&self) -> bool {
         self.changed.get()
     }
+    pub(super) fn has_result(&self) -> bool {
+        self.target.borrow().is_some()
+    }
 }
 
 /// A presentation gate, never a substitute for the locked action checks.

@@ -286,6 +286,58 @@ pub(super) fn rename_owner(old: &str, new: &str) -> Result<()> {
     atomic(&path(), &format!("{}\n", json!({"version": 1, "sessions": sessions})))
 }
 
+/// OpenCode renames take this writer before their bindings lock. Read writers
+/// inspect OpenCode while holding the same writer, so reversing that order can
+/// deadlock. The existing v1 file stays the only reader/writer protocol.
+pub(super) struct RenameGuard {
+    _guard: Guard,
+    path: PathBuf,
+    sessions: Value,
+}
+impl RenameGuard {
+    pub(super) fn at(path: &Path) -> Result<Self> {
+        let guard = lock(Some(&path.with_extension("lock")))?;
+        let sessions = match fs::read_to_string(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => json!({}),
+            Ok(text) => serde_json::from_str::<Value>(&text)
+                .ok()
+                .filter(|value| value["version"] == 1 && value["sessions"].is_object())
+                .map(|value| value["sessions"].clone())
+                .ok_or("Shared read marks could not be read; rename was not started")?,
+            Err(_) => {
+                return Err("Shared read marks could not be read; rename was not started".into())
+            }
+        };
+        Ok(Self {
+            _guard: guard,
+            path: path.to_owned(),
+            sessions,
+        })
+    }
+
+    pub(super) fn transfer(&mut self, old: &str, new: &str) -> Result<()> {
+        if old == new {
+            return Ok(());
+        }
+        let map = self
+            .sessions
+            .as_object_mut()
+            .ok_or("Invalid shared read marks")?;
+        let Some(marks) = map.remove(old) else {
+            return Ok(());
+        };
+        map.insert(new.to_owned(), marks);
+        atomic(
+            &self.path,
+            &format!("{}\n", json!({"version": 1, "sessions": self.sessions})),
+        )
+    }
+}
+
+pub(super) fn lock_rename() -> Result<RenameGuard> {
+    RenameGuard::at(&path())
+}
+
 /// Keep the newest conversations of one session.
 fn bounded(conversations: &mut serde_json::Map<String, Value>) {
     while conversations.len() > MAX_CONVERSATIONS {
