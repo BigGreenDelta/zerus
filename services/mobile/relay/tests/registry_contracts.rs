@@ -639,28 +639,65 @@ async fn a_stale_shown_route_still_uses_the_physical_mute_highwater() {
     let fleet = Fleet::new().await;
     let (_, direct) = fleet.direct("Direct").await;
     let active = json!({"idle_seconds":1.0,"locked":false});
-    fleet.direct_beat_with(&direct, &plain(), &active).await.unwrap();
-    fleet.direct_beat_with(&direct, &question(), &active).await.unwrap();
+    fleet
+        .direct_beat_with(&direct, &plain(), &active)
+        .await
+        .unwrap();
+    fleet
+        .direct_beat_with(&direct, &question(), &active)
+        .await
+        .unwrap();
     assert_eq!(fleet.f.count("alert_candidates").await, 1);
     let preferences = json!({"conversation_id":"conversation","muted":true,"revision":1,
         "suppressed":{"reply_id":null,"attention_signature":null,"optional_question_ids":[],"main_attention":null,"child_attention":{}}});
-    let muted = snapshot("session", json!({"phase":"input","notification_preferences":preferences}));
+    let muted = snapshot(
+        "session",
+        json!({"phase":"input","notification_preferences":preferences}),
+    );
     // A confirmed mutation can advance the physical preference before the
     // selected route reports it. Native state still comes from that route.
     let mut t = fleet.f.store.db.begin().await.unwrap();
-    fleet.f.store.db.payload_usage(&mut t, &fleet.f.phone.workspace).await.unwrap();
-    zerus_relay::notification_highwater::accept(&fleet.f.store.db, &mut t,
-        &fleet.f.phone.workspace, &fleet.target, &muted).await.unwrap();
+    fleet
+        .f
+        .store
+        .db
+        .payload_usage(&mut t, &fleet.f.phone.workspace)
+        .await
+        .unwrap();
+    zerus_relay::notification_highwater::accept(
+        &fleet.f.store.db,
+        &mut t,
+        &fleet.f.phone.workspace,
+        &fleet.target,
+        &muted,
+    )
+    .await
+    .unwrap();
     t.commit().await.unwrap();
     // The other route reports older native state but the confirmed preference.
     // Route selection must retain the direct question and still apply Mute.
-    let lagging = snapshot("session", json!({"activity":"busy","notification_preferences":preferences}));
-    fleet.peer(&fleet.route, &fleet.remote, &lagging).await.unwrap();
+    let lagging = snapshot(
+        "session",
+        json!({"activity":"busy","notification_preferences":preferences}),
+    );
+    fleet
+        .peer(&fleet.route, &fleet.remote, &lagging)
+        .await
+        .unwrap();
     let shown = fleet.rows(&fleet.remote).await;
     assert!(shown[0]["via"].is_null());
     assert_eq!(shown[0]["snapshot"]["sessions"][0]["phase"], "input");
-    assert_eq!(shown[0]["snapshot"]["sessions"][0]["notification_preferences"], preferences);
-    assert_eq!((fleet.f.count("alert_candidates").await, fleet.f.alert_count().await), (0, 0));
+    assert_eq!(
+        shown[0]["snapshot"]["sessions"][0]["notification_preferences"],
+        preferences
+    );
+    assert_eq!(
+        (
+            fleet.f.count("alert_candidates").await,
+            fleet.f.alert_count().await
+        ),
+        (0, 0)
+    );
     fleet.close().await;
 }
 
