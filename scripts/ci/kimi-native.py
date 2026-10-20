@@ -141,7 +141,8 @@ def checked_pins(platform_id):
         entry = document['platforms'][platform_id]
         pin = pins[version][platform_id]
         if (document['version'] != version or document['tag'] != '@moonshot-ai/kimi-code@' + version
-                or entry['filename'] != 'kimi-code-' + platform_id or entry['checksum'] != pin['sha256']
+                or entry['filename'] != 'kimi-code-' + platform_id + ('.exe' if platform_id.startswith('win32-') else '')
+                or entry['checksum'] != pin['sha256']
                 or type(pin['size']) is not int or not 0 < pin['size'] <= IMAGE_LIMIT):
             raise ValueError('official manifest and reviewed image pin disagree')
     return pins

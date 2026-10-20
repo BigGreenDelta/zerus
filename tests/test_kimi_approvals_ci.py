@@ -1,0 +1,162 @@
+"""Memory/source controls; none starts a process, native agent or OS service."""
+import ast
+import importlib.util
+import json
+from pathlib import Path
+import unittest
+from unittest import mock
+
+import kimi_windows_process as process
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('kimi_approvals_gate', ROOT / 'scripts/ci/kimi-approvals.py')
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+
+
+class ApprovalGateControls(unittest.TestCase):
+    def test_both_platforms_keep_the_exact_seven_semantic_names(self):
+        for platform in ('darwin-arm64', 'win32-x64'):
+            methods = gate.methods(platform)
+            self.assertEqual(len(methods), 7)
+            self.assertEqual(tuple(item.rsplit('.', 1)[-1] for item in methods), gate.NAMES)
+
+    def test_a_partial_or_skipped_result_never_qualifies(self):
+        methods = gate.methods('win32-x64')
+        good = dict(tests=7, started=list(methods), completed=list(methods), failures=0, errors=0, skipped=0,
+                    expected_failures=0, unexpected_successes=0)
+        self.assertTrue(gate.qualifies(good, methods))
+        for key in ('failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'):
+            self.assertFalse(gate.qualifies(dict(good, **{key: 1}), methods), key)
+        for value in (6, True, '7'):
+            self.assertFalse(gate.qualifies(dict(good, tests=value), methods))
+        self.assertFalse(gate.qualifies(dict(good, completed=list(methods[:-1])), methods))
+        self.assertFalse(gate.qualifies(dict(good, started=list(reversed(methods))), methods))
+
+    def test_only_the_two_reviewed_host_architectures_are_admitted(self):
+        for system, machine, expected in (('Darwin', 'arm64', 'darwin-arm64'),
+                                           ('Windows', 'AMD64', 'win32-x64')):
+            with mock.patch.object(gate.platform, 'system', return_value=system), \
+                    mock.patch.object(gate.platform, 'machine', return_value=machine):
+                self.assertEqual(gate.target(), expected)
+        for system, machine in (('Windows', 'arm64'), ('Linux', 'x86_64'), ('Darwin', 'x86_64')):
+            with mock.patch.object(gate.platform, 'system', return_value=system), \
+                    mock.patch.object(gate.platform, 'machine', return_value=machine):
+                with self.assertRaises(ValueError):
+                    gate.target()
+
+    def test_windows_pins_are_the_retained_official_manifest_entries(self):
+        pins = gate.retained.checked_pins('win32-x64')
+        self.assertEqual([pins[v]['win32-x64']['size'] for v in gate.VERSIONS], [159601440, 160725792])
+        self.assertEqual(pins['2.2.0']['win32-x64']['sha256'],
+                         '5120f69812bc6437354d7d99e801c1b38fee1eeefdc858e2ad726356f1a245b0')
+
+    def test_windows_layout_proof_precedes_every_native_download_and_launch(self):
+        tree = ast.parse((ROOT / 'scripts/ci/kimi-approvals.py').read_text())
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        calls = [(node.lineno, ast.unparse(node.func), ast.unparse(node)) for node in ast.walk(main)
+                 if isinstance(node, ast.Call)]
+        oracle = next(line for line, func, text in calls if func == 'invoke' and 'oracle=True' in text)
+        download = next(line for line, func, _ in calls if func == 'fetch')
+        launches = [line for line, func, text in calls if func == 'invoke' and 'oracle=True' not in text]
+        self.assertLess(oracle, download)
+        self.assertTrue(launches and all(download < line for line in launches))
+
+    def test_mac_uses_the_existing_oracle_without_an_alternative_predicate(self):
+        source = (ROOT / 'tests/test_kimi_approvals_native.py').read_text()
+        self.assertIn('guard.shim_source(self.captures, self.image)', source)
+        self.assertIn('guard.NativeKimi.assert_process(self, self.name, stage)', source)
+        for name in ('process_sample', 'environment', 'launched_environment'):
+            self.assertIn(name + ' = guard.NativeKimi.' + name, source)
+
+    def test_workflow_is_manual_standard_hosted_without_write_permissions(self):
+        source = (ROOT / '.github/workflows/kimi-approvals.yml').read_text()
+        self.assertIn('workflow_dispatch:', source)
+        self.assertNotIn('pull_request_target:', source)
+        self.assertNotIn('self-hosted', source)
+        self.assertIn('os: ["macos-15", "windows-2025"]', source)
+        self.assertIn('contents: read', source)
+        self.assertNotIn('contents: write', source)
+        self.assertIn('cache-mode: none', source)
+        self.assertIn('cargo +1.99.1 build --locked --bin hgs -j 2', source)
+
+
+class WindowsEnvironmentControls(unittest.TestCase):
+    def test_exact_utf16_environment_and_hidden_drive_cwd(self):
+        block = 'HOME=private\0KIMI_CODE_HOME=private/kimi\0=C:=C:\\fixture\0\0'.encode('utf-16-le')
+        self.assertEqual(process.decode_environment(block),
+                         {'HOME': 'private', 'KIMI_CODE_HOME': 'private/kimi', '=C:': 'C:\\fixture'})
+
+    def test_duplicates_case_collisions_missing_terminal_and_invalid_utf16_refuse(self):
+        for text in ('HOME=a\0HOME=b\0\0', 'home=a\0HOME=b\0\0', 'HOME=a\0',
+                     'HOME=a\0\0EXTRA=b\0\0', 'no-separator\0\0', '=bad\0\0'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                process.decode_environment(text.encode('utf-16-le'))
+        for data in (b'', b'\x00', b'\x00\xd8\0\0\0\0', b'x' * (process.MAX_ENVIRONMENT + 2)):
+            with self.assertRaises((ValueError, UnicodeError)):
+                process.decode_environment(data)
+
+    def test_changed_process_or_environment_refuses_before_returning_values(self):
+        fake = object.__new__(process.Process)
+        snapshot = dict(pid=7, image=str(ROOT), parent=8, parameters=100, environment=200)
+        fake.snapshot = mock.Mock(side_effect=[snapshot, dict(snapshot, parent=9)])
+        fake.block = mock.Mock(return_value='HOME=a\0\0'.encode('utf-16-le'))
+        with self.assertRaisesRegex(OSError, 'changed'):
+            fake.environment(ROOT, 8)
+        fake.snapshot = mock.Mock(return_value=snapshot)
+        fake.block = mock.Mock(side_effect=[b'first', b'second'])
+        with self.assertRaisesRegex(OSError, 'changed'):
+            fake.environment(ROOT, 8)
+
+    def test_unknown_image_or_parent_never_reads_remote_environment(self):
+        fake = object.__new__(process.Process)
+        fake.snapshot = lambda: dict(image=str(ROOT), parent=8)
+        fake.block = mock.Mock(side_effect=AssertionError('must not read'))
+        with self.assertRaisesRegex(OSError, 'image/parent'):
+            fake.environment(ROOT, 9)
+        fake.block.assert_not_called()
+
+
+class WindowsCustodyControls(unittest.TestCase):
+    def test_a_cleanup_failure_does_not_skip_later_stop_or_seal(self):
+        import test_kimi_approvals_windows as windows
+        case = windows.NativeWindowsKimiApprovals('test_approve_once_runs_the_command')
+        class Root:
+            def exists(self):
+                return True
+            def __str__(self):
+                return 'synthetic-kept-root'
+        case.root, case.images = Root(), Root()
+        seen = []
+        for name in ('retain', 'stop_client', 'stop_owned', 'seal'):
+            def step(name=name):
+                seen.append(name)
+                if name == 'stop_client':
+                    raise OSError('owned client stop unknown')
+            setattr(case, name, step)
+        case.server = mock.Mock()
+        with mock.patch.object(windows.shutil, 'rmtree') as remove, mock.patch('builtins.print'):
+            with self.assertRaisesRegex(AssertionError, 'attached client'):
+                case.custody()
+        self.assertEqual(seen, ['retain', 'stop_client', 'stop_owned', 'seal'])
+        case.server.shutdown.assert_called_once_with()
+        case.server.server_close.assert_called_once_with()
+        remove.assert_not_called()
+
+    def test_an_unknown_handle_close_does_not_skip_the_next_owned_handle(self):
+        import test_kimi_approvals_windows as windows
+        case = windows.NativeWindowsKimiApprovals('test_approve_once_runs_the_command')
+        first, second = mock.Mock(), mock.Mock()
+        first.wait.return_value = second.wait.return_value = True
+        first.close.side_effect = OSError('close failed')
+        case.pinned = {(1, 'one'): first, (2, 'two'): second}
+        with self.assertRaisesRegex(AssertionError, 'handle close'):
+            case.stop_owned()
+        first.wait.assert_called_once_with(15)
+        second.wait.assert_called_once_with(15)
+        second.close.assert_called_once_with()
+        self.assertEqual(case.pinned, {})
+
+
+if __name__ == '__main__':
+    unittest.main()
