@@ -1,5 +1,6 @@
 package app.zerus.mobile
 
+import app.zerus.mobile.replica.SessionRef
 import app.zerus.mobile.replica.TaskPosition
 import app.zerus.mobile.replica.TaskStage
 import app.zerus.mobile.replica.TaskStore
@@ -88,9 +89,10 @@ class TaskActionsTest {
     @Test fun aFailedExchangeSendsNothing() = world { computer, connection, _, sync ->
         val task = added(computer.store, "Add rate limiting")
         computer.exchangeFails = true
-        val outcome = sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api")
+        val outcome = sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api", computerName = "Studio")
         assertTrue(outcome is TaskOutcome.Refused)
         assertTrue((outcome as TaskOutcome.Refused).reason, outcome.reason.contains("busy"))
+        assertTrue(outcome.reason, outcome.reason.startsWith("The tasks could not reach Studio"))
         assertTrue(computer.operations().none { it == "task_send" })
     }
 
@@ -178,10 +180,23 @@ class TaskActionsTest {
     }
 
     @Test fun openingADoneTaskFetchesIt() = world { computer, connection, replicas, sync ->
+        // Only hgs accepts a task into Done; the crate and bindings tests fetch a real one.
         val done = added(computer.store, "Document the limits")
-        // The phone does not hold it yet; the exchange that fetches it brings it.
         sync.exchangeNow(connection, key, "orchard", "computer-1", fetch = listOf(done.uuid))
+        // The phone held nothing: its first request asks for that task by name.
+        val first = computer.envelopes.first { it.getString("operation") == "task_exchange" }
+        assertTrue(first.getJSONObject("payload").getJSONObject("inventory").getJSONObject("tasks").has(done.uuid))
         replicas.store(key, "orchard").use { assertEquals("Document the limits", it.get(done.uuid).text) }
+    }
+
+    @Test fun aDonePageForOneSessionNamesIt() = world { computer, connection, _, sync ->
+        computer.receipts["task_done"] = {
+            Triple("completed", JSONObject().put("schema", 1).put("tasks", JSONArray()).put("next", JSONObject.NULL)
+                .put("total", 0).put("recent", 0).put("damaged", 0), JSONObject.NULL)
+        }
+        sync.donePage(connection, key, "computer-1", null, session = SessionRef("node-1", "codex/api"))
+        val asked = computer.envelopes.last().getJSONObject("payload").getJSONObject("session")
+        assertEquals(listOf("node-1", "codex/api"), listOf(asked.getString("machine"), asked.getString("session")))
     }
 
     @Test fun editsReachTheComputer() = world { computer, connection, replicas, sync ->

@@ -2024,14 +2024,21 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     /** Nothing syncs in the background: the activity stops the running exchange when it stops; merges are idempotent. */
-    fun stopTaskSync() { taskSyncJob?.cancel() }
+    fun stopTaskSync() { taskSyncJob?.cancel(); projectSyncs.toList().forEach { it.cancel() } }
+    /** The exchanges that edits and opening Tasks start; they stop with the app too. */
+    private val projectSyncs = java.util.concurrent.ConcurrentHashMap.newKeySet<Job>()
+    private fun launchProjectSync(key: ProjectKey, then: suspend () -> Unit = {}) {
+        val job = viewModelScope.launch { syncProject(key); then() }
+        projectSyncs += job
+        job.invokeOnCompletion { projectSyncs -= job }
+    }
 
     // The Tasks screen (TasksUi.kt) over the phone's replica of a project.
     var tasksKey by mutableStateOf<ProjectKey?>(null); private set
     var tasksChosen by mutableStateOf<ChosenSession?>(null); private set
     var taskListing by mutableStateOf<List<TaskInfo>>(emptyList()); private set
     var taskTab by mutableStateOf(TaskTab.TODO)
-    var tasksOnlyThisSession by mutableStateOf(false)
+    var tasksOnlyThisSession by mutableStateOf(false); private set
     /** The snackbar's next message on the Tasks screen. */
     var taskNotice by mutableStateOf<String?>(null)
     var taskBusy by mutableStateOf(false); private set
@@ -2079,16 +2086,22 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** Another session for Tasks only, keeping the tab; one of another project shows that project's tasks. */
     fun chooseTaskSession(key: ProjectKey, chosen: ChosenSession) {
-        if (key != tasksKey) showTasks(key, chosen, selectDefault = false) else { tasksChosen = chosen }
+        if (key != tasksKey) showTasks(key, chosen, selectDefault = false)
+        else { tasksChosen = chosen; if (tasksOnlyThisSession) loadDone(more = false) }
+    }
+    /** Only this session: Done then lists and counts only the tasks sent to it. */
+    fun setOnlyThisSession(on: Boolean) {
+        tasksOnlyThisSession = on
+        loadDone(more = false)
     }
     private fun showTasks(key: ProjectKey, chosen: ChosenSession, selectDefault: Boolean = true) {
         tasksKey = key; tasksChosen = chosen; taskListing = emptyList(); doneRows = emptyList(); doneNext = null
-        doneTotal = 0; doneRecent = 0; doneExpanded = false; doneError = ""; doneLoaded = false
+        doneTotal = 0; doneRecent = 0; doneExpanded = false; doneError = ""; doneLoaded = false; taskNotice = null
         refreshTasks(selectDefault)
         loadDone(more = false)
-        viewModelScope.launch { syncProject(key) }
+        launchProjectSync(key)
     }
-    fun closeTasks() { tasksKey = null }
+    fun closeTasks() { tasksKey = null; taskNotice = null }
     /** Done lists from a computer each time it is opened, so tasks accepted since show. */
     fun selectTaskTab(tab: TaskTab) {
         taskTab = tab
@@ -2100,10 +2113,18 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshTasks(selectDefault: Boolean = false) {
         val key = tasksKey ?: return
         viewModelScope.launch {
-            val listing = try {
-                withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use { it.list() } }
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { taskNotice = e.message; return@launch }
+            // An import may hold the project for a moment; the listing waits once, then keeps what it shows.
+            var failure = ""
+            var read: app.zerus.mobile.replica.TaskListing? = null
+            for (attempt in 0..1) {
+                try { read = withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use { it.list() } }; break }
+                catch (e: CancellationException) { throw e }
+                catch (e: Exception) { failure = e.message.orEmpty(); if (attempt == 0) delay(500) }
+            }
+            val listing = read ?: run {
+                if (tasksKey == key && (selectDefault || taskListing.isEmpty())) taskNotice = failure.ifBlank { "The tasks could not be read." }
+                return@launch
+            }
             if (tasksKey != key) return@launch
             taskListing = listing.tasks
             reviewCounts = reviewCounts + (key to listing.tasks.count { it.stage == TaskStage.REVIEW })
@@ -2130,8 +2151,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be changed." }; return@launch }
             refreshTasks()
-            syncProject(key)
-            if (tasksKey == key && taskTab == TaskTab.DONE) loadDone(more = false)
+            launchProjectSync(key) { if (tasksKey == key && taskTab == TaskTab.DONE) loadDone(more = false, keepExpanded = true) }
         }
     }
     /** One sync of the project with its computers now; failures wait in TaskSync's backoff. */
@@ -2149,11 +2169,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     /** New tasks go to To do, or to Backlog while Backlog is open, pinned to the chosen session. */
     fun addTask(text: String) {
         val chosen = tasksChosen
+        TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { taskNotice = it; return }
         val stage = if (taskTab == TaskTab.BACKLOG) TaskStage.BACKLOG else TaskStage.TODO
-        val target = chosen?.let { TaskTarget.Session(SessionRef(it.machineId, it.name)) }
-            ?: TaskTarget.AnySession
+        val target = TaskTarget.Session(SessionRef(chosen!!.machineId, chosen.name))
         editTasks { it.add(text, stage, target, TaskPosition.End) }
     }
+    private fun computerName(key: ProjectKey, computerId: String) =
+        machines.firstOrNull { it.connectionId == key.connectionId && it.id == computerId }?.name ?: computerId
     /** The task settings' Save: the prompt and the session, whichever changed. */
     fun saveTask(uuid: String, text: String?, target: TaskTarget?) = editTasks { store ->
         if (text != null) store.editText(uuid, text)
@@ -2213,7 +2235,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         taskBusy = true
         viewModelScope.launch {
             try {
-                taskNotice = when (val outcome = taskSync.send(connection, key, taskProjectName(key), route.computerId, task.uuid, route.session)) {
+                taskNotice = when (val outcome = taskSync.send(connection, key, taskProjectName(key), route.computerId, task.uuid, route.session,
+                    computerName(key, route.computerId))) {
                     TaskOutcome.Done -> "Sent to ${route.session}"
                     is TaskOutcome.Refused -> outcome.reason
                     is TaskOutcome.Uncertain -> "It may have been sent: ${outcome.reason}"
@@ -2234,7 +2257,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         taskBusy = true
         viewModelScope.launch {
             try {
-                taskNotice = when (val outcome = taskSync.cancel(connection, key, taskProjectName(key), route.computerId, task.uuid, reason)) {
+                taskNotice = when (val outcome = taskSync.cancel(connection, key, taskProjectName(key), route.computerId, task.uuid, reason,
+                    computerName(key, route.computerId))) {
                     TaskOutcome.Done -> "Cancelled; it is In review"
                     is TaskOutcome.Refused -> outcome.reason
                     is TaskOutcome.Uncertain -> "It may have been cancelled: ${outcome.reason}"
@@ -2251,25 +2275,34 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val able = projectMachines(key).filter { it.online && !it.lastKnown && "task_done" in taskOperations(it) }
         return able.firstOrNull { it.id == tasksChosen?.computerId } ?: able.firstOrNull()
     }
-    /** The first page, or with `more` the next one; "Show older" also shows the older rows already loaded. */
-    fun loadDone(more: Boolean) {
+    /** The latest first-page read; an older one's answer is dropped. */
+    private var doneRequest = 0
+    /** The first page, or with `more` the next one; "Show older" also shows the older rows already loaded.
+     * A reload after an edit keeps the older rows shown. */
+    fun loadDone(more: Boolean, keepExpanded: Boolean = false) {
         val key = tasksKey ?: return
-        if (doneLoading) return
+        if (more && doneLoading) return
         // The first page may already hold older tasks; showing them needs no read.
         if (more && (!doneExpanded && doneRows.size > doneRecent || doneNext == null)) { doneExpanded = true; return }
-        doneExpanded = more
+        doneExpanded = more || keepExpanded && doneExpanded
+        val chosen = tasksChosen
+        val session = if (!tasksOnlyThisSession) null else {
+            TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { doneError = it; return }
+            SessionRef(chosen!!.machineId, chosen.name)
+        }
         val machine = doneComputer(key) ?: run { doneError = "No computer of this project lists Done tasks now"; return }
         val connection = connections.find { it.id == key.connectionId } ?: return
+        val request = ++doneRequest
         doneLoading = true
         viewModelScope.launch {
             try {
-                val page = taskSync.donePage(connection, key, machine.id, if (more) doneNext else null)
-                if (tasksKey != key) return@launch
+                val page = taskSync.donePage(connection, key, machine.id, if (more) doneNext else null, session = session)
+                if (tasksKey != key || request != doneRequest) return@launch
                 doneRows = if (more) doneRows + page.rows else page.rows
                 doneNext = page.next; doneTotal = page.total; doneRecent = page.recent; doneError = ""; doneLoaded = true
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { doneError = e.message.orEmpty().ifBlank { "The Done list could not be read." } }
-            finally { doneLoading = false }
+            catch (e: Exception) { if (request == doneRequest) doneError = e.message.orEmpty().ifBlank { "The Done list could not be read." } }
+            finally { if (request == doneRequest) doneLoading = false }
         }
     }
     /** Fetches a Done task from that computer into the replica, then hands it over. */

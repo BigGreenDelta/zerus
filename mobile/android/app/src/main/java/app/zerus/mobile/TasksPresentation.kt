@@ -26,8 +26,8 @@ data class ChosenSession(val name: String, val computerId: String, val machineId
 enum class ChipDot { WORKING, ATTENTION, READY }
 data class SessionChip(val session: ChosenSession, val dot: ChipDot)
 
-/** The computer a Send now or Cancel goes to, and the session it names. */
-data class SendRoute(val computerId: String, val session: String)
+/** The computer a Send now or Cancel goes to, and the session it names; `direct` when that is the session's own computer. */
+data class SendRoute(val computerId: String, val session: String, val direct: Boolean = true)
 sealed interface RouteState {
     data class Ready(val route: SendRoute) : RouteState
     data class Blocked(val reason: String) : RouteState
@@ -106,7 +106,17 @@ object TasksPresentation {
 
     /** The computer of `ref` among this connection's machines. */
     private fun computer(ref: SessionRef, machines: List<Machine>, connectionId: String) =
-        machines.firstOrNull { it.connectionId == connectionId && it.machineId == ref.machine }
+        machines.firstOrNull { it.connectionId == connectionId && it.machineId.isNotBlank() && it.machineId == ref.machine }
+
+    /** A session takes tasks once its computer reports its native ID, which tasks pin. */
+    private fun outdated(session: String) = "$session is on a computer that needs an update to take tasks"
+
+    /** Why the input cannot add a task for the chosen session, or "". */
+    fun addReason(chosen: ChosenSession?): String = when {
+        chosen == null -> "Choose a session for new tasks"
+        chosen.machineId.isBlank() -> outdated(chosen.name)
+        else -> ""
+    }
 
     private fun reachable(machine: Machine) = machine.online && !machine.lastKnown
 
@@ -116,6 +126,7 @@ object TasksPresentation {
         val ref = (task.target as? TaskTarget.Session)?.session
             ?: chosen?.let { SessionRef(it.machineId, it.name) }
             ?: return RouteState.Blocked("Choose a session for this task")
+        if (ref.machine.isBlank()) return RouteState.Blocked(outdated(ref.session))
         val machine = computer(ref, machines, connectionId)
             ?: return RouteState.Blocked("${ref.session} is on a computer this phone does not reach")
         if (!reachable(machine)) return RouteState.Blocked("${machine.name} is offline")
@@ -128,10 +139,10 @@ object TasksPresentation {
     /** Cancel goes to the session's computer, or, while it is out of reach, to any online computer of the project, which cancels it there as hgs does. */
     fun cancelRoute(task: TaskInfo, machines: List<Machine>, operations: (Machine) -> Set<String>): RouteState {
         val ref = task.session ?: return RouteState.Blocked("This task was not sent to a session")
-        val able = machines.filter { reachable(it) && "task_cancel" in operations(it) }
+        val able = machines.filter { reachable(it) && it.machineId.isNotBlank() && "task_cancel" in operations(it) }
         val machine = able.firstOrNull { it.machineId == ref.machine } ?: able.firstOrNull()
             ?: return RouteState.Blocked("No computer of this project is online")
-        return RouteState.Ready(SendRoute(machine.id, ref.session))
+        return RouteState.Ready(SendRoute(machine.id, ref.session, direct = machine.machineId == ref.machine))
     }
 
     /** One chip per live session of the project, with its status. */

@@ -124,6 +124,15 @@ struct Cached {
     /// When it entered that stage, for the Done list; an entry without it is read again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stage_at: Option<i64>,
+    /// The session it was last sent to, for the Done list's filter; an entry without it is read again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sent: Option<Sent>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Sent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<SessionKey>,
 }
 
 /// A rewrite within one timestamp tick can hand a file its old inode back, so
@@ -211,19 +220,24 @@ impl ProjectStore {
 
     /// The Done tasks newest first (when they entered Done, then UUID, both
     /// descending): at most `limit` after `before`, with how many there are and
-    /// how many entered Done at or after `since`. Only the page's documents are
-    /// read; one that cannot be read is left out of its page.
+    /// how many entered Done at or after `since`; with `session`, only the
+    /// tasks sent to it. Only the page's documents are read; one that cannot be
+    /// read is left out of its page.
     pub fn done_page(
         &self,
         before: Option<(i64, String)>,
         limit: usize,
         since: i64,
+        session: Option<&SessionKey>,
     ) -> Result<DonePage> {
         let (_, stages, _) = self.inventory_with_stages()?;
         let mut done: Vec<(i64, String)> = stages
             .into_iter()
-            .filter(|(_, (stage, _))| *stage == Stage::Done)
-            .map(|(uuid, (_, at))| (at, uuid))
+            .filter(|(_, (stage, _, sent))| {
+                *stage == Stage::Done
+                    && session.is_none_or(|session| sent.as_ref() == Some(session))
+            })
+            .map(|(uuid, (_, at, _))| (at, uuid))
             .collect();
         done.sort_unstable_by(|a, b| b.cmp(a));
         let total = done.len();
@@ -258,7 +272,11 @@ impl ProjectStore {
     #[allow(clippy::type_complexity)]
     fn inventory_with_stages(
         &self,
-    ) -> Result<(Inventory, BTreeMap<String, (Stage, i64)>, Vec<Damaged>)> {
+    ) -> Result<(
+        Inventory,
+        BTreeMap<String, (Stage, i64, Option<SessionKey>)>,
+        Vec<Damaged>,
+    )> {
         let path = self.dir().join(CACHE);
         let old: Cache = fs::read(&path)
             .ok()
@@ -283,6 +301,7 @@ impl ProjectStore {
                     error: None,
                     stage: None,
                     stage_at: None,
+                    sent: None,
                 },
             };
             inventory.project = cached.version.clone();
@@ -299,7 +318,8 @@ impl ProjectStore {
             let remembered = old.tasks.get(&uuid).filter(|c| {
                 trusted
                     && c.files == files
-                    && (c.error.is_some() || (c.stage.is_some() && c.stage_at.is_some()))
+                    && (c.error.is_some()
+                        || (c.stage.is_some() && c.stage_at.is_some() && c.sent.is_some()))
             });
             let cached = match remembered {
                 Some(cached) => cached.clone(),
@@ -310,6 +330,9 @@ impl ProjectStore {
                         error: None,
                         stage: Some(task.stage()?),
                         stage_at: Some(task.stage_at()),
+                        sent: Some(Sent {
+                            session: task.session(),
+                        }),
                     },
                     Err(error) => Cached {
                         files,
@@ -317,6 +340,7 @@ impl ProjectStore {
                         error: Some(error.to_string()),
                         stage: None,
                         stage_at: None,
+                        sent: None,
                     },
                 },
             };
@@ -328,7 +352,8 @@ impl ProjectStore {
                 None => {
                     inventory.tasks.insert(uuid.clone(), cached.version.clone());
                     if let (Some(stage), Some(at)) = (cached.stage, cached.stage_at) {
-                        stages.insert(uuid.clone(), (stage, at));
+                        let sent = cached.sent.as_ref().and_then(|sent| sent.session.clone());
+                        stages.insert(uuid.clone(), (stage, at, sent));
                     }
                 }
             }

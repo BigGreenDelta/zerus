@@ -87,7 +87,7 @@ import org.json.JSONObject
     LaunchedEffect(taskProject) { taskProject?.let(model::refreshReviewCount) }
     val tasksOpen = model.tasksKey != null
     // Tasks opens over this conversation and closes with it.
-    DisposableEffect(Unit) { onDispose { model.closeTasks() } }
+    DisposableEffect(target.key) { onDispose { model.closeTasks() } }
     if(details || settingsOpen || menu || request != null || terminal || search || tasksOpen) ObscureConversation()
     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else if (onDetails != null) onDetails() else details = true },

@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::Read;
 use std::time::Duration;
-use zerus_replica::{ids, ProjectStore};
+use zerus_replica::{ids, ProjectStore, SessionKey};
 
 /// The most a request may be: a cancel reason is the longest field.
 const MAX_REQUEST: u64 = 64 * 1024;
@@ -84,6 +84,9 @@ struct Done {
     #[serde(default)]
     before: Option<Cursor>,
     limit: usize,
+    /// Only the tasks sent to this session (Only this session).
+    #[serde(default)]
+    session: Option<SessionKey>,
 }
 
 /// `hgs task mobile-send --json`: pastes the task into a session this computer
@@ -128,7 +131,8 @@ pub(super) fn cancel(config: &Config) -> Result<Value> {
               "cancel_message": out["cancel_message"]}))
 }
 
-/// `hgs task mobile-done --json`: one page of the project's Done tasks, newest first.
+/// `hgs task mobile-done --json`: one page of the project's Done tasks, newest
+/// first, or of those sent to one session.
 pub(super) fn done(config: &Config) -> Result<Value> {
     let request: Done = request()?;
     if !(1..=PAGE).contains(&request.limit) {
@@ -146,6 +150,7 @@ pub(super) fn done(config: &Config) -> Result<Value> {
             request.before.map(|cursor| (cursor.at, cursor.uuid)),
             request.limit,
             now() - RECENT_MS,
+            request.session.as_ref(),
         )
         .map_err(fail)?;
     Ok(json!({"schema": 1, "tasks": page.tasks,

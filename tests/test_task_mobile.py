@@ -108,6 +108,18 @@ class Mobile(test_tasks.DeliveryFixture):
         rest = self.mobile("mobile-done", {"schema": 1, "project": "project-1", "limit": 2, "before": first["next"]})
         self.assertEqual(([r["text"] for r in rest["tasks"]], rest["next"], rest["damaged"]), (["Task 0"], None, 0))
 
+    def test_done_for_one_session(self):
+        task = self.add("Task 0", "--target", self.name)
+        self.accept(task)
+        mine = self.mobile("mobile-done", {"schema": 1, "project": "project-1", "limit": 50})["tasks"][0]["session"]
+        only = self.mobile("mobile-done", {"schema": 1, "project": "project-1", "limit": 50, "session": mine})
+        self.assertEqual((only["total"], only["recent"], [r["text"] for r in only["tasks"]]), (1, 1, ["Task 0"]))
+        other = dict(mine, session="codex/elsewhere")
+        none = self.mobile("mobile-done", {"schema": 1, "project": "project-1", "limit": 50, "session": other})
+        self.assertEqual((none["total"], none["recent"], none["tasks"]), (0, 0, []))
+        broken = {"schema": 1, "project": "project-1", "limit": 50, "session": {"session": self.name}}
+        self.assertIn("invalid request", self.mobile("mobile-done", broken, ok=False)["error"])
+
     def test_mobile_answers_stay_small(self):
         # A long prompt and 4 MiB of comments: the answer carries neither.
         prompt = "Add rate limiting " + hashlib.sha256(b"prompt").hexdigest() * 900

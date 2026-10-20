@@ -711,7 +711,7 @@ pub fn task_payload(op: &str, p: &Value) -> Result<()> {
             Ok(())
         }
         "task_done" => {
-            fields(p, &["schema", "project", "limit"], &["before"])?;
+            fields(p, &["schema", "project", "limit"], &["before", "session"])?;
             task_project(p)?;
             if p["limit"]
                 .as_u64()
@@ -723,6 +723,12 @@ pub fn task_payload(op: &str, p: &Value) -> Result<()> {
                 fields(before, &["at", "uuid"], &[])?;
                 before["at"].as_u64().ok_or(Error::BAD)?;
                 uuid(&before["uuid"], false)?;
+            }
+            // Only this session: the Done tasks sent to one session.
+            if let Some(session) = p.get("session") {
+                fields(session, &["machine", "session"], &[])?;
+                text(&session["machine"], TASK_PROJECT_MAX, false)?;
+                text(&session["session"], 1024, false)?;
             }
             Ok(())
         }

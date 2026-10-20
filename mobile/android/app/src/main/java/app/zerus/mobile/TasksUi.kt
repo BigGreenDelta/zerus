@@ -149,7 +149,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
                 }, navigationIcon = { IconButton(onClick = { model.closeTasks() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                     actions = {
                         val only = model.tasksOnlyThisSession
-                        IconButton(onClick = { model.tasksOnlyThisSession = !only }, modifier = Modifier.semantics {
+                        IconButton(onClick = { model.setOnlyThisSession(!only) }, modifier = Modifier.semantics {
                             contentDescription = "Only this session"; stateDescription = if (only) "On" else "Off"
                         }) { Icon(Icons.Default.FilterList, null, tint = if (only) TasksColors.Accent else LocalContentColor.current) }
                         IconButton(onClick = { projectSettings = true }) { Icon(Icons.Default.Settings, "Project task settings") }
@@ -195,7 +195,10 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
             openTask?.let { uuid -> tasks.firstOrNull { it.uuid == uuid }?.let { task ->
                 TaskSettingsSheet(model, key, task, onDismiss = { openTask = null }, onCancel = { openTask = null; cancelling = task })
             } }
-            cancelling?.let { task -> CancelTaskDialog(task, onDismiss = { cancelling = null }) { reason -> cancelling = null; model.cancelTask(task, reason) } }
+            cancelling?.let { task ->
+                val direct = ((model.cancelRoute(task) as? RouteState.Ready)?.route?.direct) ?: true
+                CancelTaskDialog(task, direct, onDismiss = { cancelling = null }) { reason -> cancelling = null; model.cancelTask(task, reason) }
+            }
             if (projectSettings) ProjectTaskSettingsSheet(model, onDismiss = { projectSettings = false })
             if (allSessions) AllSessionsSheet(model, onDismiss = { allSessions = false })
         }
@@ -270,13 +273,18 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
     val focus = remember { FocusRequester() }
     val stage = if (model.taskTab == TaskTab.BACKLOG) "Backlog" else "To do"
     val text = editor.text.toString()
-    val canAdd = text.isNotBlank() && model.tasksChosen != null
+    val reason = TasksPresentation.addReason(model.tasksChosen)
+    val canAdd = text.isNotBlank() && reason.isEmpty()
     CompactMessageInput(state = editor, placeholder = "Add to $stage", readOnly = false, inputTransformation = InputTransformation { },
         focusRequester = focus, onFocusChanged = { }, modifier = modifier, leading = { Spacer(Modifier.width(8.dp)) }, action = {
-            ComposerActionButton(onClick = { model.addTask(text.trim()); editor.clearText() }, enabled = canAdd,
-                containerColor = TasksColors.Accent, contentColor = MaterialTheme.colorScheme.background,
+            // A session that cannot take tasks answers the tap with why.
+            ComposerActionButton(onClick = { if (canAdd) { model.addTask(text.trim()); editor.clearText() } else model.taskNotice = reason },
+                enabled = text.isNotBlank(),
+                containerColor = if (canAdd) TasksColors.Accent else Color(0xFF2B3B3B),
+                contentColor = if (canAdd) MaterialTheme.colorScheme.background else TasksColors.Muted,
                 disabledContainerColor = Color(0xFF2B3B3B), disabledContentColor = TasksColors.Muted) {
-                Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add to $stage", Modifier.size(22.dp))
+                if (text.isNotBlank() && !canAdd) Icon(Icons.Default.Info, "Why the task cannot be added", Modifier.size(22.dp))
+                else Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add to $stage", Modifier.size(22.dp))
             }
         })
 }
@@ -386,14 +394,17 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
     }
 }
 
-/** The desktop's cancel dialog: the text, what will happen, the optional reason. */
-@Composable private fun CancelTaskDialog(task: TaskInfo, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+/** The desktop's cancel dialog: the text, what will happen, the optional reason. When the session's computer is
+ * out of reach, another computer cancels it there without the cancel message. */
+@Composable private fun CancelTaskDialog(task: TaskInfo, direct: Boolean, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
     var reason by remember(task.uuid) { mutableStateOf("") }
     val session = task.session?.session ?: "the session"
     AlertDialog(onDismissRequest = onDismiss, containerColor = TasksColors.Dialog, title = { Text("Cancel ${task.id}?") }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(task.text, maxLines = 4, overflow = TextOverflow.Ellipsis)
-            Text("${task.id} moves to In review, and $session gets the cancel message.", style = MaterialTheme.typography.bodySmall,
+            Text(if (direct) "${task.id} moves to In review, and $session gets the cancel message."
+                else "${task.id} moves to In review. The computer of $session is out of reach, so $session gets no cancel message.",
+                style = MaterialTheme.typography.bodySmall,
                 color = TasksColors.Muted)
             OutlinedTextField(reason, { reason = it }, Modifier.fillMaxWidth(), label = { Text("Reason (optional)") },
                 supportingText = { Text("Saved as a comment on the task, not sent to the agent") }, maxLines = 4)

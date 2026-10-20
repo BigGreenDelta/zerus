@@ -300,6 +300,9 @@ fn the_task_actions_wire_is_strict() {
     let mut first = done(&computer);
     first["payload"].as_object_mut().unwrap().remove("before");
     protocol::request(&first).unwrap();
+    // Only this session: the Done tasks sent to one session.
+    first["payload"]["session"] = json!({"machine": "node-1", "session": "codex/api"});
+    protocol::request(&first).unwrap();
     type Make = fn(&str) -> Value;
     let cases: &[(Make, &str, Value)] = &[
         (send, "schema", json!(2)),
@@ -315,6 +318,23 @@ fn the_task_actions_wire_is_strict() {
         (done, "before", json!({"at": -1, "uuid": TASK})),
         (done, "before", json!({"at": 1, "uuid": "x"})),
         (done, "before", json!({"at": 1, "uuid": TASK, "extra": 1})),
+        (done, "session", json!("codex/api")),
+        (done, "session", json!({"session": "codex/api"})),
+        (
+            done,
+            "session",
+            json!({"machine": "", "session": "codex/api"}),
+        ),
+        (
+            done,
+            "session",
+            json!({"machine": "node-1", "session": "codex/\napi"}),
+        ),
+        (
+            done,
+            "session",
+            json!({"machine": "node-1", "session": "codex/api", "extra": 1}),
+        ),
     ];
     for (make, key, value) in cases {
         let mut bad = make(&computer);

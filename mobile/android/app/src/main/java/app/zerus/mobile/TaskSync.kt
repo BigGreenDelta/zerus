@@ -113,8 +113,9 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
     }
 
     /** Send now: the phone's edits reach the session's computer first, then it sends, then its copy comes back. */
-    suspend fun send(connection: Connection, key: ProjectKey, name: String, computerId: String, task: String, session: String): TaskOutcome =
-        act(connection, key, name, computerId, "task_send",
+    suspend fun send(connection: Connection, key: ProjectKey, name: String, computerId: String, task: String, session: String,
+                     computerName: String = computerId): TaskOutcome =
+        act(connection, key, name, computerId, computerName, "task_send",
             JSONObject().put("schema", 1).put("project", key.id).put("task", task).put("session", session))
             .also { if (it is TaskOutcome.Uncertain) sends[task] = key to computerId }
 
@@ -133,14 +134,17 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
         }
     }
 
-    suspend fun cancel(connection: Connection, key: ProjectKey, name: String, computerId: String, task: String, reason: String): TaskOutcome =
-        act(connection, key, name, computerId, "task_cancel", JSONObject().put("schema", 1).put("project", key.id).put("task", task)
+    suspend fun cancel(connection: Connection, key: ProjectKey, name: String, computerId: String, task: String, reason: String,
+                       computerName: String = computerId): TaskOutcome =
+        act(connection, key, name, computerId, computerName, "task_cancel", JSONObject().put("schema", 1).put("project", key.id).put("task", task)
             .also { if (reason.isNotBlank()) it.put("reason", reason) })
 
-    /** One page of that computer's Done list. */
-    suspend fun donePage(connection: Connection, key: ProjectKey, computerId: String, before: DoneCursor?, limit: Int = 50): DonePage {
+    /** One page of that computer's Done list; with `session`, of the tasks sent to it. */
+    suspend fun donePage(connection: Connection, key: ProjectKey, computerId: String, before: DoneCursor?, limit: Int = 50,
+                         session: app.zerus.mobile.replica.SessionRef? = null): DonePage {
         val payload = JSONObject().put("schema", 1).put("project", key.id).put("limit", limit)
         before?.let { payload.put("before", JSONObject().put("at", it.at).put("uuid", it.uuid)) }
+        session?.let { payload.put("session", JSONObject().put("machine", it.machine).put("session", it.session)) }
         val receipt = request(connection, computerId, "task_done", payload)
         check(receipt.string("state") == "completed") { receipt.string("error").ifBlank { "The computer did not list its Done tasks." } }
         val result = receipt.optJSONObject("result") ?: error("The computer's Done list has no result.")
@@ -153,11 +157,11 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
     }
 
     /** The exchange, then `operation` on that computer, then the exchange that shows its result. */
-    private suspend fun act(connection: Connection, key: ProjectKey, name: String, computerId: String,
+    private suspend fun act(connection: Connection, key: ProjectKey, name: String, computerId: String, computerName: String,
                             operation: String, payload: JSONObject): TaskOutcome = project(key, name) { store ->
         try { bounded { exchange(connection, store, computerId) } }
         catch (e: CancellationException) { throw e }
-        catch (e: Exception) { return@project TaskOutcome.Refused("The tasks could not reach that computer: ${e.message.orEmpty()}") }
+        catch (e: Exception) { return@project TaskOutcome.Refused("The tasks could not reach $computerName: ${e.message.orEmpty()}") }
         val outcome = try {
             val receipt = request(connection, computerId, operation, payload, maxPolls = 150)
             val reason = receipt.string("error")

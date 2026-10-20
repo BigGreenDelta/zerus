@@ -13,6 +13,11 @@ fn store(root: &Path) -> ProjectStore {
 
 /// A task filed, sent, reported and accepted into Done at `now`.
 fn done_at(store: &ProjectStore, text: &str, now: i64) -> String {
+    done_in(store, text, now, "codex/api")
+}
+
+/// A task sent to `session` on computer `m` and accepted into Done at `now`.
+fn done_in(store: &ProjectStore, text: &str, now: i64, session: &str) -> String {
     let mut task = TaskDoc::create(NewTask {
         project: store.project_id(),
         id: &store.unused_short_id().unwrap(),
@@ -26,7 +31,7 @@ fn done_at(store: &ProjectStore, text: &str, now: i64) -> String {
     .unwrap();
     let session = SessionKey {
         machine: "m".into(),
-        session: "codex/api".into(),
+        session: session.into(),
     };
     task.record_send(&session, "request-1", &Actor::Person, now - 2)
         .unwrap();
@@ -86,7 +91,7 @@ fn done_pages_walk_every_task_once() {
     let mut sizes = Vec::new();
     let mut before = None;
     loop {
-        let page = store.done_page(before.clone(), 50, 100).unwrap();
+        let page = store.done_page(before.clone(), 50, 100, None).unwrap();
         assert_eq!((page.total, page.recent), (120, 30));
         sizes.push(page.tasks.len());
         for row in &page.tasks {
@@ -112,7 +117,7 @@ fn an_empty_page_ends_the_list() {
     let root = tempfile::tempdir().unwrap();
     let store = store(root.path());
     done_at(&store, "Task", 10);
-    let page = store.done_page(None, 0, 0).unwrap();
+    let page = store.done_page(None, 0, 0, None).unwrap();
     assert_eq!((page.tasks.len(), page.next, page.total), (0, None, 1));
 }
 
@@ -123,7 +128,7 @@ fn a_task_accepted_meanwhile_does_not_shift_the_pages() {
     let uuids: Vec<_> = (0..5)
         .map(|n| done_at(&store, &format!("Task {n}"), 10 + n))
         .collect();
-    let first = store.done_page(None, 2, 0).unwrap();
+    let first = store.done_page(None, 2, 0, None).unwrap();
     assert_eq!(
         first
             .tasks
@@ -133,7 +138,7 @@ fn a_task_accepted_meanwhile_does_not_shift_the_pages() {
         [uuids[4].clone(), uuids[3].clone()]
     );
     done_at(&store, "Accepted meanwhile", 99);
-    let second = store.done_page(first.next, 2, 0).unwrap();
+    let second = store.done_page(first.next, 2, 0, None).unwrap();
     assert_eq!(
         second
             .tasks
@@ -155,7 +160,7 @@ fn the_page_loads_only_its_tasks() {
     done_at(&store, "Middle", 20);
     done_at(&store, "Newest", 30);
     settle_all(root.path());
-    store.done_page(None, 3, 0).unwrap();
+    store.done_page(None, 3, 0, None).unwrap();
     // The cache knows the oldest task's stage and time; its file can no longer be read.
     let file = project_dir(root.path())
         .join("tasks")
@@ -164,7 +169,7 @@ fn the_page_loads_only_its_tasks() {
     if fs::read(&file).is_ok() {
         return; // A superuser reads anything: nothing to show here.
     }
-    let first = store.done_page(None, 2, 0).unwrap();
+    let first = store.done_page(None, 2, 0, None).unwrap();
     assert_eq!(
         first
             .tasks
@@ -174,9 +179,89 @@ fn the_page_loads_only_its_tasks() {
         ["Newest", "Middle"]
     );
     // The page that holds it leaves it out and still ends the list.
-    let last = store.done_page(first.next, 2, 0).unwrap();
+    let last = store.done_page(first.next, 2, 0, None).unwrap();
     assert!(last.tasks.is_empty());
     assert_eq!((last.next, last.total, last.damaged), (None, 3, 1));
     assert_eq!(first.damaged, 0);
     fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn a_session_filter_counts_and_pages_only_that_sessions_tasks_from_the_cache() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path());
+    let mut mine = Vec::new();
+    for n in 0..5 {
+        mine.push(done_in(
+            &store,
+            &format!("Mine {n}"),
+            10 + 2 * n,
+            "codex/api",
+        ));
+        done_in(&store, &format!("Theirs {n}"), 11 + 2 * n, "claude/web");
+    }
+    let api = SessionKey {
+        machine: "m".into(),
+        session: "codex/api".into(),
+    };
+    settle_all(root.path());
+    store.done_page(None, 50, 0, None).unwrap();
+    // Another session's task no longer reads; the filter needs only the cache.
+    let theirs = store.done_page(None, 1, 0, None).unwrap().tasks[0]
+        .uuid
+        .clone();
+    let file = project_dir(root.path())
+        .join("tasks")
+        .join(format!("{theirs}.loro"));
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    let unreadable = fs::read(&file).is_err();
+    let first = store.done_page(None, 3, 14, Some(&api)).unwrap();
+    assert_eq!((first.total, first.recent), (5, 3));
+    assert_eq!(
+        first
+            .tasks
+            .iter()
+            .map(|r| r.uuid.clone())
+            .collect::<Vec<_>>(),
+        [mine[4].clone(), mine[3].clone(), mine[2].clone()]
+    );
+    let rest = store.done_page(first.next, 3, 14, Some(&api)).unwrap();
+    assert_eq!(
+        rest.tasks
+            .iter()
+            .map(|r| r.uuid.clone())
+            .collect::<Vec<_>>(),
+        [mine[1].clone(), mine[0].clone()]
+    );
+    assert_eq!(rest.next, None);
+    if unreadable {
+        assert_eq!((first.damaged, rest.damaged), (0, 0));
+    }
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[test]
+fn a_cache_written_before_the_filter_is_read_again() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path());
+    done_in(&store, "Mine", 10, "codex/api");
+    done_in(&store, "Theirs", 11, "claude/web");
+    settle_all(root.path());
+    store.done_page(None, 50, 0, None).unwrap();
+    // An older hgs cached stages without sessions.
+    let path = project_dir(root.path()).join("inventory.json");
+    let mut cache: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for entry in cache["tasks"].as_object_mut().unwrap().values_mut() {
+        entry.as_object_mut().unwrap().remove("sent");
+    }
+    fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+    let api = SessionKey {
+        machine: "m".into(),
+        session: "codex/api".into(),
+    };
+    let page = store.done_page(None, 50, 0, Some(&api)).unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.tasks[0].text, "Mine");
 }

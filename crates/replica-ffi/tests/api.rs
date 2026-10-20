@@ -3,6 +3,34 @@ use zerus_replica_ffi::{
     ReplicaError, TaskPosition, TaskSettings, TaskStage, TaskStore, TaskTarget,
 };
 
+/// A task sent, reported and accepted into Done, as only hgs records a send.
+fn accepted(root: &tempfile::TempDir, text: &str) -> String {
+    use zerus_replica::{Actor, NewTask, ProjectStore, SessionKey, Stage, Target, TaskDoc};
+    let store = ProjectStore::open(root.path(), "project-1").unwrap();
+    let mut task = TaskDoc::create(NewTask {
+        project: "project-1",
+        id: &store.unused_short_id().unwrap(),
+        text,
+        stage: Stage::Todo,
+        target: Target::Any,
+        author: Actor::Person,
+        rank: "V",
+        now: 1,
+    })
+    .unwrap();
+    let session = SessionKey {
+        machine: "m".into(),
+        session: "codex/api".into(),
+    };
+    task.record_send(&session, "request-1", &Actor::Person, 2)
+        .unwrap();
+    task.record_report("Done.", &Actor::Agent(session), 3)
+        .unwrap();
+    task.set_stage(Stage::Done, &Actor::Person, 4).unwrap();
+    store.save(&mut task).unwrap();
+    task.uuid().to_owned()
+}
+
 fn store(root: &tempfile::TempDir) -> std::sync::Arc<TaskStore> {
     TaskStore::new(
         root.path().display().to_string(),
@@ -199,24 +227,23 @@ fn two_stores_exchange_through_json() {
     assert_eq!(phone.list().unwrap().tasks.len(), 2);
     // A task the phone does not hold, such as a Done task opened on it, comes
     // when the exchange asks for it.
-    let done = computer
-        .add(
-            "Document the limits".into(),
-            TaskStage::Todo,
-            TaskTarget::AnySession,
-            TaskPosition::End,
-        )
-        .unwrap();
-    let fetching = phone.clone().exchange_fetching(vec![done.uuid.clone()]);
+    let done = accepted(&a, "Document the limits");
+    // A plain exchange leaves a Done task on the computer.
+    let plain = phone.clone().exchange();
+    while let Some(request) = plain.next_request().unwrap() {
+        plain
+            .accept(computer.answer_exchange(request).unwrap())
+            .unwrap();
+    }
+    assert!(phone.get(done.clone()).is_err());
+    let fetching = phone.clone().exchange_fetching(vec![done.clone()]);
     while let Some(request) = fetching.next_request().unwrap() {
         fetching
             .accept(computer.answer_exchange(request).unwrap())
             .unwrap();
     }
-    assert_eq!(
-        phone.get(done.uuid.clone()).unwrap().text,
-        "Document the limits"
-    );
+    assert_eq!(phone.get(done.clone()).unwrap().text, "Document the limits");
+    assert_eq!(phone.get(done.clone()).unwrap().stage, TaskStage::Done);
     // An answer that is not JSON is refused with its reason.
     let again = phone.clone().exchange();
     again.next_request().unwrap().unwrap();

@@ -206,6 +206,11 @@ impl TaskDoc {
         string(&self.fields(), "rank").unwrap_or_default()
     }
 
+    /// The session it was last sent to.
+    pub fn session(&self) -> Option<SessionKey> {
+        string(&self.fields(), "session").and_then(|s| serde_json::from_str(&s).ok())
+    }
+
     pub fn view(&self) -> Result<TaskView> {
         let meta = self.meta();
         let fields = self.fields();
@@ -260,7 +265,7 @@ impl TaskDoc {
             stage: self.stage()?,
             target,
             rank: self.rank(),
-            session: string(&fields, "session").and_then(|s| serde_json::from_str(&s).ok()),
+            session: self.session(),
             summary: string(&fields, "summary").unwrap_or_default(),
             cancelled_at: integer(&fields, "cancelled_at"),
             cancel_reason: string(&fields, "cancel_reason").unwrap_or_default(),

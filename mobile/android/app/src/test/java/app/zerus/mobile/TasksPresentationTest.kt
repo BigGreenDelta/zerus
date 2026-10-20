@@ -104,10 +104,27 @@ class TasksPresentationTest {
         assertEquals(RouteState.Ready(SendRoute("computer-2", "claude/web")),
             TasksPresentation.cancelRoute(active, listOf(here, laptop), { exchange }))
         // That computer is offline: another one cancels it there, as hgs does.
-        assertEquals(RouteState.Ready(SendRoute("computer-1", "claude/web")),
+        assertEquals(RouteState.Ready(SendRoute("computer-1", "claude/web", direct = false)),
             TasksPresentation.cancelRoute(active, listOf(here, laptop.copy(online = false)), { exchange }))
         assertEquals(RouteState.Blocked("No computer of this project is online"),
             TasksPresentation.cancelRoute(active, listOf(here.copy(online = false)), { exchange }))
+    }
+
+    @Test fun aSessionOnAComputerWithoutANativeIdTakesNoTasks() {
+        val old = Machine("workspace-a", "computer-3", "Old", true)
+        val unknown = ChosenSession("codex/old", "computer-3", "")
+        assertEquals("codex/old is on a computer that needs an update to take tasks", TasksPresentation.addReason(unknown))
+        assertEquals("Choose a session for new tasks", TasksPresentation.addReason(null))
+        assertEquals("", TasksPresentation.addReason(chosen))
+        // Neither an Any session task nor a blank pin reaches the computer that reports no ID.
+        val sessions = listOf(session("codex/old", "computer-3"))
+        assertEquals(RouteState.Blocked("codex/old is on a computer that needs an update to take tasks"),
+            TasksPresentation.route(task(TaskStage.TODO), unknown, listOf(old), "workspace-a", { exchange }, sessions))
+        assertEquals(RouteState.Blocked("codex/old is on a computer that needs an update to take tasks"),
+            TasksPresentation.route(task(TaskStage.TODO, pinned("codex/old", "")), chosen, listOf(old), "workspace-a", { exchange }, sessions))
+        val active = task(TaskStage.ACTIVE, session = SessionRef("", "codex/old"))
+        assertEquals(RouteState.Ready(SendRoute("computer-1", "codex/old", direct = false)),
+            TasksPresentation.cancelRoute(active, listOf(old, here), { exchange }))
     }
 
     @Test fun chipsShowEachSessionsStatus() {

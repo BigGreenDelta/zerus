@@ -162,6 +162,10 @@ class TaskExchangeEndToEnd(unittest.IsolatedAsyncioTestCase):
             done = await self.submit("task_done", {"schema": 1, "project": "project-1", "limit": 50})
             self.assertEqual(done["state"], "completed", done)
             self.assertEqual((done["result"]["tasks"], done["result"]["total"], done["result"]["next"]), ([], 0, None))
+            # Only this session: the Done tasks sent to one session.
+            mine = await self.submit("task_done", {"schema": 1, "project": "project-1", "limit": 50,
+                                                   "session": {"machine": "node-1", "session": "codex/api"}})
+            self.assertEqual((mine["state"], mine["result"]["total"]), ("completed", 0), mine)
             # The computer's own hgs refuses before anything happens: the receipt says why.
             sent = await self.submit("task_send", {"schema": 1, "project": "project-1", "task": task["uuid"],
                                                     "session": "codex/nowhere"})
