@@ -9,7 +9,11 @@ data class ProjectKey(val connectionId: String, val swarmId: String, val id: Str
 data class ProjectFolder(val id: String, val name: String, val path: String, val computerId: String, val computerName: String)
 data class ProjectSummary(val key: ProjectKey, val name: String, val color: String,
     val folders: List<ProjectFolder>, val computers: Map<String, String>, val stale: Boolean = false, val catalogued: Boolean = true)
-data class ProjectCatalog(val projects: List<ProjectSummary>, val sessions: List<Session>, val unavailableComputers: List<String>)
+/** [taskDigests] holds, for each catalogued project, every computer's tasks digest (by computer ID). */
+data class ProjectCatalog(val projects: List<ProjectSummary>, val sessions: List<Session>, val unavailableComputers: List<String>,
+    val taskDigests: Map<ProjectKey, Map<String, String>> = emptyMap())
+
+private val taskDigest = Regex("[0-9a-f]{64}")
 
 /** Canonical IDs own membership; paths are only an exact fallback for uncatalogued sessions. */
 object ProjectParser {
@@ -17,6 +21,7 @@ object ProjectParser {
         val groups = linkedMapOf<ProjectKey, ProjectSummary>()
         val catalogs = computers.associate { computer -> computer.getString("id") to computer.optJSONObject("snapshot")?.optJSONObject("mobile_projects") }
         val assignments = mutableMapOf<Pair<String, String>, MutableSet<ProjectKey>>()
+        val digests = linkedMapOf<ProjectKey, MutableMap<String, String>>()
         val unavailable = mutableListOf<String>()
         computers.forEach { computer ->
             val computerId = computer.getString("id")
@@ -34,6 +39,10 @@ object ProjectParser {
                 val id = project.string("id")
                 if (id.isBlank()) return@projectLoop
                 val key = ProjectKey(connection.id, swarm, id)
+                // Every computer of the swarm names its own digest of the project's tasks.
+                project.optString("tasks_digest").takeIf { taskDigest.matches(it) }?.let {
+                    digests.getOrPut(key) { linkedMapOf() }[computerId] = it
+                }
                 val folders = project.optJSONArray("folders")?.objects().orEmpty().filter { it.optBoolean("local", true) }.map {
                     ProjectFolder(it.string("id"), it.string("name"), it.string("path"), computerId, computerName)
                 }.filter { it.path.isNotBlank() }
@@ -85,6 +94,6 @@ object ProjectParser {
             }
             session.copy(project = groups.getValue(key).name, projectKey = key)
         }
-        return ProjectCatalog(groups.values.toList(), mapped, unavailable)
+        return ProjectCatalog(groups.values.toList(), mapped, unavailable, digests)
     }
 }

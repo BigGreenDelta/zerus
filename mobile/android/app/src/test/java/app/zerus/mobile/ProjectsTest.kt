@@ -29,6 +29,15 @@ class ProjectsTest {
         val another = parse(listOf(a), connection.copy(id = "workspace-b"))
         assertNotEquals(result.sessions.first().projectKey, another.sessions.first().projectKey)
     }
+    @Test fun taskDigestsAreReadPerComputer() {
+        val digest = { c: Char -> c.toString().repeat(64) }
+        val a = computer("a", listOf(project("p", "Orchard", listOf("one")).put("tasks_digest", digest('a'))), listOf(session("one", "/a", id = "p")))
+        // A computer that lists the project without folders or sessions still names its digest.
+        val b = computer("b", listOf(project("p", "Orchard").put("tasks_digest", digest('b')), project("q", "Meadow").put("tasks_digest", "not a digest")))
+        val result = parse(listOf(a, b))
+        assertEquals(mapOf("a" to digest('a'), "b" to digest('b')), result.taskDigests[result.projects.first { it.key.id == "p" }.key])
+        assertNull(result.taskDigests[result.projects.first { it.key.id == "q" }.key])
+    }
     @Test fun projectsAndSessionGroupsKeepTheSharedCatalogOrder() {
         // hgs lists projects in the swarm's shared order, the order desktops show.
         val result = parse(listOf(computer("a", listOf(project("z-first", "Zeta", listOf("one")), project("m", "Alpha", listOf("two")),
