@@ -99,16 +99,39 @@ private slots:
         QVERIFY(reply(dir.path()+"/reply",state(true)));start->click();QTRY_VERIFY(stop->isEnabled());
         QVERIFY(reply(dir.path()+"/reply",state()));stop->click();QTRY_VERIFY(save->isEnabled());
     }
+    void configuredDefaultStateDirectoryRemainsSupported_data(){
+        QTest::addColumn<QJsonValue>("defaultDirectory");
+        QTest::newRow("null")<<QJsonValue(QJsonValue::Null);
+        QTest::newRow("empty")<<QJsonValue(QString());
+    }
     void configuredDefaultStateDirectoryRemainsSupported(){
+        QFETCH(QJsonValue,defaultDirectory);
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto fixture=dir.path()+"/connector";
-        QVERIFY(install(fixture));auto status=state();status["state_dir"]=QJsonValue(QJsonValue::Null);
+        QVERIFY(install(fixture));auto status=state();status["state_dir"]=defaultDirectory;
         QVERIFY(reply(dir.path()+"/reply",status));
         WindowsMobileSettings::Panel panel(FakeCli::program(fixture),dir.path()+"/private/connector.json");
         auto *start=panel.findChild<QPushButton*>("startMobileConnector");
+        auto *save=panel.findChild<QPushButton*>("saveRelayConfiguration");
+        auto *stop=panel.findChild<QPushButton*>("stopMobileConnector");
+        auto *reload=panel.findChild<QPushButton*>("reloadMobileConnector");
+        auto *token=panel.findChild<QLineEdit*>("relayReplacementToken");
         QTRY_VERIFY(start->isEnabled());
+        // Saving an unchanged configuration keeps its documented default form.
+        save->click();QTRY_VERIFY(start->isEnabled());
         status["running"]=true;status["generation"]=QString(32,'b');
         QVERIFY(reply(dir.path()+"/reply",status));start->click();
-        QTRY_VERIFY(panel.findChild<QPushButton*>("stopMobileConnector")->isEnabled());
+        QTRY_VERIFY(stop->isEnabled());
+        status["running"]=false;status["generation"]=QJsonValue(QJsonValue::Null);
+        QVERIFY(reply(dir.path()+"/reply",status));stop->click();QTRY_VERIFY(save->isEnabled());
+        // Accepting a default must not weaken malformed-state refusal or lose
+        // the user's replacement credential on an unconfirmed reload.
+        token->setText("synthetic-replacement-credential");
+        auto invalid=status;invalid["running"]="false";
+        QVERIFY(reply(dir.path()+"/reply",invalid));reload->click();
+        QTRY_VERIFY(reload->isEnabled());
+        QVERIFY(!save->isEnabled());QVERIFY(!start->isEnabled());QVERIFY(!stop->isEnabled());
+        QCOMPARE(token->text(),QString("synthetic-replacement-credential"));
+        QVERIFY(reply(dir.path()+"/reply",status));reload->click();QTRY_VERIFY(start->isEnabled());
     }
 };
 QTEST_MAIN(TestWindowsMobileSettings)

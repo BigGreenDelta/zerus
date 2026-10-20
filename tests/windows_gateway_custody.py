@@ -6,6 +6,11 @@ class CustodyUnknown(RuntimeError):
     pass
 
 
+def termination_adapter(kernel):
+    """Adapt the two-argument Windows API to the custody callback contract."""
+    return lambda handle: kernel.TerminateProcess(handle, 1)
+
+
 def guard_root_cleanup(case, temporary, may_remove):
     """Prevent unittest and TemporaryDirectory GC from bypassing custody."""
     def cleanup():

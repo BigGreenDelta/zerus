@@ -20,7 +20,7 @@ import uuid
 
 from test_windows_host import FAKE_AGENT, HGS, HIDDEN, LIMIT
 from test_windows_lifecycle import LifecycleCase, read_json, read_events
-from windows_gateway_custody import ConnectorCustody, guard_root_cleanup
+from windows_gateway_custody import ConnectorCustody, guard_root_cleanup, termination_adapter
 
 CONNECTOR = Path(os.environ.get("HGS_TEST_CONNECTOR", Path(__file__).resolve().parents[1] /
                                "services/mobile/connector/target/release/zerus-mobile-connector.exe"))
@@ -170,7 +170,7 @@ class Gateway(LifecycleCase):
         def stop(control):
             self.manage("stop", {"revision": control["revision"], "generation": control["generation"]})
         self.custody = ConnectorCustody(state["revision"], read_control, self.pin_connector,
-            kernel.WaitForSingleObject, kernel.TerminateProcess, kernel.CloseHandle, stop)
+            kernel.WaitForSingleObject, termination_adapter(kernel), kernel.CloseHandle, stop)
         self.custody.begin()  # Before Start, so failure/timeout cannot lose custody.
         running = self.manage("start", {"revision": state["revision"]})
         self.custody.recover()

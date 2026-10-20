@@ -69,9 +69,8 @@ private:
         return hex(result.value("revision"),64)&&result.value("server_url").isString()
             &&RelaySettings::validUrl(result.value("server_url").toString())
             // A manually supplied configuration may use the connector's
-            // default state directory, reported as null by management.
-            &&(result.value("state_dir").isNull()||(result.value("state_dir").isString()
-                &&!result.value("state_dir").toString().isEmpty()))
+            // default state directory, reported as null or an empty string.
+            &&(result.value("state_dir").isNull()||result.value("state_dir").isString())
             &&(running?hex(result.value("generation"),32):result.value("generation").isNull());
     }
     static bool confirmed(const QString &action,const QJsonObject &result,const QJsonObject &sent,const QJsonObject &previous){

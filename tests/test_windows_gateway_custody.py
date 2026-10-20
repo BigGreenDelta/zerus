@@ -3,7 +3,7 @@ import unittest
 import gc
 from pathlib import Path
 import tempfile
-from windows_gateway_custody import ConnectorCustody, CustodyUnknown, guard_root_cleanup
+from windows_gateway_custody import ConnectorCustody, CustodyUnknown, guard_root_cleanup, termination_adapter
 
 
 class Custody(unittest.TestCase):
@@ -91,6 +91,21 @@ class Custody(unittest.TestCase):
     def test_forced_exit_requires_final_handle_signal(self):
         self.custody.begin(); self.admit(); self.waits = [0x102, 0]
         self.assertTrue(self.custody.cleanup())
+        self.assertTrue(self.custody.may_remove_root)
+
+    def test_native_termination_adapter_passes_handle_and_exit_code(self):
+        calls = []
+        class Kernel:
+            # The real ctypes binding requires both arguments. A raw function
+            # passed as the one-argument callback must fail this boundary.
+            def TerminateProcess(self, handle, exit_code):
+                calls.append((handle, exit_code))
+                return True
+        self.custody.terminate = termination_adapter(Kernel())
+        self.custody.begin(); self.admit(); self.waits = [0x102, 0]
+        self.assertTrue(self.custody.cleanup())
+        self.assertEqual(calls, [("owned-image-handle", 1)])
+        self.assertEqual(self.closed, ["owned-image-handle"])
         self.assertTrue(self.custody.may_remove_root)
 
     def test_no_launch_allows_root_cleanup(self):
