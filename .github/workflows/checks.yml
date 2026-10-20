@@ -897,7 +897,10 @@ jobs:
       - name: Windows mobile connector build and native filesystem contracts
         run: |
           cargo +1.99.1 clippy --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --all-targets -- -D warnings
-          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --test windows_gateway </dev/null
+          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --lib windows_management::tests </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-locks.log
+          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --test windows_gateway </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-config.log
           cargo +1.99.1 build --locked --release --manifest-path services/mobile/connector/Cargo.toml --target-dir target
       - name: Windows client integration tests
         run: |

@@ -242,6 +242,7 @@ HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
   python -X utf8 scripts/ci/agent-compatibility.py </dev/null
 export QT_ROOT_DIR="$(cygpath -w ~/Qt/6.10.3/msvc2022_64)"
 bash scripts/ci/gui.sh </dev/null
+cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --lib windows_management::tests
 cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --test windows_gateway
 cargo +1.99.1 build --release --locked --manifest-path services/mobile/connector/Cargo.toml
 HGS_TEST_CONNECTOR="$(cygpath -w "$PWD/services/mobile/connector/target/release/zerus-mobile-connector.exe")" \
@@ -304,6 +305,10 @@ after artwork changes.
 
 `test_windows_mobile_gateway.py` needs Git for Windows' `openssl` on PATH and
 runs outside a job that forbids breakaway, as do the other session-host suites.
+Before that fixture, the two `windows_management::tests` library cases exercise
+actual management-lock contention and expiry, and the five `windows_gateway`
+integration cases exercise private configuration, revision admission and ACLs.
+They must execute on Windows; Linux excludes them and is not runtime evidence.
 It creates only a throwaway profile, tracked fake Codex session, copied gateway
 bundle and HTTPS loopback protocol fixture. It checks actual connector Start,
 duplicate Start, published capabilities, Terminal snapshot/input and duplicate

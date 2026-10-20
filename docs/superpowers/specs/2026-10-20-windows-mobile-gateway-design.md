@@ -150,10 +150,13 @@ disposable Windows user/profile with an already provisioned toolchain, exact
 reviewed source and no owner installation, services, agents, keys or phone.
 Set `CARGO_BUILD_JOBS=2` and `ZERUS_BUILD_JOBS=2` for the approved local gate.
 
-1. Build/lint the connector and CLI natively. Run `windows_gateway` explicitly:
-   five cases must execute, including the unsafe inheritable directory with a
-   private existing DB/absent sidecars, held Start revision A versus Save B, and
-   same-revision already-running Start. Zero tests/skips do not qualify it.
+1. Build/lint the connector and CLI natively. Run the two
+   `windows_management::tests` library cases explicitly for actual lock
+   contention and expiry, then the five `windows_gateway` integration cases,
+   including the unsafe inheritable directory with private existing DB and lock
+   files/absent sidecars, held Start revision A versus Save B, and same-revision
+   already-running Start. Retain both raw logs. Zero tests/skips do not qualify
+   either suite.
 2. Run the Windows Qt settings fixtures, including all malformed status/save/
    start/stop cases and real successful response forms. Run supported native
    host/agent contracts only under a separately reviewed runtime scope.
