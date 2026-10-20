@@ -58,6 +58,45 @@ public enum HistoryProjection {
         try require(id.utf8.count == 64 && id.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) })
         return id
     }
+    /// Compact Python ASCII JSON, without the platform JSON writer's float/escape differences.
+    static func asciiBytes(_ value: JSON) throws -> Int {
+        func string(_ value: String) -> Int {
+            2 + value.utf16.reduce(0) { total, unit in
+                total + ([8, 9, 10, 12, 13, 34, 92].contains(Int(unit)) ? 2 : ((32...126).contains(unit) ? 1 : 6))
+            }
+        }
+        switch value {
+        case .null, .bool(true): return 4
+        case .bool(false): return 5
+        case .int(let number): return String(number).count
+        case .double(let number):
+            try require(number.isFinite)
+            return pythonFloat(number).count
+        case .string(let text): return string(text)
+        case .array(let values): return try 2 + values.reduce(0) { try $0 + asciiBytes($1) } + max(0, values.count - 1)
+        case .object(let values): return try 2 + values.reduce(0) { try $0 + string($1.key) + 1 + asciiBytes($1.value) } + max(0, values.count - 1)
+        }
+    }
+    static func pythonFloat(_ value: Double) -> String {
+        let raw = String(value).lowercased(), sign = raw.hasPrefix("-") ? "-" : ""
+        let unsigned = raw.hasPrefix("-") ? String(raw.dropFirst()) : raw
+        let parts = unsigned.split(separator: "e", omittingEmptySubsequences: false)
+        let mantissa = String(parts[0]), exponent = parts.count > 1 ? Int(parts[1])! : 0
+        let point = mantissa.firstIndex(of: ".").map { mantissa.distance(from: mantissa.startIndex, to: $0) } ?? mantissa.count
+        let all = mantissa.replacingOccurrences(of: ".", with: "")
+        let first = all.firstIndex(where: { $0 != "0" }).map { all.distance(from: all.startIndex, to: $0) } ?? all.count
+        let digits = String(all.dropFirst(first).reversed().drop(while: { $0 == "0" }).reversed())
+        if digits.isEmpty { return sign + "0.0" }
+        let power = exponent + point - first - 1
+        if !(-4..<16).contains(power) {
+            let fraction = digits.count > 1 ? "." + String(digits.dropFirst()) : ""
+            return sign + String(digits.prefix(1)) + fraction + "e" + (power < 0 ? "-" : "+") + String(format: "%02d", abs(power))
+        }
+        let position = power + 1
+        if position <= 0 { return sign + "0." + String(repeating: "0", count: -position) + digits }
+        if position >= digits.count { return sign + digits + String(repeating: "0", count: position - digits.count) + ".0" }
+        return sign + String(digits.prefix(position)) + "." + String(digits.dropFirst(position))
+    }
     public static func payload(_ target: Target, id: String, epoch: String, after: Int64, until: Int64) throws -> JSONObject {
         try require(after >= 0 && after <= until)
         _ = try text(.string(epoch), 128)
@@ -69,8 +108,7 @@ public enum HistoryProjection {
         return raw
     }
     public static func parse(target: Target, id: String, epoch: String, after: Int64, until: Int64, raw: JSONObject) throws -> Page {
-        let encoded = try JSON.object(raw).text()
-        try require(encoded.utf16.reduce(0, { $0 + ($1 < 128 ? 1 : 6) }) <= maxBytes && after >= 0 && until >= after)
+        try require(asciiBytes(.object(raw)) <= maxBytes && after >= 0 && until >= after)
         try require(raw["request_id"] == .string(id) && raw["name"] == .string(target.session) && raw["run_id"] == .string(target.run) && raw["conversation_id"] == .string(target.conversation))
         func echo(_ field: String, _ expected: String) -> Bool { raw[field].map { $0 == .string(expected) } ?? expected.isEmpty }
         try require(echo("archive_id", target.archiveId) && echo("agent_id", target.agentId) &&

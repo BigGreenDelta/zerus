@@ -986,6 +986,28 @@
         ]
       ],
       "remove": []
+    },
+    {
+      "id": "incomplete-at-until",
+      "accept": false,
+      "payload_set": {
+        "projection_until": 4
+      },
+      "set": [
+        [
+          [
+            "complete"
+          ],
+          false
+        ],
+        [
+          [
+            "next_projection_after"
+          ],
+          4
+        ]
+      ],
+      "remove": []
     }
   ]
 }

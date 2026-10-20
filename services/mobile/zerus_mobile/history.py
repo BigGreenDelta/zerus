@@ -223,5 +223,5 @@ def validate_projection_result(result, payload, session, request_id):
     if result["complete"]:
         if result["next_projection_after"] != payload["projection_until"]:
             refuse()
-    elif not result["projection_changes"] or result["next_projection_after"] != previous:
+    elif not result["projection_changes"] or result["next_projection_after"] != previous or previous >= payload["projection_until"]:
         refuse()

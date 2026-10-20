@@ -2,6 +2,9 @@ package app.zerus.mobile
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.math.BigDecimal
+import java.math.MathContext
+import java.math.RoundingMode
 
 /** Same-epoch corrections to derived display rows. Never a read mark or a delivery receipt. */
 object HistoryProjection {
@@ -32,15 +35,59 @@ object HistoryProjection {
         return value
     }
     private fun id(value:Any?):String { require(value is String && value.length==64 && value.all { it in '0'..'9' || it in 'a'..'f' });return value }
-    /** Count compact ASCII JSON, including surrogate pairs, as the computer's envelope budget does. */
-    private fun asciiBytes(raw:JSONObject):Long {
-        val s=raw.toString();var count=0L;var i=0
-        while(i<s.length) {
-            val c=s[i]
-            if(c.isHighSurrogate()) { require(i+1<s.length && s[i+1].isLowSurrogate());count+=12;i+=2 }
-            else { require(!c.isLowSurrogate());count+=if(c.code<128) 1 else 6;i++ }
+    /** Python's compact ASCII JSON size, not JSONObject's different slash/float spelling. */
+    internal fun asciiBytes(value:Any?):Long {
+        fun string(value:String):Long {
+            var count=2L;var i=0
+            while(i<value.length) {
+                val c=value[i]
+                if(c.isHighSurrogate()) { require(i+1<value.length && value[i+1].isLowSurrogate());count+=12;i+=2 }
+                else { require(!c.isLowSurrogate());count+=when(c) {
+                    '"','\\','\b','\t','\n','\u000c','\r' -> 2
+                    else -> if(c.code in 32..126) 1 else 6
+                };i++ }
+            }
+            return count
         }
-        return count
+        val floats=mutableMapOf<Long,Int>()
+        fun size(value:Any?,depth:Int):Long {
+            require(depth<=512)
+            return when(value) {
+                null,JSONObject.NULL -> 4L
+                is JSONObject -> 2L+value.keys().asSequence().sumOf { string(it)+1+size(value.get(it),depth+1) }+(value.length()-1).coerceAtLeast(0)
+                is JSONArray -> 2L+(0 until value.length()).sumOf { size(value.get(it),depth+1) }+(value.length()-1).coerceAtLeast(0)
+                is String -> string(value)
+                is Boolean -> if(value) 4L else 5L
+                is Number -> {
+                    val raw=value.toString()
+                    if(value is Double || value is Float || raw.any { it in ".eE" }) {
+                        val number=value.toDouble();require(number.isFinite())
+                        floats.getOrPut(number.toRawBits()) { pythonFloat(number).length }.toLong()
+                    } else raw.length.toLong()
+                }
+                else -> error("Invalid JSON value")
+            }
+        }
+        return size(value,0)
+    }
+    private fun pythonFloat(value:Double):String {
+        val negative=value.toRawBits()<0
+        if(value==0.0) return if(negative) "-0.0" else "0.0"
+        // Old Android/JDK Double.toString need not choose Python's shortest decimal (1e23).
+        // Round the exact binary value at the first precision that round-trips to the same bits.
+        val exact=BigDecimal(kotlin.math.abs(value))
+        val shortest=(1..17).asSequence().map { exact.round(MathContext(it,RoundingMode.HALF_EVEN)).stripTrailingZeros() }
+            .first { it.toDouble()==kotlin.math.abs(value) }.toString()
+        val parts=shortest.lowercase().split('e');val mantissa=parts[0];val exponent=parts.getOrNull(1)?.toInt() ?: 0
+        val point=mantissa.indexOf('.').takeIf { it>=0 } ?: mantissa.length
+        val all=mantissa.replace(".","");val first=all.indexOfFirst { it!='0' }
+        val digits=all.substring(first).trimEnd('0');val power=exponent+point-first-1;val sign=if(negative) "-" else ""
+        return sign+when {
+            power !in -4..15 -> digits.take(1)+(if(digits.length>1) "."+digits.drop(1) else "")+"e"+(if(power<0) "-" else "+")+kotlin.math.abs(power).toString().padStart(2,'0')
+            power+1<=0 -> "0."+"0".repeat(-power-1)+digits
+            power+1>=digits.length -> digits+"0".repeat(power+1-digits.length)+".0"
+            else -> digits.take(power+1)+"."+digits.drop(power+1)
+        }
     }
     fun payload(target:Target,request:String,epoch:String,after:Long,until:Long):JSONObject {
         require(after>=0 && after<=until);text(epoch,128)

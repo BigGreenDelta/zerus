@@ -1,0 +1,80 @@
+{
+  "source": "Python standard-library json.dumps(value,ensure_ascii=True,separators=(comma,colon)); literal fixed cases",
+  "cases": [
+    {
+      "value": "plain </script>",
+      "ascii": "\"plain </script>\"",
+      "bytes": 17
+    },
+    {
+      "value": "\\\"\\\\\\b\\t\\n\\f\\r",
+      "ascii": "\"\\\\\\\"\\\\\\\\\\\\b\\\\t\\\\n\\\\f\\\\r\"",
+      "bytes": 25
+    },
+    {
+      "value": "\u0000\b\t\n\f\r\u001f ~\u007f\u0080\u009f\u00e9\ud83d\ude00",
+      "ascii": "\"\\u0000\\b\\t\\n\\f\\r\\u001f ~\\u007f\\u0080\\u009f\\u00e9\\ud83d\\ude00\"",
+      "bytes": 62
+    },
+    {
+      "value": 0.0,
+      "ascii": "0.0",
+      "bytes": 3
+    },
+    {
+      "value": -0.0,
+      "ascii": "-0.0",
+      "bytes": 4
+    },
+    {
+      "value": 1700000000.0,
+      "ascii": "1700000000.0",
+      "bytes": 12
+    },
+    {
+      "value": 0.0001,
+      "ascii": "0.0001",
+      "bytes": 6
+    },
+    {
+      "value": 1e-05,
+      "ascii": "1e-05",
+      "bytes": 5
+    },
+    {
+      "value": 1000000000000000.0,
+      "ascii": "1000000000000000.0",
+      "bytes": 18
+    },
+    {
+      "value": 1e+16,
+      "ascii": "1e+16",
+      "bytes": 5
+    },
+    {
+      "value": 1e+23,
+      "ascii": "1e+23",
+      "bytes": 5
+    },
+    {
+      "value": 1e+100,
+      "ascii": "1e+100",
+      "bytes": 6
+    },
+    {
+      "value": 1e-100,
+      "ascii": "1e-100",
+      "bytes": 6
+    },
+    {
+      "value": 5e-324,
+      "ascii": "5e-324",
+      "bytes": 6
+    },
+    {
+      "value": 1.7976931348623157e+308,
+      "ascii": "1.7976931348623157e+308",
+      "bytes": 23
+    }
+  ]
+}

@@ -1138,7 +1138,7 @@ fn projection_result(result: &Value, payload: &Value, session: &str, request_id:
     if result["complete"] == json!(true) {
         next == Some(until)
     } else {
-        !entries.is_empty() && next == Some(previous)
+        !entries.is_empty() && previous < until && next == Some(previous)
     }
 }
 

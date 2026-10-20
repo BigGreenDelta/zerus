@@ -49,7 +49,7 @@ positions, actual Boolean completion, at most 256 entries and at most 880 KiB of
 compact ASCII JSON including all envelope and successor metadata. Returned
 generations increase strictly above `after` and are at most the captured `until`;
 gaps are allowed. Complete responses set next to `until`; incomplete responses
-are nonempty and set next to their last returned generation. History IDs are
+are nonempty and set next to their last returned generation, strictly before `until`. History IDs are
 64-character lowercase hexadecimal strings. Each entry has exactly generation,
 history ID, change, resolution and successor, with an optional unresolved reason:
 
@@ -110,7 +110,7 @@ request/envelope corpus. Its capability, heartbeat and unrelated rows remain
 historical evidence. Only current operation/read sets and counts, read-class SQL
 and the new literal refusal catalogue entry change. Dedicated fixtures under
 `services/mobile/vectors/history_projection/` contain the new envelope, the
-unchanged 28-request review corpus and 56 response grammar cases. Separate source
+unchanged 28-request review corpus and 57 response grammar cases. Separate source
 controls cover routing, one-call scope/budgets, exact wire and entry boundaries,
 outer receipt refusal, read quotas, retention, restart and preserved mutation
 identity. Scripted native and peer-wrapper controls are synthetic evidence, not

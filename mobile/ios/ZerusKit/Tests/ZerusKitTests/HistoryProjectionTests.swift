@@ -69,11 +69,16 @@ final class HistoryProjectionTests: XCTestCase {
             XCTAssertThrowsError(try parse(bad, until: 2))
         }
         XCTAssertThrowsError(try parse(response([], until: 2, complete: false, next: 0)))
+        XCTAssertThrowsError(try parse(response([entry(2, a)], until: 2, complete: false, next: 2)))
         XCTAssertThrowsError(try parse(response((1...257).map { entry(Int64($0), a) })))
         XCTAssertEqual(try parse(original).next, 1)
         XCTAssertEqual(try parse(response([], until: 5), after: 5).applied(after: 5), 5)
     }
     func testASCIIByteLimitCountsUnicodeAndEnvelopeOverhead() throws {
+        let fixture = try XCTUnwrap(SharedFixture.json("history-projection-wire.json").object)
+        for test in fixture.objects("cases") {
+            XCTAssertEqual(try HistoryProjection.asciiBytes(test["value"]!), Int(test.int64("bytes")))
+        }
         let unicode = response([entry(1, a, change: "refreshed", successor: row(a, text: String(repeating: "я", count: 150_000)))])
         XCTAssertLessThan(JSON.object(unicode).compact.utf8.count, HistoryProjection.maxBytes)
         XCTAssertThrowsError(try parse(unicode))

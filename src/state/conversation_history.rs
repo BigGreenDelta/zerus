@@ -1301,12 +1301,69 @@ fn reconcile(db: &Connection) -> Result<()> {
     set(db, "reconciled", if pending { "0" } else { "1" })?;
     Ok(())
 }
+fn projection_number(number: &serde_json::Number) -> String {
+    let raw = number.to_string();
+    if !raw.contains(['.', 'e', 'E']) {
+        return if raw == "-0" { "0".into() } else { raw };
+    }
+    // serde_json writes the shortest digits that round-trip, as Python does.
+    let (sign, unsigned) = match raw.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", raw.as_str()),
+    };
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i32>().unwrap_or(0)),
+        None => (unsigned, 0),
+    };
+    let point = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
+    let all = mantissa.replace('.', "");
+    let first = all.find(|c| c != '0').unwrap_or(all.len());
+    let digits = all[first..].trim_end_matches('0');
+    if digits.is_empty() {
+        return format!("{sign}0.0");
+    }
+    let power = exponent + point - first as i32 - 1;
+    if !(-4..16).contains(&power) {
+        let (lead, rest) = digits.split_at(1);
+        let rest = if rest.is_empty() {
+            String::new()
+        } else {
+            format!(".{rest}")
+        };
+        let mark = if power < 0 { '-' } else { '+' };
+        return format!("{sign}{lead}{rest}e{mark}{:02}", power.abs());
+    }
+    let position = power + 1;
+    if position <= 0 {
+        format!(
+            "{sign}0.{}{digits}",
+            "0".repeat(position.unsigned_abs() as usize)
+        )
+    } else if position as usize >= digits.len() {
+        let zeros = "0".repeat(position as usize - digits.len());
+        format!("{sign}{digits}{zeros}.0")
+    } else {
+        let (whole, fraction) = digits.split_at(position as usize);
+        format!("{sign}{whole}.{fraction}")
+    }
+}
+
 fn ascii_wire_size(value: &Value) -> usize {
-    value
-        .to_string()
-        .chars()
-        .map(|c| if c.is_ascii() { 1 } else { 6 * c.len_utf16() })
-        .sum()
+    fn text(value: &str) -> usize {
+        2 + value.chars().map(|c| match c {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            ' '..='~' => 1,
+            c => 6 * c.len_utf16(),
+        }).sum::<usize>()
+    }
+    match value {
+        Value::Null | Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(n) => projection_number(n).len(),
+        Value::String(s) => text(s),
+        Value::Array(items) => 2 + items.iter().map(ascii_wire_size).sum::<usize>() + items.len().saturating_sub(1),
+        Value::Object(items) => 2 + items.iter().map(|(k,v)| text(k) + 1 + ascii_wire_size(v)).sum::<usize>() + items.len().saturating_sub(1),
+    }
 }
 
 /// A native row is eligible only within the source boundary persisted before
@@ -2103,6 +2160,14 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn projection_ascii_budget_matches_the_shared_wire_literals() {
+        let fixture: Value = serde_json::from_str(include_str!("../../mobile/android/app/src/test/resources/history-projection-wire.json")).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            assert_eq!(ascii_wire_size(&case["value"]), case["bytes"].as_u64().unwrap() as usize, "{}", case["ascii"]);
+        }
+    }
+
     #[test]
     fn voice_matching_requires_source_boundary_and_keeps_exact_journal_alias() {
         let sources = json!([["/synthetic/transcript.jsonl",7,8,"header"]]);

@@ -54,12 +54,14 @@ class HistoryProjectionTest {
             JSONObject(original.toString()).put("conversation_id","other"),JSONObject(original.toString()).put("history_epoch","other"),
             JSONObject(original.toString()).put("archive_id",JSONObject.NULL),JSONObject(original.toString()).put("complete","false"),
             JSONObject(original.toString()).put("next_projection_after",0),JSONObject(original.toString()).put("projection_generation",1),
-            response(emptyList(),2,false,0),response((1..257).map { entry(it.toLong()) }))
+            response(emptyList(),2,false,0),response(listOf(entry(2)),2,false,2),response((1..257).map { entry(it.toLong()) }))
         for(value in invalid) assertThrows(IllegalArgumentException::class.java) { HistoryProjection.parse(target,"request","epoch",0,2,value) }
         assertEquals(1L,parse(original).next)
         val tail=parse(response(emptyList(),5),5,5);assertTrue(tail.complete);assertEquals(5L,tail.applied(5))
     }
     @Test fun asciiEnvelopeBudgetIncludesUnicodeAndIdentityOverhead() {
+        val fixture=javaClass.classLoader!!.getResourceAsStream("history-projection-wire.json")!!.bufferedReader().use { JSONObject(it.readText()) }
+        fixture.getJSONArray("cases").objects().forEach { case -> assertEquals(case.getLong("bytes"),HistoryProjection.asciiBytes(case.get("value"))) }
         val value=response(listOf(entry(1,a,"refreshed",row(a,"я".repeat(150_000)))))
         assertTrue(value.toString().toByteArray().size<HistoryProjection.maxBytes)
         assertThrows(IllegalArgumentException::class.java) { parse(value) }

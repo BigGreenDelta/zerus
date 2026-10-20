@@ -179,7 +179,7 @@ fn projection_request_corpus_rejects_coercion_and_unrelated_selectors() {
 async fn projection_returns_one_intact_fixed_range_and_rejects_malformed_native_envelopes() {
     let corpus = document("history_projection/results.json");
     let cases = corpus["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 56);
+    assert_eq!(cases.len(), 57);
     for case in cases {
         let mut payload = corpus["payload"].clone();
         if let Some(changes) = case.get("payload_set") {
@@ -242,6 +242,11 @@ async fn ordinary_history_preserves_projection_generation_metadata() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn projection_enforces_256_entries_and_the_whole_ascii_wire_boundary() {
+    let shared: Value = serde_json::from_str(include_str!("../../../../mobile/android/app/src/test/resources/history-projection-wire.json")).unwrap();
+    for case in shared["cases"].as_array().unwrap() {
+        assert_eq!(codec::canonical(&case["value"]).unwrap(), case["ascii"].as_str().unwrap());
+        assert_eq!(codec::size(&case["value"], 1024).unwrap(), case["bytes"].as_u64().unwrap() as usize);
+    }
     let corpus = document("history_projection/results.json");
     for count in [256, 257] {
         let mut payload = corpus["payload"].clone();

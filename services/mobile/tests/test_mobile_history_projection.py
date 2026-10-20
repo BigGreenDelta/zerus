@@ -80,7 +80,7 @@ class HistoryProjectionValidation(unittest.TestCase):
 
     def test_response_grammar_is_disjoint_and_preserves_the_whole_canonical_row(self):
         corpus = document("results")
-        self.assertEqual(len(corpus["cases"]), 56)
+        self.assertEqual(len(corpus["cases"]), 57)
         for case in corpus["cases"]:
             with self.subTest(case["id"]):
                 payload = {**corpus["payload"], **case.get("payload_set", {})}
@@ -98,6 +98,11 @@ class HistoryProjectionValidation(unittest.TestCase):
                 self.assertEqual(result, original, "validation must not edit or acknowledge the result")
 
     def test_entry_count_and_partial_position_are_not_silently_truncated(self):
+        shared = json.loads((Path(__file__).resolve().parents[3] / "mobile/android/app/src/test/resources/history-projection-wire.json").read_text())
+        for case in shared["cases"]:
+            wire = json.dumps(case["value"], ensure_ascii=True, separators=(",", ":"))
+            self.assertEqual(wire, case["ascii"])
+            self.assertEqual(len(wire.encode("ascii")), case["bytes"])
         corpus = document("results")
         payload = {**corpus["payload"], "projection_until": 300}
         for count in (256, 257):
