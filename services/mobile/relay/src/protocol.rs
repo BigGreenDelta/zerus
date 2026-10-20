@@ -16,6 +16,7 @@ pub const READS: &[&str] = &[
     "speech_config_status",
     "inspect",
     "history",
+    "history_projection",
     "hooks_status",
     "git_status",
     "process_output",
@@ -94,6 +95,7 @@ pub const OPERATIONS: &[&str] = &[
     "forget",
     "fork",
     "history",
+    "history_projection",
     "hooks_status",
     "git_status",
     "inspect",
@@ -548,6 +550,7 @@ pub fn request(v: &Value) -> Result<()> {
             "settings" => &["model", "effort", "expected_pending_id"],
             "process_output" => &["process_id", "generation", "archive_id"],
             "process_stop" => &["process_id", "generation"],
+            "history_projection" => &["archive_id", "agent_id", "history_epoch", "projection_after", "projection_until"],
             "history" => &[
                 "archive_id",
                 "agent_id",
@@ -591,6 +594,7 @@ pub fn request(v: &Value) -> Result<()> {
                 "compact_context",
                 "clear_context",
                 "history",
+                "history_projection",
                 "recovery_action",
                 "send_now",
                 "attachment_read",
@@ -697,6 +701,7 @@ pub fn request(v: &Value) -> Result<()> {
                 }
             }
             "history" => history(p)?,
+            "history_projection" => history_projection(p)?,
             "recovery_action" => {
                 uuid(&p["job_id"], true)?;
                 if p["action"] != "now" && p["action"] != "cancel" {
@@ -777,6 +782,40 @@ fn tag(v: &Value, launch: bool) -> Result<()> {
     }
     Ok(())
 }
+/// The new projection ABI has byte-bounded native identities and literal i64 positions.
+/// It never borrows ordinary history's optional selectors or coerces JSON numbers.
+pub fn history_projection(p: &Value) -> Result<()> {
+    fields(
+        p,
+        &["request_id", "expected_run_id", "expected_conversation_id", "history_epoch", "projection_after", "projection_until"],
+        &["archive_id", "agent_id"],
+    )?;
+    uuid(&p["request_id"], true)?;
+    let native_text = |value: &Value, maximum: usize| {
+        value.as_str().is_some_and(|s| !s.is_empty() && s.len() <= maximum && !s.chars().any(char::is_control))
+    };
+    if !native_text(&p["expected_run_id"], 128)
+        || !native_text(&p["expected_conversation_id"], 256)
+        || !native_text(&p["history_epoch"], 128)
+    {
+        return Err(Error::BAD);
+    }
+    if let Some(value) = p.get("agent_id") {
+        if !native_text(value, 160) || value.as_str().is_some_and(|s| s.contains(['/', '\\'])) {
+            return Err(Error::BAD);
+        }
+    }
+    if let Some(value) = p.get("archive_id") {
+        uuid(value, true)?;
+    }
+    let after = p["projection_after"].as_i64().ok_or(Error::BAD)?;
+    let until = p["projection_until"].as_i64().ok_or(Error::BAD)?;
+    if after < 0 || until < after {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
+
 fn history(p: &Value) -> Result<()> {
     if let Some(v) = p.get("limit") {
         if v.as_i64().is_none_or(|n| !(1..=100).contains(&n)) {

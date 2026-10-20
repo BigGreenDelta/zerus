@@ -1,0 +1,387 @@
+{
+  "data_only": true,
+  "cases": [
+    {
+      "id": "valid-zero",
+      "payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 0
+      },
+      "transport": "accept shape; native requires current epoch, ready index and maximum>=0"
+    },
+    {
+      "id": "valid-parent",
+      "payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "transport": "accept shape; native checks epoch/readiness/until"
+    },
+    {
+      "id": "valid-archive",
+      "payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7,
+        "archive_id": "20000000-0000-4000-8000-000000000002"
+      },
+      "transport": "admit only exact archive target/preflight"
+    },
+    {
+      "id": "valid-child",
+      "payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7,
+        "agent_id": "child-one"
+      },
+      "transport": "exact parent request; response conversation-one/child-one and parent_conversation_id required"
+    },
+    {
+      "id": "valid-large-integer",
+      "payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 9007199254740993,
+        "projection_until": 9223372036854775807
+      },
+      "transport": "accept exact integer range; native current-maximum check still required"
+    },
+    {
+      "id": "projection_after-true",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_after",
+      "raw_JSON_literal": "true",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_after-false",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_after",
+      "raw_JSON_literal": "false",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_after-1.0",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_after",
+      "raw_JSON_literal": "1.0",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_after-1e0",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_after",
+      "raw_JSON_literal": "1e0",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_after-\"1\"",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_after",
+      "raw_JSON_literal": "\"1\"",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_after-null",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_after",
+      "raw_JSON_literal": "null",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_after--1",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_after",
+      "raw_JSON_literal": "-1",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_after-9223372036854775808",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_after",
+      "raw_JSON_literal": "9223372036854775808",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_until-true",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_until",
+      "raw_JSON_literal": "true",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_until-false",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_until",
+      "raw_JSON_literal": "false",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_until-1.0",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_until",
+      "raw_JSON_literal": "1.0",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_until-1e0",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_until",
+      "raw_JSON_literal": "1e0",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_until-\"1\"",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_until",
+      "raw_JSON_literal": "\"1\"",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_until-null",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_until",
+      "raw_JSON_literal": "null",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_until--1",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_until",
+      "raw_JSON_literal": "-1",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "projection_until-9223372036854775808",
+      "base_payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "replace_field": "projection_until",
+      "raw_JSON_literal": "9223372036854775808",
+      "transport": "reject before native call"
+    },
+    {
+      "id": "after-greater-than-until",
+      "payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 8,
+        "projection_until": 7
+      },
+      "transport": "reject before native call"
+    },
+    {
+      "id": "unknown-history-selector",
+      "payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7,
+        "before": "opaque"
+      },
+      "transport": "reject before native call"
+    },
+    {
+      "id": "unknown-action",
+      "payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7,
+        "action": "clear"
+      },
+      "transport": "reject before native call"
+    },
+    {
+      "id": "empty-epoch",
+      "payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "transport": "reject before native call"
+    },
+    {
+      "id": "child-path",
+      "payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7,
+        "agent_id": "../child"
+      },
+      "transport": "reject before native call"
+    },
+    {
+      "id": "nil-archive",
+      "payload": {
+        "request_id": "10000000-0000-4000-8000-000000000001",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7,
+        "archive_id": "00000000-0000-0000-0000-000000000000"
+      },
+      "transport": "reject before native call"
+    },
+    {
+      "id": "payload-request-mismatch",
+      "payload": {
+        "request_id": "30000000-0000-4000-8000-000000000003",
+        "expected_run_id": "run-one",
+        "expected_conversation_id": "conversation-one",
+        "history_epoch": "epoch-one",
+        "projection_after": 0,
+        "projection_until": 7
+      },
+      "transport": "reject before native call"
+    }
+  ],
+  "runtime_control_execution": false,
+  "native_only_refusals": [
+    "wrong current epoch",
+    "until beyond current generation",
+    "index missing/unready/reconciliation pending",
+    "changed saved run/parent/archive/child identity"
+  ],
+  "native_optional_null_note": "80eb serde Option<String> treats explicit archive_id/agent_id null as absent; existing transport history validators reject optional null when present. The new transport should retain the latter omission-or-valid-string rule and document the native difference, not call it a new backend bug."
+}

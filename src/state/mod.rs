@@ -690,6 +690,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "read" { return read_marks::dispatch(args); }
     if command == "notifications" { return notifications::dispatch(args); }
     if command == "history" { return conversation_history::dispatch(args); }
+    if command == "history-projection" { return conversation_history::projection_dispatch(args); }
     if command == "terminal" { return terminal::dispatch(args); }
     if command == "session-action" { return session_action::dispatch(args); }
     if command == "compact-context" { return compact_context::dispatch(args); }

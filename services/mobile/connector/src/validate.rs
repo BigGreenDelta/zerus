@@ -15,9 +15,10 @@ pub const ARCHIVE_SNAPSHOT_TTL: f64 = 45.0;
 pub const MAX_PAYLOAD: usize = crate::native::MAX_PAYLOAD;
 const IDENTITY_FIELDS: [&str; 3] = ["request_id", "expected_run_id", "expected_conversation_id"];
 /// Operations that may name an archive in their payload besides inspect.
-const ARCHIVED_OUTPUT: [&str; 8] = [
+const ARCHIVED_OUTPUT: [&str; 9] = [
     "process_output",
     "history",
+    "history_projection",
     "restore",
     "forget",
     "rename",
@@ -230,6 +231,19 @@ pub fn validate_history(payload: &Value, request_id: &str) -> Result<(), String>
         }
     }
     Ok(())
+}
+
+/// Projection requests retain the same outer UUID and target admission as history.
+/// The shared relay validator checks only this new ABI, including UTF-8 byte limits.
+pub fn validate_history_projection(payload: &Value, request_id: &str) -> Result<(), String> {
+    identity_fields(
+        payload,
+        request_id,
+        &["archive_id", "agent_id", "history_epoch", "projection_after", "projection_until"],
+        "invalid history projection request",
+    )?;
+    zerus_relay::protocol::history_projection(payload)
+        .map_err(|_| error("invalid history projection request"))
 }
 
 /// `context.validate_mark_read(payload)`.
@@ -463,6 +477,7 @@ pub fn validate(
     let payload = payload.expect("checked");
     match operation {
         "history" => validate_history(payload, request_id)?,
+        "history_projection" => validate_history_projection(payload, request_id)?,
         "hooks_status" => {
             crate::mutations::validate_for_session("clear_context", session, payload, request_id)?
         }

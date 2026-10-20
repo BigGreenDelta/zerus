@@ -56,7 +56,7 @@ pub const INDEXES: [(&str, &str); 9] = [
 ];
 
 // The Python connector's frozen predicates (operations.json `sql`).
-pub const READ_CLASS_SQL: &str = "('analytics_read','archive_list','attachment_read','catalog','dirs','file_read','history','hooks_status','inspect','mark_read','process_output','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
+pub const READ_CLASS_SQL: &str = "('analytics_read','archive_list','attachment_read','catalog','dirs','file_read','history','history_projection','hooks_status','inspect','mark_read','process_output','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
 pub const READ_SQL: &str = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')";
 pub const SPEECH_READ_SQL: &str = "('speech_profiles','speech_stats','speech_status')";
 pub const SPEECH_CONFIG_READ_SQL: &str = "('speech_config','speech_config_status')";
@@ -284,6 +284,8 @@ impl Journal {
         )?;
         tx.execute(&format!("DELETE FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND {delivered}"),
                    [now - READ_SECONDS])?;
+        // Projection reads share the read cap and expire through the operation index.
+        tx.execute("DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation='history_projection' AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)", [now - READ_SECONDS])?;
         // This class shares the read cap, but must expire before the unchanged
         // legacy NOT-IN mutation tombstone selector can see it.
         tx.execute(GIT_STATUS_PRUNE_SQL, [now - READ_SECONDS])?;

@@ -71,6 +71,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
        hgs [@host] recovery action --scoped-json exact waiting-job control
        hgs [@host] history <session> --json bounded exact public history
+       hgs [@host] history-projection <session> --json retired and refreshed history rows
        hgs [@host] graph snapshot --json   bounded saved relationship metadata (partial coverage)
        hgs [@host] wait begin|ack|finish|cancel|list --json   explicit independent-agent waits (JSON stdin)
        hgs [@host] terminal <session> --json scoped terminal screen/input
@@ -595,7 +596,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             }
             state_command(command, &args)
         }
-        "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
+        "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
         | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" => {
             if command == "wait" && dry { return Err(Error::new(1,"Wait operations do not support --dry-run")); }
             if command == "graph" && dry { return Err(Error::new(1,"Graph reads do not support --dry-run")); }
@@ -919,7 +920,7 @@ fn remote(
             all
         }
         "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
