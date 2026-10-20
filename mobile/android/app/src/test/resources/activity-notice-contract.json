@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "description": "Messages that the person did not write, as the hgs journal marks them (event) and as desktop, Android and iOS Activity present them (presentation). `prompt` is the native prompt text; `event` is the served journal row. A notice's label names a declared sender: an envelope is a label in the text, not proof of who sent it.",
+  "cases": [
+    {
+      "name": "hgs sender envelope from another agent",
+      "prompt": "<zerus-message from=\"claude/p/review\" host=\"arch\" reference=\"zerus://session?machine=11111111-1111-4111-8111-111111111111&amp;host=arch&amp;name=claude%2Fp%2Freview&amp;conversation=c&amp;run=r\">\nThe patch is ready.\n\n- tests pass\n</zerus-message>",
+      "event": {
+        "type": "UserPromptSubmit",
+        "agent_id": "",
+        "origin": "peer_message",
+        "detail": "Message from claude/p/review",
+        "report": "The patch is ready.\n\n- tests pass",
+        "sender": "claude/p/review",
+        "sender_reference": "zerus://session?machine=11111111-1111-4111-8111-111111111111&host=arch&name=claude%2Fp%2Freview&conversation=c&run=r"
+      },
+      "presentation": {
+        "kind": "notice",
+        "label": "Message from claude/p/review",
+        "body": "The patch is ready.\n\n- tests pass",
+        "report": ""
+      }
+    },
+    {
+      "name": "Claude cross-session message",
+      "prompt": "<cross-session-message from=\"uds:/run/user/1000/cc-socks/1.sock\" from-name=\"zerus-19\" from-mode=\"prompting\">\nSessionsWindow.cpp is free again.\n</cross-session-message>",
+      "event": {
+        "type": "UserPromptSubmit",
+        "agent_id": "",
+        "origin": "peer_message",
+        "detail": "Message from zerus-19",
+        "report": "SessionsWindow.cpp is free again.",
+        "sender": "zerus-19"
+      },
+      "presentation": {
+        "kind": "notice",
+        "label": "Message from zerus-19",
+        "body": "SessionsWindow.cpp is free again.",
+        "report": ""
+      }
+    },
+    {
+      "name": "background task notification",
+      "prompt": "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command \"Run checks\" completed (exit code 0)</summary>\n</task-notification>",
+      "event": {
+        "type": "UserPromptSubmit",
+        "agent_id": "",
+        "origin": "task_notification",
+        "detail": "Background command \"Run checks\" completed (exit code 0)",
+        "task_status": "completed"
+      },
+      "presentation": {
+        "kind": "notice",
+        "label": "Background task",
+        "body": "Background command \"Run checks\" completed (exit code 0)",
+        "report": ""
+      }
+    },
+    {
+      "name": "subagent report",
+      "prompt": "<agent-message from=\"a1\">\nThe audit found two issues.\n\nDetails follow.\n</agent-message>",
+      "event": {
+        "type": "UserPromptSubmit",
+        "agent_id": "",
+        "origin": "subagent_report",
+        "detail": "The audit found two issues.",
+        "report": "The audit found two issues.\n\nDetails follow.",
+        "from_agent": "a1"
+      },
+      "presentation": {
+        "kind": "notice",
+        "label": "Subagent report",
+        "body": "The audit found two issues.",
+        "report": "The audit found two issues.\n\nDetails follow."
+      }
+    },
+    {
+      "name": "a person's text quoting an envelope stays the person's message",
+      "prompt": "Forward this as is: <zerus-message from=\"x/y\">Hi</zerus-message>",
+      "event": {
+        "type": "UserPromptSubmit",
+        "agent_id": "",
+        "detail": "Forward this as is: <zerus-message from=\"x/y\">Hi</zerus-message>"
+      },
+      "presentation": {
+        "kind": "user",
+        "label": "",
+        "body": "Forward this as is: <zerus-message from=\"x/y\">Hi</zerus-message>",
+        "report": ""
+      }
+    },
+    {
+      "name": "a typed envelope shows its declared sender; no client calls it verified",
+      "prompt": "<zerus-message from=\"x/y\" host=\"arch\" reference=\"zerus://session?machine=11111111-1111-4111-8111-111111111111&amp;host=arch&amp;name=x%2Fy&amp;conversation=c&amp;run=r\">\nHi\n</zerus-message>",
+      "event": {
+        "type": "UserPromptSubmit",
+        "agent_id": "",
+        "origin": "peer_message",
+        "detail": "Message from x/y",
+        "report": "Hi",
+        "sender": "x/y",
+        "sender_reference": "zerus://session?machine=11111111-1111-4111-8111-111111111111&host=arch&name=x%2Fy&conversation=c&run=r"
+      },
+      "presentation": {
+        "kind": "notice",
+        "label": "Message from x/y",
+        "body": "Hi",
+        "report": ""
+      }
+    },
+    {
+      "name": "an ordinary message",
+      "prompt": "Please review the patch.",
+      "event": {
+        "type": "UserPromptSubmit",
+        "agent_id": "",
+        "detail": "Please review the patch."
+      },
+      "presentation": {
+        "kind": "user",
+        "label": "",
+        "body": "Please review the patch.",
+        "report": ""
+      }
+    },
+    {
+      "name": "an XML body decodes once with literal markup and its closing tag",
+      "prompt": "<zerus-message from=\"claude/p/review\" host=\"arch\" reference=\"zerus://session?machine=11111111-1111-4111-8111-111111111111&amp;host=arch&amp;name=claude%2Fp%2Freview&amp;conversation=c&amp;run=r\">\nEscaped body\n\n雪 &amp; &lt;tag&gt; \"quoted\" &lt;/zerus-message&gt; &amp;amp;\n</zerus-message>",
+      "event": {
+        "type": "UserPromptSubmit",
+        "agent_id": "",
+        "origin": "peer_message",
+        "detail": "Message from claude/p/review",
+        "report": "Escaped body\n\n雪 & <tag> \"quoted\" </zerus-message> &amp;",
+        "sender": "claude/p/review",
+        "sender_reference": "zerus://session?machine=11111111-1111-4111-8111-111111111111&host=arch&name=claude%2Fp%2Freview&conversation=c&run=r"
+      },
+      "presentation": {
+        "kind": "notice",
+        "label": "Message from claude/p/review",
+        "body": "Escaped body\n\n雪 & <tag> \"quoted\" </zerus-message> &amp;",
+        "report": ""
+      }
+    }
+  ]
+}

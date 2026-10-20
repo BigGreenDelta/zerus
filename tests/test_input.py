@@ -843,7 +843,10 @@ os.execv('/bin/sh', ['sh', '-c', sys.argv[-1]])
                                   capture_output=True,text=True,timeout=5)
         opened=evidence(read)
         self.assertEqual(opened.returncode,0,opened.stderr)
-        self.assertEqual(json.loads(opened.stdout)['event']['detail'],payload['text'])
+        # An agent's send arrives inside its sender envelope (tests/test_sender_envelope.py).
+        detail=json.loads(opened.stdout)['event']['detail']
+        self.assertTrue(detail.startswith('<zerus-message from="claude/graph/source" '),detail)
+        self.assertTrue(detail.endswith('>\n'+payload['text']+'\n</zerus-message>'),detail)
         self.assertEqual(json.loads(opened.stdout)['event']['message_id'],payload['request_id'])
         for field in ('name','expected_run_id','expected_conversation_id','message_request_id'):
             value=dict(read);value[field]=str(uuid.uuid4())
