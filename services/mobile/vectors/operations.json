@@ -35,7 +35,7 @@
  },
  "counts": {
   "ATTACHMENT_OPERATIONS": 1,
-  "CAPABILITY_OPERATIONS": 46,
+  "CAPABILITY_OPERATIONS": 48,
   "COMPUTER_OPERATIONS": 1,
   "CONTEXT_KEYS": 23,
   "FEATURES": 3,
@@ -84,7 +84,7 @@
  },
  "sets": {
   "ATTACHMENT_OPERATIONS": ["attachment_read"],
-  "CAPABILITY_OPERATIONS": ["analytics_read","archive","archive_list","attachment_read","catalog","clear_context","compact_context","directory_create","dirs","file_read","forget","fork","history","hooks_status","launch","mark_read","pause","process_output","process_stop","recovery_action","rename","restore","resume","send_now","session_notifications","set_mobile_delivery","settings","speech_cancel","speech_config","speech_config_status","speech_profile_remove","speech_profile_test","speech_profile_upsert","speech_profiles","speech_stats","speech_status","speech_submit","terminal_input","terminal_snapshot","terminate","voice_cancel","voice_profiles","voice_status","voice_submit","worktree_create","worktrees"],
+  "CAPABILITY_OPERATIONS": ["analytics_read","archive","archive_list","attachment_read","catalog","clear_context","compact_context","directory_create","dirs","file_read","forget","fork","history","hooks_status","launch","mark_read","pause","process_output","process_stop","project_assign","project_assignment","recovery_action","rename","restore","resume","send_now","session_notifications","set_mobile_delivery","settings","speech_cancel","speech_config","speech_config_status","speech_profile_remove","speech_profile_test","speech_profile_upsert","speech_profiles","speech_stats","speech_status","speech_submit","terminal_input","terminal_snapshot","terminate","voice_cancel","voice_profiles","voice_status","voice_submit","worktree_create","worktrees"],
   "COMPUTER_OPERATIONS": ["set_mobile_delivery"],
   "CONTEXT_KEYS": ["CLAUDE_CONFIG_DIR","CODEX_HOME","DSH_CONFIG_DIR","DSH_HOME","HGS_ACCOUNT_ID","HGS_AGENT","HGS_ARCHIVE_ID","HGS_CLIENT","HGS_EXECUTABLE","HGS_EXPECTED_ID","HGS_FORK_PARENT_ID","HGS_FRESH","HGS_FRESH_REPLACES","HGS_LAUNCH_ID","HGS_REQUESTED_ID","HGS_RUN_ID","HGS_SESSION","KIMI_CODE_HOME","OPENCODE_CONFIG","OPENCODE_CONFIG_CONTENT","OPENCODE_CONFIG_DIR","TMUX","TMUX_PANE"],
   "FEATURES": ["inspect_after","inspect_agent","send_agent"],
