@@ -8,6 +8,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.MoreVert
@@ -81,7 +82,13 @@ import org.json.JSONObject
     LaunchedEffect(model.sessionMenuRequest,target.key) {
         model.takeSessionMenuRequest(target)?.let { operation -> if(operation == "terminal") terminal = true else request = operation }
     }
-    if(details || settingsOpen || menu || request != null || terminal || search) ObscureConversation()
+    // Tasks belong to catalogued projects; the badge counts the tasks In review.
+    val taskProject = remember(target.key, model.projects) { model.taskProject(session) }
+    LaunchedEffect(taskProject) { taskProject?.let(model::refreshReviewCount) }
+    val tasksOpen = model.tasksKey != null
+    // Tasks opens over this conversation and closes with it.
+    DisposableEffect(Unit) { onDispose { model.closeTasks() } }
+    if(details || settingsOpen || menu || request != null || terminal || search || tasksOpen) ObscureConversation()
     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else if (onDetails != null) onDetails() else details = true },
             modifier = Modifier.weight(1f),contentPadding = PaddingValues(start = 8.dp,end = 4.dp)) {
@@ -106,6 +113,16 @@ import org.json.JSONObject
                 else "Read all unavailable. This conversation needs verified history or loaded replies on this phone"
         }) { Icon(Icons.Default.DoneAll,null,Modifier.size(20.dp)) }
         IconButton(onClick = { terminal = true }) { Icon(Icons.Default.Terminal, "Terminal",Modifier.size(20.dp)) }
+        if (taskProject != null && target.agentId.isBlank() && target.archiveId.isBlank() && !model.demo) {
+            val review = model.reviewCounts[taskProject] ?: 0
+            IconButton(onClick = { model.openTasks(session) }, modifier = Modifier.semantics {
+                contentDescription = "Tasks"; if (review > 0) stateDescription = "$review In review"
+            }) {
+                BadgedBox(badge = { if (review > 0) Badge { Text(if (review > 99) "99+" else "$review") } }) {
+                    Icon(Icons.Default.Checklist, null, Modifier.size(20.dp))
+                }
+            }
+        }
         Box {
             IconButton(onClick = { readEvidence = if(target.agentId.isBlank()) model.captureReadAttention(target) else null;menu = true }) { Icon(Icons.Default.MoreVert, "Session actions",Modifier.size(20.dp)) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false },modifier = Modifier.heightIn(max = 480.dp)) {
@@ -161,6 +178,7 @@ import org.json.JSONObject
             confirmButton = { TextButton(onClick = { terminal = false }) { Text("Close") } })
     }
     if (details) SessionDetailsSheet(model,session) { details = false }
+    if (tasksOpen) TasksScreen(model)
     if (settingsOpen) NativeSettingsDialog(model,session) { settingsOpen = false }
     request?.let { operation -> SessionActionDialog(model,session,operation) { request = null } }
 }
@@ -178,7 +196,8 @@ import org.json.JSONObject
     var tab by remember(target.key) { mutableIntStateOf(0) }
     var stop by remember(target.key) { mutableStateOf<Pair<DetailProcess,String>?>(null) }
     var showOutput by remember(target.key) { mutableStateOf<DetailProcess?>(null) }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = TasksColors.Sheet, dragHandle = { BottomSheetDefaults.DragHandle(color = TasksColors.Handle) }) {
         // A fixed height keeps the sheet still when tabs or polled content change size.
         Column(Modifier.fillMaxWidth().fillMaxHeight(.88f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -186,7 +205,7 @@ import org.json.JSONObject
                 if (details?.recorded == true) Text("Last known / Read-only", style = MaterialTheme.typography.labelMedium)
             }
             PrimaryScrollableTabRow(selectedTabIndex = tab, edgePadding = 0.dp) {
-                listOf("Overview","Tasks","Agents","Processes").forEachIndexed { index,label -> Tab(tab == index,{ tab = index },text = { Text(label, maxLines = 1, softWrap = false) }) }
+                listOf("Overview","Plan","Agents","Processes").forEachIndexed { index,label -> Tab(tab == index,{ tab = index },text = { Text(label, maxLines = 1, softWrap = false) }) }
             }
             Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(key(tab) { rememberScrollState() }).padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -200,7 +219,7 @@ import org.json.JSONObject
                         NativeActionRows(model,target)
                     }
                     1 -> {
-                        if (details.tasks.isEmpty()) Text("No task list reported yet. Tasks appear when the agent updates its plan.")
+                        if (details.tasks.isEmpty()) Text("No plan reported yet. It appears when the agent updates its plan.")
                         details.tasks.forEach { list ->
                             Text(list.label, fontWeight = FontWeight.SemiBold)
                             Text("${list.tasks.count { it.status == "completed" }} of ${list.tasks.size} completed" + if (list.recorded) " / Last recorded" else "",

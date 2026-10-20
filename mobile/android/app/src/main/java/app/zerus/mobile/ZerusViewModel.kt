@@ -27,6 +27,13 @@ import android.net.Uri
 import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
+import app.zerus.mobile.replica.SessionRef
+import app.zerus.mobile.replica.TaskInfo
+import app.zerus.mobile.replica.TaskPosition
+import app.zerus.mobile.replica.TaskSettings
+import app.zerus.mobile.replica.TaskStage
+import app.zerus.mobile.replica.TaskStore
+import app.zerus.mobile.replica.TaskTarget
 
 class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val store = PrivateStore(application)
@@ -1999,7 +2006,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 for ((key, peers) in TaskSyncPlan.peers(digests, relayOperations, operations, known)) {
                     if (connections != original) return@launch
                     val connection = original.find { it.id == key.connectionId } ?: continue
-                    taskSync.sync(connection, key, names[key] ?: "Project", peers)
+                    if (taskSync.sync(connection, key, names[key] ?: "Project", peers).isEmpty()) settleSends(key)
+                    refreshReviewCount(key)
+                    if (tasksKey == key) refreshTasks()
                 }
             } catch (e: CancellationException) { throw e }
             // Failures wait in TaskSync's backoff; tasks have no screen to report them yet.
@@ -2009,6 +2018,271 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** Nothing syncs in the background: the activity stops the running exchange when it stops; merges are idempotent. */
     fun stopTaskSync() { taskSyncJob?.cancel() }
+
+    // The Tasks screen (TasksUi.kt) over the phone's replica of a project.
+    var tasksKey by mutableStateOf<ProjectKey?>(null); private set
+    var tasksChosen by mutableStateOf<ChosenSession?>(null); private set
+    var taskListing by mutableStateOf<List<TaskInfo>>(emptyList()); private set
+    var taskTab by mutableStateOf(TaskTab.TODO)
+    var tasksOnlyThisSession by mutableStateOf(false)
+    /** The snackbar's next message on the Tasks screen. */
+    var taskNotice by mutableStateOf<String?>(null)
+    var taskBusy by mutableStateOf(false); private set
+    var doneRows by mutableStateOf<List<DoneRow>>(emptyList()); private set
+    var doneTotal by mutableStateOf(0); private set
+    var doneRecent by mutableStateOf(0); private set
+    var doneNext by mutableStateOf<DoneCursor?>(null); private set
+    var doneExpanded by mutableStateOf(false); private set
+    var doneLoading by mutableStateOf(false); private set
+    var doneError by mutableStateOf(""); private set
+    /** The tasks In review of each project, for the badge on the Tasks button. */
+    var reviewCounts by mutableStateOf<Map<ProjectKey, Int>>(emptyMap()); private set
+    /** Tasks whose Send now may have happened: Send now waits for the next exchange to show their stage. */
+    private var uncertainSends by mutableStateOf<Map<String, ProjectKey>>(emptyMap())
+    private fun settleSends(key: ProjectKey) { uncertainSends = uncertainSends.filterValues { it != key } }
+
+    fun taskProjectName(key: ProjectKey) = projects.find { it.key == key }?.name ?: "Project"
+    /** Only catalogued projects have tasks. */
+    fun taskProject(session: Session) = session.projectKey?.takeIf { key -> projects.any { it.key == key && it.catalogued } }
+    fun projectSessions(key: ProjectKey) = sessions.filter { it.projectKey == key && it.target.archiveId.isBlank() && it.target.agentId.isBlank() }
+    fun taskChips(key: ProjectKey) = TasksPresentation.chips(projectSessions(key), machines)
+    /** An operation counts when both the relay and the computer offer it. */
+    private fun taskOperations(machine: Machine) =
+        machineOperations[MachineKey(machine.connectionId, machine.id)].orEmpty() intersect relayOperations[machine.connectionId].orEmpty()
+    /** The computers that list the project; every computer of its connection before the catalog names them. */
+    private fun projectMachines(key: ProjectKey): List<Machine> {
+        val listed = taskDigests[key]?.keys.orEmpty()
+        return machines.filter { it.connectionId == key.connectionId && (listed.isEmpty() || it.id in listed) }
+    }
+    fun sendRoute(task: TaskInfo): RouteState {
+        val key = tasksKey ?: return RouteState.Blocked("No project")
+        if (taskBusy) return RouteState.Blocked("Another task action is running")
+        if (task.uuid in uncertainSends) return RouteState.Blocked("It may have been sent already; its stage arrives with the next sync")
+        return TasksPresentation.route(task, tasksChosen, machines, key.connectionId, ::taskOperations, projectSessions(key))
+    }
+    fun cancelRoute(task: TaskInfo): RouteState {
+        val key = tasksKey ?: return RouteState.Blocked("No project")
+        if (taskBusy) return RouteState.Blocked("Another task action is running")
+        return TasksPresentation.cancelRoute(task, projectMachines(key), ::taskOperations)
+    }
+
+    fun openTasks(session: Session) {
+        val key = taskProject(session) ?: return
+        val machine = machines.firstOrNull { it.connectionId == session.target.connectionId && it.id == session.target.computerId }
+        showTasks(key, ChosenSession(session.target.session, session.target.computerId, machine?.machineId.orEmpty()))
+    }
+    /** Another session for Tasks only, keeping the tab; one of another project shows that project's tasks. */
+    fun chooseTaskSession(key: ProjectKey, chosen: ChosenSession) {
+        if (key != tasksKey) showTasks(key, chosen, selectDefault = false) else { tasksChosen = chosen }
+    }
+    private fun showTasks(key: ProjectKey, chosen: ChosenSession, selectDefault: Boolean = true) {
+        tasksKey = key; tasksChosen = chosen; taskListing = emptyList(); doneRows = emptyList(); doneNext = null
+        doneTotal = 0; doneRecent = 0; doneExpanded = false; doneError = ""; doneLoaded = false
+        refreshTasks(selectDefault)
+        loadDone(more = false)
+        viewModelScope.launch { syncProject(key) }
+    }
+    fun closeTasks() { tasksKey = null }
+    /** Done lists from a computer each time it is opened, so tasks accepted since show. */
+    fun selectTaskTab(tab: TaskTab) {
+        taskTab = tab
+        if (tab == TaskTab.DONE && !doneLoading) loadDone(more = false)
+    }
+    /** A page of Done arrived, so its count is known. */
+    var doneLoaded by mutableStateOf(false); private set
+
+    fun refreshTasks(selectDefault: Boolean = false) {
+        val key = tasksKey ?: return
+        viewModelScope.launch {
+            val listing = try {
+                withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use { it.list() } }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { taskNotice = e.message; return@launch }
+            if (tasksKey != key) return@launch
+            taskListing = listing.tasks
+            reviewCounts = reviewCounts + (key to listing.tasks.count { it.stage == TaskStage.REVIEW })
+            if (selectDefault) taskTab = TasksPresentation.defaultTab(TasksPresentation.counts(listing.tasks, tasksChosen, tasksOnlyThisSession))
+        }
+    }
+    fun refreshReviewCount(key: ProjectKey) {
+        viewModelScope.launch {
+            val count = try {
+                withContext(Dispatchers.IO) {
+                    taskReplicas.store(key, taskProjectName(key)).use { store -> store.list().tasks.count { it.stage == TaskStage.REVIEW } }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { return@launch }
+            reviewCounts = reviewCounts + (key to count)
+        }
+    }
+
+    /** A local edit, then the project's exchange with its computers, so the edit reaches them. */
+    private fun editTasks(change: (TaskStore) -> Unit) {
+        val key = tasksKey ?: return
+        viewModelScope.launch {
+            try { withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use(change) } }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be changed." }; return@launch }
+            refreshTasks()
+            syncProject(key)
+            if (tasksKey == key && taskTab == TaskTab.DONE) loadDone(more = false)
+        }
+    }
+    /** One sync of the project with its computers now; failures wait in TaskSync's backoff. */
+    private suspend fun syncProject(key: ProjectKey) {
+        if (demo) return
+        val connection = connections.find { it.id == key.connectionId } ?: return
+        val peers = TaskSyncPlan.peers(mapOf(key to taskDigests[key].orEmpty()), relayOperations, machineOperations, machines)[key].orEmpty()
+        if (peers.isEmpty()) return
+        try { if (taskSync.sync(connection, key, taskProjectName(key), peers).isEmpty()) settleSends(key) }
+        catch (e: CancellationException) { throw e }
+        catch (_: Exception) { }
+        if (tasksKey == key) refreshTasks()
+    }
+
+    /** New tasks go to To do, or to Backlog while Backlog is open, pinned to the chosen session. */
+    fun addTask(text: String) {
+        val chosen = tasksChosen
+        val stage = if (taskTab == TaskTab.BACKLOG) TaskStage.BACKLOG else TaskStage.TODO
+        val target = chosen?.let { TaskTarget.Session(SessionRef(it.machineId, it.name)) }
+            ?: TaskTarget.AnySession
+        editTasks { it.add(text, stage, target, TaskPosition.End) }
+    }
+    /** The task settings' Save: the prompt and the session, whichever changed. */
+    fun saveTask(uuid: String, text: String?, target: TaskTarget?) = editTasks { store ->
+        if (text != null) store.editText(uuid, text)
+        if (target != null) store.setTarget(uuid, target)
+    }
+    fun commentTask(uuid: String, text: String) = editTasks { it.comment(uuid, text) }
+    /** Only the fields changed here, onto the replica's current settings, so a change that arrived meanwhile stays. */
+    fun saveTaskSettings(original: TaskSettings, edited: TaskSettings) = editTasks { store ->
+        val current = store.settings()
+        fun <T> pick(field: (TaskSettings) -> T) = if (field(edited) != field(original)) field(edited) else field(current)
+        store.setSettings(TaskSettings(pick { it.taskTemplate }, pick { it.cancelTemplate }, pick { it.agentsOther }, pick { it.agentLimit }))
+    }
+    suspend fun taskSettings(): TaskSettings? {
+        val key = tasksKey ?: return null
+        return try { withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use { it.settings() } } }
+        catch (e: CancellationException) { throw e }
+        catch (e: Exception) { taskNotice = e.message; null }
+    }
+
+    /** The task settings' action: their unsaved prompt and session first, then the action. */
+    fun saveThen(task: TaskInfo, text: String?, target: TaskTarget?, action: TaskAction) {
+        if (text == null && target == null) return taskAction(task, action)
+        val key = tasksKey ?: return
+        viewModelScope.launch {
+            val saved = try {
+                withContext(Dispatchers.IO) {
+                    taskReplicas.store(key, taskProjectName(key)).use { store ->
+                        if (text != null) store.editText(task.uuid, text)
+                        if (target != null) store.setTarget(task.uuid, target)
+                        store.get(task.uuid)
+                    }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be changed." }; return@launch }
+            refreshTasks()
+            taskAction(saved, action)
+        }
+    }
+    /** A stage action of a card or the task settings; Cancel goes through its dialog. */
+    fun taskAction(task: TaskInfo, action: TaskAction) {
+        when (action) {
+            TaskAction.TO_BACKLOG -> editTasks { it.setStage(task.uuid, TaskStage.BACKLOG) }
+            TaskAction.TO_TODO, TaskAction.BACK_TO_TODO -> editTasks { it.setStage(task.uuid, TaskStage.TODO) }
+            TaskAction.ACCEPT -> editTasks { it.setStage(task.uuid, TaskStage.DONE) }
+            TaskAction.TO_TOP -> editTasks { it.moveTask(task.uuid, TaskPosition.Top) }
+            TaskAction.SEND -> sendTask(task)
+            TaskAction.EDIT, TaskAction.CANCEL -> {}
+        }
+    }
+    private fun sendTask(task: TaskInfo) {
+        val key = tasksKey ?: return
+        val route = when (val state = sendRoute(task)) {
+            is RouteState.Blocked -> { taskNotice = state.reason; return }
+            is RouteState.Ready -> state.route
+        }
+        val connection = connections.find { it.id == key.connectionId } ?: return
+        taskBusy = true
+        viewModelScope.launch {
+            try {
+                taskNotice = when (val outcome = taskSync.send(connection, key, taskProjectName(key), route.computerId, task.uuid, route.session)) {
+                    TaskOutcome.Done -> "Sent to ${route.session}"
+                    is TaskOutcome.Refused -> outcome.reason
+                    is TaskOutcome.Uncertain -> { uncertainSends = uncertainSends + (task.uuid to key); "It may have been sent: ${outcome.reason}" }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be sent." } }
+            finally { taskBusy = false }
+            refreshTasks()
+        }
+    }
+    fun cancelTask(task: TaskInfo, reason: String) {
+        val key = tasksKey ?: return
+        val route = when (val state = cancelRoute(task)) {
+            is RouteState.Blocked -> { taskNotice = state.reason; return }
+            is RouteState.Ready -> state.route
+        }
+        val connection = connections.find { it.id == key.connectionId } ?: return
+        taskBusy = true
+        viewModelScope.launch {
+            try {
+                taskNotice = when (val outcome = taskSync.cancel(connection, key, taskProjectName(key), route.computerId, task.uuid, reason)) {
+                    TaskOutcome.Done -> "Cancelled; it is In review"
+                    is TaskOutcome.Refused -> outcome.reason
+                    is TaskOutcome.Uncertain -> "It may have been cancelled: ${outcome.reason}"
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be cancelled." } }
+            finally { taskBusy = false }
+            refreshTasks()
+        }
+    }
+
+    /** The computer that lists Done: the chosen session's, or any of the project's that offers it. */
+    private fun doneComputer(key: ProjectKey): Machine? {
+        val able = projectMachines(key).filter { it.online && !it.lastKnown && "task_done" in taskOperations(it) }
+        return able.firstOrNull { it.id == tasksChosen?.computerId } ?: able.firstOrNull()
+    }
+    /** The first page, or with `more` the next one; "Show older" also shows the older rows already loaded. */
+    fun loadDone(more: Boolean) {
+        val key = tasksKey ?: return
+        if (doneLoading) return
+        // The first page may already hold older tasks; showing them needs no read.
+        if (more && (!doneExpanded && doneRows.size > doneRecent || doneNext == null)) { doneExpanded = true; return }
+        doneExpanded = more
+        val machine = doneComputer(key) ?: run { doneError = "No computer of this project lists Done tasks now"; return }
+        val connection = connections.find { it.id == key.connectionId } ?: return
+        doneLoading = true
+        viewModelScope.launch {
+            try {
+                val page = taskSync.donePage(connection, key, machine.id, if (more) doneNext else null)
+                if (tasksKey != key) return@launch
+                doneRows = if (more) doneRows + page.rows else page.rows
+                doneNext = page.next; doneTotal = page.total; doneRecent = page.recent; doneError = ""; doneLoaded = true
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { doneError = e.message.orEmpty().ifBlank { "The Done list could not be read." } }
+            finally { doneLoading = false }
+        }
+    }
+    /** Fetches a Done task from that computer into the replica, then hands it over. */
+    fun openDoneTask(row: DoneRow, opened: (TaskInfo) -> Unit) {
+        val key = tasksKey ?: return
+        val machine = doneComputer(key) ?: run { taskNotice = "No computer of this project is online"; return }
+        val connection = connections.find { it.id == key.connectionId } ?: return
+        taskBusy = true
+        viewModelScope.launch {
+            try {
+                taskSync.exchangeNow(connection, key, taskProjectName(key), machine.id, fetch = listOf(row.uuid))
+                val task = withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use { it.get(row.uuid) } }
+                refreshTasks()
+                opened(task)
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be opened." } }
+            finally { taskBusy = false }
+        }
+    }
     fun openProject(project: ProjectSummary) { selectedProject = project }
     fun clearProject() { selectedProject = null }
     fun open(session: Session, preserveProject: Boolean = false) {

@@ -386,7 +386,7 @@ class MainActivity : ComponentActivity() {
         Text(text, Modifier.padding(horizontal = 8.dp, vertical = 4.dp), color = color, style = MaterialTheme.typography.labelSmall)
     }
 }
-@Composable private fun SessionBadge(session: Session, online: Boolean, modifier: Modifier = Modifier) {
+@Composable internal fun SessionBadge(session: Session, online: Boolean, modifier: Modifier = Modifier) {
     val badge = DesktopSessionPalette.badge(session, online)
     val dark = MaterialTheme.colorScheme.background.luminance() < .5f
     val colors = DesktopSessionPalette.colors(badge.kind, dark)
