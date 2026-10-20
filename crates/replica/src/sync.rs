@@ -243,7 +243,7 @@ impl ProjectStore {
         }
         Ok(DonePage {
             tasks,
-            next: (end < total).then(|| done[end - 1].clone()),
+            next: (start < end && end < total).then(|| done[end - 1].clone()),
             total,
             recent,
         })

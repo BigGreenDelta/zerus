@@ -108,6 +108,15 @@ fn done_pages_walk_every_task_once() {
 }
 
 #[test]
+fn an_empty_page_ends_the_list() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path());
+    done_at(&store, "Task", 10);
+    let page = store.done_page(None, 0, 0).unwrap();
+    assert_eq!((page.tasks.len(), page.next, page.total), (0, None, 1));
+}
+
+#[test]
 fn a_task_accepted_meanwhile_does_not_shift_the_pages() {
     let root = tempfile::tempdir().unwrap();
     let store = store(root.path());

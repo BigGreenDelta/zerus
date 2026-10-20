@@ -291,6 +291,12 @@ fn the_task_actions_wire_is_strict() {
     let mut minimal = cancel(&computer);
     minimal["payload"].as_object_mut().unwrap().remove("reason");
     protocol::request(&minimal).unwrap();
+    // A reason has lines like any comment; other control characters are refused.
+    let mut lines = cancel(&computer);
+    lines["payload"]["reason"] = json!("Wrong approach.\n\tMeasure first.");
+    protocol::request(&lines).unwrap();
+    lines["payload"]["reason"] = json!("Wrong\u{7}approach");
+    assert!(protocol::request(&lines).is_err());
     let mut first = done(&computer);
     first["payload"].as_object_mut().unwrap().remove("before");
     protocol::request(&first).unwrap();

@@ -697,8 +697,16 @@ pub fn task_payload(op: &str, p: &Value) -> Result<()> {
         "task_cancel" => {
             fields(p, &["schema", "project", "task"], &["reason"])?;
             task_request(p)?;
+            // A reason becomes a comment: lines and tabs, no other control characters.
             if let Some(reason) = p.get("reason") {
-                text(reason, TASK_REASON_MAX, true)?;
+                let reason = reason.as_str().ok_or(Error::BAD)?;
+                if reason.chars().count() > TASK_REASON_MAX
+                    || reason
+                        .chars()
+                        .any(|c| (c < ' ' && c != '\n' && c != '\t') || c == '\u{7f}')
+                {
+                    return Err(Error::BAD);
+                }
             }
             Ok(())
         }

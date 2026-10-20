@@ -555,7 +555,8 @@ computer whose heartbeat lists it (409 otherwise), with an empty session:
 
 - `task_send` (`schema` 1, `project`, `task` UUID, `session` at most 1024
   characters) and `task_cancel` (`schema`, `project`, `task`, optional `reason`
-  of at most 4096 characters) are mutations: the relay keeps their durable
+  of at most 4096 characters, which may hold lines and tabs but no other
+  control characters) are mutations: the relay keeps their durable
   identity, mutation quota and retention as for any mutation, a duplicate
   replays its receipt, and the connector journal runs each identity once. A
   receipt is failed when hgs refused before anything happened, with its reason,

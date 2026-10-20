@@ -90,8 +90,14 @@ pub(super) fn send(config: &Config) -> Result<Value> {
         request.session,
     ];
     let out = change(config, "send", &args)?;
+    // The receipt's identity and status, never the prompt it carries: a
+    // mutation's receipt stays in the relay for days.
+    let receipt = &out["receipt"];
     Ok(json!({"schema": 1, "ok": true, "task": out["task"]["uuid"], "stage": out["task"]["stage"],
-              "session": out["task"]["session"], "receipt": out["receipt"]}))
+              "session": out["task"]["session"],
+              "receipt": {"request_id": receipt["request_id"], "status": receipt["status"],
+                          "name": receipt["name"], "run_id": receipt["run_id"],
+                          "conversation_id": receipt["conversation_id"], "submitted_at": receipt["submitted_at"]}}))
 }
 
 /// `hgs task mobile-cancel --json`: cancels the task as `hgs task cancel` does.

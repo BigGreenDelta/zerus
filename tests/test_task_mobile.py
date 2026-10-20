@@ -107,13 +107,17 @@ class Mobile(test_tasks.DeliveryFixture):
         self.assertEqual(([r["text"] for r in rest["tasks"]], rest["next"]), (["Task 0"], None))
 
     def test_mobile_answers_stay_small(self):
-        task = self.add("Add rate limiting")
+        # A long prompt and 4 MiB of comments: the answer carries neither.
+        prompt = "Add rate limiting " + hashlib.sha256(b"prompt").hexdigest() * 900
+        task = self.add(prompt)
         for n in range(64):
             self.hgs("comment", task["ref"], text=hashlib.sha256(str(n).encode()).hexdigest() * 1000)
         result = subprocess.run([str(HGS), "task", "mobile-send", "--json"], input=json.dumps(self.send_request(task)),
                                 env=self.env, text=True, capture_output=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertLess(len(result.stdout), 4096)
+        self.assertNotIn(prompt[20:80], result.stdout)
+        self.assertNotIn("submitted_text", result.stdout)
 
     def test_invalid_mobile_requests_are_refused_in_json(self):
         task = self.add("Add rate limiting")

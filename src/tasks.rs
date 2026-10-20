@@ -25,6 +25,13 @@ mod phone;
 /// uncertain, and the phone's receipt says so.
 const SENT_UNRECORDED: &str = "the prompt was sent, but the task could not record it";
 
+/// Whether a failed send may have pasted its prompt: it was sent but not
+/// recorded, or its delivery is uncertain (the paste began, Enter or the
+/// receipt did not follow). Never "nothing was sent" then.
+fn paste_uncertain(message: &str) -> bool {
+    message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
+}
+
 const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | report REF | comment REF | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
@@ -308,11 +315,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
                 0
             }
             Err(error) => {
-                let mut refusal = json!({"schema": 1, "ok": false, "error": error.message});
-                if error.message.starts_with(SENT_UNRECORDED) {
-                    refusal["uncertain"] = json!(true);
-                }
-                println!("{refusal}");
+                println!("{}", refusal(&error.message));
                 1
             }
         });
@@ -324,6 +327,16 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         _ => println!("{out}"),
     }
     Ok(0)
+}
+
+/// A phone command's refusal, which the connector passes on: `uncertain`
+/// when the prompt may be in the session already.
+fn refusal(message: &str) -> Value {
+    let mut refusal = json!({"schema": 1, "ok": false, "error": message});
+    if paste_uncertain(message) {
+        refusal["uncertain"] = json!(true);
+    }
+    refusal
 }
 
 /// Runs one task command and returns its JSON.
@@ -469,7 +482,7 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
         if matches!(who, Actor::Agent(_))
             && !forwarded_here
             && action == "send"
-            && !error.message.starts_with(SENT_UNRECORDED)
+            && !paste_uncertain(&error.message)
         {
             fail(answers::refused(to, &error.message))
         } else {
@@ -653,7 +666,7 @@ fn forwarded(
             Some(refusal)
                 if action == "send"
                     && matches!(who, Actor::Agent(_))
-                    && !refusal.starts_with("the prompt was sent") =>
+                    && !paste_uncertain(refusal) =>
             {
                 fail(answers::refused(&format!("{} on {alias}", session.session), refusal))
             }
@@ -825,6 +838,18 @@ fn settings(config: &Config, args: &[String]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phone_refusals_say_when_the_prompt_may_be_in_the_session() {
+        let uncertain = |message: &str| refusal(message).get("uncertain").cloned();
+        assert_eq!(
+            uncertain("delivery uncertain: agent changed after paste; inspect Terminal before retrying"),
+            Some(json!(true))
+        );
+        assert_eq!(uncertain(&format!("{SENT_UNRECORDED}: disk full")), Some(json!(true)));
+        assert_eq!(uncertain("no task T-a1b2c3 in this project"), None);
+        assert_eq!(refusal("no task")["error"], "no task");
+    }
 
     #[test]
     fn claude_and_codex_read_the_instructions_others_do_not() {
