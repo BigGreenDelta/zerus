@@ -219,8 +219,16 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, unittest.TestCase):
             return cards[0] if len(cards) == 1 else None
         item = self.until(card)
         self.assertIn('Trust this folder?', self.screen())
-        payload = self.payload(item)
-        payload['answers'] = [dict(question_id='trust', selected_option_ids=['trust_0'], text='')]
+        binding = self.binding(self.name)
+        self.assertIn(binding['conversation_id'], (None, ''))
+        self.assertIn(item['conversation_id'], (None, ''))
+        self.assertEqual(item['run_id'], binding['run_id'])
+        # Startup is deliberately unbound, unlike a normal approval. Keep the
+        # existing Unix trust envelope; never coerce a generic approval's ID.
+        payload = dict(request_id=str(uuid.uuid4()), expected_run_id=binding['run_id'],
+                       expected_conversation_id='', question_id=item['question_id'],
+                       expected_question_hash=item['question_hash'],
+                       answers=[dict(question_id='trust', selected_option_ids=['trust_0'], text='')])
         self.assertEqual(self.call('answer', payload)['status'], 'answered')
 
     def pin(self, pid, started):

@@ -173,3 +173,22 @@ binding or another refusal still fails evidence capture. The primary launch
 failure and every independent custody step remain intact. This is source-only
 preparation for a separately reviewed fresh head, not permission to replay
 either failed attempt.
+
+## Windows startup envelope after the job-boundary repair
+
+Exact `ed8ebb81` reached a real private Windows Kimi 2.1.1 process outside the
+runner job. The known-child oracle and initial Kimi image, parent, creation-time,
+owner and thirteen-key environment checks passed. Startup trust then failed
+before input: its fixture reused the normal approval payload, whose unbound
+conversation was JSON null; the unchanged CLI correctly requires a string.
+No approval scenario was reached. Image seals and independent cleanup reported
+no errors; the wrapper retained its failure status directory. Its scoped
+survivor observation does not establish global process quiescence.
+
+Only Windows startup trust now uses the existing Unix startup envelope with
+an explicit empty expected conversation ID. Both card and binding must still
+be unbound and their current runs must agree; the exact card ID/hash and
+explicit trust choice are retained. Bound conversations and run mismatches
+refuse before the answer call. Generic approval payloads and all product
+validation stay unchanged. This source child needs separate root review and
+a fresh hosted grant; the earlier native attempt is not replayed.

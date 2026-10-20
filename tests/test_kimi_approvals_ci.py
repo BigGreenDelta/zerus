@@ -211,6 +211,35 @@ class WindowsEnvironmentControls(unittest.TestCase):
 
 
 class WindowsCustodyControls(unittest.TestCase):
+    def test_startup_trust_uses_the_exact_unbound_envelope_and_keeps_run_identity(self):
+        import test_kimi_approvals_windows as windows
+        case = windows.NativeWindowsKimiApprovals('test_approve_once_runs_the_command')
+        run = '00000000-0000-4000-8000-000000000001'
+        card = dict(source='kimi_folder_trust', can_answer=True, conversation_id=None,
+                    run_id=run, question_id='synthetic-startup', question_hash='a' * 64)
+        binding = dict(run_id=run, conversation_id=None)
+        case.name = 'kimi/p/approval'
+        case.inspect = mock.Mock(return_value=dict(pending_questions=[card]))
+        case.binding = mock.Mock(return_value=binding)
+        case.until = lambda predicate: predicate()
+        case.screen = mock.Mock(return_value='Trust this folder?')
+        case.call = mock.Mock(return_value=dict(status='answered'))
+        case.trust()
+        command, payload = case.call.call_args.args
+        self.assertEqual(command, 'answer')
+        self.assertEqual(windows.uuid.UUID(payload.pop('request_id')).version, 4)
+        self.assertEqual(payload, dict(expected_run_id=run, expected_conversation_id='',
+            question_id='synthetic-startup', expected_question_hash='a' * 64,
+            answers=[dict(question_id='trust', selected_option_ids=['trust_0'], text='')]))
+        for card_change, binding_change in ((dict(conversation_id=run), {}),
+                ({}, dict(conversation_id=run)), (dict(run_id='other'), {})):
+            case.inspect.return_value = dict(pending_questions=[dict(card, **card_change)])
+            case.binding.return_value = dict(binding, **binding_change)
+            case.call.reset_mock()
+            with self.subTest(card=card_change, binding=binding_change), self.assertRaises(AssertionError):
+                case.trust()
+            case.call.assert_not_called()
+
     def test_only_a_typed_absence_before_launch_acknowledgement_can_omit_the_screen(self):
         import test_kimi_approvals_windows as windows
         with tempfile.TemporaryDirectory(prefix='kimi-absent-control-') as directory:
