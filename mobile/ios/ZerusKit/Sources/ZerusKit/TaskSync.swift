@@ -59,6 +59,42 @@ public final class TaskReplicas: Sendable {
     static func hex(_ value: String) -> String { SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined() }
 }
 
+/// How a Send now or Cancel ended on the session's computer.
+public enum TaskOutcome: Equatable, Sendable {
+    case done
+    /// Nothing happened: hgs's reason, or why the phone's edits could not reach that computer.
+    case refused(String)
+    /// It may have happened: the next exchange shows the task's stage.
+    case uncertain(String)
+}
+
+/// Where the next Done page starts.
+public struct DoneCursor: Equatable, Sendable {
+    public let at: Int64
+    public let uuid: String
+    public init(at: Int64, uuid: String) {
+        self.at = at
+        self.uuid = uuid
+    }
+}
+
+public struct DoneRow: Equatable, Sendable {
+    public let uuid: String
+    public let id: String
+    public let text: String
+    public let session: SessionRef?
+    public let acceptedAt: Int64
+}
+
+/// One page of a computer's Done list, newest first; `recent` counts the last 7 days.
+public struct DonePage: Equatable, Sendable {
+    public let rows: [DoneRow]
+    public let next: DoneCursor?
+    public let total: Int
+    public let recent: Int
+    public let damaged: Int
+}
+
 /// A computer of a project that can exchange its tasks now, and the digest its heartbeat names.
 public struct TaskPeer: Hashable, Sendable {
     public let computerId: String
@@ -111,6 +147,7 @@ public struct TaskSyncError: Error, Equatable, CustomStringConvertible {
 public actor TaskSync {
     public static let retry: TimeInterval = 60
     public static let exchangePolls = 80
+    public static let actionPolls = 150
     public static let pollDelay: Duration = .milliseconds(400)
 
     private struct PeerKey: Hashable { let project: ProjectKey; let computerId: String }
@@ -123,8 +160,10 @@ public actor TaskSync {
     private let clock: @Sendable () -> Date
     private var waiting: [PeerKey: Date] = [:]
     private var quiet: [PeerKey: Quiet] = [:]
-    private var held: Set<ProjectKey> = []
+    private var locked: Set<ProjectKey> = []
     private var queued: [ProjectKey: [CheckedContinuation<Void, Never>]] = [:]
+    /// Tasks whose Send now may have happened, with their project and computer.
+    private var sends: [String: PeerKey] = [:]
     private var known: Set<ProjectKey> = []
 
     public init(client: RelayClient, replicas: TaskReplicas, exchangeTimeout: Duration = .seconds(300),
@@ -174,7 +213,7 @@ public actor TaskSync {
 
     func lock(_ key: ProjectKey) async {
         known.insert(key)
-        guard held.contains(key) else { held.insert(key); return }
+        guard locked.contains(key) else { locked.insert(key); return }
         await withCheckedContinuation { queued[key, default: []].append($0) }
     }
 
@@ -184,7 +223,7 @@ public actor TaskSync {
             queued[key] = waiters
             next.resume()
         } else {
-            held.remove(key)
+            locked.remove(key)
         }
     }
 
@@ -193,6 +232,101 @@ public actor TaskSync {
         await lock(key)
         defer { unlock(key) }
         return try await body(replicas.store(key, name: name))
+    }
+
+    // MARK: Actions
+
+    /// One exchange with this computer now, whatever the digests: the phone's edits reach it, and `fetch` brings tasks it does not hold.
+    public func exchangeNow(_ connection: Connection, _ key: ProjectKey, name: String, computerId: String, fetch: [String] = []) async throws {
+        try await project(key, name: name) { store in
+            _ = try await bounded { try await self.exchange(connection, store, computerId: computerId, fetch: fetch) }
+        }
+    }
+
+    /// Send now: the phone's edits reach the session's computer first, then it sends, then its copy comes back.
+    public func send(_ connection: Connection, _ key: ProjectKey, name: String, computerId: String, task: String,
+                     session: String, computerName: String? = nil) async -> TaskOutcome {
+        let payload: JSONObject = ["schema": 1, "project": .string(key.id), "task": .string(task), "session": .string(session)]
+        let outcome = await act(connection, key, name: name, computerId: computerId, computerName: computerName ?? computerId,
+                                operation: "task_send", payload: payload)
+        if case .uncertain = outcome { sends[task] = PeerKey(project: key, computerId: computerId) }
+        return outcome
+    }
+
+    /// A Send now that may have happened holds the task until an exchange with that computer shows its stage.
+    public func held(_ task: String) -> Bool { sends[task] != nil }
+    public func heldTasks() -> Set<String> { Set(sends.keys) }
+
+    /// Exchanges once with each computer of this connection that holds a task back; one that completes releases them.
+    public func settleSends(_ connection: Connection, names: @Sendable (ProjectKey) -> String) async {
+        for pending in Set(sends.values.filter { $0.project.connectionId == connection.id }) {
+            do {
+                try await exchangeNow(connection, pending.project, name: names(pending.project), computerId: pending.computerId)
+                sends = sends.filter { $0.value != pending }
+            } catch {
+                if Task.isCancelled { return }
+                // The next sync tries again.
+            }
+        }
+    }
+
+    public func cancel(_ connection: Connection, _ key: ProjectKey, name: String, computerId: String, task: String,
+                       reason: String, computerName: String? = nil) async -> TaskOutcome {
+        var payload: JSONObject = ["schema": 1, "project": .string(key.id), "task": .string(task)]
+        if !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { payload = payload.putting("reason", .string(reason)) }
+        return await act(connection, key, name: name, computerId: computerId, computerName: computerName ?? computerId,
+                         operation: "task_cancel", payload: payload)
+    }
+
+    /// One page of that computer's Done list; with `session`, of the tasks sent to it.
+    public func donePage(_ connection: Connection, _ key: ProjectKey, computerId: String, before: DoneCursor?,
+                         limit: Int = 50, session: SessionRef? = nil) async throws -> DonePage {
+        var payload: JSONObject = ["schema": 1, "project": .string(key.id), "limit": .int(Int64(limit))]
+        if let before { payload = payload.putting("before", ["at": .int(before.at), "uuid": .string(before.uuid)]) }
+        if let session { payload = payload.putting("session", ["machine": .string(session.machine), "session": .string(session.session)]) }
+        let receipt = try await request(connection, computerId: computerId, operation: "task_done", payload: payload, maxPolls: Self.exchangePolls)
+        guard receipt.string("state") == "completed" else {
+            let error = receipt.string("error")
+            throw TaskSyncError(error.isEmpty ? "The computer did not list its Done tasks." : error)
+        }
+        guard let result = receipt.object("result") else { throw TaskSyncError("The computer's Done list has no result.") }
+        let rows = result.objects("tasks").map { row in
+            DoneRow(uuid: row.string("uuid"), id: row.string("id"), text: row.string("text"),
+                    session: row.object("session").map { SessionRef(machine: $0.string("machine"), session: $0.string("session")) },
+                    acceptedAt: Int64(row.int("accepted_at")))
+        }
+        let next = result.object("next").map { DoneCursor(at: Int64($0.int("at")), uuid: $0.string("uuid")) }
+        return DonePage(rows: rows, next: next, total: result.int("total"), recent: result.int("recent"), damaged: result.int("damaged"))
+    }
+
+    /// The exchange, then `operation` on that computer, then the exchange that shows its result.
+    private func act(_ connection: Connection, _ key: ProjectKey, name: String, computerId: String, computerName: String,
+                     operation: String, payload: JSONObject) async -> TaskOutcome {
+        await project(key, name: name) { store in
+            do { _ = try await bounded { try await self.exchange(connection, store, computerId: computerId) } }
+            catch { return .refused("The tasks could not reach \(computerName): \(TaskSyncError.reason(error))") }
+            let outcome: TaskOutcome
+            do {
+                let receipt = try await request(connection, computerId: computerId, operation: operation, payload: payload,
+                                                maxPolls: Self.actionPolls)
+                let reason = receipt.string("error")
+                switch receipt.string("state") {
+                case "completed": outcome = .done
+                case "failed": outcome = .refused(reason.isEmpty ? "The computer refused it." : reason)
+                case "uncertain": outcome = .uncertain(reason.isEmpty ? "The computer could not confirm it." : reason)
+                default: outcome = .uncertain("The computer has not answered yet.")
+                }
+            } catch let error as RelayError where (400..<500).contains(error.status) && error.status != 408 {
+                // The relay refused the request itself: nothing was queued.
+                outcome = .refused(error.message.isEmpty ? "The relay refused it." : error.message)
+            } catch {
+                // The request may be queued although its answer was lost.
+                outcome = .uncertain("The relay did not confirm it: \(TaskSyncError.reason(error))")
+            }
+            // Its copy comes back now; when that fails the next sync brings it.
+            _ = try? await bounded { try await self.exchange(connection, store, computerId: computerId) }
+            return outcome
+        }
     }
 
     // MARK: Exchange
