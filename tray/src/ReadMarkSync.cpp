@@ -36,15 +36,27 @@ void ReadMarkSync::setPending(const QJsonObject &pending)
 void ReadMarkSync::pump()
 {
     const qint64 now = m_clock();
-    for (auto it = m_pending.constBegin(); it != m_pending.constEnd() && m_requests.size() < kMaxInFlight; ++it) {
-        auto &attempt = m_attempts[it.key()];
-        const auto entry = it.value().toObject();
-        if (attempt.inFlight || (attempt.sent == entry && now < attempt.dueAt)) continue;
+    // A slow or busy host must not hold every slot: each free one goes to the
+    // host with the fewest writes in flight, then in key order.
+    QHash<QString, int> busy;
+    for (const auto &attempt : std::as_const(m_attempts)) if (attempt.inFlight) ++busy[attempt.host];
+    while (m_requests.size() < kMaxInFlight) {
+        QString chosen; int fewest = kMaxInFlight + 1;
+        for (auto it = m_pending.constBegin(); it != m_pending.constEnd(); ++it) {
+            const auto entry = it.value().toObject();
+            const auto attempt = m_attempts.constFind(it.key());
+            if (attempt != m_attempts.constEnd() && (attempt->inFlight || (attempt->sent == entry && now < attempt->dueAt))) continue;
+            const auto mark = ReadMark::fromJson(entry);
+            if (mark.isEmpty() || mark.name.isEmpty() || mark.runId.isEmpty() || mark.conversationId.isEmpty()) continue;
+            if (busy.value(mark.host) < fewest) { fewest = busy.value(mark.host); chosen = it.key(); }
+        }
+        if (chosen.isEmpty()) return;
+        const auto entry = m_pending.value(chosen).toObject();
         const auto mark = ReadMark::fromJson(entry);
-        if (mark.isEmpty() || mark.name.isEmpty() || mark.runId.isEmpty() || mark.conversationId.isEmpty()) continue;
-        if (attempt.sent != entry) attempt.failures = 0;
-        attempt.sent = entry; attempt.inFlight = true;
-        m_requests.insert(m_client->requestRead(mark.host, mark.name, mark.payload()), it.key());
+        auto &attempt = m_attempts[chosen];
+        if (attempt.sent != entry) attempt.failures = attempt.unapplied = 0;
+        attempt.sent = entry; attempt.host = mark.host; attempt.inFlight = true; ++busy[mark.host];
+        m_requests.insert(m_client->requestRead(mark.host, mark.name, mark.payload()), chosen);
     }
 }
 
@@ -61,7 +73,15 @@ void ReadMarkSync::finished(quint64 request, bool delivered, const QJsonObject &
     attempt.inFlight = false;
     const qint64 now = m_clock();
     if (delivered) {
-        attempt.failures = 0; attempt.dueAt = now + kConfirmedResendMs;
+        // A host that applies only part of a mark (no longer current, or its
+        // question index not ready) needs a new snapshot, not the same write.
+        const auto sent = ReadMark::fromJson(attempt.sent);
+        const auto applied = result.value("applied").toObject();
+        const bool all = (sent.replyId.isEmpty() || applied.value("reply_id").toBool())
+            && (sent.attentionSignature.isEmpty() || applied.value("attention_signature").toBool());
+        attempt.failures = 0;
+        attempt.dueAt = now + (all ? kConfirmedResendMs : std::min(kMaxUnappliedResendMs, kConfirmedResendMs << std::min(attempt.unapplied, 3)));
+        attempt.unapplied = all ? 0 : attempt.unapplied + 1;
     } else {
         attempt.dueAt = now + std::min(kMaxBackoffMs, kFirstBackoffMs << std::min(attempt.failures, 5));
         ++attempt.failures;

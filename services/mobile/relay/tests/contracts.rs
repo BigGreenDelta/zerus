@@ -1520,6 +1520,63 @@ async fn alert_candidates_are_bounded_and_expire() {
     f.close().await;
 }
 #[tokio::test]
+async fn candidate_expiry_survives_a_persistently_failing_delivery() {
+    let f = Fixture::new().await;
+    let at = now();
+    // Delivery rechecks the currently displayed route. Unknown snapshots hold
+    // candidates instead of reaching the alert append, so provide the actual
+    // waiting request whose append this fault control needs to exercise.
+    let snapshot = canonical(&json!({"sessions":[{"name":"due","run_id":"r","conversation_id":"c","phase":"input","activity":"waiting"}]})).unwrap();
+    f.store
+        .db
+        .exec(
+            "UPDATE nodes SET snapshot=?,last_seen=? WHERE id=?",
+            args![&snapshot, at, &f.node.id],
+        )
+        .await
+        .unwrap();
+    let insert = "INSERT INTO alert_candidates(workspace_id,computer_id,session,kind,run_id,conversation_id,created,next_at) VALUES(?,?,?,'attention','r','c',?,?)";
+    // A due candidate of a machine without presence delivers; an expired one
+    // is not due, so only expiry removes it.
+    for (session, created, next) in [
+        ("due", at, at - 30.0),
+        ("expired", at - 86401.0, at + 600.0),
+    ] {
+        f.store
+            .db
+            .exec(
+                insert,
+                args![&f.node.workspace, &f.node.id, session, created, next],
+            )
+            .await
+            .unwrap();
+    }
+    // Every alert append fails, as a persistent fault in one workspace would.
+    let (fault, repair) = if f.backend.is_postgres() {
+        f.store.db.exec("CREATE FUNCTION synthetic_alert_fault() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'synthetic alert fault'; END$$", &[]).await.unwrap();
+        ("CREATE TRIGGER synthetic_alert_fault BEFORE INSERT ON events FOR EACH ROW WHEN (NEW.kind='alert') EXECUTE FUNCTION synthetic_alert_fault()",
+         "DROP TRIGGER synthetic_alert_fault ON events")
+    } else {
+        ("CREATE TRIGGER synthetic_alert_fault BEFORE INSERT ON events WHEN NEW.kind='alert' BEGIN SELECT RAISE(ABORT,'synthetic alert fault'); END",
+         "DROP TRIGGER synthetic_alert_fault")
+    };
+    f.store.db.exec(fault, &[]).await.unwrap();
+    for _ in 0..2 {
+        assert!(f.store.maintain(false).await.is_err());
+    }
+    assert_eq!(f.count("alert_candidates WHERE session='expired'").await, 0);
+    assert_eq!(f.count("alert_candidates WHERE session='due'").await, 1);
+    assert_eq!(f.alert_count().await, 0);
+    // Once the fault is repaired, the held candidate delivers.
+    f.store.db.exec(repair, &[]).await.unwrap();
+    f.store.maintain(false).await.unwrap();
+    assert_eq!(
+        (f.count("alert_candidates").await, f.alert_count().await),
+        (0, 1)
+    );
+    f.close().await;
+}
+#[tokio::test]
 async fn maintenance_rechecks_most_overdue_workspaces_first() {
     let f = Fixture::new().await;
     // More waiting workspaces than one pass takes (32): owners at their desks
@@ -2203,6 +2260,119 @@ async fn postgres_cross_worker_offline_peer_last_seen() {
     let second = f.backend.store().await;
     // The gateway writes through one worker; the phone lists through another.
     offline_peer_route_keeps_last_seen(&f, &second).await;
+    second.db.close().await;
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated ZERUS_RELAY_TEST_DATABASE_URL; run explicitly in CI"]
+async fn postgres_cross_worker_waiting_plans_leave_the_event_row_free() {
+    let f = Fixture::provision(
+        Backend::postgres(Config {
+            background: false,
+            ..Config::default()
+        })
+        .await,
+    )
+    .await;
+    let second = f.backend.store().await;
+    // The fixture's machine has no presence, so its due candidate delivers;
+    // the owner of another workspace is at the desk, so its candidate waits.
+    let c = f
+        .store
+        .provision("Example workspace", "Example computer")
+        .await
+        .unwrap();
+    let (desk, desk_node) = (
+        s(&c, "workspace_id").to_owned(),
+        s(&c, "node_id").to_owned(),
+    );
+    let at = now();
+    // The delivery claim rechecks the selected native snapshot. Give the
+    // delivering workspace a real waiting request; unknown state correctly
+    // holds a candidate and cannot exercise this event-lock control.
+    let snapshot = canonical(&json!({"sessions":[{"name":"example","run_id":"r","conversation_id":"c","phase":"input","activity":"waiting"}]})).unwrap();
+    f.store
+        .db
+        .exec(
+            "UPDATE nodes SET snapshot=?,last_seen=? WHERE id=?",
+            args![&snapshot, at, &f.node.id],
+        )
+        .await
+        .unwrap();
+    f.store
+        .db
+        .exec(
+            "UPDATE nodes SET presence_at=?,presence_until=? WHERE id=?",
+            args![at, at + 600.0, &desk_node],
+        )
+        .await
+        .unwrap();
+    let insert = "INSERT INTO alert_candidates(workspace_id,computer_id,session,kind,run_id,conversation_id,created,next_at) VALUES(?,?,'example','attention','r','c',?,?)";
+    for (w, node, next) in [
+        (&f.node.workspace, &f.node.id, at - 30.0),
+        (&desk, &desk_node, at - 15.0),
+    ] {
+        f.store
+            .db
+            .exec(insert, args![w, node, at, next])
+            .await
+            .unwrap();
+    }
+    // Another worker holds the waiting candidate, as an evaluation of that
+    // workspace would, while the other worker's maintenance pass runs.
+    let mut held = f.store.db.begin().await.unwrap();
+    held.all(
+        "SELECT id FROM alert_candidates WHERE workspace_id=? ORDER BY id FOR UPDATE",
+        args![&desk],
+    )
+    .await
+    .unwrap();
+    let probe = async {
+        let mut waiting = false;
+        for _ in 0..250 {
+            let r = f.store.db.one("SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'", &[]).await.unwrap().unwrap();
+            if i(&r, "n") > 0 {
+                waiting = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            waiting,
+            "the maintenance pass never waited for the held candidate"
+        );
+        // A heartbeat with events takes the global event row meanwhile.
+        let mut heartbeat = f.store.db.begin().await.unwrap();
+        heartbeat
+            .exec("SET LOCAL lock_timeout='1s'", &[])
+            .await
+            .unwrap();
+        let free = heartbeat
+            .one("SELECT events FROM global_usage WHERE id=1 FOR UPDATE", &[])
+            .await
+            .is_ok();
+        if free {
+            heartbeat.commit().await.unwrap();
+        }
+        held.commit().await.unwrap();
+        free
+    };
+    let (pass, free) = tokio::join!(second.maintain(false), probe);
+    pass.unwrap();
+    assert!(free, "a waiting plan held the global event row");
+    let next = f
+        .store
+        .db
+        .one(
+            "SELECT next_at FROM alert_candidates WHERE workspace_id=?",
+            args![&desk],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(next["next_at"].as_f64().unwrap() > at);
+    assert_eq!(f.alert_count().await, 1);
     second.db.close().await;
     f.close().await;
 }

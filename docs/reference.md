@@ -3075,8 +3075,9 @@ the owner: run, conversation, the phase when it is `approval`, `input` or
 the mobile connector publishes as `mobile_attention`) and actionable subagent
 requests. An approval or input request also contributes `attention_started`, the
 time it began, so requests without a native ID (a permission prompt without a
-tool call, a tool known only by name) stay distinct; each external child approval
-carries its own `attention_id`. It is `null` when nothing needs attention and
+tool call, a tool known only by name) stay distinct; the end of a compaction and
+a prompt repeated with the same native tool IDs, tool and input keep that time.
+Each external child approval carries its own `attention_id`. It is `null` when nothing needs attention and
 does not change on status-only updates. A listing indexes Codex question
 transcripts within a shared one-second budget (and a short slice per session),
 saving its progress so the next listing resumes; it never scans a long
