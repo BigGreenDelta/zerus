@@ -342,9 +342,8 @@ fn journal_operation_sets_match_the_python_connector() {
         sorted(&python(zerus_relay::protocol::OPERATIONS)),
         set("OPERATIONS")
     );
-    let mutations: Vec<&str> = zerus_relay::protocol::OPERATIONS
-        .iter()
-        .copied()
+    let mutations: Vec<&str> = python(zerus_relay::protocol::OPERATIONS)
+        .into_iter()
         .filter(|operation| journal::is_mutation(operation))
         .collect();
     assert_eq!(sorted(&mutations), set("MUTATIONS"));

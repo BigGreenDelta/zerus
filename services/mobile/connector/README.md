@@ -215,6 +215,15 @@ to Python only the exchanges of the last two minutes stay in the journal, as
 Python's mutation tombstones. `tests/task_exchange.rs` and
 `test_bb_task_exchange` pin it.
 
+When native help also names `hgs task mobile-send|mobile-cancel|mobile-done
+--json`, the connector offers the phone's Send now (`task_send`), Cancel
+(`task_cancel`) and Done list (`task_done`), each with its payload on stdin on
+the machine the route names. Send now and Cancel are mutations: the journal
+runs each identity once, hgs's JSON refusal before anything happened fails the
+receipt with its reason, and any other outcome once the call began (a prompt
+sent but not recorded, a crash, a timeout) is uncertain. `task_done` is a short
+read like the exchange (`TASK_READ_SQL`).
+
 ## Divergences from the Python connector
 
 Each divergence is listed in the design; this build implements every row.

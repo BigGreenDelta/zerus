@@ -17,6 +17,11 @@ use zerus_mobile_connector::runtime::{Connector, Settings};
 
 const MARKER: &str =
     "       hgs task exchange|digests --json                 the phone's task exchange (mobile)\n";
+const ACTIONS: &str =
+    "       hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)\n";
+const SEND: [&str; 3] = ["task", "mobile-send", "--json"];
+const CANCEL: [&str; 3] = ["task", "mobile-cancel", "--json"];
+const DONE: [&str; 3] = ["task", "mobile-done", "--json"];
 const TASK: &str = "0b9d6c55-2f5e-4c39-9a51-0d6f3c2a7e11";
 const EXCHANGE: [&str; 3] = ["task", "exchange", "--json"];
 const DIGESTS: [&str; 3] = ["task", "digests", "--json"];
@@ -55,6 +60,10 @@ struct Harness {
 
 impl Harness {
     fn new(label: &str, marker: bool) -> Self {
+        Self::with_help(label, if marker { help() + MARKER } else { help() })
+    }
+
+    fn with_help(label: &str, help: String) -> Self {
         umask();
         let scratch = Scratch::new(label);
         let journal = Journal::open(&scratch.path("state"), "fixture-binding", EPOCH).unwrap();
@@ -65,7 +74,6 @@ impl Harness {
             clock_scale: 1.0,
         };
         let connector = Connector::new(Scripted::default(), journal, settings, Box::new(|| EPOCH));
-        let help = if marker { help() + MARKER } else { help() };
         connector.flags.set(Flags::from_help(&help));
         connector.state.borrow_mut().snapshot_seen_at = Some(connector.clock());
         Harness {
@@ -96,9 +104,29 @@ impl Harness {
     }
 
     async fn exchange(&self, request_id: &str, session: &str, payload: Value) -> Value {
-        let request = json!({"request_id": request_id, "operation": "task_exchange",
+        match self
+            .execute("task_exchange", request_id, session, payload)
+            .await
+        {
+            Outcome::Finished(receipt) => receipt,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    async fn execute(
+        &self,
+        operation: &str,
+        request_id: &str,
+        session: &str,
+        payload: Value,
+    ) -> Outcome {
+        let request = json!({"request_id": request_id, "operation": operation,
                              "session": session, "payload": payload});
-        match self.connector.execute(request).await.unwrap() {
+        self.connector.execute(request).await.unwrap()
+    }
+
+    async fn finished(&self, operation: &str, request_id: &str, payload: Value) -> Value {
+        match self.execute(operation, request_id, "", payload).await {
             Outcome::Finished(receipt) => receipt,
             other => panic!("{other:?}"),
         }
@@ -340,4 +368,161 @@ async fn heartbeat_projects_carry_their_tasks_digest() {
     let snapshot = heartbeat(&failing).await;
     assert_eq!(snapshot["mobile_projects"]["available"], true);
     assert_eq!(digests(&snapshot), [Value::Null, Value::Null]);
+}
+
+fn send_payload() -> Value {
+    json!({"schema": 1, "project": "project-1", "task": TASK, "session": "codex/api"})
+}
+
+fn actions() -> Harness {
+    Harness::with_help("task-actions", help() + MARKER + ACTIONS)
+}
+
+#[test]
+fn the_task_actions_are_advertised_only_with_their_marker() {
+    let ops = |help: String| -> Vec<String> {
+        Flags::from_help(&help).advertised(true)["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|op| op.as_str().unwrap().to_owned())
+            .filter(|op| op.starts_with("task_"))
+            .collect()
+    };
+    assert_eq!(
+        ops(help() + MARKER + ACTIONS),
+        ["task_cancel", "task_done", "task_exchange", "task_send"]
+    );
+    assert_eq!(ops(help() + MARKER), ["task_exchange"]);
+    assert!(ops(help()).is_empty());
+    for op in ["task_send", "task_cancel", "task_done"] {
+        assert!(!Flags::from_help(&(help() + ACTIONS))
+            .python_operations(true)
+            .contains(op));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_send_runs_hgs_once_and_replays() {
+    let harness = actions();
+    let answer = json!({"schema": 1, "ok": true, "task": TASK, "stage": "active",
+                        "session": {"machine": "m", "session": "codex/api"}, "receipt": {"status": "submitted"}});
+    harness.answer(&SEND, answer.clone());
+    let id = "7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c5d01";
+    assert_eq!(
+        harness.finished("task_send", id, send_payload()).await,
+        json!({"state": "completed", "result": answer, "error": null})
+    );
+    assert_eq!(harness.calls(&SEND), [Some(send_payload())]);
+    // The same identity again replays its receipt; hgs runs once.
+    assert_eq!(
+        harness.execute("task_send", id, "", send_payload()).await,
+        Outcome::Replayed
+    );
+    assert_eq!(harness.calls(&SEND).len(), 1);
+    let cancel =
+        json!({"schema": 1, "project": "project-1", "task": TASK, "reason": "Wrong approach"});
+    let cancelled =
+        json!({"schema": 1, "ok": true, "task": TASK, "stage": "review", "cancel_message": null});
+    harness.answer(&CANCEL, cancelled.clone());
+    assert_eq!(
+        harness
+            .finished(
+                "task_cancel",
+                "7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c5d02",
+                cancel.clone()
+            )
+            .await,
+        json!({"state": "completed", "result": cancelled, "error": null})
+    );
+    assert_eq!(harness.calls(&CANCEL), [Some(cancel)]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_send_that_may_have_pasted_is_uncertain() {
+    let id = |n: u8| format!("7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c6d{n:02x}");
+    let state = |receipt: &Value| (receipt["state"].clone(), receipt["error"].clone());
+    // Without the marker nothing runs, and nothing happened.
+    let old = Harness::new("task-actions-old", true);
+    old.answer(&SEND, json!({"schema": 1, "ok": true}));
+    assert_eq!(
+        state(&old.finished("task_send", &id(1), send_payload()).await),
+        (
+            json!("failed"),
+            json!("native task actions ABI is unavailable")
+        )
+    );
+    assert!(old.calls(&SEND).is_empty());
+    let harness = actions();
+    // A native failure once the send began: it may have pasted.
+    assert_eq!(
+        state(&harness.finished("task_send", &id(2), send_payload()).await).0,
+        "uncertain"
+    );
+    let unrecorded = "the prompt was sent, but the task could not record it: disk full";
+    harness.answer(
+        &SEND,
+        json!({"schema": 1, "ok": false, "error": unrecorded, "uncertain": true}),
+    );
+    assert_eq!(
+        state(&harness.finished("task_send", &id(3), send_payload()).await),
+        (json!("uncertain"), json!(unrecorded))
+    );
+    // A refusal before the paste: failed, with hgs's reason.
+    let refused = "codex/api cannot take it now: a question is open";
+    harness.answer(&SEND, json!({"schema": 1, "ok": false, "error": refused}));
+    assert_eq!(
+        state(&harness.finished("task_send", &id(4), send_payload()).await),
+        (json!("failed"), json!(refused))
+    );
+    // A session target or a payload the relay refuses never reaches hgs.
+    let calls = harness.calls(&SEND).len();
+    let mut bad = send_payload();
+    bad["task"] = json!("T-a1b2c3");
+    assert_eq!(
+        state(&harness.finished("task_send", &id(5), bad).await).0,
+        "failed"
+    );
+    match harness
+        .execute("task_send", &id(6), "codex/api", send_payload())
+        .await
+    {
+        Outcome::Finished(receipt) => assert_eq!(receipt["state"], "failed"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(harness.calls(&SEND).len(), calls);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_done_page_is_a_short_read() {
+    let harness = actions();
+    let page = json!({"schema": 1, "tasks": [], "next": null, "total": 0, "recent": 0});
+    harness.answer(&DONE, page.clone());
+    let request = json!({"schema": 1, "project": "project-1", "limit": 50});
+    let id = "7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c7d01";
+    assert_eq!(
+        harness.finished("task_done", id, request.clone()).await,
+        json!({"state": "completed", "result": page, "error": null})
+    );
+    harness.answer(
+        &DONE,
+        json!({"schema": 1, "ok": false, "error": "the project's tasks are busy; try again"}),
+    );
+    assert_eq!(
+        harness
+            .finished("task_done", "7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c7d02", request)
+            .await["error"],
+        "the project's tasks are busy; try again"
+    );
+    let journal = Journal::open(&harness.scratch.path("state2"), "fixture-binding", EPOCH).unwrap();
+    let receipt = json!({"state": "completed", "result": page, "error": null});
+    assert!(journal
+        .claim("d", "task_done", Some("hash"), EPOCH)
+        .unwrap());
+    journal.finish("d", &receipt, EPOCH).unwrap();
+    journal.delivered("d", EPOCH).unwrap();
+    journal.prune(EPOCH + 121.0).unwrap();
+    assert!(journal
+        .claim("d", "task_done", Some("hash"), EPOCH + 121.0)
+        .unwrap());
 }

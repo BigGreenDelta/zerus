@@ -40,7 +40,10 @@ pub const IMPLEMENTED: &[&str] = &[
     "speech_stats",
     "speech_status",
     "speech_submit",
+    "task_cancel",
+    "task_done",
     "task_exchange",
+    "task_send",
     "terminal_input",
     "terminal_snapshot",
     "voice_cancel",
@@ -135,6 +138,8 @@ pub struct Flags {
     pub peers: bool,
     /// The phone's task exchange, which the Python connector never offers.
     pub task_exchange: bool,
+    /// The phone's Send now, Cancel and Done list, which it never offers either.
+    pub task_actions: bool,
 }
 
 impl Flags {
@@ -163,6 +168,7 @@ impl Flags {
             speech_config: has("Speech profile management v1"),
             peers: has("mobile-peers --json") && has("mobile-peer --json"),
             task_exchange: has("hgs task exchange|digests --json"),
+            task_actions: has("hgs task mobile-send|mobile-cancel|mobile-done --json"),
         }
     }
 
@@ -242,11 +248,14 @@ impl Flags {
             .into_iter()
             .filter(|operation| implemented(operation))
             .collect();
-        // Connector-only: the phone's task exchange, when hgs offers it.
+        // Connector-only: the phone's tasks, when hgs offers them.
         if self.task_exchange {
             operations.push("task_exchange");
-            operations.sort_unstable();
         }
+        if self.task_actions {
+            operations.extend(["task_send", "task_cancel", "task_done"]);
+        }
+        operations.sort_unstable();
         let features: Vec<&str> = self
             .python_features(one_hop)
             .into_iter()

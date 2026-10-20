@@ -13,6 +13,9 @@ from connector_harness import HELP_TEXT, IMPLEMENTATION, BlackBoxCase
 from gateway_harness import OTHER, PEER, ROUTE, Fleet, GatewayCase, Peer, gateway_help, help_text
 
 MARKER = "       hgs task exchange|digests --json                 the phone's task exchange (mobile)\n"
+ACTIONS = "       hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)\n"
+SEND = ["task", "mobile-send", "--json"]
+CANCEL = ["task", "mobile-cancel", "--json"]
 EXCHANGE = ["task", "exchange", "--json"]
 TASK = "0b9d6c55-2f5e-4c39-9a51-0d6f3c2a7e11"
 REQUEST = {"schema": 1, "project": "project-1", "inventory": {"project": {}, "tasks": {}},
@@ -60,6 +63,39 @@ class TaskExchangeTests(RustOnly, GatewayCase):
         self.assertEqual((result["state"], result["error"]), ("failed", "native task exchange ABI is unavailable"))
         self.assertEqual(self.through(machine=OTHER, argv=EXCHANGE), [])
         self.assertEqual(self.hgs.calls("task"), [])
+
+
+class TaskActionTests(RustOnly, GatewayCase):
+    def action(self, operation: str, payload: dict) -> dict:
+        return {"request_id": str(uuid.uuid4()), "computer_id": self.relay.computer_id,
+                "operation": operation, "session": "", "payload": payload}
+
+    async def test_sends_and_cancels_run_on_the_machine_their_route_names(self):
+        sent = {"schema": 1, "ok": True, "task": TASK, "stage": "active",
+                "session": {"machine": PEER, "session": "codex/api"}, "receipt": {"status": "submitted"}}
+        unrecorded = "the prompt was sent, but the task could not record it: disk full"
+        old = Peer(via="bb-old-peer", machine=OTHER, help=help_text() + MARKER)
+        self.use(Fleet(Peer(help=help_text() + MARKER + ACTIONS, answers=[
+            (SEND, {"stdout": sent, "times": 1}),
+            (SEND, {"stdout": {"schema": 1, "ok": False, "error": unrecorded, "uncertain": True}, "exit": 1}),
+            (CANCEL, {"stdout": {"schema": 1, "ok": False, "error": "only a task In progress can be cancelled"},
+                      "exit": 1})]), old, help=gateway_help() + MARKER + ACTIONS))
+        process = await self.launch()
+        await self.gateway_ready(process)
+        send = {"schema": 1, "project": "project-1", "task": TASK, "session": "codex/api"}
+        result = await self.submit(self.action("task_send", send), process, gateway_route=self.route())
+        self.assertEqual(result, {"state": "completed", "result": sent, "error": None})
+        [call] = self.through(machine=PEER, argv=SEND)
+        self.assertEqual(call["envelope"]["payload"], send)
+        result = await self.submit(self.action("task_send", send), process, gateway_route=self.route())
+        self.assertEqual((result["state"], result["error"]), ("uncertain", unrecorded))
+        cancel = {"schema": 1, "project": "project-1", "task": TASK}
+        result = await self.submit(self.action("task_cancel", cancel), process, gateway_route=self.route())
+        self.assertEqual((result["state"], result["error"]), ("failed", "only a task In progress can be cancelled"))
+        # A peer whose hgs predates the actions never runs them.
+        result = await self.submit(self.action("task_send", send), process, gateway_route=self.route(old))
+        self.assertEqual((result["state"], result["error"]), ("failed", "native task actions ABI is unavailable"))
+        self.assertEqual(self.through(machine=OTHER, argv=SEND), [])
 
 
 class TaskDigestTests(RustOnly, BlackBoxCase):

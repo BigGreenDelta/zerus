@@ -264,6 +264,8 @@ impl<N: Native + 'static> Connector<N> {
             } else if crate::launch::handles(&validated.operation) {
                 self.create(&validated, request_id, &mutation_started)
                     .await?
+            } else if ["task_send", "task_cancel"].contains(&validated.operation.as_str()) {
+                self.task_action(&validated, &mutation_started).await?
             } else {
                 self.run(&validated, request_id).await?
             };
@@ -447,7 +449,37 @@ impl<N: Native + 'static> Connector<N> {
         if operation == "task_exchange" && !flags.task_exchange {
             return Err(Failure::text("native task exchange ABI is unavailable"));
         }
+        if ["task_send", "task_cancel", "task_done"].contains(&operation) && !flags.task_actions {
+            return Err(Failure::text("native task actions ABI is unavailable"));
+        }
         Ok(())
+    }
+
+    /// Send now or Cancel on the session's computer: a mutation, run once per
+    /// identity by the journal. hgs's refusal before anything happened fails
+    /// the receipt with its reason; any other outcome after the call began is
+    /// uncertain.
+    async fn task_action(
+        &self,
+        validated: &Validated,
+        started: &Cell<bool>,
+    ) -> Result<Value, Failure> {
+        let action = if validated.operation == "task_send" {
+            "mobile-send"
+        } else {
+            "mobile-cancel"
+        };
+        let call = Call::new(["task", action, "--json"])
+            .payload(validated.payload.clone().expect("validated"))
+            .failure_json();
+        started.set(true);
+        let answer = self.call(call).await?;
+        task_answer(answer).map_err(|(failure, definite)| {
+            if definite {
+                started.set(false);
+            }
+            failure
+        })
     }
 
     pub(crate) async fn call(&self, call: Call) -> Result<Value, Failure> {
@@ -486,6 +518,12 @@ impl<N: Native + 'static> Connector<N> {
                     .await
             }
             "catalog" => self.catalog(request_id).await,
+            "task_done" => {
+                let call = Call::new(["task", "mobile-done", "--json"])
+                    .payload(payload.expect("validated").clone())
+                    .failure_json();
+                task_answer(self.call(call).await?).map_err(|(failure, _)| failure)
+            }
             "task_exchange" => {
                 // hgs refuses on stdout with a failing exit status; the phone
                 // reads why, such as a project another command holds.
@@ -844,6 +882,24 @@ pub fn receipt_of(operation: &str, result: Value) -> Value {
         _ => Value::Null,
     };
     json!({"state": state, "result": result, "error": error})
+}
+
+/// hgs's answer to one of the phone's task commands: the answer, or its
+/// refusal and whether that refusal is definite (nothing happened).
+fn task_answer(answer: Value) -> Result<Value, (Failure, bool)> {
+    let invalid = || (Failure::text("native task answer is invalid"), false);
+    match answer.get("ok") {
+        Some(Value::Bool(false)) => {
+            let error = answer
+                .get("error")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            let uncertain = answer.get("uncertain") == Some(&Value::Bool(true));
+            Err((Failure::text(error), !uncertain))
+        }
+        _ if answer.is_object() => Ok(answer),
+        _ => Err(invalid()),
+    }
 }
 
 /// `x != payload[key]` with a string on the payload side.

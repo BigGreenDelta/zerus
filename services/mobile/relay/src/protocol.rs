@@ -370,36 +370,7 @@ pub fn request(v: &Value) -> Result<()> {
         if v["session"] != "" {
             return Err(Error::BAD);
         }
-        match op {
-            "task_exchange" => task_exchange(p)?,
-            "task_send" => {
-                fields(p, &["schema", "project", "task", "session"], &[])?;
-                task_request(p)?;
-                text(&p["session"], 1024, false)?;
-            }
-            "task_cancel" => {
-                fields(p, &["schema", "project", "task"], &["reason"])?;
-                task_request(p)?;
-                if let Some(reason) = p.get("reason") {
-                    text(reason, TASK_REASON_MAX, true)?;
-                }
-            }
-            _ => {
-                fields(p, &["schema", "project", "limit"], &["before"])?;
-                task_project(p)?;
-                if p["limit"]
-                    .as_u64()
-                    .is_none_or(|n| !(1..=TASK_DONE_MAX).contains(&n))
-                {
-                    return Err(Error::BAD);
-                }
-                if let Some(before) = p.get("before") {
-                    fields(before, &["at", "uuid"], &[])?;
-                    before["at"].as_u64().ok_or(Error::BAD)?;
-                    uuid(&before["uuid"], false)?;
-                }
-            }
-        }
+        task_payload(op, p)?;
     } else if COMPUTER.contains(&op) {
         fields(p, &["value"], &[])?;
         if v["session"] != "" || !MOBILE_DELIVERY.iter().any(|x| p["value"] == *x) {
@@ -711,6 +682,44 @@ pub fn task_exchange(p: &Value) -> Result<()> {
         next["offset"].as_u64().ok_or(Error::BAD)?;
     }
     Ok(())
+}
+/// The payload of one of the phone's task operations (`TASKS`). The
+/// connector checks a claimed payload with it again.
+pub fn task_payload(op: &str, p: &Value) -> Result<()> {
+    match op {
+        "task_exchange" => task_exchange(p),
+        "task_send" => {
+            fields(p, &["schema", "project", "task", "session"], &[])?;
+            task_request(p)?;
+            text(&p["session"], 1024, false)?;
+            Ok(())
+        }
+        "task_cancel" => {
+            fields(p, &["schema", "project", "task"], &["reason"])?;
+            task_request(p)?;
+            if let Some(reason) = p.get("reason") {
+                text(reason, TASK_REASON_MAX, true)?;
+            }
+            Ok(())
+        }
+        "task_done" => {
+            fields(p, &["schema", "project", "limit"], &["before"])?;
+            task_project(p)?;
+            if p["limit"]
+                .as_u64()
+                .is_none_or(|n| !(1..=TASK_DONE_MAX).contains(&n))
+            {
+                return Err(Error::BAD);
+            }
+            if let Some(before) = p.get("before") {
+                fields(before, &["at", "uuid"], &[])?;
+                before["at"].as_u64().ok_or(Error::BAD)?;
+                uuid(&before["uuid"], false)?;
+            }
+            Ok(())
+        }
+        _ => Err(Error::BAD),
+    }
 }
 /// The schema and a project ID as the replica stores it.
 fn task_project(p: &Value) -> Result<()> {

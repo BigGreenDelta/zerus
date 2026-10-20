@@ -368,13 +368,13 @@ pub fn validate(
         validate_launch(operation, request.get("payload"), request_id)?;
         return Ok(validated("", request.get("payload").cloned()));
     }
-    if operation == "task_exchange" {
+    if zerus_relay::protocol::TASKS.contains(&operation) {
         if request.get("session").and_then(Value::as_str) != Some("") {
-            return Err(error("the task exchange uses no session target"));
+            return Err(error("the phone's tasks use no session target"));
         }
         let payload = request.get("payload").unwrap_or(&Value::Null);
-        zerus_relay::protocol::task_exchange(payload)
-            .map_err(|_| error("invalid task exchange request"))?;
+        zerus_relay::protocol::task_payload(operation, payload)
+            .map_err(|_| error("invalid task request"))?;
         return Ok(validated("", Some(payload.clone())));
     }
     if operation == "set_mobile_delivery" {
