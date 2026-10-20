@@ -22,6 +22,29 @@ SERIAL = "emulator-5554"
 REVISIONS = {"emulator": "37.2.12", IMAGE: "9.0.0"}
 
 
+def java_release(text):
+    """Exact published base/build, with only the recognized optional LTS suffix."""
+    assert len(text.encode("utf-8")) <= 65536, "java_release_size"
+    fields = {}
+    for line in text.splitlines():
+        if not line:
+            continue
+        match = re.fullmatch(r'([A-Z][A-Z0-9_]*)="([^"\r\n]*)"', line)
+        assert match and match[1] not in fields, "java_release_fields"
+        fields[match[1]] = match[2]
+    full = r"17\.0\.20\+1(?:-LTS)?"
+    assert fields.get("JAVA_VERSION") == "17.0.20" or re.fullmatch(full, fields.get("JAVA_VERSION", "")), "JAVA_VERSION"
+    proof = bool(re.fullmatch(full, fields["JAVA_VERSION"]))
+    for name in ("JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION"):
+        if name not in fields:
+            continue
+        pattern = (r"(?:Temurin-)?" if name == "IMPLEMENTOR_VERSION" else "") + full
+        assert re.fullmatch(pattern, fields[name]), name
+        proof = True
+    assert proof, "java_build_unknown"
+    return {name: fields[name] for name in ("JAVA_VERSION", "JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION", "IMPLEMENTOR") if name in fields}
+
+
 def validate_inputs(environment, pins):
     """Versions are a reviewed selection, never an instruction to take latest."""
     assert re.fullmatch(r"[0-9a-f]{40}", environment["EXPECTED_SOURCE"])
@@ -148,7 +171,10 @@ def main():
     project = Path.cwd()
     sdk = Path(os.environ["ANDROID_SDK_ROOT"]).resolve(strict=True)
     java = Path(os.environ["JAVA_HOME"]).resolve(strict=True)
-    assert 'JAVA_RUNTIME_VERSION="17.0.20+1"' in (java / "release").read_text().splitlines()
+    with (java / "release").open("rb") as release:
+        raw_release = release.read(65537)
+    assert len(raw_release) <= 65536
+    java_identity = java_release(raw_release.decode("utf-8"))
     root = Path(tempfile.mkdtemp(prefix="zerus-project-ui-", dir=os.environ["RUNNER_TEMP"]))
     root.chmod(0o700)
     evidence = Path(os.environ["RUNNER_TEMP"]) / "android-project-ui-evidence"
@@ -211,6 +237,7 @@ def main():
         source_before = {name: sha(project / name) for name in paths if name}
         save("source.json", {"commit": source, "files": source_before, "scope": "owned disposable VM; no installed/production/tool-closure claim"})
         save("selected-packages.json", pins)
+        save("java-release.json", java_identity)
         sdkmanager = sdk / "cmdline-tools/latest/bin/sdkmanager"
         assert "Pkg.Revision=12.0" in (sdkmanager.parent.parent / "source.properties").read_text().splitlines()
         save("setup-tools.json", {str(path): sha(path) for path in (java / "release", java / "bin/java", sdkmanager,

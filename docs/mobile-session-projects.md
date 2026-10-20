@@ -134,6 +134,12 @@ standard disposable GitHub-hosted Ubuntu VM. A changed hosted image or JDK is a
 refusal requiring review. Manual package inputs must equal the checked-in pins;
 there is no latest-version fallback.
 
+Admission retains the bounded actual JDK `release` file and names the failing
+guard before checkout. The published Java 17.0.20 build 1 must be proved by the
+version fields; only the explicit `-LTS` spelling is normalized. Missing build
+proof, conflicting fields and unknown suffixes remain refusals. The helper uses
+the same checked validation as the pre-checkout admission step.
+
 The stable package selection in `scripts/ci/android-project-ui-pins.json` is
 Emulator 37.2.12 and API 35 Google APIs x86_64 revision 9. Google repository XML
 URLs, SHA-256 identities and selected archive sizes/official SHA-1 checksums are

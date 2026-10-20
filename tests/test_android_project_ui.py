@@ -1,11 +1,15 @@
 """Offline result/admission controls; no SDK, child, device or network is used."""
 import copy
+import ast
 import importlib.util
 import json
+import os
 from pathlib import Path
 import struct
 import tempfile
+import textwrap
 import unittest
+from unittest.mock import patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -166,10 +170,70 @@ class InputAdmissionTests(unittest.TestCase):
                 UI.revision(xml)
 
 
+class HostedJavaAdmissionTests(unittest.TestCase):
+    def test_published_base_build_and_recognized_lts_spelling(self):
+        for fields in ({"JAVA_VERSION": "17.0.20", "JAVA_RUNTIME_VERSION": "17.0.20+1"},
+                       {"JAVA_VERSION": "17.0.20", "JAVA_RUNTIME_VERSION": "17.0.20+1-LTS", "IMPLEMENTOR_VERSION": "Temurin-17.0.20+1"},
+                       {"JAVA_VERSION": "17.0.20", "IMPLEMENTOR_VERSION": "Temurin-17.0.20+1-LTS"},
+                       {"JAVA_VERSION": "17.0.20+1-LTS"}):
+            with self.subTest(fields=fields):
+                text = "".join(f'{key}="{value}"\n' for key, value in fields.items())
+                self.assertEqual(UI.java_release(text), fields)
+
+    def test_wrong_or_unknown_build_fields_never_fall_back(self):
+        for text in ('JAVA_VERSION="17.0.21"\nJAVA_RUNTIME_VERSION="17.0.21+1"\n',
+                     'JAVA_VERSION="17.0.20"\nJAVA_RUNTIME_VERSION="17.0.20+2"\n',
+                     'JAVA_VERSION="17.0.20"\nJAVA_RUNTIME_VERSION="17.0.20+1-unknown"\n',
+                     'JAVA_VERSION="17.0.20"\nJAVA_RUNTIME_VERSION="17.0.20+1"\nIMPLEMENTOR_VERSION="Temurin-17.0.20+2"\n',
+                     'JAVA_VERSION="17.0.20"\n', 'JAVA_VERSION="17.0.20+1"\nJAVA_VERSION="17.0.20+2"\n',
+                     'JAVA_VERSION="17.0.20+1"\nINVALID\n', 'x' * 65537):
+            with self.subTest(text=text[:200]), self.assertRaises(AssertionError):
+                UI.java_release(text)
+
+    def test_precheckout_and_helper_use_identical_java_validation(self):
+        workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
+        block = workflow.split("python3 -I -B - <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
+        nodes = ast.parse(textwrap.dedent(block)).body
+        inline = next(node for node in nodes if isinstance(node, ast.FunctionDef) and node.name == "java_release")
+        helper = next(node for node in ast.parse((ROOT / "scripts/ci/android-project-ui.py").read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "java_release")
+        self.assertEqual(ast.dump(inline), ast.dump(helper))
+        for literal in ("raw = source.read(65537)", "java-release.txt", "failed_guard", "Hosted admission refused:"):
+            self.assertIn(literal, block)
+
+    def test_precheckout_retains_actual_release_and_names_refused_guard(self):
+        workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
+        block = textwrap.dedent(workflow.split("python3 -I -B - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
+        for refused in (None, "hosted_image", "java_base_build"):
+            with self.subTest(refused=refused), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                java = root / "jdk"
+                java.mkdir()
+                raw = b'JAVA_VERSION="17.0.20"\nJAVA_RUNTIME_VERSION="17.0.20+1-LTS"\n'
+                if refused == "java_base_build":
+                    raw = raw.replace(b"+1", b"+2")
+                (java / "release").write_bytes(raw)
+                env = {"RUNNER_TEMP": str(root), "ImageVersion": "20261018.339.1", "RUNNER_ENVIRONMENT": "github-hosted", "EXPECTED_SOURCE": "a" * 40,
+                       "EXPECTED_EMULATOR_REVISION": "37.2.12", "REQUESTED_EMULATOR_REVISION": "37.2.12",
+                       "EXPECTED_SYSTEM_IMAGE_REVISION": "9.0.0", "REQUESTED_SYSTEM_IMAGE_REVISION": "9.0.0", "JAVA_HOME_17_X64": str(java)}
+                if refused == "hosted_image":
+                    env["ImageVersion"] = "unknown"
+                with patch.dict(os.environ, env, clear=True):
+                    if refused:
+                        with self.assertRaisesRegex(SystemExit, "Hosted admission refused: " + refused):
+                            exec(compile(block, "<hosted-admission>", "exec"), {})
+                    else:
+                        exec(compile(block, "<hosted-admission>", "exec"), {})
+                admission = root / "android-project-ui-admission"
+                record = json.loads((admission / "runner.json").read_text())
+                self.assertEqual(record.get("failed_guard"), refused)
+                if refused != "hosted_image":
+                    self.assertEqual((admission / "java-release.txt").read_bytes(), raw)
+
+
 class WorkflowBoundaryTests(unittest.TestCase):
     def test_pr_and_manual_run_the_exact_source_with_no_write_authority(self):
         workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
-        for literal in ("pull_request:", "branches: [main]", "workflow_dispatch:", "github.event.pull_request.head.sha", "ref: ${{ env.EXPECTED_SOURCE }}", "contents: read", "persist-credentials: false", "EXPECTED_EMULATOR_REVISION: '37.2.12'", "EXPECTED_SYSTEM_IMAGE_REVISION: '9.0.0'", 'test "$ImageVersion" = 20261012.334.1'):
+        for literal in ("pull_request:", "branches: [main]", "workflow_dispatch:", "github.event.pull_request.head.sha", "ref: ${{ env.EXPECTED_SOURCE }}", "contents: read", "persist-credentials: false", "EXPECTED_EMULATOR_REVISION: '37.2.12'", "EXPECTED_SYSTEM_IMAGE_REVISION: '9.0.0'", "require('hosted_image', os.environ.get('ImageVersion') == '20261018.339.1')"):
             self.assertIn(literal, workflow)
         for forbidden in ("pull_request_target", "secrets.", "environment:", "self-hosted", "actions/cache", "permissions: write-all", "contents: write"):
             self.assertNotIn(forbidden, workflow)
