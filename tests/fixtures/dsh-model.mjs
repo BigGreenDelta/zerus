@@ -106,7 +106,10 @@ export function apply(ctx,config) {
     const hold=agent?.session.header.origin==='subagent'&&JSON.stringify(request.messages??[]).match(/HOLD_CHILD_\w+/)?.[0];
     const armed=hold&&hold.startsWith('HOLD_CHILD_ARMED_')&&config?.holds&&!existsSync(join(config.holds,hold))&&ctx.goals.get(agent);
     if(armed)ctx.goals.resume(agent,{id:armed.id,revision:armed.revision});
-    for(let i=0;hold&&config?.holds&&i<300&&!existsSync(join(config.holds,hold));i++)await new Promise(resolve=>setTimeout(resolve,50));
+    for(let i=0;hold&&config?.holds&&i<300&&!existsSync(join(config.holds,hold));i++){
+      if(i===0)writeFileSync(join(config.holds,hold+'.waiting'),'');
+      await new Promise(resolve=>setTimeout(resolve,50));
+    }
     const goal=armed&&ctx.goals.get(agent);
     if(goal?.phase==='active')ctx.goals.pause(agent,{id:goal.id,revision:goal.revision});
     return next();
