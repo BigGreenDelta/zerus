@@ -43,7 +43,9 @@ Activity required to lose and regain focus. Only these assertions use a scoped c
 card: refresh, exact visible label, window and card/run/conversation identity must still match, without a fallback search.
 The cache is cleared in `finally`. Monotonic time begins before resume and must remain below the original three seconds
 after the early assertion or Enter; a slow fixture cannot qualify that precondition. The independent lifecycle case keeps
-its original Home/resume boundary, without an additional reset. No production visibility, foreground or review clock is set.
+its original Home/resume boundary exactly once, with the same cache and elapsed check around its original
+focus/question/confirmation-retired/count/disabled assertions; it never performs an additional reset. No production
+visibility, foreground or review clock is set.
 
 Before dispatch, review this workflow and the SDK-free `tests/test_android_project_ui.py` and
 `tests/test_approval_ui_harness.py` controls. The new app/test are built under a fresh synthetic debug signer; this does

@@ -293,11 +293,11 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('check(cached.current())', button)
         self.assertIn('cached.node.refresh() && cached.node.windowId == cached.window && exactVisible(cached.node, label)', button)
         self.assertIn('} else node(label)', button)
-        helper = source.split("        fun earlyReview(", 1)[1].split("        try {\n            await(\"private model storage\")", 1)[0]
+        helper = source.split("        fun captureEarlySend(", 1)[1].split("        try {\n            await(\"private model storage\")", 1)[0]
         for identity in ('model.selected?.target == target && model.activityVerified', 'card.id == id && card.hash == hash',
                          'card.run == target.run && card.conversation == target.conversation'):
             self.assertIn(identity, helper)
-        self.assertLess(helper.index('earlySend = EarlySend('), helper.index('sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)'))
+        self.assertLess(helper.index('earlySend = captured'), helper.index('sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)'))
         self.assertLess(helper.index('!main { activity.hasWindowFocus() }'), helper.index('val resumeStart = SystemClock.elapsedRealtime()'))
         self.assertLess(helper.index('val resumeStart = SystemClock.elapsedRealtime()'), helper.index('targetContext.startActivity('))
         self.assertLess(helper.index('main { activity.hasWindowFocus() }'), helper.index('checkEarly()'))
@@ -309,6 +309,14 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertLess(source.index('check(editor.performAction(AccessibilityNodeInfo.ACTION_FOCUS))'), source.index('earlyReview("feedback")'))
         lifecycle = source.split('boundary("begin", "lifecycle_no_submit")', 1)[1].split('boundary("complete", "lifecycle_no_submit")', 1)[0]
         self.assertNotIn('earlyReview(', lifecycle)
+        self.assertEqual(lifecycle.count('sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)'), 1)
+        self.assertEqual(lifecycle.count('targetContext.startActivity('), 1)
+        self.assertLess(lifecycle.index('val lifecycleSend = captureEarlySend()'), lifecycle.index('tap("Send answer")'))
+        self.assertLess(lifecycle.index('earlySend = lifecycleSend'), lifecycle.index('sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)'))
+        self.assertLess(lifecycle.index('val resumeStart = SystemClock.elapsedRealtime()'), lifecycle.index('targetContext.startActivity('))
+        self.assertLess(lifecycle.index('check(count() == 4 && !button("Send answer").isEnabled)'), lifecycle.index('val elapsed = '))
+        self.assertIn('elapsed >= 0 && elapsed < 3_000', lifecycle)
+        self.assertIn('finally {\n                earlySend = null', lifecycle)
         self.assertIn('check(count() == 4 && !button("Send answer").isEnabled)', lifecycle)
         for forbidden in ('setActivityVerified', 'setDeclaredField("activeFrameVerified"', 'setReviewDelayForTests', 'CountDownLatch'):
             self.assertNotIn(forbidden, source)

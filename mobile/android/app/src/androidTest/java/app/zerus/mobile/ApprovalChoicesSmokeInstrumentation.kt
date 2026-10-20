@@ -236,7 +236,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             check(expected.compareAndSet(null, JSONObject().put("id", q.string("question_id")).put("hash", q.string("question_hash"))
                 .put("options", JSONArray(if (option == null) emptyList<String>() else listOf(option))).put("text", text)))
         }
-        fun earlyReview(name: String, checkEarly: () -> Unit) {
+        fun captureEarlySend(): EarlySend {
             val q = checkNotNull(pending)
             val id = q.string("question_id"); val hash = q.string("question_hash")
             val current = {
@@ -249,7 +249,11 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             check(earlySend == null && current())
             val send = node("Send answer")
             check(send.refresh() && exactVisible(send, "Send answer"))
-            earlySend = EarlySend(send, send.windowId, current)
+            return EarlySend(send, send.windowId, current)
+        }
+        fun earlyReview(name: String, checkEarly: () -> Unit) {
+            val captured = captureEarlySend()
+            earlySend = captured
             var resumedAt: Long? = null
             try {
                 phase("early-home:$name")
@@ -263,7 +267,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 targetContext.startActivity(Intent(targetContext, MainActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
                 await("same Activity regained focus for $name") { main { activity.hasWindowFocus() } }
-                check(current()) { "Early-review card identity changed after resume" }
+                check(captured.current()) { "Early-review card identity changed after resume" }
                 checkEarly()
                 val elapsed = SystemClock.elapsedRealtime() - resumeStart
                 check(elapsed >= 0 && elapsed < 3_000) { "Fixture missed the real early-review window: $name elapsedMs=$elapsed" }
@@ -333,14 +337,30 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
 
             boundary("begin", "lifecycle_no_submit")
             open("background")
-            reveal("Approve for this session"); tap("Approve for this session"); reviewed(); tap("Send answer"); node("Confirm this option?")
+            reveal("Approve for this session"); tap("Approve for this session"); reviewed()
+            val lifecycleSend = captureEarlySend() // Capture the underlying card before its native modal obscures it.
+            tap("Send answer"); node("Confirm this option?")
             // Real Activity/window lifecycle, not an injected foreground Boolean.
-            sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)
-            await("Activity stopped") { !main { activity.hasWindowFocus() } }
-            targetContext.startActivity(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
-            await("same Activity regained focus") { main { activity.hasWindowFocus() } }
-            node("Review synthetic background"); await("background retires confirmation") { visible("Confirm this option?") == null }
-            check(count() == 4 && !button("Send answer").isEnabled)
+            check(earlySend == null && lifecycleSend.current())
+            earlySend = lifecycleSend
+            var lifecycleResumedAt: Long? = null
+            try {
+                phase("early-home:lifecycle")
+                sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)
+                await("Activity stopped") { !main { activity.hasWindowFocus() } }
+                val resumeStart = SystemClock.elapsedRealtime()
+                lifecycleResumedAt = resumeStart
+                phase("early-resume-begin:lifecycle")
+                targetContext.startActivity(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+                await("same Activity regained focus") { main { activity.hasWindowFocus() } }
+                node("Review synthetic background"); await("background retires confirmation") { visible("Confirm this option?") == null }
+                check(count() == 4 && !button("Send answer").isEnabled)
+                val elapsed = SystemClock.elapsedRealtime() - resumeStart
+                check(elapsed >= 0 && elapsed < 3_000) { "Fixture missed the real early-review window: lifecycle elapsedMs=$elapsed" }
+            } finally {
+                earlySend = null
+                phase("early-end:lifecycle:${lifecycleResumedAt?.let { SystemClock.elapsedRealtime() - it }}")
+            }
             cases += "lifecycle_no_submit"
             boundary("complete", "lifecycle_no_submit")
 
