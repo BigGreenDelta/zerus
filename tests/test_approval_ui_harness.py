@@ -251,6 +251,18 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('check(!button("Send answer").isEnabled && count() == 0)', source)
         self.assertNotIn("setReviewDelayForTests", source)
 
+    def test_android_failure_phase_buffer_is_bounded_and_does_not_change_pass_schema(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        self.assertIn("private val phases = ArrayDeque<String>()", source)
+        phase = source.split("    private fun phase(", 1)[1].split("    override fun onCreate", 1)[0]
+        self.assertIn(".take(160)", phase)
+        self.assertIn("if (phases.size == 64) phases.removeFirst()", phase)
+        self.assertIn("phases.addLast(record)", phase)
+        self.assertIn('${error.stackTraceToString()}\\n${phases.joinToString("\\n")}\\n', source)
+        success = source.split('            result.putString("approval_cases"', 1)[1].split('        } catch (error: Throwable)', 1)[0]
+        self.assertNotIn("phases", success)
+        self.assertIn('finish(Activity.RESULT_OK, result)', success)
+
 
 if __name__ == "__main__":
     unittest.main()

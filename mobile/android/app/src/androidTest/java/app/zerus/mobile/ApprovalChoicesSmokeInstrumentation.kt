@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicReference
 /** Actual Compose/card/model paths, intercepted receipts only; never a native provider or connected workspace. */
 class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     private val cases = mutableListOf<String>()
+    private val phases = ArrayDeque<String>()
     private data class InterceptorFailure(val guard: String, val type: String, val method: String, val path: String)
     private val interceptorFailure = AtomicReference<InterceptorFailure?>(null)
     private fun requireHealthyFixture() {
@@ -37,7 +38,10 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         Log.i("ZerusApprovalUI", "$event $name completed=${cases.size} elapsedMs=${SystemClock.elapsedRealtime()}")
     }
     private fun phase(name: String) {
-        Log.i("ZerusApprovalUI", "phase ${name.take(100)} elapsedMs=${SystemClock.elapsedRealtime()}")
+        val record = "phase ${name.take(100)} elapsedMs=${SystemClock.elapsedRealtime()}".take(160)
+        if (phases.size == 64) phases.removeFirst()
+        phases.addLast(record)
+        Log.i("ZerusApprovalUI", record)
     }
     override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
     override fun onStart() {
@@ -55,7 +59,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             screenshot("failure")
-            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n")
+            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n")
             finish(Activity.RESULT_CANCELED, result)
         }
     }
