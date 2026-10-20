@@ -150,9 +150,9 @@ async fn receipt(f: &Fixture, b: &Value) -> Value {
 async fn context_commands_are_gated_per_operation_and_protocol_version() {
     let f = Fixture::new().await;
     let n = f.node.id.clone();
-    // The relay declares exactly the operations the Python connector
-    // advertises with every capability, as its golden vectors record them,
-    // and those only the Rust connector executes.
+    // The relay declares the current Python operation table plus the
+    // Rust-only operations. The historical all-capabilities help capture
+    // stays frozen and predates additive operations such as projection.
     let vectors: Value =
         serde_json::from_str(include_str!("../../vectors/operations.json")).unwrap();
     let declared = protocol::capabilities(vec![])["operations"].clone();
@@ -163,7 +163,7 @@ async fn context_commands_are_gated_per_operation_and_protocol_version() {
             .map(|op| op.as_str().unwrap().to_string())
             .collect()
     };
-    let mut python = set(&vectors["capabilities"]["all"]["operations"]);
+    let mut python = set(&vectors["sets"]["OPERATIONS"]);
     let rust_only: Value = serde_json::from_str(RUST_ONLY).unwrap();
     for row in rust_only["operations"].as_array().unwrap() {
         let op = row["operation"].as_str().unwrap();
