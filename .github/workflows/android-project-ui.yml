@@ -1,0 +1,80 @@
+name: Android project picker UI qualification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/android-project-ui.yml'
+      - 'scripts/ci/android-project-ui*'
+      - 'tests/test_android_project_ui.py'
+      - 'mobile/android/**'
+      - 'src/state/project*'
+      - 'src/state/swarm*'
+      - 'services/mobile/**'
+      - 'tests/fixtures/mobile-*.json'
+      - 'docs/mobile-session-projects.md'
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Reviewed exact source commit (40 lowercase hex characters)
+        required: true
+        type: string
+      emulator_revision:
+        description: Must equal the reviewed stable pin (no automatic version fallback)
+        default: '37.2.12'
+        required: true
+        type: string
+      system_image_revision:
+        description: Must equal the reviewed API35 image pin
+        default: '9.0.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  project-ui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha }}
+      EXPECTED_EMULATOR_REVISION: '37.2.12'
+      EXPECTED_SYSTEM_IMAGE_REVISION: '9.0.0'
+      REQUESTED_EMULATOR_REVISION: ${{ github.event_name == 'pull_request' && '37.2.12' || inputs.emulator_revision }}
+      REQUESTED_SYSTEM_IMAGE_REVISION: ${{ github.event_name == 'pull_request' && '9.0.0' || inputs.system_image_revision }}
+    steps:
+      - name: Validate immutable input and hosted image
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          test "$REQUESTED_EMULATOR_REVISION" = "$EXPECTED_EMULATOR_REVISION"
+          test "$REQUESTED_SYSTEM_IMAGE_REVISION" = "$EXPECTED_SYSTEM_IMAGE_REVISION"
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$ImageVersion" = 20261012.334.1
+          grep -qx 'JAVA_RUNTIME_VERSION="17.0.20+1"' "$JAVA_HOME_17_X64/release"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.EXPECTED_SOURCE }}
+          persist-credentials: false
+      - name: Check result and APK admission controls without an SDK
+        run: python3 -I -B tests/test_android_project_ui.py
+      - name: Build and qualify the disposable picker fixture once
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test -z "$(git status --porcelain)"
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export PATH="$JAVA_HOME/bin:/usr/bin:/bin"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          python3 -I -B scripts/ci/android-project-ui.py
+      - name: Retain tool/source/APK identities and raw synthetic results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-project-ui-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/android-project-ui-evidence
+          if-no-files-found: error
+          retention-days: 3

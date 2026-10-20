@@ -124,3 +124,44 @@ successful stream and exit, and require the runner's result code. Keep native
 session and owner-phone operations out of this gate. Resource allocation,
 signing, installation and execution are separate from source and unit-test
 acceptance; this document grants none of them.
+
+## Disposable Android UI qualification
+
+`.github/workflows/android-project-ui.yml` runs on relevant pull requests and
+offers an explicit exact-commit manual run. It has read-only repository access,
+no secrets, publication environment or caches, and uses SHA-pinned actions on a
+standard disposable GitHub-hosted Ubuntu VM. A changed hosted image or JDK is a
+refusal requiring review. Manual package inputs must equal the checked-in pins;
+there is no latest-version fallback.
+
+The stable package selection in `scripts/ci/android-project-ui-pins.json` is
+Emulator 37.2.12 and API 35 Google APIs x86_64 revision 9. Google repository XML
+URLs, SHA-256 identities and selected archive sizes/official SHA-1 checksums are
+recorded there. Source preparation read only those two XML documents. The job
+uses the official stable-channel `sdkmanager`, refuses different installed
+revisions, and records the actual installed tool/image hashes. Archive bytes are
+not independently re-hashed by this helper; the metadata receipt and installed
+hashes are different evidence. This selection does not map a development host's
+older platform-tools binary to an upstream source revision.
+
+The helper creates private HOME/XDG/Gradle/Android/AVD state, uses an absent
+signing-properties path and a new synthetic debug signer, and checks the actual
+app/test certificate equality, manifest runner/target and defined DEX classes.
+An explicit foreground ADB server and one fresh KVM emulator use empty fixed
+loopback ports. Other attached devices cause refusal. App networking is disabled
+before installing the fixture. No owner device, existing profile, retained APK,
+keystore, native agent, relay or gateway is involved.
+
+Exactly one custom-runner invocation must report all six ordered case IDs:
+`current_selection`, `close_no_write`, `durable_single_post`, `route_refusal`,
+`original_receipt`, and `stale_navigation`. Failed, incomplete, duplicate or
+unknown result fields fail qualification. Cleanup addresses only the unreaped
+foreground leaders through their pidfds, and requires their exit. This is a
+whole disposable VM boundary, not proof of all descendant ownership or a
+general installed SDK/kernel isolation contract. The VM is retired after the
+job; failed or uncertain steps retain raw evidence and never authorize replay.
+
+Offline helper controls run with `python3 -I -B tests/test_android_project_ui.py`.
+Passing those controls or compiling the APK does not establish an actual UI
+pass: the raw instrumentation result and cleanup outcome from this hosted job
+are required separately.

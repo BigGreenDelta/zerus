@@ -1,0 +1,37 @@
+{
+  "packages": {
+    "emulator": {
+      "archive": {
+        "bytes": 349654171,
+        "checksum": "cd7362ea55dfb86a418958138dc396e74165dd01",
+        "checksum_type": "sha1",
+        "url": "https://dl.google.com/android/repository/emulator-linux_x64-16428233.zip"
+      },
+      "channel": "channel-0",
+      "metadata": {
+        "bytes": 377036,
+        "sha256": "9c6014fd13f460b2eff2a241f1fa4f8881a8a2c4ed8c2a6a2886697c660b4af8",
+        "url": "https://dl.google.com/android/repository/repository2-1.xml"
+      },
+      "revision": "37.2.12"
+    },
+    "system-images;android-35;google_apis;x86_64": {
+      "archive": {
+        "bytes": 1738815903,
+        "checksum": "0103e6dab21290c4b9d16550a3ce99476f884eef",
+        "checksum_type": "sha1",
+        "url": "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-35_r09.zip"
+      },
+      "channel": "channel-0",
+      "metadata": {
+        "bytes": 200144,
+        "sha256": "d48bd8404b8d5ab42d84cc0907dfb9e55c8a50194bb07c8a864c331375dd8b3a",
+        "url": "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-1.xml"
+      },
+      "revision": "9.0.0"
+    }
+  },
+  "schema": 1,
+  "scope": "Official stable metadata selection; archive bytes are fetched by sdkmanager only on the disposable hosted job, not by source preparation. Installed package revisions and actual tool/image SHA-256 identities are checked separately. No mapping of old development-host platform-tools binaries is claimed.",
+  "selected_date": "2026-10-20"
+}
