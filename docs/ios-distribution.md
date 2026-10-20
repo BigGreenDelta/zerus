@@ -23,7 +23,10 @@ newest Xcode 26 or later and uploads it with `xcodebuild -exportArchive`
 archive is signed with an Apple Development identity, and the upload re-signs it
 with a cloud-managed distribution certificate through an App Store Connect API
 key. `mobile/ios/scripts/testflight-upload.sh` does the work and checks the
-archived bundle ID, versions and channel before uploading.
+archived bundle ID, versions and channel before uploading. Before any signing
+secret is in the environment, a step of its own builds the project task replica
+(`mobile/ios/scripts/build-replica.sh`, Rust 1.99.1 with the Apple targets),
+since cargo runs its dependencies' build scripts.
 
 A runner starts without a development identity, and automatic signing would then
 create a new development certificate on every run until the team reaches Apple's

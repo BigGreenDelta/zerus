@@ -221,8 +221,9 @@ operations.
     active: first after 6 seconds, then every 15.
   - It uses the latest catalog, or its own `/v1/computers` read when the
     catalog is older than 20 seconds.
-  - Leaving `.active` cancels it, together with the exchanges that edits
-    started.
+  - Leaving `.active` stops the loop; moving to the background also cancels
+    the exchanges that edits started, as Android does when the app stops.
+    Removing a connection stops the running exchanges before it purges.
 - **Purge.** `AppModel.disconnect` purges the connection's replicas once their
   running exchanges end.
 - **Storage.**
