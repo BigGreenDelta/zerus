@@ -94,6 +94,8 @@ impl Event {
 #[derive(Default)]
 pub struct State {
     pub sessions: HashSet<String>,
+    /// Provider identities from the current listing, scoped to this machine.
+    pub opencode_sessions: HashSet<String>,
     pub archives: HashSet<(String, String)>,
     pub snapshot_seen_at: Option<f64>,
     pub attention: HashMap<(String, String, String), Value>,
@@ -388,6 +390,12 @@ impl<N: Native + 'static> Connector<N> {
                 .filter_map(|row| row.get("name").and_then(Value::as_str))
                 .map(str::to_owned)
                 .collect();
+            state.opencode_sessions = sessions
+                .iter()
+                .filter(|row| row.get("cmd").and_then(Value::as_str) == Some("opencode"))
+                .filter_map(|row| row.get("name").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
             state.archives = sessions
                 .iter()
                 .filter_map(Value::as_object)
@@ -405,6 +413,9 @@ impl<N: Native + 'static> Connector<N> {
         let ((), projects) =
             future::join(self.read_attention(&sessions), self.read_projects(host)).await;
         self.apply_attention(&mut sessions);
+        for row in &mut sessions {
+            crate::opencode_privacy::row(row);
+        }
         let mut projects =
             projects.unwrap_or_else(|| projects::unavailable(&self.settings.binding));
         projects::apply_memberships(&mut sessions, &projects);
