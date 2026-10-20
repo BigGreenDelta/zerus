@@ -192,6 +192,9 @@ pub(crate) fn forward_send(route: &str, args: &[String], origin: Value) -> crate
     if input.len() as u64 > MAX_INPUT {
         return Err(crate::cli::Error::new(1, "message payload exceeds 29 MiB"));
     }
+    // The ledger digest and the receiving send's request identity both cover
+    // the exact text delivered.
+    let input = enveloped(input);
     let reservation = match reserve(&origin, route, &args[0], &input) {
         Ok(value) => Some(value),
         Err(_) => {
@@ -246,6 +249,22 @@ pub(crate) fn forward_send(route: &str, args: &[String], origin: Value) -> crate
         }
     }
     Ok(status.code().unwrap_or(1))
+}
+
+/// `input` with its text inside the calling agent's sender envelope. A payload
+/// without text, or a caller whose reference cannot be proven, stays as it is.
+fn enveloped(input: Vec<u8>) -> Vec<u8> {
+    let Ok(mut request) = serde_json::from_slice::<Value>(&input) else {
+        return input;
+    };
+    let Some(text) = request.get("text").and_then(Value::as_str) else {
+        return input;
+    };
+    let Some(text) = crate::session_reference::sender_envelope(text) else {
+        return input;
+    };
+    request["text"] = json!(text);
+    serde_json::to_vec(&request).unwrap_or(input)
 }
 
 pub(super) fn source_ids(root: &Path) -> anyhow::Result<Vec<(String, String)>> {

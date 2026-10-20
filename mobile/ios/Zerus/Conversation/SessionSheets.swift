@@ -89,6 +89,7 @@ struct NativeSettingsSheet: View {
     @State private var selectedModel = ""
     @State private var selectedEffort = ""
     @State private var effortPage = false
+    @State private var modelQuery = ""
 
     var body: some View {
         let model = app.conversation!
@@ -139,14 +140,27 @@ struct NativeSettingsSheet: View {
                         .disabled(!(effortChoices.count > 1 || !selectedEffort.isEmpty))
                         .accessibilityLabel("Choose effort, \(effortLabel)")
                     }
-                    Section("Model") {
-                        ForEach(snapshot.models, id: \.id) { option in
-                            row(option.label, selected: selectedModel == option.id) {
-                                selectedModel = option.id
-                                selectedEffort = snapshot.keptEffort(selectedEffort, model: option.id, effortFeature: effortFeature)
+                    if snapshot.models.contains(where: { !$0.provider.isEmpty }) {
+                        let models = snapshot.models.map { option in
+                            OpenCodeModel(value: option.id, label: option.label, provider: option.provider, providerLabel: option.providerLabel,
+                                free: option.free, favorite: option.favorite, isDefault: option.isDefault)
+                        }
+                        OpenCodeModelSections(models: OpenCodeCatalog.filter(models, query: modelQuery), selected: selectedModel) { value in
+                            selectedModel = value
+                            selectedEffort = snapshot.keptEffort(selectedEffort, model: value, effortFeature: effortFeature)
+                        }
+                    } else {
+                        Section("Model") {
+                            ForEach(snapshot.models, id: \.id) { option in
+                                row(option.label, selected: selectedModel == option.id) {
+                                    selectedModel = option.id
+                                    selectedEffort = snapshot.keptEffort(selectedEffort, model: option.id, effortFeature: effortFeature)
+                                }
                             }
                         }
                     }
+                    let notice = OpenCodeCatalog.truncationMessage(models: snapshot.modelsTruncated, providers: false)
+                    if !notice.isEmpty { Section { Text(notice).font(.footnote).foregroundStyle(Theme.muted) } }
                 }
                 Section {
                     Text(Self.applyText(snapshot.applyWhen)).font(.footnote).foregroundStyle(Theme.muted)
@@ -154,6 +168,7 @@ struct NativeSettingsSheet: View {
                     if !reason.isEmpty { Text(reason).font(.footnote).foregroundStyle(Theme.amber) }
                 }
             }
+            .modifier(OpenCodeModelSearch(enabled: !effortPage && snapshot.models.count > 8 && snapshot.models.contains(where: { !$0.provider.isEmpty }), query: $modelQuery))
             .navigationTitle(effortPage ? "Effort" : "Select model")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

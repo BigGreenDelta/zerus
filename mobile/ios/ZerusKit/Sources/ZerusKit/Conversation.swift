@@ -275,7 +275,9 @@ public enum ConversationSearch {
             let body = replies?.map { "Question\n\($0.question)\nYour answer\n\($0.answer)" }.joined(separator: "\n\n") ?? event.text
             let text = [body, event.attachments.map(\.name).joined(separator: "\n")]
                 .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.joined(separator: "\n")
-            return SearchableMessage(eventId: event.id, role: replies != nil ? "You (answer)" : event.role, text: text, at: event.at)
+            let role = replies != nil ? "You (answer)" : event.role == ActivityNotices.role
+                ? ActivityNotices.label(origin: event.origin ?? "", sender: event.sender ?? "") : event.role
+            return SearchableMessage(eventId: event.id, role: role, text: text, at: event.at)
         }
     }
 

@@ -10,7 +10,7 @@ data class AccountWindow(val id:String,val label:String,val usedPercent:Double?,
 data class AccountBalance(val kind:String,val balance:String?,val currency:String)
 data class ReportedAccount(val id:String,val provider:String,val label:String,val native:Boolean,val installed:Boolean,val isDefault:Boolean,
     val status:String,val authStatus:String,val identity:AccountIdentity,val windows:List<AccountWindow>,val creditBalance:String?,val unlimited:Boolean?,
-    val balances:List<AccountBalance>,val checkedAt:Double?,val identityCached:Boolean,val refreshing:Boolean,val refreshError:Boolean,val stale:Boolean)
+    val balances:List<AccountBalance>,val checkedAt:Double?,val identityCached:Boolean,val refreshing:Boolean,val refreshError:Boolean,val stale:Boolean,val openCode:OpenCodeAccountCatalog?=null)
 data class AccountCatalog(val key:MachineKey,val machineName:String,val supported:Boolean,val available:Boolean,val stale:Boolean,val online:Boolean,
     val observedAt:Double?,val accounts:List<ReportedAccount>)
 
@@ -52,7 +52,7 @@ object AccountSnapshots {
         return ReportedAccount(id,provider,str(raw,"label",160).ifBlank { id },flag(raw,"native"),flag(raw,"installed"),flag(raw,"is_default"),
             str(usage,"status",48).takeIf { it in statuses } ?: "unknown",str(usage,"auth_status",48).takeIf { it in setOf("signed_in","signed_out","expired","locked","unavailable","unknown","configured","credentials_locked") } ?: "unknown",
             AccountIdentity(str(identity,"name"),str(identity,"email"),str(identity,"organization"),str(identity,"plan"),str(identity,"auth_method",80),str(identity,"account_id")),
-            windows,money(credits,"balance"),credits.opt("unlimited") as? Boolean,balances,number(usage,"checked_at"),flag(usage,"identity_cached"),flag(usage,"refreshing"),flag(usage,"refresh_error"),flag(usage,"stale"))
+            windows,money(credits,"balance"),credits.opt("unlimited") as? Boolean,balances,number(usage,"checked_at"),flag(usage,"identity_cached"),flag(usage,"refreshing"),flag(usage,"refresh_error"),flag(usage,"stale"),OpenCodeCatalog.account(raw))
     }
     /** A successful catalog is authoritative for removals. Failed workspaces keep explicitly stale values. */
     fun merge(previous:List<AccountCatalog>,incoming:List<AccountCatalog>,successful:Set<String>,connected:Set<String>):List<AccountCatalog> {
@@ -78,6 +78,15 @@ object AccountSnapshots {
             .put("windows",JSONArray(a.windows.map { JSONObject().put("id",it.id).put("label",it.label).put("used_percent",it.usedPercent).put("window_minutes",it.minutes).put("resets_at",it.resetsAt) }))
             .put("credits",JSONObject().put("balance",a.creditBalance).put("unlimited",a.unlimited)).put("balances",JSONArray(a.balances.map { JSONObject().put("kind",it.kind).put("balance",it.balance).put("currency",it.currency) }))
             .put("checked_at",a.checkedAt).put("identity_cached",a.identityCached).put("refreshing",a.refreshing).put("refresh_error",a.refreshError).put("stale",a.stale))
+        .also { row -> a.openCode?.let { catalog ->
+            row.put("catalog_state",catalog.state).put("catalog_reason",catalog.reason).put("catalog_at",catalog.catalogAt)
+                .put("model_options_truncated",catalog.modelsTruncated)
+                .put("providers_truncated",catalog.providersTruncated || catalog.providers.size>OpenCodeCatalog.PERSISTED_PROVIDERS)
+                .put("providers",JSONArray(catalog.providers.take(OpenCodeCatalog.PERSISTED_PROVIDERS).map { provider ->
+                    JSONObject().put("id",provider.id).put("label",provider.label).put("kind",provider.kind)
+                        .put("credential_count",provider.credentials).put("active_label",provider.activeLabel).put("model_count",provider.models)
+                }))
+        } }
     fun decode(rows:JSONArray):List<AccountCatalog> {
         if(rows.length()>64 || rows.toString().toByteArray(Charsets.UTF_8).size>1024*1024) return emptyList()
         return (0 until rows.length()).mapNotNull { index -> rows.optJSONObject(index)?.let { raw ->

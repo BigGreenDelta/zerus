@@ -278,12 +278,21 @@ struct LaunchForm: View {
                     }
                     if provider == "opencode" {
                         section("Model") {
-                            Picker("Model", selection: $selectedModel) {
-                                Text("Native default model").tag("")
-                                ForEach(modelOptions, id: \.value) { Text($0.label).tag($0.value) }
+                            NavigationLink {
+                                OpenCodeModelList(models: modelOptions.map {
+                                    OpenCodeModel(value: $0.value, label: $0.label, provider: $0.provider, providerLabel: $0.providerLabel,
+                                        free: $0.free, favorite: $0.favorite, isDefault: $0.isDefault, efforts: $0.efforts)
+                                }, selected: selectedModel, nativeDefault: "Native default model") { selectedModel = $0 }
+                            } label: {
+                                HStack {
+                                    Text("Model").foregroundStyle(Theme.onSurface)
+                                    Spacer()
+                                    Text(modelOptions.first { $0.value == selectedModel }?.label ?? "Native default model").foregroundStyle(Theme.mint)
+                                }
                             }
-                            .pickerStyle(.menu)
                             .disabled(busy)
+                            let notice = LaunchPresentation.catalogNotice(catalog, provider: provider, accountId: account)
+                            if !notice.isEmpty { hint(notice) }
                             hint("Models configured on \(computer). Native default uses OpenCode's configuration.")
                             if !effortOptions.isEmpty {
                                 HStack {

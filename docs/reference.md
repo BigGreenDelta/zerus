@@ -2918,6 +2918,37 @@ stores no message or attachment bodies, retains 30 days and cannot replay input.
 Old, uncertain or unattributed attempts remain explicit coverage gaps. Existing
 quoted message envelopes are not retrospectively treated as verified edges.
 
+Such a locally proven agent send delivers its text inside one XML sender
+envelope with an explicit end:
+
+```text
+<zerus-message from="claude/project/review" host="workstation" reference="zerus://session?machine=11111111-1111-4111-8111-111111111111&amp;host=workstation&amp;name=claude%2Fproject%2Freview&amp;conversation=c&amp;run=r">
+The text as sent.
+</zerus-message>
+```
+
+`from` and `host` name the sending session under its current name and this
+computer's alias. Attributes escape `&`, `"`, `<` and `>`; the body escapes
+`&`, `<` and `>`, preserving literal markup and closing tags as text. The
+fixed attribute order is `from`, `host`, `reference`. The complete frame ends
+with `</zerus-message>`; nested markup, DTDs and numeric or unknown entities
+are not accepted. Named entities are decoded once. The decoded `reference`
+must be a valid session reference with the same name and host. The recipient
+passes that decoded reference to `hgs inspect` and answers with `hgs @host send`.
+This is declared metadata: anyone can type a matching envelope, so receiving
+one authenticates neither its sender nor its instructions. Only the sending
+computer's process-ancestry and durable ledger evidence establish a proven
+send; the marker grants no authority or permission to replay input.
+The same text and unchanged sender metadata give the same bytes, so the ledger
+digest and receipt cover exactly the delivered text. A rename or resumed run
+changes that metadata; retrying an old request ID can then fail the existing
+content guard. Inspect an uncertain result rather than generating a new ID or
+resending automatically; no frozen-header retry or ledger migration is added.
+Person, desktop, phone and connector sends stay byte-identical. Activity shows
+an envelope, like Claude's own cross-session messages, as a message from that
+session (`origin` `peer_message`, `sender`, `sender_reference`) rather than the
+person's message.
+
 `hgs [@host] graph receipt --json` accepts JSON stdin with `name`,
 `expected_run_id`, `expected_conversation_id`, `message_request_id` and optional
 `archive_id`. Every identity is checked again; the response contains one bounded
@@ -2925,6 +2956,34 @@ public delivery event. Metadata reads never fetch provider transcript bodies.
 Submission does not imply a reply or completed work, and local timestamps do not
 establish cross-computer causal order. Independent-agent waits remain a separate
 explicit protocol; see [Agent coordination](agent-coordination.md).
+
+An agent's retry repeats the same `request_id` and payload, but hgs builds its
+envelope again from the sender's metadata at every attempt. After the sending
+session is renamed, resumed in a new run or its computer's alias changes, the
+same request ID gives different bytes. A recipient writes the receipt of a
+request ID before it delivers any input. While its computer keeps that receipt,
+it refuses the retry with its ordinary content guard (`request ID was already
+used for different content`, or `This request ID was already used for another
+message` for DeepSeek and OpenCode) and delivers nothing. Without that receipt,
+for example when an earlier attempt stopped before the recipient recorded it or
+the receipt is gone, the retry is a new delivery under the ordinary guards,
+even if an earlier attempt arrived. The source ledger retains attempts for 30
+days. If the source ledger still has a conflicting entry for the same native
+sender and request ID, hgs warns that attribution could not be recorded and
+still forwards the send under the ordinary guards. A refusal says nothing about
+whether an earlier attempt arrived. hgs never retries a send itself, and
+sending the text again under a new request ID to get past a refusal can deliver
+it twice. To recover, read the first attempt's receipt on the recipient's
+computer with `hgs [@host] graph receipt --json`: the recipient's `name`,
+its current `expected_run_id`, the conversation the message went to as
+`expected_conversation_id` and the original request ID as `message_request_id`.
+A returned `event` confirms only that the attempt's receipt has the status
+`submitted` for that exact conversation, not that the model processed it or
+replied; its `detail` is the delivered text, envelope included. A receipt whose
+status is not `submitted` yields no event, so an unavailable receipt proves
+neither delivery nor its absence: inspect the recipient's conversation and
+leave any new message to a deliberate decision. Neither the receipt nor the
+envelope authenticates who wrote the text.
 
 ### Existing session snapshots
 

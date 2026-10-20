@@ -327,7 +327,7 @@ public enum ConversationDisplayCache {
     public static func decode(_ data: Data) -> Decoded? {
         guard let snapshot = try? JSONDecoder().decode(ConversationSnapshot.self, from: data), let raw = snapshot.raw.object,
               snapshot.events.count <= 500 else { return nil }
-        return Decoded(raw: raw, events: snapshot.events, truncated: snapshot.truncated || raw.bool("mobile_history_truncated"))
+        return Decoded(raw: raw, events: snapshot.events.map(ActivityNotices.cached), truncated: snapshot.truncated || raw.bool("mobile_history_truncated"))
     }
 }
 
@@ -417,7 +417,7 @@ public struct CachedHistoryPage: Codable, Hashable, Sendable {
         try require(self.target == target && !epoch.isEmpty && epoch.count <= 512 && events.count <= 100)
         try require(events.allSatisfy { $0.historyEpoch == epoch && !$0.historyId.isEmpty && !$0.historyCursor.isEmpty })
         for cursor in [before, after].compactMap({ $0 }) { try require(!cursor.isEmpty && cursor.count <= 8192) }
-        return HistoryPage(target: target, epoch: epoch, events: events, before: before, after: after, hasBefore: hasBefore, hasAfter: hasAfter,
+        return HistoryPage(target: target, epoch: epoch, events: events.map(ActivityNotices.cached), before: before, after: after, hasBefore: hasBefore, hasAfter: hasAfter,
                            latestIncoming: latestIncoming, totalIncoming: totalIncoming, complete: complete, indexing: indexing, truncated: truncated, projectionApplied: projectionApplied ?? 0)
     }
 

@@ -53,6 +53,7 @@ public struct ReportedAccount: Codable, Hashable, Sendable {
     public var refreshing: Bool
     public var refreshError: Bool
     public var stale: Bool
+    public var openCode: OpenCodeAccountCatalog? = nil
 }
 
 public struct AccountCatalog: Codable, Hashable, Sendable {
@@ -160,7 +161,7 @@ public enum AccountSnapshots {
                                                          plan: str(identity, "plan"), authMethod: str(identity, "auth_method", 80), accountId: str(identity, "account_id")),
                                windows: windows, creditBalance: money(credits, "balance"), unlimited: unlimited, balances: balances,
                                checkedAt: number(usage, "checked_at"), identityCached: flag(usage, "identity_cached"), refreshing: flag(usage, "refreshing"),
-                               refreshError: flag(usage, "refresh_error"), stale: flag(usage, "stale"))
+                               refreshError: flag(usage, "refresh_error"), stale: flag(usage, "stale"), openCode: OpenCodeCatalog.account(raw))
     }
 
     /// The typed fields of one account, as the connector reports them; anything else is dropped.
