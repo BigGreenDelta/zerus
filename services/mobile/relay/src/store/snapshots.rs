@@ -78,11 +78,14 @@ impl Store {
             return Err(Error::LARGE);
         }
         let hash = digest(encoded);
+        // Only valid incoming preferences can grow the permanent highwater.
+        // Missing/old-host fields still pass accept()'s read-only stale check.
+        let needs_payload = crate::notification_highwater::present(snapshot);
         // Older connectors forward the desktop's presence inside the snapshot.
         let received = now();
         let presence = Presence::from_value(presence, received)
             .or_else(|| Presence::from_value(&snapshot["desktop_presence"], received));
-        if peer.is_none() && !crate::notification_highwater::present(snapshot) {
+        if peer.is_none() && !needs_payload {
             let mut t = self.db.begin().await?;
             if t.exec("UPDATE nodes SET last_seen=? WHERE id=? AND workspace_id=? AND revoked=0 AND (snapshot_hash=? OR EXISTS(SELECT 1 FROM computers c WHERE c.id=nodes.computer_id AND c.revoked=1))",args![now(),&c.id,&c.workspace,&hash]).await? != 0 {
                 // Unchanged content: remember presence without rewriting the snapshot.
@@ -114,10 +117,10 @@ impl Store {
                     &mut t,
                     &[c.workspace.as_str()],
                     changes.len(),
-                    Some(&c.workspace),
+                    needs_payload.then_some(c.workspace.as_str()),
                 )
                 .await?;
-            } else {
+            } else if needs_payload {
                 self.db.payload_usage(&mut t, &c.workspace).await?;
             }
             // Global events (when needed), payload shard, sorted workspaces, then route.
