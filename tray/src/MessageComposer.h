@@ -12,6 +12,7 @@
 
 class QAction;
 class QLabel;
+class QMenu;
 class QComboBox;
 class QPlainTextEdit;
 class QPushButton;
@@ -36,6 +37,9 @@ public:
     // Independent of delivery/loading locks; keeps the existing draft selectable.
     void setRecording(bool recording);
     void setAttachmentAvailability(bool available, const QString &reason = {});
+    // Editable path text on this exact session's computer, without reading or
+    // uploading the file. An empty key withdraws the reference target.
+    void setFileReferenceTarget(const QString &key, const QString &host, const QString &machine, const QString &context = {});
     void setInterruptAvailability(bool working, bool enabled, const QString &reason = {});
     // Same as Stop; false when no turn can be interrupted now.
     bool requestInterrupt();
@@ -134,6 +138,7 @@ private:
     QHash<QString, Suggestion> m_suggestions;
     QHash<QString, double> m_dismissedSuggestions;
     void attachFiles();
+    void referenceFile();
     void attachFile(const QString &path);
     void updateControls();
     void rebuildAttachments();
@@ -165,6 +170,8 @@ private:
     bool m_sessionStatusError = false, m_sessionStatusBlocksInput = false;
     bool m_available = false, m_loading = false, m_dark = true, m_recording = false, m_attachmentsAvailable = true;
     QString m_attachmentsReason;
+    QString m_referenceKey, m_referenceHost, m_referenceMachine, m_referenceContext;
+    quint64 m_referenceRevision = 0;
     double m_scale = 1.0;
     QPlainTextEdit *m_editor;
     QLabel *m_status;
@@ -179,7 +186,9 @@ private:
     bool m_modelDefaultEffort = false;
     QString m_model, m_effort, m_pendingModel, m_pendingEffort, m_settingsReason, m_applyWhen, m_popupKey, m_settingsNotice;
     bool m_settingsEnabled = false;
-    QPushButton *m_attach, *m_send, *m_retry;
+    QPushButton *m_attach, *m_reference, *m_send, *m_retry;
+    QMenu *m_fileMenu;
+    QAction *m_attachFileAction, *m_referenceFileAction;
     QPushButton *m_refreshStatus;
     QPushButton *m_stop;
     ComposerToolbar *m_toolbar;
