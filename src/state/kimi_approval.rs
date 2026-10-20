@@ -494,13 +494,14 @@ fn bound(record: &Value, card: &Value) -> Result<Value> {
         return Err(UNVERIFIED.into());
     }
     let id = string(card, "question_id");
-    let gone = "This approval is no longer pending; refresh Activity";
+    // The same guard runs after earlier native input, before each next write.
+    let gone = "This approval is no longer pending; no further input was sent";
     let event = open.pending.get(id).ok_or(gone)?;
     let fresh = self::card(record, event).ok_or(gone)?;
     if fresh["question_hash"] != card["question_hash"]
         || fresh["questions"][0]["allow_other"] != true
     {
-        return Err("This approval changed; refresh Activity".into());
+        return Err("This approval changed; no further input was sent".into());
     }
     if open.pending.len() != 1 {
         return Err("Another Kimi request is waiting. Answer in Terminal.".into());
@@ -1755,9 +1756,10 @@ mod tests {
 
     #[test]
     fn every_write_is_checked_first_and_one_key_chooses() {
-        let home = tempfile::tempdir().unwrap();
         let event = request("approval_a", "tool_bash", COMMAND);
-        let card = only(&record(home.path()), std::slice::from_ref(&event));
+        let home = home(std::slice::from_ref(&event), &[]);
+        let r = record(home.path());
+        let card = only(&r, std::slice::from_ref(&event));
         let req = &event["request"];
         let choosing = screen(&BODY, CHOOSING, HINT_ROW);
         let pick =
@@ -1833,30 +1835,58 @@ mod tests {
                 3
             )
         );
-        // A failed check stops before the next write.
-        let mut io = Fixture {
-            screens,
-            keys: vec![],
-            pastes: vec![],
-            response: None,
-        };
-        let mut checks = 0;
-        let result = drive(
-            &mut io,
-            &mut || {
-                checks += 1;
-                if checks == 2 {
-                    Err("This approval changed; refresh Activity".into())
-                } else {
-                    Ok(())
-                }
-            },
-            req,
-            &card,
-            &answer,
-        );
-        assert!(result.is_err());
-        assert_eq!((io.keys, io.pastes.len()), (vec!["4".to_owned()], 0));
+        // The real guard can refuse after the chooser key or feedback paste.
+        // Preserve that partial input without claiming that nothing was sent.
+        let wire = home
+            .path()
+            .join("sessions/workspace/session_test/agents/main/wire.jsonl");
+        let mut changed = event.clone();
+        changed["request"]["display"]["description"] = json!("Remove a different cached build");
+        for (replacement, refusal) in [
+            (
+                format!("{changed}\n"),
+                "This approval changed; no further input was sent",
+            ),
+            (
+                format!("{event}\n{}\n", resolved("approval_a")),
+                "This approval is no longer pending; no further input was sent",
+            ),
+        ] {
+            for writes_before_refusal in [1, 2] {
+                fs::write(&wire, format!("{event}\n")).unwrap();
+                let mut io = Fixture {
+                    screens: screens.clone(),
+                    keys: vec![],
+                    pastes: vec![],
+                    response: None,
+                };
+                let mut checks = 0;
+                let result = drive(
+                    &mut io,
+                    &mut || {
+                        checks += 1;
+                        if checks == writes_before_refusal + 1 {
+                            fs::write(&wire, &replacement).unwrap();
+                        }
+                        bound(&r, &card).map(|_| ())
+                    },
+                    req,
+                    &card,
+                    &answer,
+                );
+                assert_eq!(result.unwrap_err(), refusal);
+                assert_eq!(checks, writes_before_refusal + 1);
+                assert_eq!(io.keys, ["4"]);
+                assert_eq!(
+                    io.pastes,
+                    if writes_before_refusal == 1 {
+                        vec![]
+                    } else {
+                        vec![feedback.to_owned()]
+                    }
+                );
+            }
+        }
         // No write at all unless the chooser waits for a choice.
         let mut io = Fixture {
             screens: vec![screen(&BODY, typing, TYPING_ROW)],

@@ -490,7 +490,7 @@ fn validate(request: &LocalRequest) -> Result<()> {
             scoped(&request.payload)?;
             ensure!(request.payload.as_ref().and_then(Value::as_object).is_some_and(|object| object.len()==3 && object.keys().all(|key| ["request_id","expected_run_id","expected_conversation_id"].contains(&key.as_str()))), "hook health is read-only");
         }
-        "history" | "terminal" | "session-action" | "send" | "send-now" | "settings" | "answer"
+        "history" | "history-projection" | "terminal" | "session-action" | "send" | "send-now" | "settings" | "answer"
         | "interrupt" | "clear-context" | "compact-context" | "effort" | "file-read" => {
             ensure!(
                 rest.len() == 2 && session(&rest[0]) && rest[1] == "--json",
@@ -1138,7 +1138,7 @@ fn execute(config: &Config, args: &[String]) -> Result<i32> {
                 direct(config, &request.via),
                 "mobile route is not an enabled direct peer"
             );
-            let max_output = if local.argv.first().is_some_and(|op| op == "analytics") {
+            let max_output = if local.argv.first().is_some_and(|op| op == "analytics" || op == "history-projection") {
                 1024 * 1024
             } else { MAX_BYTES };
             let output = transport(
@@ -1176,6 +1176,27 @@ mod tests {
 
     fn scope() -> Value {
         json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation"})
+    }
+
+    #[test]
+    fn peer_fixed_projection_shape_preserves_the_exact_scope() {
+        let mut payload = scope();
+        payload["history_epoch"] = json!("epoch");
+        payload["projection_after"] = json!(0);
+        payload["projection_until"] = json!(7);
+        let argv = ["history-projection", "codex/project", "--json"];
+        assert!(validate(&request(&argv, Some(payload.clone()))).is_ok());
+        for argv in [vec!["history-projection"], vec!["history-projection", "codex/project"],
+            vec!["history-projection", "codex/project", "--json", "--clear"],
+            vec!["history-projection", "@next", "--json"]] {
+            assert!(validate(&request(&argv, Some(payload.clone()))).is_err());
+        }
+        for payload in [None, Some(json!({})), Some(Value::Null)] {
+            assert!(validate(&request(&argv, payload)).is_err());
+        }
+        let mut wrong = request(&argv, Some(payload));
+        wrong.target_machine_id = "not-a-machine-uuid".into();
+        assert!(validate(&wrong).is_err());
     }
 
     #[test]

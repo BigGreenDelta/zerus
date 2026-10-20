@@ -312,7 +312,8 @@ impl<N: Native + 'static> Connector<N> {
     }
 
     /// `probe_capabilities`: at most every 300 s; a failed probe keeps the
-    /// previous flags (a).
+    /// previous legacy flags (a). Projection alone is revoked while a due probe
+    /// is in flight, and stays unavailable after failure or non-text help.
     pub async fn probe_capabilities(&self) {
         {
             let mut state = self.state.borrow_mut();
@@ -321,6 +322,9 @@ impl<N: Native + 'static> Connector<N> {
             }
             state.capabilities_next_poll = self.clock() + REPROBE_SECONDS;
         }
+        let mut flags = self.flags.get();
+        flags.history_projection = false;
+        self.flags.set(flags);
         if let Ok(Output::Text(help)) = self
             .native(Call::new(["--help"]).timeout(PROBE_TIMEOUT).text())
             .await

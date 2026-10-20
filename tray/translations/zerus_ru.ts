@@ -2195,8 +2195,8 @@ Sessions</source>
     </message>
     <message>
       <location filename="../src/HgsClient.cpp" line="817" />
-      <source>Invalid attachment response. Refresh Activity and try again.</source>
-      <translation>Неверный ответ на вложение. Обновите активность и повторите попытку.</translation>
+      <source>Invalid attachment response. Try again.</source>
+      <translation>Неверный ответ на вложение. Повторите попытку.</translation>
     </message>
     <message>
       <location filename="../src/HgsClient.cpp" line="858" />
@@ -9086,7 +9086,7 @@ Open the downloaded copy, or download again to get an updated file.</source>
     <message>
       <location filename="../src/SessionsWindow.cpp" line="1107" />
       <source>Stop %1 failed: %2
-Refresh status or open Terminal to check the agent before trying again.</source>
+Open Terminal to check the agent before trying again.</source>
       <translation type="unfinished" />
     </message>
     <message>

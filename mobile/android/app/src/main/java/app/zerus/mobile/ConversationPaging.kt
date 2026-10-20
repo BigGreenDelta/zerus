@@ -3,7 +3,7 @@ package app.zerus.mobile
 import org.json.JSONObject
 
 data class HistoryPage(val target:Target,val epoch:String,val events:List<Event>,val before:String?,val after:String?,val hasBefore:Boolean,val hasAfter:Boolean,
-    val latestIncoming:Long?,val totalIncoming:Long?,val complete:Boolean,val indexing:Boolean,val truncated:Boolean,val raw:JSONObject) {
+    val latestIncoming:Long?,val totalIncoming:Long?,val complete:Boolean,val indexing:Boolean,val truncated:Boolean,val raw:JSONObject,val projectionApplied:Long=0) {
     companion object {
         fun cached(target:Target,raw:JSONObject):HistoryPage {
             if(raw.optInt("zerus_page_window") != 1) return parse(target,raw.getString("request_id"),raw)
@@ -11,13 +11,13 @@ data class HistoryPage(val target:Target,val epoch:String,val events:List<Event>
             val epoch=raw.getString("epoch");require(epoch.isNotBlank() && epoch.length<=512)
             val events=EventHistoryCodec.decode(raw.getJSONArray("rows"));require(events.size<=100 && events.all { it.historyEpoch==epoch && it.historyId.isNotBlank() && it.historyCursor.isNotBlank() })
             fun cursor(name:String)=(raw.opt(name) as? String)?.also { require(it.isNotBlank() && it.length<=8192) }
-            return HistoryPage(target,epoch,events,cursor("before"),cursor("after"),raw.getBoolean("has_before"),raw.getBoolean("has_after"),null,null,false,false,true,raw)
+            return HistoryPage(target,epoch,events,cursor("before"),cursor("after"),raw.getBoolean("has_before"),raw.getBoolean("has_after"),null,null,false,false,true,raw,HistoryProjection.number(raw,"projection_applied",0))
         }
         private fun slice(window:HistoryWindow,start:Int,end:Int):JSONObject? {
             val rows=window.events.subList(start,end)
             if(rows.isEmpty()) return null
             val raw=JSONObject().put("zerus_page_window",1).put("target",MessageCodec.targetJson(window.target)).put("epoch",window.epoch)
-                .put("rows",EventHistoryCodec.encode(rows)).put("before",rows.first().historyCursor).put("after",rows.last().historyCursor)
+                .put("projection_applied",window.projectionApplied).put("rows",EventHistoryCodec.encode(rows)).put("before",rows.first().historyCursor).put("after",rows.last().historyCursor)
                 .put("has_before",window.hasBefore || start>0).put("has_after",window.hasAfter || end<window.events.size)
             return raw.takeIf { it.toString().toByteArray(Charsets.UTF_8).size<900*1024 }
         }
@@ -62,7 +62,7 @@ data class HistoryPage(val target:Target,val epoch:String,val events:List<Event>
             val before=cursor("next_before");val after=cursor("next_after")
             val hasBefore=raw.getBoolean("has_more_before");val hasAfter=raw.getBoolean("has_more_after")
             require(!hasBefore || before != null);require(!hasAfter || after != null)
-            return HistoryPage(target,epoch,events,before,after,hasBefore,hasAfter,latest,total,complete,raw.optBoolean("indexing"),raw.optBoolean("truncated"),raw)
+            return HistoryPage(target,epoch,events,before,after,hasBefore,hasAfter,latest,total,complete,raw.optBoolean("indexing"),raw.optBoolean("truncated"),raw,if(complete) HistoryProjection.generation(raw) else 0)
         }
     }
 }
@@ -72,7 +72,7 @@ data class HistoryPage(val target:Target,val epoch:String,val events:List<Event>
  * the durable tail in [displayed] until a durable row represents them or the inspection drops them.
  */
 data class HistoryWindow(val target:Target,val epoch:String,val events:List<Event>,val before:String?,val after:String?,val hasBefore:Boolean,val hasAfter:Boolean,val atHead:Boolean,
-    val inbox:List<Event> = emptyList()) {
+    val inbox:List<Event> = emptyList(),val projectionApplied:Long=0) {
     val displayed:List<Event> get() {
         if(!atHead || inbox.isEmpty()) return events
         val known=events.flatMap(HistoryInspection::identities).toSet()
@@ -98,7 +98,7 @@ data class HistoryWindow(val target:Target,val epoch:String,val events:List<Even
             after=if(direction=="after") page.after else if(dropped) rows.lastOrNull()?.historyCursor else after,
             hasBefore=if(direction=="before") page.hasBefore else hasBefore || dropped,
             hasAfter=nextHasAfter,
-            atHead=!nextHasAfter)
+            atHead=!nextHasAfter,projectionApplied=minOf(projectionApplied,page.projectionApplied))
     }
     fun inspection(incoming:List<Event>,previousInspection:List<Event> = emptyList()):HistoryWindow {
         if(!atHead) return this
@@ -119,10 +119,10 @@ data class HistoryWindow(val target:Target,val epoch:String,val events:List<Even
         val inbox=HistoryInspection.inbox(incoming)
         if(newer.isEmpty()) return copy(events=updated,inbox=inbox)
         val cursor=events.lastOrNull { it.historyCursor.isNotBlank() }?.historyCursor ?: after
-        val page=HistoryPage(target,epoch,newer,before,cursor,hasBefore,false,null,null,false,false,false,JSONObject())
+        val page=HistoryPage(target,epoch,newer,before,cursor,hasBefore,false,null,null,false,false,false,JSONObject(),projectionApplied)
         return copy(events=updated,inbox=inbox).merge(page,"after")
     }
-    companion object { fun from(page:HistoryPage)=HistoryWindow(page.target,page.epoch,page.events,page.before,page.after,page.hasBefore,page.hasAfter,!page.hasAfter) }
+    companion object { fun from(page:HistoryPage)=HistoryWindow(page.target,page.epoch,page.events,page.before,page.after,page.hasBefore,page.hasAfter,!page.hasAfter,projectionApplied=page.projectionApplied) }
 }
 
 object HistoryRequests {

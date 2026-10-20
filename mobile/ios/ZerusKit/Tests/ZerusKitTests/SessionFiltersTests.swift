@@ -215,6 +215,12 @@ final class SessionFiltersTests: XCTestCase {
             XCTAssertTrue(SessionFilters.needsAction(session(#"{"phase":"idle","recovery":{"state":"\#(recovery)"}}"#)))
         }
         XCTAssertFalse(SessionFilters.needsAction(session(#"{"state":"paused","recovery":{"state":"blocked"}}"#)))
+        let retrying = session(#"{"tracked":true,"activity":"busy","phase":"tool","recovery":{"state":"retrying","acknowledged":true}}"#)
+        XCTAssertEqual("Retrying", SessionFilters.status(retrying, true))
+        XCTAssertEqual(.neutral, DesktopSessionPalette.detailKind(retrying, true))
+        let resumed = session(#"{"tracked":true,"activity":"busy","phase":"tool","recovery":{"state":"retrying","acknowledged":true,"resumed_at":125}}"#)
+        XCTAssertEqual("Using a tool", SessionFilters.status(resumed, true))
+        XCTAssertEqual(.working, DesktopSessionPalette.detailKind(resumed, true))
         XCTAssertTrue(SessionFilters.needsAttention(session(#"{"activity":"busy"}"#, pending: 1), true))
         XCTAssertFalse(SessionFilters.needsAttention(session(#"{"activity":"busy"}"#, pending: 1), false))
         for state in ["input", "approval", "attention"] {

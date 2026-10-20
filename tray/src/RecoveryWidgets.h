@@ -19,6 +19,12 @@
 #include <functional>
 
 namespace RecoveryUi {
+// The agent accepted the continuation and the provider served it again. The
+// episode stays open until the turn ends only to keep its attempt budget.
+inline bool resumed(const QJsonObject &job)
+{
+    return job.value("state") == "retrying" && job.value("acknowledged").toBool() && job.value("resumed_at").toDouble() > 0;
+}
 inline QString status(const QJsonObject &job)
 {
     const auto state = job.value("state").toString();
@@ -29,7 +35,8 @@ inline QString status(const QJsonObject &job)
         return remaining > 0 ? QObject::tr("Retry in %1 s").arg(remaining) : QObject::tr("Waiting to retry");
     }
     if (state == "dispatching") return QObject::tr("Sending recovery request…");
-    if (state == "retrying") return job.value("acknowledged").toBool() ? QObject::tr("Recovery in progress") : QObject::tr("Waiting for delivery confirmation…");
+    if (state == "retrying") return !job.value("acknowledged").toBool() ? QObject::tr("Waiting for delivery confirmation…")
+        : resumed(job) ? QObject::tr("Agent resumed after recovery") : QObject::tr("Recovery in progress");
     if (state == "exhausted") return QObject::tr("Automatic attempts exhausted");
     if (state == "uncertain") return QObject::tr("Check the agent before retrying");
     if (state == "blocked") return QObject::tr("Automatic recovery needs attention");
@@ -90,7 +97,7 @@ public:
         if(job.value("id")!=m_job.value("id")) {m_pending=false;m_error.clear();}
         m_job=job;m_online=online;
         m_failure=details.value("phase")=="error"?details.value("provider_error").toObject():QJsonObject();
-        m_active=(!job.isEmpty() && job.value("state")!="succeeded") || !m_failure.isEmpty(); refresh();
+        m_active=(!job.isEmpty() && job.value("state")!="succeeded" && !RecoveryUi::resumed(job)) || !m_failure.isEmpty(); refresh();
     }
     void finished(const QString &error) { m_pending=false;m_error=error;refresh(); }
     void setUsageNotice(const QString &notice) { if(m_usageNotice!=notice){m_usageNotice=notice;refresh();} }
@@ -143,7 +150,7 @@ private:
         notify();
     }
     bool isFailure() const {
-        return !m_failure.isEmpty() && (m_job.isEmpty() || m_job.value("state")=="succeeded" || m_failure.value("error_kind")=="quota"
+        return !m_failure.isEmpty() && (m_job.isEmpty() || m_job.value("state")=="succeeded" || RecoveryUi::resumed(m_job) || m_failure.value("error_kind")=="quota"
             || (m_failure.value("error_kind")=="session_limit" && m_job.value("class")!="session_limit"));
     }
     void notify() { if(summaryChanged)summaryChanged(); }

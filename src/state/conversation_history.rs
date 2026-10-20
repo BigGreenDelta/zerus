@@ -25,6 +25,14 @@ const SOURCE_LINE_BYTES: usize = 16 * 1024 * 1024;
 const SOURCE_READER_VERSION: &str = "2";
 const ROW_BYTES: usize = 32 * 1024;
 const RECONCILE_VERSION: &str = "3";
+// Stored provider rows follow the current public projection (zerus-e9qx).
+const PROJECTION_VERSION: &str = "1";
+const PROJECTION_ROWS: usize = 64;
+// A call stops before another row once this much transcript was read. Each row's
+// line is read whole, up to SOURCE_LINE_BYTES, so one call reads under 20 MiB.
+const PROJECTION_BYTES: usize = 4 * 1024 * 1024;
+// The projection change ledger's bound; at the bound the upgrade changes nothing.
+const LEDGER_ENTRIES: i64 = 100_000;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -48,6 +56,25 @@ struct Request {
     #[serde(default)]
     history_epoch: Option<String>,
 }
+/// A `history-projection` request: the history identity, its exact epoch and a
+/// generation range. Integers only: a float, string or boolean is refused.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectionRequest {
+    request_id: String,
+    expected_run_id: String,
+    expected_conversation_id: String,
+    #[serde(default)]
+    archive_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    history_epoch: String,
+    projection_after: i64,
+    projection_until: i64,
+}
+const PROJECTION_ENTRIES: usize = 256;
+const INDEX_NOT_READY: &str = "History index is not ready; open its history first";
+const PROJECTION_RESPONSE_BYTES: usize = 880 * 1024;
 fn hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
@@ -171,9 +198,12 @@ fn key(parent: &Value, r: &Request) -> String {
     )
 }
 fn index(parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
-    let directory = absolute_root()?.join("public_history");
-    private_dir(&directory)?;
-    if !crate::platform::verify_private(&directory, crate::platform::Private::Directory)
+    index_in(&absolute_root()?.join("public_history"), parent, r)
+}
+/// Opens, creating or migrating, the private history index of `parent` in `directory`.
+fn index_in(directory: &Path, parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
+    private_dir(directory)?;
+    if !crate::platform::verify_private(directory, crate::platform::Private::Directory)
         .map_err(|e| e.to_string())?
     {
         return Err("Public history index directory must be private".into());
@@ -201,6 +231,7 @@ fn index(parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
  CREATE TABLE IF NOT EXISTS aliases(original TEXT PRIMARY KEY,id TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS receipt_seen(name TEXT PRIMARY KEY,stamp TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS reconcile_work(id TEXT PRIMARY KEY);
+ CREATE TABLE IF NOT EXISTS projection_changes(generation INTEGER PRIMARY KEY AUTOINCREMENT,epoch TEXT NOT NULL,id TEXT NOT NULL,change TEXT NOT NULL CHECK(change IN ('retired','refreshed')));
  CREATE INDEX IF NOT EXISTS attachment_candidates ON messages(role,json_extract(body,'$.native_match_hash'));").map_err(|e|e.to_string())?;
     if get(&db, "schema")?.as_deref() != Some("2") {
         let has = db
@@ -214,12 +245,13 @@ fn index(parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
             db.execute_batch("ALTER TABLE messages ADD COLUMN ordinal TEXT NOT NULL DEFAULT ''; ")
                 .map_err(|e| e.to_string())?;
         }
-        db.execute_batch("DELETE FROM messages;DELETE FROM aliases;DELETE FROM receipt_seen;DELETE FROM reconcile_work;DELETE FROM meta;").map_err(|e|e.to_string())?;
+        db.execute_batch("DELETE FROM messages;DELETE FROM aliases;DELETE FROM receipt_seen;DELETE FROM reconcile_work;DELETE FROM projection_changes;DELETE FROM meta;").map_err(|e|e.to_string())?;
         set(&db, "schema", "2")?;
     }
     if get(&db, "epoch")?.is_none() {
         // A new index has no old projections to migrate.
         set(&db, "reconcile_version", RECONCILE_VERSION)?;
+        set(&db, "projection_version", PROJECTION_VERSION)?;
         set(&db, "epoch", &uuid::Uuid::new_v4().to_string())?;
         set(
             &db,
@@ -513,7 +545,7 @@ fn sources(db: &Connection, parent: &Value, r: &Request, native: &Value) -> Resu
         .as_deref()
         .is_some_and(|old| old != descriptor)
     {
-        db.execute_batch("DELETE FROM messages;DELETE FROM aliases;DELETE FROM receipt_seen;DELETE FROM reconcile_work;DELETE FROM meta WHERE key NOT IN ('secret','schema');").map_err(|e|e.to_string())?;
+        db.execute_batch("DELETE FROM messages;DELETE FROM aliases;DELETE FROM receipt_seen;DELETE FROM reconcile_work;DELETE FROM projection_changes;DELETE FROM meta WHERE key NOT IN ('secret','schema');").map_err(|e|e.to_string())?;
         set(db, "epoch", &uuid::Uuid::new_v4().to_string())?;
     }
     set(db, "sources", &descriptor)?;
@@ -542,7 +574,7 @@ fn sources(db: &Connection, parent: &Value, r: &Request, native: &Value) -> Resu
         let changed_boundary =
             get(db, &format!("boundary:{number}"))?.is_some_and(|old| old != boundary);
         if len < offset || changed_same_length || changed_boundary {
-            db.execute_batch("DELETE FROM messages;DELETE FROM aliases;DELETE FROM receipt_seen;DELETE FROM reconcile_work;DELETE FROM meta WHERE key NOT IN ('secret','schema');").map_err(|e|e.to_string())?;
+            db.execute_batch("DELETE FROM messages;DELETE FROM aliases;DELETE FROM receipt_seen;DELETE FROM reconcile_work;DELETE FROM projection_changes;DELETE FROM meta WHERE key NOT IN ('secret','schema');").map_err(|e|e.to_string())?;
             set(db, "epoch", &uuid::Uuid::new_v4().to_string())?;
             return Ok((false, json!({"provider":"source_reset"})));
         }
@@ -946,6 +978,191 @@ fn advance_reconcile_upgrade(db: &Connection) -> Result<bool> {
     }
     Ok(rows.len() < 256)
 }
+/// Applies the current public projection to outgoing Claude rows indexed
+/// before it: each row's own transcript line, found by its source offset and
+/// verified by its uuid, is projected again. That includes a hook row that a
+/// provider row merged into, which keeps the provider's body and aliases. A row
+/// that line still publishes is refreshed in place through its alias; a row it
+/// no longer publishes, such as a compaction summary or Claude's record of a
+/// local command, is removed when nothing else was merged into it. Incoming
+/// rows, their sequences and the epoch never change. Bounded per call and
+/// resumable by row ID.
+fn advance_projection_upgrade(db: &Connection, canonical: &str, native: &Value) -> Result<Value> {
+    let epoch = get(db, "epoch")?.ok_or("History epoch unavailable")?;
+    // Only this epoch's changes can be served; an earlier epoch's are dropped.
+    db.execute("DELETE FROM projection_changes WHERE epoch<>?", [&epoch]).map_err(|e| e.to_string())?;
+    let generation: i64 = db
+        .query_row("SELECT COALESCE(MAX(generation),0) FROM projection_changes", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if get(db, "projection_version")?.as_deref() == Some(PROJECTION_VERSION) {
+        return Ok(json!({"state":"complete","generation":generation}));
+    }
+    if string(native, "agent") != "claude" {
+        set(db, "projection_version", PROJECTION_VERSION)?;
+        return Ok(json!({"state":"complete","generation":generation}));
+    }
+    let paths = paths(native)?;
+    // Without the transcript nothing can be proven; try again on a later call.
+    if paths.is_empty() {
+        return Ok(json!({"state":"indexing","generation":generation}));
+    }
+    let after = get(db, "projection_upgrade_after")?.unwrap_or_default();
+    let mut query = db
+        .prepare("SELECT id,body FROM messages WHERE id>? AND role='outgoing' AND stream IN ('provider','journal') ORDER BY id LIMIT ?")
+        .map_err(|e| e.to_string())?;
+    let rows = query
+        .query_map(params![after, PROJECTION_ROWS as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let (mut read, mut last, mut full) = (0, None, false);
+    for (id, body) in &rows {
+        if read >= PROJECTION_BYTES {
+            break;
+        }
+        let previous = last.replace(id.clone());
+        let row: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+        if row["source"] != "claude_transcript" {
+            continue;
+        }
+        // The row must own its provider origin; another owner proves nothing here.
+        let origin = original(&row, "provider").unwrap_or_default();
+        let owner: Option<String> = db
+            .query_row("SELECT id FROM aliases WHERE original=?", [&origin], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if owner.as_ref() != Some(id) {
+            tally(db, "projection_unverified")?;
+            continue;
+        }
+        let Some(line) = native_line(&paths, &row, native, &mut read) else {
+            tally(db, "projection_unverified")?;
+            continue;
+        };
+        let change = match search::provider_event("claude", &line) {
+            Some((fresh, _)) => {
+                let stored = string(&row, "native_match_hash");
+                let changed = (!stored.is_empty() && stored != hash(string(&fresh, "detail")))
+                    || (stored.is_empty() && row["detail"] != fresh["detail"]);
+                changed.then_some(("refreshed", Some(fresh)))
+            }
+            None => {
+                let mut aliases = db
+                    .prepare("SELECT original FROM aliases WHERE id=? LIMIT 2")
+                    .map_err(|e| e.to_string())?;
+                let aliases = aliases
+                    .query_map([id], |r| r.get::<_, String>(0))
+                    .map_err(|e| e.to_string())?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?;
+                if aliases.len() == 1 && aliases[0] == origin {
+                    Some(("retired", None))
+                } else {
+                    tally(db, "projection_retained")?;
+                    None
+                }
+            }
+        };
+        let Some((change, fresh)) = change else { continue };
+        // Every row change is recorded with it; without room, nothing changes.
+        if !ledger_room(db)? {
+            last = previous;
+            full = true;
+            break;
+        }
+        if let Some(mut fresh) = fresh {
+            fresh["source_offset"] = row["source_offset"].clone();
+            add(db, canonical, fresh, "provider")?;
+            let rewritten: Option<String> = db
+                .query_row("SELECT body FROM messages WHERE id=?", [id], |r| r.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            // add declines a rewrite past the index budget; that is no change.
+            if rewritten.as_deref() == Some(body.as_str()) {
+                tally(db, "projection_declined")?;
+                continue;
+            }
+        } else {
+            db.execute("DELETE FROM messages WHERE id=?", [id]).map_err(|e| e.to_string())?;
+            db.execute("DELETE FROM aliases WHERE id=?", [id]).map_err(|e| e.to_string())?;
+            db.execute("DELETE FROM reconcile_work WHERE id=?", [id]).map_err(|e| e.to_string())?;
+            advance_voice_generation(db)?;
+        }
+        db.execute("INSERT INTO projection_changes(epoch,id,change) VALUES(?,?,?)", params![epoch, id, change])
+            .map_err(|e| e.to_string())?;
+        tally(db, &format!("projection_{change}"))?;
+    }
+    let processed = !full && last.as_ref() == rows.last().map(|(id, _)| id);
+    if processed && rows.len() < PROJECTION_ROWS {
+        set(db, "projection_version", PROJECTION_VERSION)?;
+        db.execute("DELETE FROM meta WHERE key='projection_upgrade_after'", []).map_err(|e| e.to_string())?;
+    } else if let Some(id) = last {
+        set(db, "projection_upgrade_after", &id)?;
+    }
+    let state = if full {
+        "ledger_full"
+    } else if get(db, "projection_version")?.as_deref() == Some(PROJECTION_VERSION) {
+        "complete"
+    } else {
+        "indexing"
+    };
+    let generation: i64 = db
+        .query_row("SELECT COALESCE(MAX(generation),0) FROM projection_changes", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let mut status = json!({"state":state,"generation":generation});
+    for name in ["refreshed", "retired", "retained", "declined", "unverified"] {
+        status[name] = json!(get(db, &format!("projection_{name}"))?.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0));
+    }
+    Ok(status)
+}
+/// The newest ledger generation of the index's current epoch, after deleting
+/// entries of any other epoch; 0 when it has none.
+fn projection_generation(db: &Connection) -> Result<i64> {
+    let epoch = get(db, "epoch")?.ok_or("History epoch unavailable")?;
+    db.execute("DELETE FROM projection_changes WHERE epoch<>?", [&epoch]).map_err(|e| e.to_string())?;
+    db.query_row("SELECT COALESCE(MAX(generation),0) FROM projection_changes", [], |r| r.get(0))
+        .map_err(|e| e.to_string())
+}
+/// Whether one more projection change can be recorded: fewer than
+/// LEDGER_ENTRIES entries and a next generation within SQLite's integer range.
+fn ledger_room(db: &Connection) -> Result<bool> {
+    let (entries, last): (i64, i64) = db
+        .query_row(
+            "SELECT (SELECT count(*) FROM projection_changes),
+                COALESCE((SELECT seq FROM sqlite_sequence WHERE name='projection_changes'),0)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(entries < LEDGER_ENTRIES && last < i64::MAX)
+}
+/// The complete transcript line a provider row was projected from, verified by
+/// its uuid and conversation, or None. A present `sessionId` must be exactly the
+/// conversation's ID. Adds the bytes read to `read`.
+fn native_line(paths: &[PathBuf], row: &Value, native: &Value, read: &mut usize) -> Option<Value> {
+    let (file, byte) = string(row, "source_offset").split_once(':')?;
+    let mut source = File::open(paths.get(file.parse::<usize>().ok()?)?).ok()?;
+    source.seek(SeekFrom::Start(byte.parse::<u64>().ok()?)).ok()?;
+    let mut line = Vec::new();
+    BufReader::new(source.take(SOURCE_LINE_BYTES as u64)).read_until(b'\n', &mut line).ok()?;
+    *read += line.len();
+    if !line.ends_with(b"\n") {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&line).ok()?;
+    let session = match value.get("sessionId") {
+        None => true,
+        Some(Value::String(session)) => !session.is_empty() && native["conversation_id"].as_str() == Some(session.as_str()),
+        Some(_) => false,
+    };
+    let uuid = string(row, "message_id");
+    (session && !uuid.is_empty() && value.get("uuid").and_then(Value::as_str) == Some(uuid)).then_some(value)
+}
+fn tally(db: &Connection, key: &str) -> Result<()> {
+    db.execute("INSERT INTO meta(key,value) VALUES(?,'1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1", [key])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
 fn finish_reconcile_upgrade(db: &Connection, scan_done: bool) -> Result<bool> {
     if !scan_done {
         return Ok(false);
@@ -1084,12 +1301,69 @@ fn reconcile(db: &Connection) -> Result<()> {
     set(db, "reconciled", if pending { "0" } else { "1" })?;
     Ok(())
 }
+fn projection_number(number: &serde_json::Number) -> String {
+    let raw = number.to_string();
+    if !raw.contains(['.', 'e', 'E']) {
+        return if raw == "-0" { "0".into() } else { raw };
+    }
+    // serde_json writes the shortest digits that round-trip, as Python does.
+    let (sign, unsigned) = match raw.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", raw.as_str()),
+    };
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i32>().unwrap_or(0)),
+        None => (unsigned, 0),
+    };
+    let point = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
+    let all = mantissa.replace('.', "");
+    let first = all.find(|c| c != '0').unwrap_or(all.len());
+    let digits = all[first..].trim_end_matches('0');
+    if digits.is_empty() {
+        return format!("{sign}0.0");
+    }
+    let power = exponent + point - first as i32 - 1;
+    if !(-4..16).contains(&power) {
+        let (lead, rest) = digits.split_at(1);
+        let rest = if rest.is_empty() {
+            String::new()
+        } else {
+            format!(".{rest}")
+        };
+        let mark = if power < 0 { '-' } else { '+' };
+        return format!("{sign}{lead}{rest}e{mark}{:02}", power.abs());
+    }
+    let position = power + 1;
+    if position <= 0 {
+        format!(
+            "{sign}0.{}{digits}",
+            "0".repeat(position.unsigned_abs() as usize)
+        )
+    } else if position as usize >= digits.len() {
+        let zeros = "0".repeat(position as usize - digits.len());
+        format!("{sign}{digits}{zeros}.0")
+    } else {
+        let (whole, fraction) = digits.split_at(position as usize);
+        format!("{sign}{whole}.{fraction}")
+    }
+}
+
 fn ascii_wire_size(value: &Value) -> usize {
-    value
-        .to_string()
-        .chars()
-        .map(|c| if c.is_ascii() { 1 } else { 6 * c.len_utf16() })
-        .sum()
+    fn text(value: &str) -> usize {
+        2 + value.chars().map(|c| match c {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            ' '..='~' => 1,
+            c => 6 * c.len_utf16(),
+        }).sum::<usize>()
+    }
+    match value {
+        Value::Null | Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(n) => projection_number(n).len(),
+        Value::String(s) => text(s),
+        Value::Array(items) => 2 + items.iter().map(ascii_wire_size).sum::<usize>() + items.len().saturating_sub(1),
+        Value::Object(items) => 2 + items.iter().map(|(k,v)| text(k) + 1 + ascii_wire_size(v)).sum::<usize>() + items.len().saturating_sub(1),
+    }
 }
 
 /// A native row is eligible only within the source boundary persisted before
@@ -1324,6 +1598,38 @@ fn reconcile_voice(db: &Connection, parent: &Value, request: &Request) -> Result
     set(db,"voice_reconcile_after",&next.to_string())?;
     Ok(complete)
 }
+/// One stored row as history pages and projection changes return it: at most 8
+/// aliases as `original_ids`, its ID, cursor and stream, its incoming number when
+/// the history is complete, and never its native match digest.
+fn public_row(db: &Connection, secret: &str, epoch: &str, complete: bool,
+    (id, at, ordinal, body, incoming): (&str, f64, &str, &str, Option<i64>)) -> Result<Value> {
+    let mut value: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    let mut aliases = db
+        .prepare("SELECT original FROM aliases WHERE id=? ORDER BY original LIMIT 8")
+        .map_err(|e| e.to_string())?;
+    let originals = aliases
+        .query_map([id], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    value["original_ids"] = json!(originals);
+    value["history_id"] = json!(id);
+    value["history_cursor"] = json!(cursor(secret, epoch, at, ordinal, id));
+    value["history_stream"] = json!(if string(&value, "source") == "hgs_delivery" {
+        "attachment"
+    } else if string(&value, "source").is_empty() {
+        "journal"
+    } else {
+        "provider"
+    });
+    value.as_object_mut().unwrap().remove("native_match_hash");
+    value["incoming_seq"] = if complete {
+        json!(incoming)
+    } else {
+        Value::Null
+    };
+    Ok(value)
+}
 fn page(
     db: &Connection,
     r: &Request,
@@ -1397,31 +1703,7 @@ fn page(
         rows.reverse();
     }
     for (id, at, ordinal, body, incoming) in &rows {
-        let mut value: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
-        let mut aliases = db
-            .prepare("SELECT original FROM aliases WHERE id=? ORDER BY original LIMIT 8")
-            .map_err(|e| e.to_string())?;
-        let originals = aliases
-            .query_map([id], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        value["original_ids"] = json!(originals);
-        value["history_id"] = json!(id);
-        value["history_cursor"] = json!(cursor(&secret, &epoch, *at, ordinal, id));
-        value["history_stream"] = json!(if string(&value, "source") == "hgs_delivery" {
-            "attachment"
-        } else if string(&value, "source").is_empty() {
-            "journal"
-        } else {
-            "provider"
-        });
-        value.as_object_mut().unwrap().remove("native_match_hash");
-        value["incoming_seq"] = if complete {
-            json!(incoming)
-        } else {
-            Value::Null
-        };
+        let mut value = public_row(db, &secret, &epoch, complete, (id.as_str(), *at, ordinal.as_str(), body.as_str(), *incoming))?;
         let mut cost = ascii_wire_size(&value) + 1;
         if bytes + cost > 880 * 1024 {
             if !events.is_empty() {
@@ -1469,6 +1751,264 @@ fn page(
         json!({"history_epoch":epoch,"events":events,"next_before":if has_before{rows.first().map(|(id,at,ordinal,_,_)|cursor(&secret,&epoch,*at,ordinal,id))}else{None},"next_after":if has_after{rows.last().map(|(id,at,ordinal,_,_)|cursor(&secret,&epoch,*at,ordinal,id))}else{None},"has_more_before":has_before,"has_more_after":has_after,
   "head":{"incoming_seq":total,"total_incoming":total,"complete":complete},"indexing":!complete&&get(db,"gap")?.is_none()&&(status["provider"]=="indexing"||status["provider"]=="source_reset"||status["journal"]=="indexing"||status["attachments"]=="indexing"||status["canonical"]=="indexing"),"truncated":detail_truncated||!complete,"source_status":status}),
     )
+}
+/// Opens the history index of `parent` in `directory` for a projection read,
+/// under the lock `index_in` uses, only when the directory, lock file and
+/// database already exist privately and hold a schema-2 index with its epoch,
+/// cursor key and ledger. It creates, migrates, resets and repairs nothing:
+/// only ordinary history calls build an index, so a missing, uninitialized or
+/// other-schema one is refused unchanged.
+fn open_projection_index(directory: &Path, parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
+    if !crate::platform::verify_private(directory, crate::platform::Private::Directory).map_err(|_| INDEX_NOT_READY.to_owned())? {
+        return Err("Public history index directory must be private".into());
+    }
+    let key = key(parent, r);
+    // Never follows a link or waits on a FIFO; only a private regular file is locked.
+    let lock = crate::platform::no_follow(OpenOptions::new().write(true))
+        .open(directory.join(format!("{key}.lock")))
+        .map_err(|_| INDEX_NOT_READY.to_owned())?;
+    if !crate::platform::verify_private_file(&lock).map_err(|e| e.to_string())? {
+        return Err("Public history index lock must be private".into());
+    }
+    let guard = Guard::exclusive(lock).map_err(|e| e.to_string())?;
+    let path = directory.join(format!("{key}.sqlite3"));
+    let file = crate::platform::refuse_link(OpenOptions::new().read(true).write(true))
+        .open(&path)
+        .map_err(|_| INDEX_NOT_READY.to_owned())?;
+    if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())? {
+        return Err("Public history index file must be private".into());
+    }
+    drop(file);
+    let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+        .map_err(|e| e.to_string())?;
+    db.busy_timeout(std::time::Duration::from_secs(2)).map_err(|e| e.to_string())?;
+    // Connection settings only; neither writes the database.
+    db.execute_batch("PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;").map_err(|e| e.to_string())?;
+    let tables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+        .map_err(|e| e.to_string())?
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let ready = ["meta", "messages", "aliases", "reconcile_work", "receipt_seen", "projection_changes"]
+        .iter()
+        .all(|table| tables.iter().any(|name| name == table))
+        && get(&db, "schema")?.as_deref() == Some("2")
+        && get(&db, "epoch")?.is_some()
+        && get(&db, "secret")?.is_some();
+    if !ready {
+        return Err(INDEX_NOT_READY.into());
+    }
+    Ok((db, guard))
+}
+/// The identity of a projection request, checked as `history` checks its own,
+/// with its epoch and generation range checked separately.
+fn validate_projection(p: &ProjectionRequest) -> Result<Request> {
+    let request = Request {
+        request_id: p.request_id.clone(),
+        expected_run_id: p.expected_run_id.clone(),
+        expected_conversation_id: p.expected_conversation_id.clone(),
+        archive_id: p.archive_id.clone(),
+        agent_id: p.agent_id.clone(),
+        limit: None,
+        before: None,
+        after: None,
+        around: None,
+        around_incoming_seq: None,
+        history_epoch: None,
+    };
+    validate(&request)?;
+    if p.history_epoch.is_empty() || p.history_epoch.len() > 128 || p.history_epoch.chars().any(char::is_control) {
+        return Err("Invalid exact history epoch".into());
+    }
+    if p.projection_after < 0 || p.projection_until < p.projection_after {
+        return Err("Invalid projection range".into());
+    }
+    Ok(request)
+}
+/// Admits a projection read against the open index. The read never indexes
+/// sources or reconciles: it resolves against the index that ordinary history
+/// calls settled, so it refuses while reconciliation work is pending or the last
+/// reconciliation did not finish. Its epoch must be the current one, checked
+/// before anything else, and `until` no later than that epoch's newest change.
+/// Returns that newest generation.
+fn admit_projection(db: &Connection, p: &ProjectionRequest) -> Result<i64> {
+    if get(db, "epoch")?.as_deref() != Some(p.history_epoch.as_str()) {
+        return Err("History epoch changed; reopen its history".into());
+    }
+    let pending: bool = db
+        .query_row("SELECT EXISTS(SELECT 1 FROM reconcile_work)", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if pending || get(db, "reconciled")?.as_deref() != Some("1") {
+        return Err("History is still indexing; try again".into());
+    }
+    let generation = projection_generation(db)?;
+    if p.projection_until > generation {
+        return Err("Projection position is past the newest change".into());
+    }
+    Ok(generation)
+}
+/// One projection read as a single transaction: admission, the generation,
+/// successor resolution and the encoded response come from one snapshot. Any
+/// refusal rolls back, so it changes nothing and its response is never sent.
+fn serve_projection(db: &Connection, p: &ProjectionRequest, mut envelope: Value) -> Result<Value> {
+    db.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string())?;
+    let served = admit_projection(db, p).and_then(|generation| {
+        envelope["history_epoch"] = json!(p.history_epoch);
+        envelope["projection_generation"] = json!(generation);
+        projection_page(db, envelope, p.projection_after, p.projection_until)
+    });
+    match served {
+        Ok(response) => {
+            db.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+            Ok(response)
+        }
+        Err(error) => {
+            db.execute_batch("ROLLBACK").map_err(|e| e.to_string())?;
+            Err(error)
+        }
+    }
+}
+/// The row that now stands for history row `id`: the row itself, else the owner
+/// of its `history:<id>` alias, which every merge repoints to its survivor.
+fn successor(db: &Connection, id: &str) -> Result<Option<String>> {
+    let own: Option<String> = db
+        .query_row("SELECT id FROM messages WHERE id=?", [id], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if own.is_some() {
+        return Ok(own);
+    }
+    db.query_row("SELECT m.id FROM aliases a JOIN messages m ON m.id=a.id WHERE a.original=?", [format!("history:{id}")], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())
+}
+/// The changes `after < generation <= until` as one response of at most
+/// PROJECTION_ENTRIES entries and PROJECTION_RESPONSE_BYTES on the wire, the
+/// `envelope` included. Each entry is resolved retired (no successor), resolved
+/// refreshed (its successor as a page row) or unresolved (no successor, with a
+/// reason). The first entry is always returned: an oversize successor first has
+/// its detail clipped as a page clips it, then becomes unresolved `oversize`.
+/// `complete` means every change up to `until` is in the response.
+fn projection_page(db: &Connection, mut envelope: Value, after: i64, until: i64) -> Result<Value> {
+    let secret = get(db, "secret")?.ok_or("History cursor key unavailable")?;
+    let epoch = get(db, "epoch")?.ok_or("History epoch unavailable")?;
+    let mut query = db
+        .prepare("SELECT generation,id,change FROM projection_changes WHERE generation>? AND generation<=? ORDER BY generation LIMIT ?")
+        .map_err(|e| e.to_string())?;
+    let changes = query
+        .query_map(params![after, until, PROJECTION_ENTRIES as i64 + 1], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let unresolved = |generation: i64, id: &str, change: &str, reason: &str| {
+        json!({"generation":generation,"history_id":id,"change":change,"resolution":"unresolved","successor":null,"reason":reason})
+    };
+    // The largest values the final fields can take, so the result cannot outgrow its charge.
+    envelope["projection_changes"] = json!([]);
+    envelope["next_projection_after"] = json!(i64::MAX);
+    envelope["complete"] = json!(false);
+    let mut bytes = ascii_wire_size(&envelope);
+    let (mut entries, mut stopped) = (Vec::new(), false);
+    for (generation, id, change) in changes.iter().take(PROJECTION_ENTRIES) {
+        let mut entry = match (change.as_str(), successor(db, id)?) {
+            ("retired", None) => {
+                json!({"generation":generation,"history_id":id,"change":"retired","resolution":"resolved","successor":null})
+            }
+            ("refreshed", Some(row)) => {
+                let (at, ordinal, body, incoming): (f64, String, String, Option<i64>) = db
+                    .query_row("SELECT at,ordinal,body,incoming FROM messages WHERE id=?", [&row], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    })
+                    .map_err(|e| e.to_string())?;
+                let successor = public_row(db, &secret, &epoch, true, (row.as_str(), at, ordinal.as_str(), body.as_str(), incoming))?;
+                json!({"generation":generation,"history_id":id,"change":"refreshed","resolution":"resolved","successor":successor})
+            }
+            ("retired", Some(_)) => unresolved(*generation, id.as_str(), change.as_str(), "unexpected_successor"),
+            _ => unresolved(*generation, id.as_str(), change.as_str(), "no_successor"),
+        };
+        let mut cost = ascii_wire_size(&entry) + 1;
+        if bytes + cost > PROJECTION_RESPONSE_BYTES {
+            if !entries.is_empty() {
+                stopped = true;
+                break;
+            }
+            if entry["successor"].is_object() {
+                entry["successor"]["detail"] = json!(journal::clipped(&entry["successor"]["detail"], 500));
+                entry["successor"]["detail_truncated"] = json!(true);
+                cost = ascii_wire_size(&entry) + 1;
+            }
+            if bytes + cost > PROJECTION_RESPONSE_BYTES {
+                entry = unresolved(*generation, id.as_str(), change.as_str(), "oversize");
+                cost = ascii_wire_size(&entry) + 1;
+            }
+            if bytes + cost > PROJECTION_RESPONSE_BYTES {
+                return Err("Projection response envelope exceeds its bound".into());
+            }
+        }
+        bytes += cost;
+        entries.push(entry);
+    }
+    let complete = !stopped && changes.len() <= PROJECTION_ENTRIES;
+    let next = if complete { until } else { entries.last().and_then(|entry| entry["generation"].as_i64()).unwrap_or(after) };
+    envelope["projection_changes"] = json!(entries);
+    envelope["next_projection_after"] = json!(next);
+    envelope["complete"] = json!(complete);
+    Ok(envelope)
+}
+/// `hgs history-projection <session> --json`: the retired and refreshed history
+/// rows of the current epoch after `projection_after`, up to `projection_until`,
+/// for a phone to apply to its cached window. Read-only apart from deleting
+/// another epoch's ledger entries.
+pub(super) fn projection_dispatch(args: &[String]) -> Result<i32> {
+    if args.len() != 2 || args[1] != "--json" {
+        return Err("usage: hgs history-projection <session> --json".into());
+    }
+    let mut bytes = Vec::new();
+    io::stdin().take(16 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() > 16 * 1024 {
+        return Err("History projection request exceeds bounds".into());
+    }
+    let projection: ProjectionRequest = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let request = validate_projection(&projection)?;
+    let name = &args[0];
+    let parent = record(name, &request)?;
+    let directory = crate::platform::canonical(root()).map_err(|_| INDEX_NOT_READY.to_owned())?.join("public_history");
+    let (db, _guard) = open_projection_index(&directory, &parent, &request)?;
+    let mut envelope = json!({"request_id":request.request_id,"name":name,"run_id":request.expected_run_id,
+        "conversation_id":if let Some(id) = &request.agent_id {
+            format!("{}/{}", request.expected_conversation_id, id)
+        } else {
+            request.expected_conversation_id.clone()
+        }});
+    if let Some(id) = &request.agent_id {
+        envelope["agent_id"] = json!(id);
+        envelope["parent_conversation_id"] = json!(request.expected_conversation_id);
+    }
+    if let Some(id) = &request.archive_id {
+        envelope["archive_id"] = json!(id);
+    }
+    let result = serve_projection(&db, &projection, envelope)?;
+    // A fresh read result cannot quietly switch to a replacement run during I/O.
+    let _current = record(name, &request)?;
+    println!("{result}");
+    Ok(0)
+}
+/// Ends a history call's transaction and reads its page: incoming numbers are
+/// assigned, then the reported projection generation is that of the epoch the
+/// page returns, since reconciliation and incoming numbering can replace it.
+fn respond(db: &Connection, r: &Request, mut complete: bool, mut status: Value) -> Result<Value> {
+    let total = incoming(db, complete)?;
+    if complete && total.is_none() {
+        complete = false;
+        status["canonical"] = json!("indexing");
+    }
+    status["projection_upgrade"]["generation"] = json!(projection_generation(db)?);
+    db.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+    page(db, r, complete, total, status)
 }
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() != 2 || args[1] != "--json" {
@@ -1535,6 +2075,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     set(&db,"voice_seq",&voice_seq.to_string())?;
     status["voice"] = json!(if voice_complete {"complete"} else {"indexing"});
     let source_complete = provider_complete && journal_complete && receipts_complete && voice_complete;
+    status["projection_upgrade"] = advance_projection_upgrade(&db, &key(&parent, &request), &native)?;
     let upgrade_scan_done = advance_reconcile_upgrade(&db)?;
     let mut voice_reconcile_complete = false;
     if source_complete {
@@ -1579,7 +2120,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         }
     }
     status["progress"] = json!({"source_bytes":source_bytes,"known_source_bytes":known_bytes,"journal_seq":get(&db,"journal_seq")?,"receipt_files":db.query_row("SELECT count(*) FROM receipt_seen",[],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?,"canonical_pending":db.query_row("SELECT count(*) FROM reconcile_work",[],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?,"assigned_incoming":db.query_row("SELECT count(*) FROM messages WHERE incoming IS NOT NULL",[],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?,"reconcile_upgrade_after":get(&db,"reconcile_upgrade_after")?,"reconcile_version":get(&db,"reconcile_version")?});
-    let mut complete = source_complete
+    let complete = source_complete
         && voice_reconcile_complete
         && upgrade_done
         && get(&db, "reconciled")?.as_deref() == Some("1")
@@ -1591,13 +2132,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     } else {
         "complete"
     });
-    let total = incoming(&db, complete)?;
-    if complete && total.is_none() {
-        complete = false;
-        status["canonical"] = json!("indexing");
-    }
-    db.execute_batch("COMMIT").map_err(|e| e.to_string())?;
-    let mut result = page(&db, &request, complete, total, status)?;
+    let mut result = respond(&db, &request, complete, status)?;
     // A fresh read result cannot quietly switch to a replacement run during I/O.
     let _current = record(name, &request)?;
     result["request_id"] = json!(request.request_id);
@@ -1625,6 +2160,14 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn projection_ascii_budget_matches_the_shared_wire_literals() {
+        let fixture: Value = serde_json::from_str(include_str!("../../mobile/android/app/src/test/resources/history-projection-wire.json")).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            assert_eq!(ascii_wire_size(&case["value"]), case["bytes"].as_u64().unwrap() as usize, "{}", case["ascii"]);
+        }
+    }
+
     #[test]
     fn voice_matching_requires_source_boundary_and_keeps_exact_journal_alias() {
         let sources = json!([["/synthetic/transcript.jsonl",7,8,"header"]]);
@@ -1753,7 +2296,7 @@ mod tests {
     }
     fn database() -> Connection {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE messages(id TEXT PRIMARY KEY,at REAL NOT NULL,role TEXT NOT NULL,stream TEXT NOT NULL,kind TEXT NOT NULL,ordinal TEXT NOT NULL,body TEXT NOT NULL,incoming INTEGER); CREATE TABLE aliases(original TEXT PRIMARY KEY,id TEXT NOT NULL); CREATE TABLE reconcile_work(id TEXT PRIMARY KEY); CREATE TABLE receipt_seen(name TEXT PRIMARY KEY,stamp TEXT NOT NULL);").unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE messages(id TEXT PRIMARY KEY,at REAL NOT NULL,role TEXT NOT NULL,stream TEXT NOT NULL,kind TEXT NOT NULL,ordinal TEXT NOT NULL,body TEXT NOT NULL,incoming INTEGER); CREATE TABLE aliases(original TEXT PRIMARY KEY,id TEXT NOT NULL); CREATE TABLE reconcile_work(id TEXT PRIMARY KEY); CREATE TABLE receipt_seen(name TEXT PRIMARY KEY,stamp TEXT NOT NULL); CREATE TABLE projection_changes(generation INTEGER PRIMARY KEY AUTOINCREMENT,epoch TEXT NOT NULL,id TEXT NOT NULL,change TEXT NOT NULL CHECK(change IN ('retired','refreshed')));").unwrap();
         set(&db, "epoch", "test-epoch").unwrap();
         set(&db, "secret", &"a".repeat(64)).unwrap();
         db
@@ -1964,6 +2507,841 @@ mod tests {
         let details: Vec<_> = result["events"].as_array().unwrap().iter().map(|row| row["detail"].clone()).collect();
         assert_eq!(details, [json!("/compact"), json!("Compare images")]);
         assert!(!result.to_string().contains("/synthetic/"));
+    }
+    #[test]
+    fn old_claude_projections_are_retired_or_refreshed_in_place_without_an_epoch_reset() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("{conversation}.jsonl"));
+        let submitted = "Compare images\n\nInspect the attached image at \"/synthetic/request-one/image.png\"";
+        let command = "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>";
+        let output = "<local-command-stdout>\u{1b}[2mCompacted (ctrl+o to see full summary)\u{1b}[22m</local-command-stdout>";
+        let summary = "This session is being continued from a previous conversation that ran out of context.";
+        let framed = format!("\n\n<pasted_content id=\"c9a0\">\n{submitted}\n</pasted_content id=\"c9a0\">\n");
+        // Each Claude 2.1.296 line with the public row the projection before zerus-e9qx stored for it.
+        let lines = [
+            ("typed", 1, json!({"message":{"role":"user","content":"/compact"}}), "/compact".to_owned()),
+            ("command", 2, json!({"message":{"role":"user","content":command}}), command.to_owned()),
+            ("summary", 3, json!({"isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":summary}}), summary.to_owned()),
+            ("output", 4, json!({"message":{"role":"user","content":output}}),
+                "<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>".to_owned()),
+            ("pasted", 5, json!({"origin":{"kind":"human"},"message":{"role":"user","content":framed}}), format!("\n\n{submitted}\n")),
+        ];
+        let db = database();
+        let mut transcript = String::new();
+        for (uuid, second, mut line, old) in lines {
+            line["type"] = json!("user");
+            line["uuid"] = json!(uuid);
+            line["sessionId"] = json!(conversation);
+            line["timestamp"] = json!(format!("2026-10-19T00:07:{second:02}Z"));
+            let offset = transcript.len();
+            transcript += &(line.to_string() + "\n");
+            add(&db, "scope", json!({"type":"UserPromptSubmit","source":"claude_transcript","at":1_792_368_000.0 + second as f64,
+                "message_id":uuid,"agent_id":"","detail":old,"source_offset":format!("0:{offset}")}), "provider").unwrap();
+        }
+        std::fs::write(&path, transcript).unwrap();
+        add(&db, "scope", json!({"type":"AgentMessage","source":"claude_transcript","at":1_792_368_010.0,"message_id":"reply",
+            "agent_id":"","detail":"Done.","source_offset":"0:999999"}), "provider").unwrap();
+        db.execute("UPDATE messages SET incoming=7 WHERE role='incoming'", []).unwrap();
+        add(&db,"scope",attachment_row("receipt",submitted,1_792_368_005.5),"attachment").unwrap();
+        for _ in 0..4 { reconcile(&db).unwrap(); }
+        // Before the upgrade the old rows show, and the framed copy stays beside its receipt.
+        let old = page(&db,&request(),true,Some(7),json!({})).unwrap();
+        assert_eq!(old["events"].as_array().unwrap().len(), 7);
+        let owner = |uuid: &str| -> String {
+            db.query_row("SELECT id FROM aliases WHERE original=?", [format!("provider:claude_transcript:You:native:{uuid}")], |r| r.get(0)).unwrap()
+        };
+        let mut expected: Vec<(String, String)> = [("command","retired"),("summary","retired"),("output","retired"),("pasted","refreshed")]
+            .iter().map(|(uuid, change)| (owner(uuid), change.to_string())).collect();
+        let native = json!({"agent":"claude","conversation_id":conversation,"transcript":path});
+        let status = advance_projection_upgrade(&db, "scope", &native).unwrap();
+        assert_eq!(status, json!({"state":"complete","generation":4,"refreshed":1,"retired":3,"retained":0,"declined":0,"unverified":0}));
+        // Each change has its ledger entry, in this epoch, in the order made.
+        let ledger: Vec<(i64, String, String, String)> = db.prepare("SELECT generation,epoch,id,change FROM projection_changes ORDER BY generation")
+            .unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(ledger.iter().map(|entry| entry.0).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert!(ledger.iter().all(|entry| entry.1 == "test-epoch"));
+        let mut changes: Vec<(String, String)> = ledger.into_iter().map(|entry| (entry.2, entry.3)).collect();
+        changes.sort();
+        expected.sort();
+        assert_eq!(changes, expected);
+        for _ in 0..4 { reconcile(&db).unwrap(); }
+        let result = page(&db,&request(),true,Some(7),json!({})).unwrap();
+        let details: Vec<_> = result["events"].as_array().unwrap().iter().map(|row| row["detail"].clone()).collect();
+        assert_eq!(details, [json!("/compact"), json!("Compare images"), json!("Done.")]);
+        assert!(!result.to_string().contains("/synthetic/"));
+        // The epoch and every incoming sequence are unchanged.
+        assert_eq!(result["history_epoch"], "test-epoch");
+        assert_eq!(db.query_row("SELECT incoming FROM messages WHERE role='incoming'",[],|r|r.get::<_,i64>(0)).unwrap(), 7);
+        assert_eq!(get(&db, "projection_version").unwrap().as_deref(), Some(PROJECTION_VERSION));
+        assert!(get(&db, "projection_upgrade_after").unwrap().is_none());
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(advance_projection_upgrade(&db, "scope", &native).unwrap(), json!({"state":"complete","generation":4}));
+    }
+    #[test]
+    fn projection_upgrade_keeps_what_it_cannot_prove_and_resumes_in_bounded_steps() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("{conversation}.jsonl"));
+        let command = "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>";
+        let db = database();
+        let mut transcript = String::new();
+        let mut line = |uuid: &str, session: &str| {
+            let offset = transcript.len();
+            transcript += &(json!({"type":"user","uuid":uuid,"sessionId":session,"timestamp":"2026-10-19T00:00:00Z",
+                "message":{"role":"user","content":command}}).to_string() + "\n");
+            offset
+        };
+        let mut rows = Vec::new();
+        for n in 0..PROJECTION_ROWS + 6 {
+            let uuid = format!("command-{n:03}");
+            rows.push((uuid.clone(), format!("0:{}", line(&uuid, &conversation))));
+        }
+        // A line of another uuid, another conversation, a position inside a line or past
+        // the end proves nothing; a row merged with other evidence is kept.
+        let other = line("someone-else", &conversation);
+        rows.push(("moved".into(), format!("0:{other}")));
+        rows.push(("mid-line".into(), format!("0:{}", other + 1)));
+        rows.push(("missing".into(), "0:99999999".into()));
+        rows.push(("other-session".into(), format!("0:{}", line("other-session", "another-conversation"))));
+        rows.push(("merged".into(), format!("0:{}", line("merged", &conversation))));
+        for (n, (uuid, offset)) in rows.iter().enumerate() {
+            add(&db, "scope", json!({"type":"UserPromptSubmit","source":"claude_transcript","at":n as f64,"message_id":uuid,
+                "agent_id":"","detail":command,"source_offset":offset}), "provider").unwrap();
+        }
+        let merged: String = db.query_row("SELECT id FROM messages WHERE json_extract(body,'$.message_id')='merged'",[],|r|r.get(0)).unwrap();
+        db.execute("INSERT INTO aliases(original,id) VALUES('history:earlier',?)", [&merged]).unwrap();
+        std::fs::write(&path, transcript).unwrap();
+        // A conversation without its transcript waits rather than marking rows unverified.
+        assert_eq!(advance_projection_upgrade(&db, "scope", &json!({"agent":"claude","conversation_id":conversation})).unwrap(),
+            json!({"state":"indexing","generation":0}));
+        assert!(get(&db, "projection_upgrade_after").unwrap().is_none());
+        let native = json!({"agent":"claude","conversation_id":conversation,"transcript":path});
+        let first = advance_projection_upgrade(&db, "scope", &native).unwrap();
+        assert_eq!(first["state"], "indexing");
+        assert!(get(&db, "projection_upgrade_after").unwrap().is_some());
+        assert!(get(&db, "projection_version").unwrap().is_none());
+        let second = advance_projection_upgrade(&db, "scope", &native).unwrap();
+        assert_eq!(second, json!({"state":"complete","generation":PROJECTION_ROWS + 6,"refreshed":0,"retired":PROJECTION_ROWS + 6,
+            "retained":1,"declined":0,"unverified":4}));
+        let mut left: Vec<String> = db.prepare("SELECT json_extract(body,'$.message_id') FROM messages").unwrap()
+            .query_map([],|r|r.get(0)).unwrap().map(|r|r.unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["merged","mid-line","missing","moved","other-session"]);
+        // Other agents have no old Claude projection: the version is set and nothing is read.
+        let codex = database();
+        add(&codex, "scope", json!({"type":"UserPromptSubmit","source":"codex_transcript","at":1.0,"message_id":"codex",
+            "agent_id":"","detail":command,"source_offset":"0:0"}), "provider").unwrap();
+        assert_eq!(advance_projection_upgrade(&codex, "scope", &json!({"agent":"codex"})).unwrap(), json!({"state":"complete","generation":0}));
+        assert_eq!(codex.query_row("SELECT count(*) FROM messages",[],|r|r.get::<_,i64>(0)).unwrap(), 1);
+    }
+    #[test]
+    fn a_hook_row_holding_its_provider_merge_is_refreshed_and_meets_its_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("{conversation}.jsonl"));
+        let submitted = "Compare images\n\nInspect the attached image at \"/synthetic/request-one/image.png\"";
+        let command = "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args></command-args>";
+        let framed = format!("\n\n<pasted_content id=\"c9a0\">\n{submitted}\n</pasted_content id=\"c9a0\">\n");
+        let db = database();
+        let mut transcript = String::new();
+        // Each line's old provider row, and a hook row with the same old text: the
+        // existing reconciliation merges them as it does for every Claude prompt.
+        for (uuid, seq, at, content, human, old) in [
+            ("pasted", 7001, 1_792_368_005.0, framed.clone(), true, format!("\n\n{submitted}\n")),
+            ("command", 7002, 1_792_368_020.0, command.to_owned(), false, command.to_owned()),
+        ] {
+            let offset = transcript.len();
+            let mut line = json!({"type":"user","uuid":uuid,"sessionId":conversation,"timestamp":"2026-10-19T00:07:05Z",
+                "message":{"role":"user","content":content}});
+            if human {
+                line["origin"] = json!({"kind":"human"});
+            }
+            transcript += &(line.to_string() + "\n");
+            add(&db, "scope", json!({"type":"UserPromptSubmit","source":"claude_transcript","at":at,"message_id":uuid,"agent_id":"",
+                "detail":old,"source_offset":format!("0:{offset}")}), "provider").unwrap();
+            add(&db, "scope", json!({"type":"UserPromptSubmit","seq":seq,"at":at + 0.5,"agent_id":"","detail":old}), "journal").unwrap();
+        }
+        std::fs::write(&path, transcript).unwrap();
+        add(&db, "scope", json!({"type":"AgentMessage","source":"claude_transcript","at":1_792_368_030.0,"message_id":"reply",
+            "agent_id":"","detail":"Done.","source_offset":"0:999999"}), "provider").unwrap();
+        db.execute("UPDATE messages SET incoming=7 WHERE role='incoming'", []).unwrap();
+        for _ in 0..4 { reconcile(&db).unwrap(); }
+        let row = |id: &str| -> (String, Value, Vec<String>) {
+            let (stream, body): (String, String) = db.query_row("SELECT stream,body FROM messages WHERE id=?", [id],
+                |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            let mut aliases: Vec<String> = db.prepare("SELECT original FROM aliases WHERE id=?").unwrap()
+                .query_map([id], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+            aliases.sort();
+            (stream, serde_json::from_str(&body).unwrap(), aliases)
+        };
+        let owner = |original: &str| -> String {
+            db.query_row("SELECT id FROM aliases WHERE original=?", [original], |r| r.get(0)).unwrap()
+        };
+        let pasted = owner("provider:claude_transcript:You:native:pasted");
+        let (stream, body, before) = row(&pasted);
+        assert_eq!(stream, "journal");
+        assert_eq!((body["message_id"].clone(), body["source_offset"].clone()), (json!("pasted"), json!("0:0")));
+        assert_eq!(before.len(), 3);
+        assert!(before.contains(&"journal:journal:You:native:7001".to_owned()));
+        assert_eq!(owner("journal:journal:You:native:7002"), owner("provider:claude_transcript:You:native:command"));
+        // A clean receipt cannot meet the framed digest yet.
+        add(&db,"scope",attachment_row("receipt",submitted,1_792_368_006.0),"attachment").unwrap();
+        for _ in 0..4 { reconcile(&db).unwrap(); }
+        assert_eq!(db.query_row("SELECT count(*) FROM messages WHERE role='outgoing'",[],|r|r.get::<_,i64>(0)).unwrap(), 3);
+        let native = json!({"agent":"claude","conversation_id":conversation,"transcript":path});
+        let status = advance_projection_upgrade(&db, "scope", &native).unwrap();
+        // The merged private command has hook evidence too, so it stays.
+        assert_eq!(status, json!({"state":"complete","generation":1,"refreshed":1,"retired":0,"retained":1,"declined":0,"unverified":0}));
+        for _ in 0..4 { reconcile(&db).unwrap(); }
+        let (stream, body, after) = row(&pasted);
+        assert_eq!((stream.as_str(), body["detail"].clone()), ("attachment", json!("Compare images")));
+        assert!(before.iter().all(|alias| after.contains(alias)), "{after:?}");
+        assert!(after.contains(&"attachment:hgs_delivery:You:native:receipt".to_owned()));
+        assert_eq!(after.len(), 5);
+        let result = page(&db,&request(),true,Some(7),json!({})).unwrap();
+        let details: Vec<_> = result["events"].as_array().unwrap().iter().map(|row| row["detail"].clone()).collect();
+        assert_eq!(details, [json!("Compare images"), json!(command), json!("Done.")]);
+        assert_eq!(result["history_epoch"], "test-epoch");
+        assert_eq!(db.query_row("SELECT incoming FROM messages WHERE role='incoming'",[],|r|r.get::<_,i64>(0)).unwrap(), 7);
+    }
+    #[test]
+    fn only_an_absent_or_exact_session_id_proves_a_transcript_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("{conversation}.jsonl"));
+        let command = "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>";
+        let db = database();
+        let mut transcript = String::new();
+        let sessions = [("absent", None), ("exact", Some(json!(conversation))), ("null", Some(Value::Null)), ("bool", Some(json!(true))),
+            ("number", Some(json!(7))), ("array", Some(json!([conversation]))), ("object", Some(json!({"id":conversation}))),
+            ("empty", Some(json!(""))), ("other", Some(json!("another-conversation")))];
+        for (n, (uuid, session)) in sessions.iter().enumerate() {
+            let mut line = json!({"type":"user","uuid":uuid,"timestamp":"2026-10-19T00:00:00Z","message":{"role":"user","content":command}});
+            if let Some(session) = session {
+                line["sessionId"] = session.clone();
+            }
+            let offset = transcript.len();
+            transcript += &(line.to_string() + "\n");
+            add(&db, "scope", json!({"type":"UserPromptSubmit","source":"claude_transcript","at":n as f64,"message_id":uuid,
+                "agent_id":"","detail":command,"source_offset":format!("0:{offset}")}), "provider").unwrap();
+        }
+        std::fs::write(&path, transcript).unwrap();
+        let native = json!({"agent":"claude","conversation_id":conversation,"transcript":path});
+        let status = advance_projection_upgrade(&db, "scope", &native).unwrap();
+        assert_eq!(status, json!({"state":"complete","generation":2,"refreshed":0,"retired":2,"retained":0,"declined":0,"unverified":7}));
+        let mut left: Vec<String> = db.prepare("SELECT json_extract(body,'$.message_id') FROM messages").unwrap()
+            .query_map([],|r|r.get(0)).unwrap().map(|r|r.unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["array","bool","empty","null","number","object","other"]);
+    }
+    #[test]
+    fn projection_upgrade_reads_whole_lines_and_stops_after_its_soft_byte_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("{conversation}.jsonl"));
+        // Three 2.5 MiB command outputs: the first call reads two whole lines (5 MiB,
+        // past its 4 MiB budget), defers the third untouched, and the next call ends.
+        let output = format!("<local-command-stdout>{}</local-command-stdout>", "x".repeat(PROJECTION_BYTES * 5 / 8));
+        let db = database();
+        let mut transcript = String::new();
+        for n in 0..3 {
+            let uuid = format!("output-{n}");
+            let offset = transcript.len();
+            transcript += &(json!({"type":"user","uuid":uuid,"sessionId":conversation,"timestamp":"2026-10-19T00:00:00Z",
+                "message":{"role":"user","content":output}}).to_string() + "\n");
+            add(&db, "scope", json!({"type":"UserPromptSubmit","source":"claude_transcript","at":n as f64,"message_id":uuid,
+                "agent_id":"","detail":output,"source_offset":format!("0:{offset}")}), "provider").unwrap();
+        }
+        std::fs::write(&path, transcript).unwrap();
+        let native = json!({"agent":"claude","conversation_id":conversation,"transcript":path});
+        let first = advance_projection_upgrade(&db, "scope", &native).unwrap();
+        assert_eq!(first, json!({"state":"indexing","generation":2,"refreshed":0,"retired":2,"retained":0,"declined":0,"unverified":0}));
+        assert_eq!(db.query_row("SELECT count(*) FROM messages",[],|r|r.get::<_,i64>(0)).unwrap(), 1);
+        let second = advance_projection_upgrade(&db, "scope", &native).unwrap();
+        assert_eq!(second, json!({"state":"complete","generation":3,"refreshed":0,"retired":3,"retained":0,"declined":0,"unverified":0}));
+    }
+    #[test]
+    fn no_row_changes_without_its_ledger_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("{conversation}.jsonl"));
+        let command = "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>";
+        let framed = "\n\n<pasted_content id=\"c9a0\">\nFrom the phone\n</pasted_content id=\"c9a0\">\n";
+        // A command record to retire and a framed paste to refresh.
+        let setup = || -> (Connection, Value) {
+            let db = database();
+            let mut transcript = String::new();
+            for (uuid, content, human, old) in [("command", command, false, command), ("pasted", framed, true, "\n\nFrom the phone\n")] {
+                let offset = transcript.len();
+                let mut line = json!({"type":"user","uuid":uuid,"sessionId":conversation,"timestamp":"2026-10-19T00:00:00Z",
+                    "message":{"role":"user","content":content}});
+                if human {
+                    line["origin"] = json!({"kind":"human"});
+                }
+                transcript += &(line.to_string() + "\n");
+                add(&db, "scope", json!({"type":"UserPromptSubmit","source":"claude_transcript","at":1.0,"message_id":uuid,"agent_id":"",
+                    "detail":old,"source_offset":format!("0:{offset}")}), "provider").unwrap();
+            }
+            std::fs::write(&path, transcript).unwrap();
+            (db, json!({"agent":"claude","conversation_id":conversation,"transcript":path}))
+        };
+        let rows = |db: &Connection| -> Vec<(String, String)> {
+            db.prepare("SELECT id,body FROM messages ORDER BY id").unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap().map(|r| r.unwrap()).collect()
+        };
+        let ledger = |db: &Connection| -> i64 { db.query_row("SELECT count(*) FROM projection_changes", [], |r| r.get(0)).unwrap() };
+        // A full ledger, or a generation at the end of SQLite's integer range, changes nothing.
+        for full in ["WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000)
+                INSERT INTO projection_changes(epoch,id,change) SELECT 'test-epoch','earlier-'||i,'retired' FROM n;",
+            "INSERT INTO projection_changes(generation,epoch,id,change) VALUES(9223372036854775807,'test-epoch','last','retired');"] {
+            let (db, native) = setup();
+            db.execute_batch(full).unwrap();
+            let (before, entries) = (rows(&db), ledger(&db));
+            for _ in 0..2 {
+                assert_eq!(advance_projection_upgrade(&db, "scope", &native).unwrap()["state"], "ledger_full");
+            }
+            assert_eq!((rows(&db), ledger(&db)), (before, entries));
+            assert!(get(&db, "projection_upgrade_after").unwrap().is_none());
+            assert!(get(&db, "projection_version").unwrap().is_none());
+        }
+        // A rewrite add declines past the index budget is no change and has no entry;
+        // an earlier epoch's entries are dropped, not served.
+        let (db, native) = setup();
+        let pasted: String = db.query_row("SELECT id FROM aliases WHERE original='provider:claude_transcript:You:native:pasted'", [], |r| r.get(0)).unwrap();
+        let body: String = db.query_row("SELECT body FROM messages WHERE id=?", [&pasted], |r| r.get(0)).unwrap();
+        set(&db, "bytes", "600000000").unwrap();
+        db.execute("INSERT INTO projection_changes(epoch,id,change) VALUES('earlier-epoch','old','retired')", []).unwrap();
+        let status = advance_projection_upgrade(&db, "scope", &native).unwrap();
+        assert_eq!(status, json!({"state":"complete","generation":2,"refreshed":0,"retired":1,"retained":0,"declined":1,"unverified":0}));
+        assert_eq!(db.query_row("SELECT body FROM messages WHERE id=?", [&pasted], |r| r.get::<_, String>(0)).unwrap(), body);
+        let entries: Vec<(String, String)> = db.prepare("SELECT epoch,change FROM projection_changes").unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(entries, [("test-epoch".to_owned(), "retired".to_owned())]);
+        // With room for exactly one entry, of two changes only the first is made and
+        // recorded; the second waits at ledger_full with the cursor before it.
+        for (seed, entries) in [
+            ("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<99999)
+                INSERT INTO projection_changes(epoch,id,change) SELECT 'test-epoch','earlier-'||i,'retired' FROM n;", 100_000),
+            ("INSERT INTO projection_changes(generation,epoch,id,change) VALUES(9223372036854775806,'test-epoch','last','retired');", 2),
+        ] {
+            let (db, native) = setup();
+            db.execute_batch(seed).unwrap();
+            let before = rows(&db);
+            let status = advance_projection_upgrade(&db, "scope", &native).unwrap();
+            assert_eq!(status["state"], "ledger_full");
+            assert_eq!(status["refreshed"].as_i64().unwrap() + status["retired"].as_i64().unwrap(), 1);
+            assert_eq!(ledger(&db), entries);
+            let (first, second) = (&before[0], &before[1]);
+            assert_eq!(get(&db, "projection_upgrade_after").unwrap().as_ref(), Some(&first.0));
+            let after = rows(&db);
+            assert!(!after.contains(first));
+            assert!(after.contains(second));
+        }
+        // An earlier epoch's entries go, but the spent sequence does not come back.
+        let (db, native) = setup();
+        db.execute_batch("INSERT INTO projection_changes(generation,epoch,id,change) VALUES(9223372036854775807,'earlier-epoch','last','retired');").unwrap();
+        let before = rows(&db);
+        let status = advance_projection_upgrade(&db, "scope", &native).unwrap();
+        assert_eq!((status["state"].clone(), status["generation"].clone()), (json!("ledger_full"), json!(0)));
+        assert_eq!((rows(&db), ledger(&db)), (before, 0));
+        // A failed append undoes the change it records, for a retirement and a refresh.
+        for keep in ["command", "pasted"] {
+            let (db, native) = setup();
+            let other = if keep == "command" { "pasted" } else { "command" };
+            let id: String = db.query_row("SELECT id FROM aliases WHERE original=?",
+                [format!("provider:claude_transcript:You:native:{other}")], |r| r.get(0)).unwrap();
+            db.execute("DELETE FROM messages WHERE id=?", [&id]).unwrap();
+            db.execute("DELETE FROM aliases WHERE id=?", [&id]).unwrap();
+            db.execute("DELETE FROM reconcile_work", []).unwrap();
+            db.execute_batch("CREATE TEMP TRIGGER refuse BEFORE INSERT ON projection_changes BEGIN SELECT RAISE(ABORT, 'ledger append failed'); END;").unwrap();
+            let snapshot = |db: &Connection| -> Vec<String> {
+                ["SELECT id||'|'||body||'|'||ifnull(incoming,'') FROM messages ORDER BY id", "SELECT original||'|'||id FROM aliases ORDER BY original",
+                    "SELECT id FROM reconcile_work ORDER BY id", "SELECT key||'='||value FROM meta ORDER BY key",
+                    "SELECT generation||'|'||epoch||'|'||id||'|'||change FROM projection_changes ORDER BY generation"]
+                    .iter().flat_map(|sql| db.prepare(sql).unwrap().query_map([], |r| r.get::<_, String>(0)).unwrap().map(|r| r.unwrap()).collect::<Vec<_>>())
+                    .collect()
+            };
+            let before = snapshot(&db);
+            db.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let error = advance_projection_upgrade(&db, "scope", &native).unwrap_err().to_string();
+            assert!(error.contains("ledger append failed"), "{keep}: {error}");
+            db.execute_batch("ROLLBACK").unwrap();
+            assert_eq!(snapshot(&db), before, "{keep}");
+        }
+    }
+    #[test]
+    fn source_resets_clear_the_projection_ledger() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let first = temp.path().join(format!("{conversation}.jsonl"));
+        let line = json!({"type":"user","uuid":"one","sessionId":conversation,"timestamp":"2026-10-19T00:00:00Z",
+            "message":{"role":"user","content":"Hello"}}).to_string() + "\n";
+        std::fs::write(&first, line.repeat(2)).unwrap();
+        let db = database();
+        let native = json!({"agent":"claude","conversation_id":conversation,"transcript":first});
+        let ledger = |db: &Connection| -> i64 { db.query_row("SELECT count(*) FROM projection_changes", [], |r| r.get(0)).unwrap() };
+        let record = |db: &Connection| {
+            db.execute("INSERT INTO projection_changes(epoch,id,change) VALUES('test-epoch','old','retired')", []).unwrap();
+        };
+        sources(&db, &native, &request(), &native).unwrap();
+        record(&db);
+        // A truncated source starts a new epoch without the old entries.
+        std::fs::write(&first, &line).unwrap();
+        assert_eq!(sources(&db, &native, &request(), &native).unwrap().1["provider"], "source_reset");
+        assert_eq!(ledger(&db), 0);
+        assert_ne!(get(&db, "epoch").unwrap().as_deref(), Some("test-epoch"));
+        // So does another source file.
+        sources(&db, &native, &request(), &native).unwrap();
+        record(&db);
+        let second = temp.path().join(format!("{conversation}-moved.jsonl"));
+        std::fs::write(&second, &line).unwrap();
+        let moved = json!({"agent":"claude","conversation_id":conversation,"transcript":second});
+        sources(&db, &moved, &request(), &moved).unwrap();
+        assert_eq!(ledger(&db), 0);
+    }
+    #[test]
+    fn the_reported_generation_belongs_to_the_epoch_the_response_returns() {
+        let ledger = |db: &Connection| -> i64 { db.query_row("SELECT count(*) FROM projection_changes", [], |r| r.get(0)).unwrap() };
+        let seed = |db: &Connection, entries: i64| {
+            for n in 0..entries {
+                db.execute("INSERT INTO projection_changes(epoch,id,change) VALUES('test-epoch',?,'retired')", [format!("old-{n}")]).unwrap();
+            }
+        };
+        // One history call after its sources, in dispatch's order: the projection
+        // upgrade, reconciliation, then respond.
+        let call = |db: &Connection| -> Value {
+            db.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let mut status = json!({"provider":"complete"});
+            status["projection_upgrade"] = advance_projection_upgrade(db, "scope", &json!({"agent":"codex"})).unwrap();
+            let scan = advance_reconcile_upgrade(db).unwrap();
+            reconcile(db).unwrap();
+            finish_reconcile_upgrade(db, scan).unwrap();
+            respond(db, &request(), true, status).unwrap()
+        };
+        let check = |db: &Connection, response: &Value, generation: i64| {
+            assert_eq!(response["history_epoch"].as_str(), get(db, "epoch").unwrap().as_deref());
+            assert_eq!(response["source_status"]["projection_upgrade"]["generation"], json!(generation));
+        };
+        // Reconciliation merges two differently numbered rows and replaces the epoch.
+        let db = database();
+        let prefix = "🙂".repeat(1200);
+        add(&db, "scope", row("Stop", "hook", &format!("{prefix}…"), 10.), "journal").unwrap();
+        add(&db, "scope", row("AgentMessage", "provider", &format!("{prefix} full reply"), 11.), "provider").unwrap();
+        db.execute("DELETE FROM reconcile_work", []).unwrap();
+        set(&db, "reconciled", "1").unwrap();
+        assert_eq!(incoming(&db, true).unwrap(), Some(2));
+        seed(&db, 3);
+        let response = call(&db);
+        assert_ne!(response["history_epoch"], "test-epoch");
+        check(&db, &response, 0);
+        assert_eq!(ledger(&db), 0);
+        let next = call(&db);
+        assert_eq!(next["history_epoch"], response["history_epoch"]);
+        check(&db, &next, 0);
+        // Incoming numbering meets an older backfilled reply and replaces the epoch.
+        let db = database();
+        add(&db, "scope", row("AgentMessage", "later", "Later", 20.), "provider").unwrap();
+        assert_eq!(incoming(&db, true).unwrap(), Some(1));
+        seed(&db, 2);
+        add(&db, "scope", row("AgentMessage", "older", "Older", 10.), "provider").unwrap();
+        let response = call(&db);
+        assert_ne!(response["history_epoch"], "test-epoch");
+        check(&db, &response, 0);
+        assert_eq!(ledger(&db), 0);
+        let next = call(&db);
+        assert_eq!(next["history_epoch"], response["history_epoch"]);
+        check(&db, &next, 0);
+        // Without a new epoch the generation stays.
+        let db = database();
+        add(&db, "scope", row("AgentMessage", "reply", "Reply", 20.), "provider").unwrap();
+        seed(&db, 2);
+        let response = call(&db);
+        assert_eq!(response["history_epoch"], "test-epoch");
+        check(&db, &response, 2);
+        assert_eq!(ledger(&db), 2);
+        check(&db, &call(&db), 2);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_index_gains_the_ledger_and_a_legacy_schema_resets_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("public_history");
+        let parent = json!({"agent":"claude","agent_home":"/synthetic/home","account_id":"account","conversation_id":"conversation"});
+        let r = request();
+        let ledger = |db: &Connection| -> i64 { db.query_row("SELECT count(*) FROM projection_changes", [], |r| r.get(0)).unwrap() };
+        // A schema-2 index from before the ledger: no table and no projection marker.
+        let (db, guard) = index_in(&directory, &parent, &r).unwrap();
+        add(&db, "scope", row("AgentMessage", "kept", "Kept", 1.), "provider").unwrap();
+        db.execute_batch("DROP TABLE projection_changes; DELETE FROM meta WHERE key='projection_version'; UPDATE messages SET incoming=3;").unwrap();
+        let epoch = get(&db, "epoch").unwrap();
+        drop(db);
+        drop(guard);
+        let (db, guard) = index_in(&directory, &parent, &r).unwrap();
+        assert_eq!(get(&db, "epoch").unwrap(), epoch);
+        assert_eq!(get(&db, "schema").unwrap().as_deref(), Some("2"));
+        assert!(get(&db, "projection_version").unwrap().is_none());
+        assert_eq!(ledger(&db), 0);
+        assert_eq!(db.query_row("SELECT incoming FROM messages", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+        // A legacy schema is reset whole, ledger included, under a new epoch.
+        db.execute_batch("INSERT INTO projection_changes(epoch,id,change) VALUES('x','old','retired'); UPDATE meta SET value='1' WHERE key='schema';").unwrap();
+        drop(db);
+        drop(guard);
+        let (db, _guard) = index_in(&directory, &parent, &r).unwrap();
+        assert_eq!((ledger(&db), db.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0)).unwrap()), (0, 0));
+        assert_ne!(get(&db, "epoch").unwrap(), epoch);
+        assert_eq!(get(&db, "projection_version").unwrap().as_deref(), Some(PROJECTION_VERSION));
+        assert_eq!(get(&db, "schema").unwrap().as_deref(), Some("2"));
+    }
+    fn projection(epoch: &str, after: i64, until: i64) -> ProjectionRequest {
+        serde_json::from_value(json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":"run",
+            "expected_conversation_id":"conversation","history_epoch":epoch,"projection_after":after,"projection_until":until})).unwrap()
+    }
+    fn serve(db: &Connection, after: i64, until: i64) -> Result<Value> {
+        serve_projection(db, &projection("test-epoch", after, until), json!({}))
+    }
+    fn record_change(db: &Connection, id: &str, change: &str) {
+        db.execute("INSERT INTO projection_changes(epoch,id,change) VALUES('test-epoch',?,?)", [id, change]).unwrap();
+    }
+    fn stored(db: &Connection, id: &str, body: Value, at: f64) {
+        db.execute("INSERT INTO messages(id,at,role,stream,kind,ordinal,body) VALUES(?,?,'outgoing','provider','UserPromptSubmit',?,?)",
+            params![id, at, format!("1:{id}"), body.to_string()]).unwrap();
+    }
+    #[test]
+    fn projection_requests_are_strict_and_refusals_change_nothing() {
+        let base = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":"run","expected_conversation_id":"conversation",
+            "history_epoch":"test-epoch","projection_after":0,"projection_until":1});
+        assert!(serde_json::from_value::<ProjectionRequest>(base.clone()).is_ok());
+        for (field, value) in [("projection_after", json!(1.5)), ("projection_after", json!("1")), ("projection_until", json!(true)),
+            ("projection_until", json!(9223372036854775808u64)), ("projection_after", Value::Null), ("extra", json!(1))] {
+            let mut raw = base.clone();
+            raw[field] = value;
+            assert!(serde_json::from_value::<ProjectionRequest>(raw).is_err(), "{field}");
+        }
+        let mut raw = base.clone();
+        raw.as_object_mut().unwrap().remove("projection_until");
+        assert!(serde_json::from_value::<ProjectionRequest>(raw).is_err());
+        assert!(validate_projection(&projection("test-epoch", 0, 1)).is_ok());
+        for bad in [projection("test-epoch", -1, 1), projection("test-epoch", 3, 2), projection("", 0, 0),
+            projection(&"e".repeat(129), 0, 0), projection("a\u{7}b", 0, 0)] {
+            assert!(validate_projection(&bad).is_err());
+        }
+        let mut wrong = projection("test-epoch", 0, 0);
+        wrong.request_id = "not-a-uuid".into();
+        assert!(validate_projection(&wrong).is_err());
+        // Refusals roll back: no ledger, meta or row change, and no response.
+        let db = database();
+        db.execute("INSERT INTO projection_changes(epoch,id,change) VALUES('earlier-epoch','old','retired')", []).unwrap();
+        record_change(&db, "gone", "retired");
+        let snapshot = |db: &Connection| -> Vec<String> {
+            ["SELECT generation||'|'||epoch||'|'||id||'|'||change FROM projection_changes ORDER BY generation",
+                "SELECT key||'='||value FROM meta ORDER BY key", "SELECT id FROM reconcile_work ORDER BY id"]
+                .iter().flat_map(|sql| db.prepare(sql).unwrap().query_map([], |r| r.get::<_, String>(0)).unwrap().map(|r| r.unwrap()).collect::<Vec<_>>())
+                .collect()
+        };
+        let before = snapshot(&db);
+        assert_eq!(serve(&db, 0, 2).unwrap_err(), "History is still indexing; try again");
+        assert_eq!(snapshot(&db), before);
+        set(&db, "reconciled", "1").unwrap();
+        db.execute("INSERT INTO reconcile_work(id) VALUES('pending')", []).unwrap();
+        let pending = snapshot(&db);
+        assert_eq!(serve(&db, 0, 2).unwrap_err(), "History is still indexing; try again");
+        assert_eq!(snapshot(&db), pending);
+        db.execute("DELETE FROM reconcile_work", []).unwrap();
+        let settled = snapshot(&db);
+        assert_eq!(serve_projection(&db, &projection("other-epoch", 0, 2), json!({})).unwrap_err(), "History epoch changed; reopen its history");
+        assert_eq!(serve(&db, 0, 3).unwrap_err(), "Projection position is past the newest change");
+        assert_eq!(snapshot(&db), settled);
+        // Settled and exact: served in one transaction, the earlier epoch's entry gone.
+        let response = serve(&db, 0, 2).unwrap();
+        assert_eq!(response["history_epoch"], "test-epoch");
+        assert_eq!(response["projection_generation"], 2);
+        assert_eq!(response["projection_changes"], json!([{"generation":2,"history_id":"gone","change":"retired","resolution":"resolved","successor":null}]));
+        assert_eq!((response["next_projection_after"].clone(), response["complete"].clone()), (json!(2), json!(true)));
+        assert_eq!(db.query_row("SELECT count(*) FROM projection_changes", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+    #[test]
+    fn projection_entries_resolve_through_aliases_and_return_page_rows() {
+        let db = database();
+        set(&db, "reconciled", "1").unwrap();
+        let id = |message: &str| -> String {
+            db.query_row("SELECT id FROM messages WHERE json_extract(body,'$.message_id')=?", [message], |r| r.get(0)).unwrap()
+        };
+        let body = |id: &str| -> String { db.query_row("SELECT body FROM messages WHERE id=?", [id], |r| r.get(0)).unwrap() };
+        for (message, at) in [("present", 1.), ("a", 2.), ("b", 3.), ("c", 4.), ("p", 6.)] {
+            add(&db, "scope", row("UserPromptSubmit", message, &format!("Prompt {message}"), at), "provider").unwrap();
+        }
+        add(&db, "scope", json!({"type":"UserPromptSubmit","seq":9,"at":6.0,"agent_id":"","detail":"Prompt p"}), "journal").unwrap();
+        let (present, a, b, c, p) = (id("present"), id("a"), id("b"), id("c"), id("p"));
+        let j: String = db.query_row("SELECT id FROM aliases WHERE original='journal:journal:You:native:9'", [], |r| r.get(0)).unwrap();
+        // Two merges: a into b, then b into c, so history:a ends at c.
+        merge_row(&db, &b, &a, &body(&b), "UserPromptSubmit").unwrap();
+        merge_row(&db, &c, &b, &body(&c), "UserPromptSubmit").unwrap();
+        // At equal time the hook row keeps the provider row and takes a receipt's body.
+        let receipt = attachment_row("receipt", "Prompt p", 6.0).to_string();
+        merge_row(&db, &j, &p, &receipt, "UserPromptSubmit").unwrap();
+        db.execute("DELETE FROM reconcile_work", []).unwrap();
+        for (changed, change) in [("gone", "retired"), (present.as_str(), "refreshed"), (a.as_str(), "refreshed"), (p.as_str(), "refreshed"),
+            ("missing", "refreshed"), (present.as_str(), "retired")] {
+            record_change(&db, changed, change);
+        }
+        let response = serve(&db, 0, 6).unwrap();
+        let entries = response["projection_changes"].as_array().unwrap();
+        assert_eq!(entries.len(), 6);
+        assert_eq!(entries[0], json!({"generation":1,"history_id":"gone","change":"retired","resolution":"resolved","successor":null}));
+        for (entry, owner) in [(&entries[1], &present), (&entries[2], &c), (&entries[3], &j)] {
+            assert_eq!((entry["resolution"].clone(), entry["successor"]["history_id"].clone()), (json!("resolved"), json!(owner)));
+            assert!(entry["successor"].get("native_match_hash").is_none());
+            assert!(entry.get("reason").is_none());
+        }
+        assert_eq!(entries[3]["successor"]["history_stream"], "attachment");
+        assert_eq!(entries[3]["successor"]["attachments"], attachment_row("receipt", "Prompt p", 6.0)["attachments"]);
+        assert_eq!(entries[4], json!({"generation":5,"history_id":"missing","change":"refreshed","resolution":"unresolved","successor":null,"reason":"no_successor"}));
+        assert_eq!(entries[5], json!({"generation":6,"history_id":present,"change":"retired","resolution":"unresolved","successor":null,"reason":"unexpected_successor"}));
+        assert_eq!((response["next_projection_after"].clone(), response["complete"].clone()), (json!(6), json!(true)));
+        // A successor is the page's own row, byte for byte, including page's limit of 8 aliases.
+        for n in 0..12 {
+            db.execute("INSERT INTO aliases(original,id) VALUES(?,?)", params![format!("extra:{n:02}"), c]).unwrap();
+        }
+        let successor = serve(&db, 2, 3).unwrap()["projection_changes"][0]["successor"].clone();
+        let page_row = page(&db, &request(), true, Some(0), json!({})).unwrap()["events"].as_array().unwrap().iter()
+            .find(|row| row["history_id"] == json!(c)).unwrap().clone();
+        assert_eq!(successor["original_ids"].as_array().unwrap().len(), 8);
+        assert_eq!(serde_json::to_string(&successor).unwrap(), serde_json::to_string(&page_row).unwrap());
+    }
+    #[test]
+    fn ordinary_reconciliation_changes_the_served_successor() {
+        let db = database();
+        add(&db, "scope", row("UserPromptSubmit", "p", "Same prompt", 10.), "provider").unwrap();
+        reconcile(&db).unwrap();
+        let p: String = db.query_row("SELECT id FROM messages", [], |r| r.get(0)).unwrap();
+        record_change(&db, &p, "refreshed");
+        assert_eq!(serve(&db, 0, 1).unwrap()["projection_changes"][0]["successor"]["history_id"], json!(p));
+        // A hook row for the same prompt arrives; until it is reconciled nothing is served.
+        add(&db, "scope", json!({"type":"UserPromptSubmit","seq":12,"at":10.5,"agent_id":"","detail":"Same prompt"}), "journal").unwrap();
+        assert_eq!(serve(&db, 0, 1).unwrap_err(), "History is still indexing; try again");
+        reconcile(&db).unwrap();
+        let j: String = db.query_row("SELECT id FROM aliases WHERE original='journal:journal:You:native:12'", [], |r| r.get(0)).unwrap();
+        assert_ne!(j, p);
+        let entry = serve(&db, 0, 1).unwrap()["projection_changes"][0].clone();
+        assert_eq!((entry["resolution"].clone(), entry["successor"]["history_id"].clone()), (json!("resolved"), json!(j)));
+        assert_eq!(entry["successor"]["detail"], "Same prompt");
+    }
+    #[test]
+    fn projection_responses_are_bounded_and_never_drop_an_entry() {
+        let db = database();
+        set(&db, "reconciled", "1").unwrap();
+        for n in 0..300 {
+            record_change(&db, &format!("gone-{n}"), "retired");
+        }
+        let first = serve(&db, 0, 300).unwrap();
+        assert_eq!(first["projection_changes"].as_array().unwrap().len(), 256);
+        assert_eq!((first["next_projection_after"].clone(), first["complete"].clone()), (json!(256), json!(false)));
+        let second = serve(&db, 256, 300).unwrap();
+        assert_eq!(second["projection_changes"].as_array().unwrap().len(), 44);
+        assert_eq!((second["next_projection_after"].clone(), second["complete"].clone()), (json!(300), json!(true)));
+        let tail = serve(&db, 300, 300).unwrap();
+        assert_eq!((tail["projection_changes"].clone(), tail["next_projection_after"].clone(), tail["complete"].clone()), (json!([]), json!(300), json!(true)));
+        // The whole encoded response is charged: a detail past the cap is clipped as a
+        // page clips it, metadata past it is an explicit oversize statement, and an entry
+        // that fits only alone waits for the next response.
+        let db = database();
+        set(&db, "reconciled", "1").unwrap();
+        let prompt = |id: &str, detail: String, attachments: Value| {
+            json!({"type":"UserPromptSubmit","source":"claude_transcript","message_id":id,"detail":detail,"attachments":attachments})
+        };
+        stored(&db, "long", prompt("long", "x".repeat(900 * 1024), json!([])), 1.);
+        stored(&db, "wide", prompt("wide", "short".into(), json!([{"name":"y".repeat(900 * 1024),"mime":"text/plain","bytes":1}])), 2.);
+        stored(&db, "half-1", prompt("half-1", "z".repeat(500 * 1024), json!([])), 3.);
+        stored(&db, "half-2", prompt("half-2", "z".repeat(500 * 1024), json!([])), 4.);
+        for id in ["long", "wide", "half-1", "half-2"] {
+            record_change(&db, id, "refreshed");
+        }
+        let responses = [serve(&db, 0, 4).unwrap(), serve(&db, 1, 4).unwrap(), serve(&db, 3, 4).unwrap()];
+        for response in &responses {
+            assert!(ascii_wire_size(response) <= PROJECTION_RESPONSE_BYTES);
+        }
+        let first = responses[0]["projection_changes"].as_array().unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!((first[0]["resolution"].clone(), first[0]["successor"]["detail_truncated"].clone()), (json!("resolved"), json!(true)));
+        assert_eq!(first[0]["successor"]["detail"].as_str().unwrap().chars().count(), 501);
+        assert_eq!((responses[0]["next_projection_after"].clone(), responses[0]["complete"].clone()), (json!(1), json!(false)));
+        let second = responses[1]["projection_changes"].as_array().unwrap();
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0], json!({"generation":2,"history_id":"wide","change":"refreshed","resolution":"unresolved","successor":null,"reason":"oversize"}));
+        assert_eq!(second[1]["successor"]["history_id"], "half-1");
+        assert_eq!((responses[1]["next_projection_after"].clone(), responses[1]["complete"].clone()), (json!(3), json!(false)));
+        let third = responses[2]["projection_changes"].as_array().unwrap();
+        assert_eq!((third.len(), third[0]["successor"]["history_id"].clone()), (1, json!("half-2")));
+        assert_eq!((responses[2]["next_projection_after"].clone(), responses[2]["complete"].clone()), (json!(4), json!(true)));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_projection_read_opens_only_an_existing_ready_index_and_changes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("public_history");
+        let parent = json!({"agent":"claude","agent_home":"/synthetic/home","account_id":"account","conversation_id":"conversation"});
+        let r = request();
+        let key = key(&parent, &r);
+        let (db_path, lock_path) = (directory.join(format!("{key}.sqlite3")), directory.join(format!("{key}.lock")));
+        // Every file under the temporary root with its exact bytes.
+        let files = |root: &Path| -> Vec<(String, String)> {
+            let mut files = Vec::new();
+            let mut pending = vec![root.to_path_buf()];
+            while let Some(path) = pending.pop() {
+                for entry in std::fs::read_dir(&path).unwrap() {
+                    let entry = entry.unwrap().path();
+                    if entry.is_dir() {
+                        files.push((entry.display().to_string(), "directory".into()));
+                        pending.push(entry);
+                    } else {
+                        files.push((entry.display().to_string(), format!("{:x}", Sha256::digest(std::fs::read(&entry).unwrap()))));
+                    }
+                }
+            }
+            files.sort();
+            files
+        };
+        let refused = |reason: &str| {
+            let before = files(temp.path());
+            assert_eq!(open_projection_index(&directory, &parent, &r).err().as_deref(), Some(reason));
+            assert_eq!(files(temp.path()), before);
+        };
+        // Missing directory, then an empty private directory: nothing is created.
+        refused(INDEX_NOT_READY);
+        assert!(!directory.exists());
+        private_dir(&directory).unwrap();
+        refused(INDEX_NOT_READY);
+        // An uninitialized index: an empty private database beside its lock file.
+        drop(lock_file(&lock_path).unwrap());
+        drop(crate::platform::private_open(OpenOptions::new().create(true).write(true)).open(&db_path).unwrap());
+        refused(INDEX_NOT_READY);
+        assert_eq!(std::fs::metadata(&db_path).unwrap().len(), 0);
+        std::fs::remove_file(&db_path).unwrap();
+        std::fs::remove_file(&lock_path).unwrap();
+        // A real index of another schema, then one from before the ledger, is not migrated.
+        let (db, guard) = index_in(&directory, &parent, &r).unwrap();
+        let epoch = get(&db, "epoch").unwrap().unwrap();
+        set(&db, "schema", "1").unwrap();
+        drop(db);
+        drop(guard);
+        refused(INDEX_NOT_READY);
+        let other = Connection::open(&db_path).unwrap();
+        set(&other, "schema", "2").unwrap();
+        other.execute_batch("DROP TABLE projection_changes;").unwrap();
+        drop(other);
+        refused(INDEX_NOT_READY);
+        let other = Connection::open(&db_path).unwrap();
+        other.execute_batch("CREATE TABLE projection_changes(generation INTEGER PRIMARY KEY AUTOINCREMENT,epoch TEXT NOT NULL,id TEXT NOT NULL,change TEXT NOT NULL CHECK(change IN ('retired','refreshed')));").unwrap();
+        set(&other, "reconciled", "1").unwrap();
+        other.execute("INSERT INTO projection_changes(epoch,id,change) VALUES(?,'gone','retired')", [&epoch]).unwrap();
+        drop(other);
+        // A ready schema-2 index: a wrong epoch is refused with every byte unchanged.
+        let before = files(temp.path());
+        let (db, guard) = open_projection_index(&directory, &parent, &r).unwrap();
+        assert_eq!(serve_projection(&db, &projection("other-epoch", 0, 1), json!({})).unwrap_err(), "History epoch changed; reopen its history");
+        drop(db);
+        drop(guard);
+        assert_eq!(files(temp.path()), before);
+        let (db, _guard) = open_projection_index(&directory, &parent, &r).unwrap();
+        let response = serve_projection(&db, &projection(&epoch, 0, 1), json!({})).unwrap();
+        assert_eq!(response["projection_changes"], json!([{"generation":1,"history_id":"gone","change":"retired","resolution":"resolved","successor":null}]));
+    }
+    /// Every entry under `root` by its kind, never opening a FIFO: a file by its
+    /// bytes, a link by its target.
+    #[cfg(unix)]
+    fn entries(root: &Path) -> Vec<(String, String)> {
+        use std::os::unix::fs::FileTypeExt;
+        let mut entries = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            for entry in std::fs::read_dir(&path).unwrap() {
+                let entry = entry.unwrap().path();
+                let kind = std::fs::symlink_metadata(&entry).unwrap().file_type();
+                let state = if kind.is_symlink() {
+                    format!("link {}", std::fs::read_link(&entry).unwrap().display())
+                } else if kind.is_dir() {
+                    pending.push(entry.clone());
+                    "directory".into()
+                } else if kind.is_fifo() {
+                    "fifo".into()
+                } else if kind.is_file() {
+                    format!("{:x}", Sha256::digest(std::fs::read(&entry).unwrap()))
+                } else {
+                    "other".into()
+                };
+                entries.push((entry.display().to_string(), state));
+            }
+        }
+        entries.sort();
+        entries
+    }
+    #[cfg(unix)]
+    #[test]
+    fn the_projection_lock_and_metadata_must_be_ready_before_anything_is_locked() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("public_history");
+        let parent = json!({"agent":"claude","agent_home":"/synthetic/home","account_id":"account","conversation_id":"conversation"});
+        let r = request();
+        let key = key(&parent, &r);
+        let (db_path, lock_path, aside) = (directory.join(format!("{key}.sqlite3")), directory.join(format!("{key}.lock")), temp.path().join("aside"));
+        let (db, guard) = index_in(&directory, &parent, &r).unwrap();
+        add(&db, "scope", row("UserPromptSubmit", "kept", "Kept", 1.), "provider").unwrap();
+        set(&db, "reconciled", "1").unwrap();
+        let epoch = get(&db, "epoch").unwrap().unwrap();
+        db.execute("INSERT INTO projection_changes(epoch,id,change) VALUES(?,'gone','retired')", [&epoch]).unwrap();
+        db.execute("DELETE FROM reconcile_work", []).unwrap();
+        drop(db);
+        drop(guard);
+        let refused = |reason: &str| {
+            let before = entries(temp.path());
+            assert_eq!(open_projection_index(&directory, &parent, &r).err().as_deref(), Some(reason));
+            assert_eq!(entries(temp.path()), before);
+        };
+        let private = "Public history index lock must be private";
+        // A lock that is a link, a directory, a FIFO or not private is refused before locking.
+        std::fs::rename(&lock_path, &aside).unwrap();
+        std::os::unix::fs::symlink(&aside, &lock_path).unwrap();
+        refused(INDEX_NOT_READY);
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        refused(INDEX_NOT_READY);
+        std::fs::remove_dir(&lock_path).unwrap();
+        let name = std::ffi::CString::new(lock_path.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        // A held non-blocking reader lets the write open return at once, so the
+        // regular-file check, not a wait, decides; the control stays bounded.
+        let reader = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&lock_path).unwrap();
+        refused(private);
+        drop(reader);
+        std::fs::remove_file(&lock_path).unwrap();
+        std::fs::rename(&aside, &lock_path).unwrap();
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        refused(private);
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&lock_path, &aside).unwrap();
+        refused(private);
+        std::fs::remove_file(&aside).unwrap();
+        // The lock without its database, and a database without its epoch or cursor key.
+        std::fs::rename(&db_path, &aside).unwrap();
+        refused(INDEX_NOT_READY);
+        std::fs::rename(&aside, &db_path).unwrap();
+        for key in ["epoch", "secret"] {
+            let other = Connection::open(&db_path).unwrap();
+            let value = get(&other, key).unwrap().unwrap();
+            other.execute("DELETE FROM meta WHERE key=?", [key]).unwrap();
+            drop(other);
+            refused(INDEX_NOT_READY);
+            let other = Connection::open(&db_path).unwrap();
+            set(&other, key, &value).unwrap();
+        }
+        // Ready again, with its row, alias and ledger entry intact.
+        let (db, _guard) = open_projection_index(&directory, &parent, &r).unwrap();
+        let count = |sql: &str| -> i64 { db.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!((count("SELECT count(*) FROM messages"), count("SELECT count(*) FROM aliases"), count("SELECT count(*) FROM projection_changes")), (1, 1, 1));
+        let response = serve_projection(&db, &projection(&epoch, 0, 1), json!({})).unwrap();
+        assert_eq!(response["projection_changes"][0]["history_id"], "gone");
     }
     #[test]
     fn delayed_attachment_retries_after_provider_and_journal_acknowledgements_reconcile() {

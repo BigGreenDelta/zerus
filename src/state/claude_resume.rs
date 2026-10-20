@@ -156,7 +156,7 @@ pub(super) fn available(record: &Value, question: &Value) -> Result<()> {
         != Some(question["question_hash"].clone())
     {
         return Err(
-            "Claude's resume question changed or its draft has focus; refresh Activity".into(),
+            "Claude's resume question changed or its draft has focus; nothing was sent".into(),
         );
     }
     Ok(())

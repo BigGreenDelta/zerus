@@ -277,7 +277,7 @@ pub(super) fn available(record: &Value, card: &Value) -> Result<()> {
     let native = Native::new(record, card);
     let current = native.identity()?;
     if questions::wire_response(&current, string(card, "question_id"))?.is_some() {
-        return Err("This plan review was already answered; refresh Activity".into());
+        return Err("This plan review was already answered; nothing was sent".into());
     }
     match parse(&Native::capture(&current)?, &labels(card)?)? {
         Panel::Choosing => Ok(()),

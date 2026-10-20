@@ -25,6 +25,20 @@ class RecoveryPresentationTest {
         assertEquals("Waiting for delivery confirmation…",RecoveryPresentation.from(raw,target,true)!!.status(0.0))
         job.put("acknowledged",true)
         assertEquals("Recovery in progress",RecoveryPresentation.from(raw,target,true)!!.status(0.0))
+        assertFalse(RecoveryPresentation.from(raw,target,true)!!.resumed)
+    }
+    @Test fun resumedTurnIsOrdinaryWorkWhileTheEpisodeKeepsItsBudget() {
+        val raw = raw();val job = raw.getJSONObject("recovery")
+        job.put("state","retrying").put("acknowledged",true).put("resumed_at",125)
+        val view = RecoveryPresentation.from(raw,target,true)!!
+        assertTrue(view.resumed);assertEquals("Agent resumed after recovery",view.status(0.0))
+        assertEquals("1/2 attempts",view.attempts)
+        job.put("acknowledged",false)
+        assertFalse(RecoveryPresentation.from(raw,target,true)!!.resumed)
+        job.put("acknowledged",true).put("resumed_at","125")
+        assertFalse("an invalid time is not a resumption",RecoveryPresentation.from(raw,target,true)!!.resumed)
+        job.put("resumed_at",125).put("state","waiting")
+        assertFalse("a rescheduled episode is no longer resumed",RecoveryPresentation.resumed(job))
     }
     @Test fun cachedOrReusedJobIsReadOnly() {
         assertTrue(RecoveryPresentation.from(raw(),target,false)!!.recorded)

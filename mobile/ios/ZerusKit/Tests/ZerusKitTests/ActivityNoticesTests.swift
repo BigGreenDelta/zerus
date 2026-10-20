@@ -108,9 +108,11 @@ final class ActivityNoticesTests: XCTestCase {
         XCTAssertEqual(restored, [ActivityNotices.cached(notice)])
         let cache = CachedHistoryPage(target: target, epoch: "epoch", events: [notice], before: "cursor", after: "cursor",
                                       hasBefore: false, hasAfter: false, latestIncoming: nil, totalIncoming: nil,
-                                      complete: true, indexing: false, truncated: false)
+                                      complete: true, indexing: false, truncated: false, projectionApplied: 37)
         let stored = try JSONDecoder().decode(CachedHistoryPage.self, from: JSONEncoder().encode(cache))
-        let decoded = try XCTUnwrap(stored.page(for: target).events.first)
+        let page = try stored.page(for: target)
+        XCTAssertEqual(page.projectionApplied, 37)
+        let decoded = try XCTUnwrap(page.events.first)
         XCTAssertEqual(decoded, ActivityNotices.cached(notice))
         XCTAssertEqual(decoded.requestId, "")
         XCTAssertEqual(decoded.receiptRequestId, "")

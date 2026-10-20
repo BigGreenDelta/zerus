@@ -28,7 +28,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if request.expected_run_id.is_empty() || record["run_id"]!=request.expected_run_id
         || record["conversation_id"]!=request.expected_conversation_id
         || record["turn_started"].as_f64().unwrap_or(0.0)!=request.expected_turn_started {
-        return Err("The session or turn changed. Refresh Activity before stopping it".into());
+        return Err("The session or turn changed; nothing was stopped".into());
     }
     let path=absolute_root()?.join("interrupt_receipts").join(format!("{uuid}.json"));
     if path.exists() {return Err("This interrupt was already attempted. Check Terminal before trying again".into());}

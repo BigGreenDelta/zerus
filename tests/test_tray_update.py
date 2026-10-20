@@ -177,7 +177,8 @@ class TrayUpdate(unittest.TestCase):
         self.assertEqual(list((self.home / '.local/state/hgs/desktop-update').iterdir()), [])
         self.assertIn('2 nonempty drafts kept', result.stdout)
         # The next update keeps exactly one rollback copy: the GUI it replaced.
-        self.assertEqual(self.update(self.build('third')).returncode, 0)
+        result = self.update(self.build('third'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([p.name for p in previous.parent.iterdir()], ['hgs-tray'])
         self.assertIn("'second'", previous.read_text())
         self.assertEqual([variant for variant, _ in self.running()], ['third'])

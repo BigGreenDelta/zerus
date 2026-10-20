@@ -1826,15 +1826,103 @@ fn change_title(native: &dyn Native, record: &Value, title: &str) -> Result<()> 
     Ok(())
 }
 const NO_PROCESS: &str = "OpenCode sessions have no separate process to pause";
+
+fn validate_rename(old: &str, new: &str) -> Result<()> {
+    let a = old.split('/').collect::<Vec<_>>();
+    let b = new.split('/').collect::<Vec<_>>();
+    if a.len() != 3
+        || b.len() != 3
+        || a[..2] != b[..2]
+        || b.iter().any(|p| {
+            p.is_empty()
+                || p.trim() != *p
+                || p.contains([':', '.'])
+                || p.chars().any(char::is_control)
+        })
+    {
+        return Err("Rename must preserve provider and project".into());
+    }
+    Ok(())
+}
+
+struct ActionGuard {
+    // Drop bindings before read marks, in reverse acquisition order.
+    _bindings: Bindings,
+    rename_marks: Option<read_marks::RenameGuard>,
+}
+fn lock_action(
+    rename: bool,
+    read_lock: impl FnOnce() -> Result<read_marks::RenameGuard>,
+    binding_lock: impl FnOnce() -> Result<Bindings>,
+) -> Result<ActionGuard> {
+    let rename_marks = if rename { Some(read_lock()?) } else { None };
+    let bindings = binding_lock()?;
+    Ok(ActionGuard {
+        _bindings: bindings,
+        rename_marks,
+    })
+}
+fn renames_owner(action: &str, name: &str, new: Option<&str>) -> Result<bool> {
+    let Some(new) = new.filter(|new| action == "rename" && *new != name) else {
+        return Ok(false);
+    };
+    validate_rename(name, new)?;
+    Ok(true)
+}
+fn dispatch_renames_owner(command: &str, name: &str, args: &[String]) -> Result<bool> {
+    if args.iter().any(|v| v == "--dry-run" || v == "--archive") {
+        return Ok(false);
+    }
+    renames_owner(command, name, args.get(1).filter(|v| !v.starts_with('-')).map(String::as_str))
+}
+
+struct ActionStorage<'a> {
+    ledger: &'a Ledger,
+    rename_marks: Option<&'a mut read_marks::RenameGuard>,
+}
+
+/// Once native title identity is confirmed, publish the new binding and marks
+/// before retiring the old binding. Any failure remains uncertain; no rollback
+/// or second native PATCH is inferred from a partially published local rename.
+fn rename_with<N: Native>(
+    record: &mut Value,
+    new: &str,
+    scope: Option<&session_action::Scope>,
+    connect: impl FnOnce() -> Result<N>,
+    save: impl FnOnce(&Value) -> Result<()>,
+    marks: impl FnOnce(&str, &str) -> Result<()>,
+    retire: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    let old = string(record, "name").to_owned();
+    if let Some(scope) = scope {
+        scope.changing();
+    }
+    change_title(&connect()?, record, new.rsplit('/').next().unwrap_or(new))?;
+    notifications::anchor(record);
+    record["name"] = json!(new);
+    save(record)?;
+    if old != new {
+        marks(&old, new)?;
+        retire(&old)?;
+    }
+    if let Some(scope) = scope {
+        scope.result_record(record);
+    }
+    Ok(())
+}
 fn action(
     record: &mut Value,
     action: &str,
     new_name: Option<&str>,
     message_id: Option<&str>,
     scope: Option<&session_action::Scope>,
+    rename_marks: Option<&mut read_marks::RenameGuard>,
 ) -> Result<()> {
     action_in(
-        &Ledger::current(),
+        ActionStorage {
+            ledger: &Ledger::current(),
+            rename_marks,
+        },
         running_service,
         record,
         action,
@@ -1845,7 +1933,7 @@ fn action(
 }
 /// Core of `action`, against any native service and private state.
 fn action_in<N: Native>(
-    ledger: &Ledger,
+    storage: ActionStorage<'_>,
     connect: impl FnOnce() -> Result<N>,
     record: &mut Value,
     action: &str,
@@ -1872,7 +1960,7 @@ fn action_in<N: Native>(
     let old = string(record, "name").to_owned();
     if action == "remove_queued" {
         let id = queued_id(&json!({"message_id": message_id}))?;
-        remove_queued_with(&connect()?, ledger, record, &id, || {
+        remove_queued_with(&connect()?, storage.ledger, record, &id, || {
             if let Some(scope) = scope {
                 scope.changing();
             }
@@ -1884,29 +1972,27 @@ fn action_in<N: Native>(
     }
     if action == "rename" {
         let new = new_name.ok_or("Choose a new OpenCode name")?;
-        let a = old.split('/').collect::<Vec<_>>();
-        let b = new.split('/').collect::<Vec<_>>();
-        if a.len() != 3
-            || b.len() != 3
-            || a[..2] != b[..2]
-            || b.iter().any(|p| {
-                p.is_empty()
-                    || p.trim() != *p
-                    || p.contains([':', '.'])
-                    || p.chars().any(char::is_control)
-            })
-        {
-            return Err("Rename must preserve provider and project".into());
-        }
+        validate_rename(&old, new)?;
         if new != old && exists(new) {
             return Err("This name is already used".into());
         }
-        if let Some(scope) = scope {
-            scope.changing();
+        if new != old && storage.rename_marks.is_none() {
+            return Err("OpenCode rename requires the ordered shared read-mark writer".into());
         }
-        change_title(&connect()?, record, b[2])?;
-        notifications::anchor(record);
-        record["name"] = json!(new);
+        return rename_with(
+            record,
+            new,
+            scope,
+            connect,
+            save,
+            |old, new| {
+                storage
+                    .rename_marks
+                    .ok_or("Missing shared read-mark writer")?
+                    .transfer(old, new)
+            },
+            |old| archive::remove_synced(&binding_path(old)),
+        );
     } else if let Some(scope) = scope {
         scope.changing();
     }
@@ -1916,9 +2002,6 @@ fn action_in<N: Native>(
         return Ok(());
     }
     save(record)?;
-    if action == "rename" && new_name != Some(old.as_str()) {
-        archive::remove_synced(&binding_path(&old))?;
-    }
     if let Some(scope) = scope {
         scope.result_record(record);
     }
@@ -1931,14 +2014,30 @@ pub(super) fn session_action(
     message_id: Option<&str>,
     scope: &session_action::Scope,
 ) -> Result<()> {
-    let _guard = lock_bindings()?;
+    let mut guard = lock_action(
+        renames_owner(kind, name, new_name)?,
+        read_marks::lock_rename,
+        lock_bindings,
+    )?;
     let mut record = binding(name)?;
-    action(&mut record, kind, new_name, message_id, Some(scope))
+    action(
+        &mut record,
+        kind,
+        new_name,
+        message_id,
+        Some(scope),
+        guard.rename_marks.as_mut(),
+    )
 }
 pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or("Choose an OpenCode session")?;
-    let _guard = if command != "inspect" && command != "exists" {
-        Some(lock_bindings()?)
+    let mut guard = if command != "inspect" && command != "exists" {
+        let renames = dispatch_renames_owner(command, name, args)?;
+        Some(lock_action(
+            renames,
+            read_marks::lock_rename,
+            lock_bindings,
+        )?)
     } else {
         None
     };
@@ -2022,6 +2121,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                     .map(String::as_str),
                 None,
                 None,
+                guard.as_mut().and_then(|guard| guard.rename_marks.as_mut()),
             )?;
         }
         _ => {
@@ -2037,6 +2137,286 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    struct RenameNative {
+        patches: std::cell::Cell<usize>,
+        reads: std::cell::Cell<usize>,
+        refused: bool,
+        mismatched: bool,
+        title: String,
+    }
+    impl Native for &RenameNative {
+        fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+            assert_eq!(path, "/api/session/ses_A");
+            match method {
+                "PATCH" => {
+                    self.patches.set(self.patches.get() + 1);
+                    assert_eq!(body.unwrap(), &json!({"title":self.title}));
+                    Ok(Response {
+                        status: if self.refused { 500 } else { 204 },
+                        body: json!(null),
+                    })
+                }
+                "GET" => {
+                    self.reads.set(self.reads.get() + 1);
+                    Ok(Response {
+                        status: 200,
+                        body: json!({"data":{"id":"ses_A","location":{"directory":"/x"},
+                        "title":if self.mismatched { "another" } else { &self.title }}}),
+                    })
+                }
+                _ => panic!("Unexpected native request"),
+            }
+        }
+    }
+    fn rename_native(title: &str) -> RenameNative {
+        RenameNative {
+            patches: Default::default(),
+            reads: Default::default(),
+            refused: false,
+            mismatched: false,
+            title: title.into(),
+        }
+    }
+    fn rename_marks(old: &str) -> Value {
+        json!({"version":1,"sessions":{old:{"ses_A":{"conversation_id":"ses_A","reply_id":"msg_reply",
+            "attention_signature":null,"at":20.0},"ses_previous":{"conversation_id":"ses_previous","reply_id":"msg_before","at":10.0}},
+            "claude/other/session":{"conversation":{"reply_id":"untouched","at":30.0}}}})
+    }
+    fn marks_at(path: &Path) -> Value {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+    #[test]
+    fn renamed_opencode_owner_keeps_the_same_v1_read_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, new) = ("opencode/p/old", "opencode/p/new");
+        let marks = dir.path().join("read-marks.json");
+        let before = rename_marks(old);
+        atomic(&marks, &before.to_string()).unwrap();
+        let mut guard = read_marks::RenameGuard::at(&marks).unwrap();
+        let old_binding = dir.path().join("old.json");
+        let new_binding = dir.path().join("new.json");
+        let mut record = json!({"name":old,"run_id":"r1","conversation_id":"ses_A","cwd":"/x"});
+        atomic(&old_binding, &record.to_string()).unwrap();
+        let scope = session_action::Scope::expecting(old, "r1", "ses_A");
+        let native = rename_native("new");
+        rename_with(
+            &mut record,
+            new,
+            Some(&scope),
+            || Ok(&native),
+            |record| {
+                // Publication does not let another reader capture the new name
+                // before this writer has transferred the old owner's marks.
+                atomic(&new_binding, &record.to_string())?;
+                assert!(lock_until(&marks.with_extension("lock"), Instant::now())?.is_none());
+                Ok(())
+            },
+            |old, new| guard.transfer(old, new),
+            |_| archive::remove_synced(&old_binding),
+        )
+        .unwrap();
+        let after = marks_at(&marks);
+        assert_eq!(after["version"], 1);
+        assert!(after["sessions"].get(old).is_none());
+        assert_eq!(after["sessions"][new], before["sessions"][old]);
+        assert_eq!(
+            after["sessions"]["claude/other/session"],
+            before["sessions"]["claude/other/session"]
+        );
+        assert_eq!(
+            read_marks::record(&after["sessions"], new, "ses_A")["reply_id"],
+            "msg_reply"
+        );
+        assert!(!old_binding.exists());
+        let saved = marks_at(&new_binding);
+        assert_eq!(
+            (
+                saved["name"].clone(),
+                saved["run_id"].clone(),
+                saved["conversation_id"].clone()
+            ),
+            (json!(new), json!("r1"), json!("ses_A"))
+        );
+        assert_eq!((native.patches.get(), native.reads.get()), (1, 1));
+        assert!(scope.was_changing() && scope.has_result());
+    }
+    #[test]
+    fn opencode_rename_failure_keeps_a_readable_binding_and_never_claims_a_result() {
+        for failure in ["native", "identity", "save", "marks", "retire"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (old, new) = ("opencode/p/old", "opencode/p/new");
+            let marks = dir.path().join("read-marks.json");
+            let before = rename_marks(old);
+            atomic(&marks, &before.to_string()).unwrap();
+            let mut guard = read_marks::RenameGuard::at(&marks).unwrap();
+            let (old_binding, new_binding) =
+                (dir.path().join("old.json"), dir.path().join("new.json"));
+            let mut record = json!({"name":old,"run_id":"r1","conversation_id":"ses_A","cwd":"/x"});
+            atomic(&old_binding, &record.to_string()).unwrap();
+            let scope = session_action::Scope::expecting(old, "r1", "ses_A");
+            let mut native = rename_native("new");
+            native.refused = failure == "native";
+            native.mismatched = failure == "identity";
+            let result = rename_with(
+                &mut record,
+                new,
+                Some(&scope),
+                || Ok(&native),
+                |record| {
+                    if failure == "save" {
+                        Err("controlled binding write failure".into())
+                    } else {
+                        atomic(&new_binding, &record.to_string())
+                    }
+                },
+                |old, new| {
+                    if failure == "marks" {
+                        Err("controlled read-mark write failure".into())
+                    } else {
+                        guard.transfer(old, new)
+                    }
+                },
+                |_| {
+                    if failure == "retire" {
+                        Err("controlled old-binding removal failure".into())
+                    } else {
+                        archive::remove_synced(&old_binding)
+                    }
+                },
+            );
+            assert!(result.is_err(), "{failure}");
+            assert!(scope.was_changing() && !scope.has_result(), "{failure}");
+            assert_eq!(native.patches.get(), 1, "{failure}");
+            assert!(old_binding.exists(), "{failure}");
+            if failure == "marks" || failure == "retire" {
+                assert!(new_binding.exists(), "{failure}");
+            } else {
+                assert!(!new_binding.exists(), "{failure}");
+            }
+            if failure == "retire" {
+                assert_eq!(marks_at(&marks)["sessions"][new], before["sessions"][old]);
+            } else {
+                assert_eq!(marks_at(&marks), before, "{failure}");
+            }
+        }
+    }
+    #[test]
+    fn opencode_rename_preflight_refuses_bad_marks_before_bindings_or_native_work() {
+        for contents in [
+            "not JSON",
+            "{\"version\":2,\"sessions\":{}}",
+            "{\"version\":1,\"sessions\":null}",
+            "directory",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("read-marks.json");
+            if contents == "directory" {
+                fs::create_dir(&path).unwrap();
+            } else {
+                fs::write(&path, contents).unwrap();
+            }
+            let binding_called = std::cell::Cell::new(false);
+            let native_called = std::cell::Cell::new(false);
+            let result = lock_action(
+                true,
+                || read_marks::RenameGuard::at(&path),
+                || {
+                    binding_called.set(true);
+                    lock_bindings_at(&dir.path().join("bindings.lock"))
+                },
+            )
+            .map(|_| {
+                native_called.set(true);
+            });
+            assert_eq!(
+                result.unwrap_err(),
+                "Shared read marks could not be read; rename was not started"
+            );
+            assert!(!binding_called.get() && !native_called.get());
+            if contents != "directory" {
+                assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+            }
+        }
+    }
+    #[test]
+    fn same_name_dry_run_and_nonrename_need_no_read_mark_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        for flag in ["--dry-run", "--archive"] {
+            let args = ["opencode/p/old", "opencode/p/new", flag].map(str::to_owned);
+            assert!(!dispatch_renames_owner("rename", &args[0], &args).unwrap());
+        }
+        for (kind, name, new) in [
+            ("rename", "opencode/p/same", Some("opencode/p/same")),
+            ("forget", "opencode/p/same", None),
+            ("rename", "opencode/p/old", None),
+        ] {
+            assert!(!renames_owner(kind, name, new).unwrap());
+        }
+        assert!(renames_owner("rename", "opencode/p/old", Some("opencode/p/new")).unwrap());
+        assert!(renames_owner("rename", "opencode/p/old", Some("opencode/other/new")).is_err());
+        let _guard = lock_action(
+            false,
+            || panic!("Read-mark writer must not be opened"),
+            || lock_bindings_at(&dir.path().join("bindings.lock")),
+        )
+        .unwrap();
+        assert!(!dir.path().join("read-marks.lock").exists());
+        let native = rename_native("same");
+        let mut record =
+            json!({"name":"opencode/p/same","run_id":"r1","conversation_id":"ses_A","cwd":"/x"});
+        rename_with(
+            &mut record,
+            "opencode/p/same",
+            None,
+            || Ok(&native),
+            |_| Ok(()),
+            |_, _| panic!("Same name must not transfer marks"),
+            |_| panic!("Same name must not retire binding"),
+        )
+        .unwrap();
+        assert_eq!(native.patches.get(), 1); // Preserve the existing title-confirm/save behavior.
+    }
+    #[test]
+    fn missing_owner_transfer_preserves_every_other_v1_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("read-marks.json");
+        let bytes = b"{\"version\":1, \"sessions\":{\"other\":{\"conversation\":{\"reply_id\":\"same\"}}}}\n";
+        fs::write(&path, bytes).unwrap();
+        let mut guard = read_marks::RenameGuard::at(&path).unwrap();
+        guard.transfer("missing", "new").unwrap();
+        guard.transfer("other", "other").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+    #[test]
+    fn opencode_rename_waits_for_read_marks_before_acquiring_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let marks = dir.path().join("read-marks.json");
+        let binding = dir.path().join("bindings.lock");
+        let held = read_marks::RenameGuard::at(&marks).unwrap();
+        let (waiting, ready) = std::sync::mpsc::channel();
+        let (thread_marks, thread_binding) = (marks.clone(), binding.clone());
+        let writer = std::thread::spawn(move || {
+            lock_action(
+                true,
+                || {
+                    waiting.send(()).unwrap();
+                    read_marks::RenameGuard::at(&thread_marks)
+                },
+                || lock_bindings_at(&thread_binding),
+            )
+            .map(drop)
+        });
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The pending renamer must not own bindings while an earlier read writer
+        // still owns marks and needs to inspect the OpenCode binding.
+        let earlier_read = try_bindings_at(&binding, Duration::ZERO);
+        assert!(earlier_read.is_some(), "renamer acquired bindings before the earlier read writer");
+        let earlier_read = earlier_read.unwrap();
+        drop(earlier_read);
+        drop(held);
+        writer.join().unwrap().unwrap();
+    }
     #[test]
     fn new_ids_match_opencode_and_stored_ids_keep_the_existing_check() {
         for prefix in ["ses_", "msg_"] {
@@ -2924,7 +3304,7 @@ mod tests {
                 json!({"name": name, "run_id": "r1", "conversation_id": "ses_A", "cwd": "/x"});
             let connected = std::cell::Cell::new(false);
             let error = action_in(
-                &ledger,
+                ActionStorage { ledger: &ledger, rename_marks: None },
                 || {
                     connected.set(true);
                     Ok(&fake)
@@ -4000,7 +4380,7 @@ mod tests {
         let mut record = bound();
         for kind in ["pause", "resume"] {
             assert_eq!(
-                action(&mut record, kind, None, None, None).unwrap_err(),
+                action(&mut record, kind, None, None, None, None).unwrap_err(),
                 NO_PROCESS
             );
         }

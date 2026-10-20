@@ -247,7 +247,7 @@ struct NativeRecoveryCard: View {
 
     var body: some View {
         let model = app.conversation!
-        if let job = RecoveryPresentation.from(model.activity, target, verified: model.activityVerified), job.state != "succeeded" {
+        if let job = RecoveryPresentation.from(model.activity, target, verified: model.activityVerified), job.state != "succeeded", !job.resumed {
             TimelineView(.periodic(from: .now, by: 1)) { timeline in
                 let now = timeline.date.timeIntervalSince1970
                 let nowReason = model.recoveryActionReason(target, jobId: job.id, choice: "now")

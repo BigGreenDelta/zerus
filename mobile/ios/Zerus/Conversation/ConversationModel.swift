@@ -198,6 +198,8 @@ final class ConversationModel {
     @ObservationIgnored var activeFrame: ConversationFrame?
     @ObservationIgnored var activeFrameVerified = false
     @ObservationIgnored var historyWindows = RecentMap<HistoryWindow>()
+    @ObservationIgnored var projectionHeads: [String: (epoch: String, generation: Int64)] = [:]
+    @ObservationIgnored var projectionTasks: [String: (target: Target, token: UUID, task: Task<Void, Never>)] = [:]
     @ObservationIgnored var inspections: [String: (target: Target, task: Task<ConversationFrame, Error>)] = [:]
     @ObservationIgnored var historyFlights: [String: (target: Target, task: Task<HistoryPage, Error>)] = [:]
     @ObservationIgnored let detailGate = LoadingGate(now: { ProcessInfo.processInfo.systemUptime })
@@ -759,6 +761,9 @@ final class ConversationModel {
             copy.records = state.records.filter { $0.target.connectionId != connection }
             return copy
         }
+        for (_, flight) in projectionTasks where flight.target.connectionId == connection { flight.task.cancel() }
+        projectionTasks = projectionTasks.filter { $0.value.target.connectionId != connection }
+        projectionHeads = projectionHeads.filter { historyWindows[$0.key]?.target.connectionId != connection }
         historyWindows.removeAll { $0.target.connectionId == connection }
         historySnapshotHints = historySnapshotHints.filter { !removed.contains($0.key) }
         currentHistoryHeads.subtract(removed)

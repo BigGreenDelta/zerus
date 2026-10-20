@@ -2369,7 +2369,10 @@ episode returns to **Recovery in progress** with the same attempt count: nothing
 further is scheduled or delivered while it works, and its answer completes the
 episode. An account has one recovery request in flight at a time, until the agent
 accepts the continuation and makes progress, so a long working turn does not hold
-the account's other sessions at **Waiting to retry**.
+the account's other sessions at **Waiting to retry**. From that progress the job
+records `resumed_at`, and desktop and mobile show the turn as ordinary work rather
+than **Recovery in progress**. The episode stays open until the turn ends, so a
+further provider failure in that turn reschedules on the same attempt budget.
 
 Provider failures replace Working or Compacting with a specific state such as
 **Usage limit reached**, **Model at capacity** or **Sign-in failed** and appear
@@ -3146,6 +3149,11 @@ from the screen first, so its old signature is no longer acknowledged. It prints
 an unknown session prints `{"ok": false, "error": "not_found"}` and exits with
 status 1. Marks live in `read-marks.json` in the hgs state directory, at most
 eight conversations per session, and follow `hgs rename`.
+OpenCode renames publish the new binding and its unchanged v1 read marks before
+retiring the old binding, in shared-read writer order. If a confirmed native title
+change is followed by a local persistence failure, the scoped action remains
+uncertain; inspect the retained bindings before choosing another action. An
+uncertain receipt never authorizes another native rename automatically.
 
 `inspect` includes conversation, phase/activity, prompt/last message, tools,
 subagents, events and cursor. Initial reads return recent events; `--after` advances

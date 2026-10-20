@@ -31,7 +31,7 @@ from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
 from . import analytics, speech, speech_config, voice, session_notifications
 from . import attachment_reads, file_reads, archives, hook_health, session_projects, opencode_privacy
 from .recovery import validate_recovery
-from .history import validate_history
+from .history import validate_history, validate_history_projection, validate_projection_result
 from .context import CLEAR_CONTEXT_DISMISS_FEATURE, CLEAR_CONTEXT_DISMISS_HELP, validate_clear_context
 from .context import ATTACHMENT_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, TERMINAL_OPERATIONS, LAUNCH_OPERATIONS, COMPUTER_OPERATIONS, OPERATIONS, FEATURES, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, validate_context, validate_core, validate_inspect, validate_lifecycle, mark_read_result, validate_mark_read, validate_mobile_delivery
 from .launch import catalog as project_catalog, validate as validate_launch
@@ -205,6 +205,7 @@ class Journal:
             self.db.execute("DELETE FROM requests WHERE operation='file_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute("DELETE FROM requests WHERE operation='attachment_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 3600,))
+            self.db.execute("DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation='history_projection' AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)", (now - 3600,))
             rows = self.db.execute(f"SELECT request_id,state FROM requests WHERE operation NOT IN {READ_CLASS_SQL} AND delivered=1 AND state!='running' AND delivered_at<? AND response IS NOT NULL AND response_expired=0", (now - 7 * 86400,)).fetchall()
             for request_id, state in rows:
                 expired = {"state": state, "result": {"status": "history_expired"},
@@ -314,6 +315,7 @@ class Connector:
         self.hook_health_supported = False
         self.clear_context_dismiss_supported = False
         self.history_supported = False
+        self.history_projection_supported = False
         self.launch_supported = False
         self.project_launch_supported = False
         self.worktree_supported = False
@@ -536,7 +538,7 @@ class Connector:
             snapshot["mobile_projects"]={**groups,"projects":[{k:v for k,v in p.items() if k!="archives"} for p in groups.get("projects",[]) if isinstance(p,dict)]}
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if getattr(self,"session_projects_supported",False) else session_projects.OPERATIONS) - (set() if self.analytics_supported else analytics.OPERATIONS) - (set() if getattr(self,"hook_health_supported",False) else {"hooks_status"})) - (set() if self.archive_supported else {"archive_list"}) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if getattr(self, "session_notifications_supported", False) else {"session_notifications"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
+        operations = (OPERATIONS - (set() if getattr(self,"session_projects_supported",False) else session_projects.OPERATIONS) - (set() if self.analytics_supported else analytics.OPERATIONS) - (set() if getattr(self,"hook_health_supported",False) else {"hooks_status"})) - (set() if self.archive_supported else {"archive_list"}) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.history_projection_supported else {"history_projection"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if getattr(self, "session_notifications_supported", False) else {"session_notifications"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | ({session_projects.FEATURE} if getattr(self,"session_projects_supported",False) else set()) | {"accounts_snapshot"} | ({CLEAR_CONTEXT_DISMISS_FEATURE} if getattr(self, "clear_context_dismiss_supported", False) else set()) | ({voice.video.FEATURE} if self.voice_supported and self.video_supported else set()) | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -556,6 +558,7 @@ class Connector:
         self.hook_health_supported = False
         self.clear_context_dismiss_supported = False
         self.history_supported = False
+        self.history_projection_supported = False
         self.launch_supported = False
         self.project_launch_supported = False
         self.worktree_supported = False
@@ -579,6 +582,7 @@ class Connector:
             self.terminal_supported = isinstance(help_text, str) and "terminal <session> --json" in help_text
             self.recovery_supported = isinstance(help_text,str) and "recovery action --scoped-json" in help_text
             self.history_supported = isinstance(help_text,str) and "history <session> --json" in help_text
+            self.history_projection_supported = isinstance(help_text,str) and "history-projection <session> --json" in help_text
             self.session_projects_supported = session_projects.from_help(help_text)
             self.hook_health_supported = isinstance(help_text,str) and hook_health.HELP_MARKER in help_text
             self.clear_context_dismiss_supported = isinstance(help_text, str) and any(
@@ -756,7 +760,7 @@ class Connector:
                 raise ConnectorError("session must match an exact nonarchived snapshot entry")
             return operation, session, payload or None
         payload = request.get("payload")
-        archived_output = operation in {"process_output", "history", "restore", "forget", "rename", "fork", "attachment_read", "file_read"} and isinstance(payload, dict) and "archive_id" in payload
+        archived_output = operation in {"process_output", "history", "history_projection", "restore", "forget", "rename", "fork", "attachment_read", "file_read"} and isinstance(payload, dict) and "archive_id" in payload
         if isinstance(payload, dict) and "archive_id" in payload and not archived_output:
             raise ConnectorError("archived targets support inspection only")
         if archived_output:
@@ -783,6 +787,9 @@ class Connector:
             except ValueError as error: raise ConnectorError(str(error)) from None
         if operation == "history":
             try: validate_history(payload,request["request_id"])
+            except ValueError as error: raise ConnectorError(str(error)) from None
+        if operation == "history_projection":
+            try: validate_history_projection(payload, request["request_id"])
             except ValueError as error: raise ConnectorError(str(error)) from None
         if operation == "file_read":
             try: file_reads.validate(payload, request["request_id"])
@@ -989,6 +996,8 @@ class Connector:
         mutation_started = False
         try:
             operation, session, payload = await asyncio.to_thread(self.validate, request)
+            if operation == "history_projection" and not self.history_projection_supported:
+                raise ConnectorError("native history projection ABI is unavailable")
             if operation == "clear_context" and "dismiss_prompt" in payload and not getattr(self, "clear_context_dismiss_supported", False):
                 raise ConnectorError("native clear-context dismiss ABI is unavailable")
             if isinstance(payload,dict) and "archive_id" in payload and getattr(self,"archive_supported",False):
@@ -1244,6 +1253,11 @@ class Connector:
                         or result.get("job_id") != payload["job_id"] or result.get("action") != payload["action"]
                         or result.get("status") not in {"scheduled","cancelled","failed","uncertain"}):
                     raise ConnectorError("native recovery acknowledgement identity did not match")
+            elif operation == "history_projection":
+                result = await self.native(["history-projection", session, "--json"], payload,
+                                           timeout=2, max_output_bytes=MAX_RESULT)
+                try: validate_projection_result(result, payload, session, request_id)
+                except ValueError as error: raise ConnectorError(str(error)) from None
             elif operation == "history":
                 # Head indexing makes bounded native progress locally rather
                 # than requiring one network roundtrip for each two-MiB chunk.

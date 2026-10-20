@@ -258,7 +258,7 @@ def main():
         row = next((row for row in [record, *states] if row["name"] == args[1]
                     and (row.get("archive_id") == options.get("--archive") if "--archive" in options else not row.get("archive_id"))), None)
         if row is None or options.get("--conversation") != row["conversation_id"] or options.get("--agent", "") != "":
-            raise SystemExit("The session conversation changed; refresh Activity")
+            raise SystemExit("The session conversation changed; nothing was read")
         message = next((item for item in row.get("attachment_messages", []) if item["message_id"] == options["--request"]), None)
         index = int(options["--index"])
         stored = root / "attachment-store" / f"{options['--request']}-{index}.bin"

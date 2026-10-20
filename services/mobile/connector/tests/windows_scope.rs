@@ -25,7 +25,9 @@ fn windows_advertisement_rejects_unix_and_unsupported_provider_features() {
         .as_str()
         .unwrap()
         .to_owned();
-    let flags = Flags::from_help(&format!("{help}\n{WINDOWS_HELP_MARKER}\n"));
+    let flags = Flags::from_help(&format!(
+        "{help}\n{WINDOWS_HELP_MARKER}\nhgs history-projection <session> --json\n"
+    ));
     let offered = flags.advertised(true);
     for operation in offered["operations"].as_array().unwrap() {
         assert!(
@@ -49,6 +51,10 @@ fn windows_advertisement_rejects_unix_and_unsupported_provider_features() {
             "{operation}"
         );
     }
+    assert!(!offered["operations"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("history_projection")));
     for feature in [
         "send_agent",
         "gateway_one_hop",
@@ -88,6 +94,7 @@ async fn media_and_path_refusals_are_durable_and_cannot_replay_after_scope_chang
         "launch",
         "worktree_create",
         "git_status",
+        "history_projection",
         "project_assignment",
         "project_assign",
     ]

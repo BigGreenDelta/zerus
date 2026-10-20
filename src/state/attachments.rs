@@ -402,7 +402,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         read(name)?
     };
     if flag("--conversation") != string(&record, "conversation_id") {
-        return Err("The session conversation changed; refresh Activity".into());
+        return Err("The session conversation changed; nothing was read".into());
     }
     if let Some(output) = voice::read_attachment(&record, Some(flag("--agent")), &id.to_string(), index)? {
         println!("{output}");

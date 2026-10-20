@@ -238,7 +238,7 @@ public enum SessionFilters {
         default: break
         }
         if recovery == "waiting" { return "Waiting to retry" }
-        if recovery == "dispatching" || recovery == "retrying" { return "Retrying" }
+        if recovery == "dispatching" || (recovery == "retrying" && !RecoveryPresentation.resumed(raw.object("recovery"))) { return "Retrying" }
         switch raw.string("phase") {
         case "error": return "Error"
         case "interrupted": return "Interrupted"
@@ -409,7 +409,8 @@ public enum DesktopSessionPalette {
         if SessionFilters.state(session) == "stopped" || raw.string("process_state") == "exited" { return .neutral }
         if !raw.bool("tracked") && raw.string("activity").isEmpty { return .neutral }
         if ["approval", "input"].contains(phase) { return .attention }
-        if ["waiting", "dispatching", "retrying"].contains(raw.object("recovery")?.string("state") ?? "") { return .neutral }
+        if ["waiting", "dispatching", "retrying"].contains(raw.object("recovery")?.string("state") ?? ""),
+           !RecoveryPresentation.resumed(raw.object("recovery")) { return .neutral }
         if phase == "error" { return .error }
         if ["interrupted", "starting"].contains(phase) { return .neutral }
         if ["compacting", "tool"].contains(phase) || raw.string("activity") == "busy" { return .working }

@@ -6,6 +6,7 @@ import datetime
 import difflib
 import hashlib
 import http.client
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -361,6 +362,14 @@ def run_suites(suites, env, timeout, scratch, log):
     return run.returncode, out.read_bytes().decode('utf-8', 'replace')
 
 
+def run_macos_claude_suites(suites, env, timeout, scratch, log):
+    """Only this fully private matrix uses two processes under its original end."""
+    spec = importlib.util.spec_from_file_location('native_suite_workers', ROOT / 'scripts/ci/native_suite_workers.py')
+    workers = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(workers)
+    return workers.run_suites(suites, env, timeout, scratch, log)
+
+
 def method_names(value):
     methods = set()
     if isinstance(value, dict):
@@ -441,8 +450,9 @@ def qualify(agent, package, work, results, hgs):
         for case, settings in cases.items():
             test_env = dict(env, HGS_TEST_BIN=str(hgs), **{spec['variable']: str(native)},
                             **spec.get('environment', {}), **settings)
-            status, stdout = run_suites(spec['suites'], test_env, spec['timeout'], work / agent / version,
-                                        directory / (case + '.log'))
+            runner = run_macos_claude_suites if (agent, target) == ('claude', 'darwin-arm64') else run_suites
+            status, stdout = runner(spec['suites'], test_env, spec['timeout'], work / agent / version,
+                                    directory / (case + '.log'))
             marker = next((line.removeprefix('ZERUS_NATIVE_RESULT=') for line in stdout.splitlines()
                            if line.startswith('ZERUS_NATIVE_RESULT=')), None)
             if marker is not None:
