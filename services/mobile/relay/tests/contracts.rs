@@ -1523,6 +1523,18 @@ async fn alert_candidates_are_bounded_and_expire() {
 async fn candidate_expiry_survives_a_persistently_failing_delivery() {
     let f = Fixture::new().await;
     let at = now();
+    // Delivery rechecks the currently displayed route. Unknown snapshots hold
+    // candidates instead of reaching the alert append, so provide the actual
+    // waiting request whose append this fault control needs to exercise.
+    let snapshot = canonical(&json!({"sessions":[{"name":"due","run_id":"r","conversation_id":"c","phase":"input","activity":"waiting"}]})).unwrap();
+    f.store
+        .db
+        .exec(
+            "UPDATE nodes SET snapshot=?,last_seen=? WHERE id=?",
+            args![&snapshot, at, &f.node.id],
+        )
+        .await
+        .unwrap();
     let insert = "INSERT INTO alert_candidates(workspace_id,computer_id,session,kind,run_id,conversation_id,created,next_at) VALUES(?,?,?,'attention','r','c',?,?)";
     // A due candidate of a machine without presence delivers; an expired one
     // is not due, so only expiry removes it.
