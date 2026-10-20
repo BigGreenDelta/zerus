@@ -2326,9 +2326,8 @@ mod tests {
                     lock_bindings_at(&dir.path().join("bindings.lock"))
                 },
             )
-            .and_then(|_| {
+            .map(|_| {
                 native_called.set(true);
-                Ok(())
             });
             assert_eq!(
                 result.unwrap_err(),
