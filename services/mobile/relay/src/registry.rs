@@ -140,6 +140,7 @@ pub async fn gateway(
         if let Some(row) = mapped {
             revoked |= i(&row, "revoked") != 0;
             if row["id"] != computer && i(&own, "exposed") == 0 {
+                crate::notification_highwater::merge(db, t, w, &computer, s(&row, "id")).await?;
                 computer = s(&row, "id").into();
                 alias(t, w, n, &computer).await?;
             }
@@ -298,7 +299,14 @@ pub async fn select(t: &mut Tx, w: &str, a: &str) -> Result<Option<Value>> {
         return Ok(None);
     }
     let mut r = rows.remove(0);
-    r["snapshot"] = snapshot(t, &r).await?;
+    let stored = snapshot(t, &r).await?;
+    if let Some(encoded) = stored.as_str() {
+        let mut value = crate::json::parse(encoded.as_bytes(), 32, 50000)?;
+        crate::notification_highwater::overlay(t, &c, &mut value).await?;
+        r["snapshot"] = json!(canonical(&value)?);
+    } else {
+        r["snapshot"] = stored;
+    }
     Ok(Some(r))
 }
 pub async fn frozen(t: &mut Tx, r: &Value, allow: bool) -> Result<bool> {
@@ -386,16 +394,23 @@ pub async fn catalog(t: &mut Tx, w: &str, maximum: usize, online_timeout: u64) -
             .push(a["alias"].take());
     }
     let mut result = Vec::with_capacity(selected.len());
+    let mut projected_bytes = 16usize;
     for r in &selected {
         let snap = snapshots
             .remove(&(s(r, "gateway_id").to_owned(), s(r, "route_id").to_owned()))
             .ok_or(Error::CONFLICT)?;
-        let parsed = if let Some(s) = snap.as_str() {
+        let mut parsed = if let Some(s) = snap.as_str() {
             crate::json::parse(s.as_bytes(), 32, 50000)?
         } else {
             Value::Null
         };
-        result.push(json!({"id":r["id"],"name":r["name"],"online":available(r)&&!r["last_seen"].is_null()&&now()-f(r,"last_seen")<online_timeout as f64,"last_seen_at":r["last_seen_at"],"snapshot":parsed,"machine_id":r["machine_id"],"aliases":aliases_by_computer.remove(s(r,"id")).unwrap_or_default(),"via":if i(r,"local")!=0{Value::Null}else{json!({"gateway_id":r["gateway_id"],"gateway_name":r["gateway_name"]})}}));
+        crate::notification_highwater::overlay(t, s(r, "id"), &mut parsed).await?;
+        let item = json!({"id":r["id"],"name":r["name"],"online":available(r)&&!r["last_seen"].is_null()&&now()-f(r,"last_seen")<online_timeout as f64,"last_seen_at":r["last_seen_at"],"snapshot":parsed,"machine_id":r["machine_id"],"aliases":aliases_by_computer.remove(s(r,"id")).unwrap_or_default(),"via":if i(r,"local")!=0{Value::Null}else{json!({"gateway_id":r["gateway_id"],"gateway_name":r["gateway_name"]})}});
+        projected_bytes += canonical(&item)?.len() + 1;
+        if projected_bytes > maximum {
+            return Err(Error::LARGE);
+        }
+        result.push(item);
     }
     let unexposed: Vec<_> = selected
         .iter()
@@ -412,7 +427,11 @@ pub async fn catalog(t: &mut Tx, w: &str, maximum: usize, online_timeout: u64) -
         )
         .await?;
     }
-    Ok(json!({"computers":result}))
+    let result = json!({"computers":result});
+    if canonical(&result)?.len() > maximum {
+        return Err(Error::LARGE);
+    }
+    Ok(result)
 }
 pub async fn revoke_computer(db: &Db, t: &mut Tx, c: &Value) -> Result<()> {
     let rows = if c["machine_id"].is_null() {

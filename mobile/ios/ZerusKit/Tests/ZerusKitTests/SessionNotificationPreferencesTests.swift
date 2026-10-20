@@ -364,4 +364,23 @@ final class SessionNotificationPreferencesTests: XCTestCase {
         XCTAssertNotNil(writer.state.sessionActions[0].confirmedNotificationPreference)
         XCTAssertFalse(SessionNotificationPreferences.deliveryAllowed(now,actions:writer.state.sessionActions))
     }
+
+    func testCoveredMainCannotHideNewRecoveryOrUnaccountedBlockingQuestions() {
+        let suppressed = changed(baseline(),"main_attention",.object(changed(attention("main-a"),"run_id",.string(target.run))))
+        var original = raw(suppressed:suppressed);original["phase"] = "input";original["attention_id"] = "main-a";original["attention_started"] = 100
+        let first = catalogPlan(original);XCTAssertTrue(first.desired.isEmpty)
+        for state in ["exhausted","blocked","uncertain"] {
+            let recovery = changed(original,"recovery",["state":.string(state),"request_id":"recovery-b","error":"new failure"])
+            XCTAssertFalse(parsedCurrent(recovery).suppressed)
+            let next = catalogPlan(recovery,previous:first.state,at:1001)
+            XCTAssertEqual(.error,next.desired.first?.kind);XCTAssertEqual(true,next.desired.first?.fresh)
+        }
+        var unknown = original;unknown["pending_question_count"] = 1;unknown["attention_signature"] = .string(String(repeating:"b",count:64))
+        XCTAssertFalse(parsedCurrent(unknown).suppressed)
+        XCTAssertEqual(true,catalogPlan(unknown,previous:first.state,at:1002).desired.first?.fresh)
+        var blocking = original;blocking["mobile_attention"] = [["question_id":"new-blocking","question_hash":"new-hash","optional":false]]
+        blocking["attention_signature"] = .string(String(repeating:"c",count:64))
+        XCTAssertFalse(parsedCurrent(blocking).suppressed)
+        XCTAssertEqual(true,catalogPlan(blocking,previous:first.state,at:1003).desired.first?.fresh)
+    }
 }

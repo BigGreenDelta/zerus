@@ -83,6 +83,9 @@ or over-limit baseline returns `baseline_unavailable` with the current preferenc
 and no preference write. There is no trimming and no no-replay claim for an
 incomplete snapshot. This permits an offline device which missed both transitions
 to suppress the old current edges after reconnecting without marking them read.
+Failed recovery states (`uncertain`, `blocked`, `exhausted`) have no independent
+identity in this native-edge baseline. They therefore refuse an actual unmute
+with `baseline_unavailable`, keeping the existing mute until recovery is resolved.
 
 `suppressed` contains:
 

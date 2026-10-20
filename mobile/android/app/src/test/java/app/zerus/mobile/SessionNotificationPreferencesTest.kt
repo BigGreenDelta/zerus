@@ -358,4 +358,23 @@ class SessionNotificationPreferencesTest {
         assertTrue(SessionNotificationPreferences.deliveryAllowed(now,listOf(refused)))
         assertTrue(SessionNotificationPreferences.known(actions=listOf(pending)).isEmpty())
     }
+
+    @Test fun coveredMainCannotHideNewRecoveryOrUnaccountedBlockingQuestions() {
+        val suppressed=baseline().put("main_attention",attention("main-a").put("run_id",target.run))
+        val original=raw(suppressed=suppressed).put("phase","input").put("attention_id","main-a").put("attention_started",100)
+        val first=catalogPlan(original);assertTrue(first.desired.isEmpty())
+        for(state in listOf("exhausted","blocked","uncertain")) {
+            val recovery=JSONObject(original.toString()).put("recovery",JSONObject().put("state",state).put("request_id","recovery-b").put("error","new failure"))
+            assertFalse(parsedCurrent(recovery).suppressed)
+            val next=catalogPlan(recovery,first.state,1001.0)
+            assertEquals(SessionAlertKind.Error,next.desired.single().kind);assertTrue(next.desired.single().fresh)
+        }
+        val unknown=JSONObject(original.toString()).put("pending_question_count",1).put("attention_signature","b".repeat(64))
+        assertFalse(parsedCurrent(unknown).suppressed)
+        assertTrue(catalogPlan(unknown,first.state,1002.0).desired.single().fresh)
+        val question=JSONObject().put("question_id","new-blocking").put("question_hash","new-hash").put("optional",false)
+        val blocking=JSONObject(original.toString()).put("mobile_attention",JSONArray(listOf(question))).put("attention_signature","c".repeat(64))
+        assertFalse(parsedCurrent(blocking).suppressed)
+        assertTrue(catalogPlan(blocking,first.state,1003.0).desired.single().fresh)
+    }
 }

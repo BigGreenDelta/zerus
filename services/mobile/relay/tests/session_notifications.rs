@@ -8,6 +8,118 @@ use zerus_relay::{
 mod common;
 use common::Fixture;
 
+#[tokio::test]
+async fn projection_growth_then_shrink_fits_in_both_row_orders() {
+    use zerus_relay::notification_highwater;
+    let f = Fixture::new().await;
+    let mut grow = row();
+    grow["conversation_id"] = json!("grow");
+    grow["notification_preferences"]["conversation_id"] = json!("grow");
+    grow["notification_preferences"]["revision"] = json!(1);
+    for index in 0..5 {
+        grow["notification_preferences"]["suppressed"]["child_attention"]
+            [format!("child-{index}")] =
+            json!({"phase":"input","request_id":"x".repeat(65536),"started_at":null});
+    }
+    let mut shrink = row();
+    shrink["conversation_id"] = json!("shrink");
+    shrink["notification_preferences"]["conversation_id"] = json!("shrink");
+    shrink["notification_preferences"]["revision"] = json!(1);
+    let mut t = f.store.db.begin().await.unwrap();
+    f.store
+        .db
+        .payload_usage(&mut t, &f.node.workspace)
+        .await
+        .unwrap();
+    notification_highwater::accept(
+        &f.store.db,
+        &mut t,
+        &f.node.workspace,
+        &f.node.id,
+        &json!({"sessions":[grow.clone(),shrink.clone()]}),
+    )
+    .await
+    .unwrap();
+    t.commit().await.unwrap();
+    let mut old_grow = row();
+    old_grow["conversation_id"] = json!("grow");
+    old_grow["notification_preferences"]["conversation_id"] = json!("grow");
+    let mut old_shrink = grow.clone();
+    old_shrink["conversation_id"] = json!("shrink");
+    old_shrink["notification_preferences"]["conversation_id"] = json!("shrink");
+    old_shrink["notification_preferences"]["revision"] = json!(0);
+    for rows in [
+        vec![old_grow.clone(), old_shrink.clone()],
+        vec![old_shrink, old_grow],
+    ] {
+        let mut snapshot = json!({"sessions":rows,"padding":"p".repeat(500000)});
+        let mut t = f.store.db.begin().await.unwrap();
+        notification_highwater::overlay(&mut t, &f.node.id, &mut snapshot)
+            .await
+            .unwrap();
+        assert!(canonical(&snapshot).unwrap().len() <= 1024 * 1024);
+        for row in snapshot["sessions"].as_array().unwrap() {
+            assert_eq!(
+                row["notification_preferences"],
+                if row["conversation_id"] == "grow" {
+                    grow["notification_preferences"].clone()
+                } else {
+                    shrink["notification_preferences"].clone()
+                }
+            );
+        }
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn repeated_scopes_refuse_projection_before_any_preference_is_cloned_into_rows() {
+    use zerus_relay::notification_highwater;
+    let f = Fixture::new().await;
+    let mut large = row();
+    large["notification_preferences"]["revision"] = json!(1);
+    for index in 0..5 {
+        large["notification_preferences"]["suppressed"]["child_attention"]
+            [format!("child-{index}")] =
+            json!({"phase":"input","request_id":"x".repeat(65536),"started_at":null});
+    }
+    let mut t = f.store.db.begin().await.unwrap();
+    f.store
+        .db
+        .payload_usage(&mut t, &f.node.workspace)
+        .await
+        .unwrap();
+    notification_highwater::accept(
+        &f.store.db,
+        &mut t,
+        &f.node.workspace,
+        &f.node.id,
+        &json!({"sessions":[large]}),
+    )
+    .await
+    .unwrap();
+    t.commit().await.unwrap();
+    for absent in [false, true] {
+        let mut original = row();
+        if absent {
+            original
+                .as_object_mut()
+                .unwrap()
+                .remove("notification_preferences");
+        }
+        let mut snapshot = json!({"sessions":vec![original;10]});
+        let before = snapshot.clone();
+        let mut t = f.store.db.begin().await.unwrap();
+        assert!(
+            notification_highwater::overlay(&mut t, &f.node.id, &mut snapshot)
+                .await
+                .is_err()
+        );
+        assert_eq!(snapshot, before); // Refusal precedes every replacement, not only final serialization.
+    }
+    f.close().await;
+}
+
 fn row() -> Value {
     json!({"name":"s","run_id":"r","conversation_id":"c","phase":"input","activity":"idle","attention_signature":"a","reply_id":"p","notification_preferences":{"conversation_id":"c","muted":false,"revision":0,"suppressed":{"reply_id":null,"attention_signature":null,"optional_question_ids":[],"main_attention":null,"child_attention":{}}}})
 }
@@ -196,4 +308,96 @@ async fn shared_mute_retires_held_alerts_and_only_wakes_phones_to_refresh_the_pr
     assert_eq!(f.alert_count().await, 1);
     assert_eq!(f.count("alert_candidates").await, 0);
     f.close().await;
+}
+
+#[tokio::test]
+async fn physical_highwater_projects_a_stale_route_without_touching_native_state() {
+    use zerus_relay::{args, notification_highwater};
+    let f = Fixture::new().await;
+    let original = row();
+    let mut muted = original.clone();
+    muted["notification_preferences"]["muted"] = json!(true);
+    muted["notification_preferences"]["revision"] = json!(1);
+    let mut t = f.store.db.begin().await.unwrap();
+    f.store
+        .db
+        .payload_usage(&mut t, &f.node.workspace)
+        .await
+        .unwrap();
+    notification_highwater::accept(
+        &f.store.db,
+        &mut t,
+        &f.node.workspace,
+        &f.node.id,
+        &json!({"sessions":[muted.clone()]}),
+    )
+    .await
+    .unwrap();
+    t.commit().await.unwrap();
+    let mut t = f.store.db.begin().await.unwrap();
+    let mut stale = json!({"sessions":[original.clone()]});
+    notification_highwater::overlay(&mut t, &f.node.id, &mut stale)
+        .await
+        .unwrap();
+    assert_eq!(stale["sessions"][0], muted);
+    assert!(
+        Candidate::capture(&json!({"sessions":[original.clone()]}), "s", "attention")
+            .resolved(Some(&stale["sessions"][0]))
+    );
+    let charge = t
+        .one(
+            "SELECT payload_bytes FROM computer_notification_preferences WHERE computer_id=?",
+            args![&f.node.id],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let usage = t
+        .one(
+            "SELECT payload_bytes FROM workspace_usage WHERE workspace_id=?",
+            args![&f.node.workspace],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(charge["payload_bytes"], usage["payload_bytes"]);
+    t.commit().await.unwrap();
+    let mut t = f.store.db.begin().await.unwrap();
+    f.store
+        .db
+        .payload_usage(&mut t, &f.node.workspace)
+        .await
+        .unwrap();
+    assert!(notification_highwater::accept(
+        &f.store.db,
+        &mut t,
+        &f.node.workspace,
+        &f.node.id,
+        &json!({"sessions":[original]})
+    )
+    .await
+    .is_err());
+    drop(t);
+    let mut t = f.store.db.begin().await.unwrap();
+    let mut resumed = muted.clone();
+    resumed["name"] = json!("s/project/renamed");
+    resumed["run_id"] = json!("resumed");
+    notification_highwater::overlay(
+        &mut t,
+        &f.node.id,
+        &mut json!({"sessions":[resumed.clone()]}),
+    )
+    .await
+    .unwrap();
+    let mut separate = resumed;
+    separate["name"] = json!("other/session");
+    separate["notification_preferences"]["muted"] = json!(false);
+    separate["notification_preferences"]["revision"] = json!(0);
+    let mut snapshot = json!({"sessions":[separate.clone()]});
+    notification_highwater::overlay(&mut t, &f.node.id, &mut snapshot)
+        .await
+        .unwrap();
+    assert_eq!(snapshot["sessions"][0], separate);
+    t.commit().await.unwrap();
+    f.store.db.close().await;
 }

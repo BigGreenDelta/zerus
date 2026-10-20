@@ -15,6 +15,8 @@ pub mod protocol;
 pub mod push;
 #[cfg(feature = "server")]
 pub mod registry;
+#[cfg(feature = "server")]
+pub mod notification_highwater;
 mod speech_config;
 #[cfg(feature = "server")]
 pub mod store;

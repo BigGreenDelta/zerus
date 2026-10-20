@@ -242,11 +242,10 @@ public enum SessionNotificationPreferences {
         if children.contains(where:{ id,value in pref.suppressed.children.first { $0.key.utf8.elementsEqual(id.utf8) }?.value.matches(value) != true }) { return false }
         let aggregate: Bool
         if case .string(let signature)? = raw["attention_signature"] { aggregate = signature == pref.suppressed.signature } else { aggregate = false }
-        if ["approval","input","error"].contains(main.phase) {
-            return pref.suppressed.main?.matches(main) == true
-        }
-        if ["uncertain","blocked","exhausted"].contains(raw.object("recovery")?.string("state") ?? "") { return aggregate }
+        // Recovery identities are absent from the host baseline ABI and attention signature.
+        if ["uncertain","blocked","exhausted"].contains(raw.object("recovery")?.string("state") ?? "") { return false }
         if raw.objects("mobile_attention").contains(where:{ !QuestionPolicies.optionalAttention($0) }) || raw.int("pending_question_count") > 0 { return aggregate }
+        if ["approval","input","error"].contains(main.phase) { return pref.suppressed.main?.matches(main) == true }
         return !children.isEmpty || aggregate
     }
     public static func alertKind(_ raw: JSONObject, _ target: Target, kind: SessionAlertKind?, optional: [String]) -> SessionAlertKind? {

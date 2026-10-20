@@ -82,7 +82,7 @@ impl Store {
         let received = now();
         let presence = Presence::from_value(presence, received)
             .or_else(|| Presence::from_value(&snapshot["desktop_presence"], received));
-        if peer.is_none() {
+        if peer.is_none() && !crate::notification_highwater::present(snapshot) {
             let mut t = self.db.begin().await?;
             if t.exec("UPDATE nodes SET last_seen=? WHERE id=? AND workspace_id=? AND revoked=0 AND (snapshot_hash=? OR EXISTS(SELECT 1 FROM computers c WHERE c.id=nodes.computer_id AND c.revoked=1))",args![now(),&c.id,&c.workspace,&hash]).await? != 0 {
                 // Unchanged content: remember presence without rewriting the snapshot.
@@ -110,10 +110,17 @@ impl Store {
             let changes = registry::event_changes(previous["snapshot"].as_str(), snapshot)?;
             let mut t = self.db.begin().await?;
             if !changes.is_empty() {
-                self.event_locks(&mut t, &[c.workspace.as_str()], changes.len())
-                    .await?;
+                self.event_locks_with_payload(
+                    &mut t,
+                    &[c.workspace.as_str()],
+                    changes.len(),
+                    Some(&c.workspace),
+                )
+                .await?;
+            } else {
+                self.db.payload_usage(&mut t, &c.workspace).await?;
             }
-            // Changed event-free snapshots take only the node or route lock.
+            // Global events (when needed), payload shard, sorted workspaces, then route.
             let current = if let Some((route, machine)) = peer {
                 self.authorized_tx(&mut t, c).await?;
                 let r=t.one("SELECT snapshot_hash,computer_id,machine_id,active,online,guarded FROM computer_routes WHERE gateway_id=? AND route_id=? AND local=0 FOR UPDATE",args![&c.id,route]).await?.ok_or(Error::NOT_FOUND)?;
@@ -156,6 +163,14 @@ impl Store {
             if current["snapshot_hash"] != previous["snapshot_hash"] {
                 continue;
             }
+            crate::notification_highwater::accept(
+                &self.db,
+                &mut t,
+                &c.workspace,
+                s(&current, "computer_id"),
+                snapshot,
+            )
+            .await?;
             if let Some((route, _)) = peer {
                 t.exec("UPDATE computer_routes SET snapshot=?,snapshot_hash=?,last_seen=? WHERE gateway_id=? AND route_id=?",args![encoded,&hash,now(),&c.id,route]).await?;
             } else {
@@ -229,6 +244,15 @@ impl Store {
         spaces: &[&str],
         count: usize,
     ) -> Result<()> {
+        self.event_locks_with_payload(t, spaces, count, None).await
+    }
+    async fn event_locks_with_payload(
+        &self,
+        t: &mut Tx,
+        spaces: &[&str],
+        count: usize,
+        payload: Option<&str>,
+    ) -> Result<()> {
         let fleet = t
             .one(
                 "SELECT events,push_jobs FROM global_usage WHERE id=1 FOR UPDATE",
@@ -249,6 +273,14 @@ impl Store {
         // At most 1000 registrations per workspace can create jobs during one publication.
         let jobs = i(&fleet, "push_jobs") + 1000 * spaces.len() as i64 - 10000;
         for r in t.all("SELECT d.workspace_id FROM push_jobs j JOIN devices d ON d.id=j.device_id ORDER BY j.id LIMIT ?",args![jobs.max(0)]).await?{workspaces.insert(s(&r,"workspace_id").into());}
+        if let Some(w) = payload {
+            t.one(
+                "SELECT payload_bytes FROM payload_shards WHERE id=? FOR UPDATE",
+                args![self.db.shard(w)],
+            )
+            .await?
+            .ok_or(Error::BAD)?;
+        }
         for w in workspaces {
             self.db.usage(t, &w).await?;
         }

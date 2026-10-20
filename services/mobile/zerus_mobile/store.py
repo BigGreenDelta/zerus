@@ -14,7 +14,7 @@ import functools
 import uuid
 
 from .attachments import MAX_QUEUE_BYTES
-from . import speech, speech_config, voice, session_notifications
+from . import speech, speech_config, voice, session_notifications, notification_highwater
 from .context import CLEAR_CONTEXT_DISMISS_FEATURE
 from .context import CAPABILITY_OPERATIONS, ATTACHMENT_READ_GRACE, ATTACHMENT_RESULT_TTL, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, inspect_features, supports
 from .projects import is_archived
@@ -158,6 +158,8 @@ class Store:
                 if column not in existing:
                     self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
         self.db.executescript(ROUTE_SCHEMA)
+        with self.db:
+            self.db.execute("UPDATE workspace_usage SET payload_bytes=(SELECT COALESCE(sum(body_bytes+result_bytes+reserved_bytes),0) FROM requests WHERE workspace_id=workspace_usage.workspace_id)+(SELECT COALESCE(sum(payload_bytes),0) FROM computer_notification_preferences WHERE workspace_id=workspace_usage.workspace_id)")
         self.registry = Registry()
 
 
@@ -398,11 +400,12 @@ class Store:
         with self.db:
             row = self.db.execute("SELECT n.snapshot_hash,c.revoked AS computer_revoked FROM nodes n JOIN computers c ON c.id=n.computer_id WHERE n.id=? AND n.revoked=0", (node["id"],)).fetchone()
             if row is None: return False
-            if row['computer_revoked'] or row[0]==snapshot_hash:
+            if row['computer_revoked'] or (row[0]==snapshot_hash and not any(notification_highwater.preference(s) is not None for s in snapshot.get('sessions', []))):
                 self.db.execute("UPDATE nodes SET last_seen=? WHERE id=?",(now,node["id"]))
                 return False
             computer=self.db.execute('SELECT computer_id FROM nodes WHERE id=?',(node['id'],)).fetchone()[0]
             event_node={'id':computer,'workspace_id':node['workspace_id']}
+            drive_sync(self.db, notification_highwater.accept(node['workspace_id'],computer,snapshot))
             previous = self.db.execute("SELECT snapshot FROM nodes WHERE id=?",(node["id"],)).fetchone()[0]
             if previous is not None:
                 if not session_notifications.revisions_current(json.loads(previous), snapshot):
@@ -534,6 +537,7 @@ class Store:
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
             result=drive_sync(self.db, self.registry.peer_heartbeat(node, route_id, machine_id, encoded))
+            drive_sync(self.db, notification_highwater.accept(node['workspace_id'],result['id'],snapshot))
             if result["previous"] is not None and not session_notifications.revisions_current(json.loads(result["previous"]), snapshot):
                 raise RouteError(409, "stale shared notification revision")
             for name,kind in self._event_changes(result['previous'],snapshot):

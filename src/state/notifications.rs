@@ -259,6 +259,14 @@ fn attention(session: &Value, phase: &str, child: bool) -> Attention {
 /// Capture identities, not read acknowledgements. An unknown/over-limit
 /// question set is a refusal; dropping identities could replay an old alert.
 fn baseline(session: &Value, questions: Option<&[Value]>) -> Result<Suppressed> {
+    // The v1 native edge baseline has no recovery-job identity. Refuse an
+    // unmute rather than call that independent failed channel fully captured.
+    if matches!(
+        string(&session["recovery"], "state"),
+        "uncertain" | "blocked" | "exhausted"
+    ) {
+        return Err("baseline_unavailable".into());
+    }
     let questions = questions.ok_or("baseline_unavailable")?;
     let mut optional = BTreeSet::new();
     for card in questions.iter().filter(|card| {
@@ -737,6 +745,35 @@ mod tests {
             .unwrap()
             .child_attention
             .is_empty());
+    }
+
+    #[test]
+    fn failed_recovery_is_not_representable_by_the_native_baseline_and_cannot_unmute() {
+        for state in ["uncertain", "blocked", "exhausted"] {
+            let mut current = session();
+            current["recovery"] = json!({"state":state,"request_id":"recovery-B"});
+            let mut store = Store::default();
+            assert!(
+                update(
+                    &mut store,
+                    "owner",
+                    &current,
+                    &request(true, 0),
+                    unavailable
+                )
+                .2
+            );
+            let before = serde_json::to_value(&store).unwrap();
+            let (code, result, changed) =
+                update(&mut store, "owner", &current, &request(false, 1), || {
+                    baseline(&current, Some(&[]))
+                });
+            assert_eq!(code, 1);
+            assert_eq!(result["error"], "baseline_unavailable");
+            assert!(!changed);
+            assert_eq!(serde_json::to_value(&store).unwrap(), before);
+            assert_eq!(result["preferences"]["muted"], true);
+        }
     }
 
     #[test]

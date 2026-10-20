@@ -196,10 +196,11 @@ object SessionNotificationPreferences {
         if(children.any { (id,value) -> pref.suppressed.children[id]?.matches(value) != true }) return false
         val signature = raw.opt("attention_signature") as? String
         val aggregate=signature != null && signature == pref.suppressed.signature
-        if(main.phase in setOf("approval","input","error")) return pref.suppressed.main?.matches(main) == true
-        if(raw.optJSONObject("recovery")?.string("state") in setOf("uncertain","blocked","exhausted")) return aggregate
+        // Recovery identities are not part of the host baseline ABI or its attention signature.
+        if(raw.optJSONObject("recovery")?.string("state") in setOf("uncertain","blocked","exhausted")) return false
         val questions=raw.optJSONArray("mobile_attention")?.objects().orEmpty().any { !QuestionPolicies.optionalAttention(it) }
         if(questions || raw.optInt("pending_question_count")>0) return aggregate
+        if(main.phase in setOf("approval","input","error")) return pref.suppressed.main?.matches(main) == true
         // Removing a covered sibling or optional question cannot make an old child new again.
         return children.isNotEmpty() || aggregate
     }
