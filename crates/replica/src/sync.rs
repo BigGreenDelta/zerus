@@ -1,7 +1,7 @@
 //! Replicating a project between replicas: what each holds (its inventory, the
 //! version of every document), the updates the other lacks, and importing them.
 //! The inventory is bookkeeping, not a log, so nothing here grows without bound.
-use crate::schema::Stage;
+use crate::schema::{SessionKey, Stage};
 use crate::store::{write_atomic, Damaged, ProjectStore};
 use crate::task::TaskDoc;
 use crate::{ids, Error, Result};
@@ -51,6 +51,27 @@ pub struct Update {
     pub bytes: Vec<u8>,
 }
 
+/// One Done task as the phone lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoneRow {
+    pub uuid: String,
+    pub id: String,
+    /// The start of the prompt, at most 200 characters.
+    pub text: String,
+    pub session: Option<SessionKey>,
+    /// When it entered Done (Unix milliseconds).
+    pub accepted_at: i64,
+}
+
+/// A page of the Done list; `next` is the cursor of the page after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DonePage {
+    pub tasks: Vec<DoneRow>,
+    pub next: Option<(i64, String)>,
+    pub total: usize,
+    pub recent: usize,
+}
+
 /// What an import changed, and the documents it refused.
 #[derive(Debug, Default)]
 pub struct Imported {
@@ -98,6 +119,9 @@ struct Cached {
     /// The task's stage, for the phone's view; an entry without one is read again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stage: Option<Stage>,
+    /// When it entered that stage, for the Done list; an entry without it is read again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage_at: Option<i64>,
 }
 
 /// A rewrite within one timestamp tick can hand a file its old inode back, so
@@ -169,7 +193,7 @@ impl ProjectStore {
         let (mut inventory, stages, damaged) = self.inventory_with_stages()?;
         inventory
             .tasks
-            .retain(|uuid, _| stages.get(uuid) != Some(&Stage::Done));
+            .retain(|uuid, _| stages.get(uuid).map(|s| s.0) != Some(Stage::Done));
         Ok((inventory, damaged))
     }
 
@@ -178,13 +202,58 @@ impl ProjectStore {
     pub fn phone_inventory(&self, theirs: &Inventory) -> Result<Inventory> {
         let (mut inventory, stages, _) = self.inventory_with_stages()?;
         inventory.tasks.retain(|uuid, _| {
-            stages.get(uuid) != Some(&Stage::Done) || theirs.tasks.contains_key(uuid)
+            stages.get(uuid).map(|s| s.0) != Some(Stage::Done) || theirs.tasks.contains_key(uuid)
         });
         Ok(inventory)
     }
 
-    /// The inventory with each loaded task's stage.
-    fn inventory_with_stages(&self) -> Result<(Inventory, BTreeMap<String, Stage>, Vec<Damaged>)> {
+    /// The Done tasks newest first (when they entered Done, then UUID, both
+    /// descending): at most `limit` after `before`, with how many there are and
+    /// how many entered Done at or after `since`. Only the page's documents are
+    /// read; one that cannot be read is left out of its page.
+    pub fn done_page(
+        &self,
+        before: Option<(i64, String)>,
+        limit: usize,
+        since: i64,
+    ) -> Result<DonePage> {
+        let (_, stages, _) = self.inventory_with_stages()?;
+        let mut done: Vec<(i64, String)> = stages
+            .into_iter()
+            .filter(|(_, (stage, _))| *stage == Stage::Done)
+            .map(|(uuid, (_, at))| (at, uuid))
+            .collect();
+        done.sort_unstable_by(|a, b| b.cmp(a));
+        let total = done.len();
+        let recent = done.iter().filter(|(at, _)| *at >= since).count();
+        let start = before.map_or(0, |cursor| done.partition_point(|entry| *entry >= cursor));
+        let end = (start + limit).min(total);
+        let mut tasks = Vec::new();
+        for (at, uuid) in &done[start..end] {
+            let Ok(view) = self.load(uuid).and_then(|task| task.view()) else {
+                continue;
+            };
+            tasks.push(DoneRow {
+                uuid: uuid.clone(),
+                id: view.id,
+                text: view.text.chars().take(200).collect(),
+                session: view.session,
+                accepted_at: *at,
+            });
+        }
+        Ok(DonePage {
+            tasks,
+            next: (end < total).then(|| done[end - 1].clone()),
+            total,
+            recent,
+        })
+    }
+
+    /// The inventory with each loaded task's stage and when it entered it.
+    #[allow(clippy::type_complexity)]
+    fn inventory_with_stages(
+        &self,
+    ) -> Result<(Inventory, BTreeMap<String, (Stage, i64)>, Vec<Damaged>)> {
         let path = self.dir().join(CACHE);
         let old: Cache = fs::read(&path)
             .ok()
@@ -208,6 +277,7 @@ impl ProjectStore {
                     version: version(&VersionVector::decode(&self.project()?.version())?),
                     error: None,
                     stage: None,
+                    stage_at: None,
                 },
             };
             inventory.project = cached.version.clone();
@@ -222,7 +292,9 @@ impl ProjectStore {
             ];
             let trusted = settled(&files);
             let remembered = old.tasks.get(&uuid).filter(|c| {
-                trusted && c.files == files && (c.error.is_some() || c.stage.is_some())
+                trusted
+                    && c.files == files
+                    && (c.error.is_some() || (c.stage.is_some() && c.stage_at.is_some()))
             });
             let cached = match remembered {
                 Some(cached) => cached.clone(),
@@ -232,12 +304,14 @@ impl ProjectStore {
                         version: version(&task.current_vv()),
                         error: None,
                         stage: Some(task.stage()?),
+                        stage_at: Some(task.stage_at()),
                     },
                     Err(error) => Cached {
                         files,
                         version: Version::new(),
                         error: Some(error.to_string()),
                         stage: None,
+                        stage_at: None,
                     },
                 },
             };
@@ -248,8 +322,8 @@ impl ProjectStore {
                 }),
                 None => {
                     inventory.tasks.insert(uuid.clone(), cached.version.clone());
-                    if let Some(stage) = cached.stage {
-                        stages.insert(uuid.clone(), stage);
+                    if let (Some(stage), Some(at)) = (cached.stage, cached.stage_at) {
+                        stages.insert(uuid.clone(), (stage, at));
                     }
                 }
             }

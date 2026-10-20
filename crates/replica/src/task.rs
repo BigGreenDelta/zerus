@@ -195,6 +195,13 @@ impl TaskDoc {
         Stage::parse(&string(&self.fields(), "stage").unwrap_or_default())
     }
 
+    /// When the task entered its current stage (Unix milliseconds).
+    pub fn stage_at(&self) -> i64 {
+        integer(&self.fields(), "stage_at")
+            .or_else(|| integer(&self.meta(), "created_at"))
+            .unwrap_or(0)
+    }
+
     pub fn rank(&self) -> String {
         string(&self.fields(), "rank").unwrap_or_default()
     }
