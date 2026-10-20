@@ -6139,9 +6139,12 @@ void TestSessionsWindow::composerFileReferencesFollowHostAndChildSelection()
     const QJsonObject childDetails{{"parent_conversation_id", "conversation-one"}, {"conversation_id", "child-one"},
         {"run_id", "run-one"}, {"send_supported", true}};
     SessionsWindow window(programInspecting("composer-file-reference-hgs", parent, childDetails));
+    keepDetailsPollsOut(window);
     window.resize(1400, 900); window.setFleet(fleet()); window.show(); window.showSession("mac", "claude/infra/review");
+    auto *client = window.findChild<HgsClient *>();
     auto *composer = window.findChild<MessageComposer *>("messageComposer");
     setComposerText(composer, "Remote draft: ");
+    settleSelectedInspection(composer, client, "mac", "claude/infra/review", parent);
     QSignalSpy sends(composer, &MessageComposer::sendRequested);
     auto *reference = composer->findChild<QPushButton *>("referenceMessageFile");
     QVERIFY(reference->isVisible()); QVERIFY(reference->isEnabled());
@@ -6157,13 +6160,13 @@ void TestSessionsWindow::composerFileReferencesFollowHostAndChildSelection()
     QVERIFY(composer->editor()->toPlainText().contains("\"~/large existing.bin\"")); QCOMPARE(sends.size(), 0);
     window.showSession({}, "codex/hgs/dashboard");
     setComposerText(composer, "Local parent draft");
+    settleSelectedInspection(composer, client, {}, "codex/hgs/dashboard", parent);
     QTimer::singleShot(0, &window, [&] {
         auto *dialog = window.findChild<QDialog *>("fileReferenceDialog"); QVERIFY(dialog);
         const auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
         QVERIFY(dialog->findChild<QPushButton *>("browseReferenceFile"));
     });
     reference->click();
-    auto *client = window.findChild<HgsClient *>();
     client->inspectionReady({}, "codex/hgs/dashboard", parent);
     // A replacement run under the same row is a different reference context.
     QTimer::singleShot(0, &window, [&] {
