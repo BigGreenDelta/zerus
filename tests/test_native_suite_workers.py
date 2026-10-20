@@ -155,9 +155,13 @@ class NativeSuiteWorkers(unittest.TestCase):
                 workers.partition(invalid)
 
     def test_private_environment_precedes_imports_and_does_not_redirect_case_claude_config(self):
+        # Match run_suites' short root even when macOS supplies a long TMPDIR.
+        private = tempfile.TemporaryDirectory(prefix='nwenv-', dir='/tmp')
+        self.addCleanup(private.cleanup)
+        base = Path(private.name).resolve()
         envs = []
         for index in range(2):
-            root = self.root / str(index)
+            root = base / str(index)
             root.mkdir()
             envs.append(workers.worker_environment(dict(self.env, CLAUDE_CONFIG_DIR='/unowned', TMUX='unowned'), root))
         for key in ('HOME', 'TMPDIR', 'HGS_STATE_DIR', 'HGS_CONFIG_DIR', 'XDG_CONFIG_HOME',
@@ -166,7 +170,7 @@ class NativeSuiteWorkers(unittest.TestCase):
             self.assertTrue(all(Path(env[key]).is_dir() for env in envs), key)
         self.assertTrue(all(env['PYTHONDONTWRITEBYTECODE'] == '1' for env in envs))
         self.assertTrue(all('CLAUDE_CONFIG_DIR' not in env and 'TMUX' not in env for env in envs))
-        long_root = self.root / ('x' * 90)
+        long_root = base / ('x' * 90)
         long_root.mkdir()
         with self.assertRaisesRegex(ValueError, 'socket bound'):
             workers.worker_environment(self.env, long_root)
