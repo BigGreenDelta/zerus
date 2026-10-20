@@ -545,7 +545,7 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QVERIFY(effort->isVisible());QCOMPARE(effort->count(),2);
     }
     void openCodeStarSendsOneFavoriteRequestWithIdentity() {
-        flag("opencode");flag("opencode-models");
+        flag("opencode");flag("opencode-models");flag("slow-models");
         NewSessionDialog dialog(program(),fleet(),{},"opencode");dialog.selectPath("/workspace/example",false);dialog.show();
         auto *button=dialog.findChild<QPushButton *>("launchModelButton");QTRY_VERIFY(button->isEnabled());button->click();
         auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");QTRY_VERIFY(picker->values().contains("fixture/plain"));
@@ -557,8 +557,10 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(args[10].toString(),QString("--json"));
         // The folder catalog is fetched again, and it marks the favorite.
         QTRY_COMPARE(lines("model-calls").size(),2);
+        QVERIFY(!picker->values().contains("folderonly/proj"));
+        flag("released");
+        QTRY_VERIFY(picker->values().contains("folderonly/proj"));
         auto *tree=picker->findChild<QTreeWidget *>("openCodeModelList");QTRY_COMPARE(row(tree,"fixture/plain")->text(1),QString("★"));
-        QVERIFY(picker->values().contains("folderonly/proj"));
         flag("favorite-fails");
         emit picker->favoriteRequested("fixture/other",true);
         auto *error=dialog.findChild<QLabel *>("launchError");
