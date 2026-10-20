@@ -196,6 +196,18 @@ exchange is safe and needs no durable request identity (owner decision,
 - **Storage.** The documents live in the app's `noBackupFilesDir`, which backups
   and device transfer never include, without further encryption (owner
   decision, 2026-10-19).
+- **The phone's side.** The exchange itself lives in `zerus-replica`: the
+  computer's answer, which hgs serves, and the phone's exchange, which walks
+  the ranges, assembles parts and sends what the answer's inventory lacks; the
+  app only carries its JSON through the relay. The phone keeps one replica per
+  relay connection and swarm, so two relays never share documents, and drops it
+  when the connection is removed. While the app is visible it checks every
+  15 seconds, with the digests of the latest catalog or, when the catalog has
+  not been read for 20 seconds, of its own read of the computers; it exchanges
+  with every online computer of the project that advertises the exchange and
+  names a digest other than its own, one at a time, and waits a minute before
+  it tries a computer whose exchange failed again. An update of its own too
+  large for one request (about 700 KiB) is not sent; the exchange names it.
 
 ### Done tasks
 
