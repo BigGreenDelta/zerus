@@ -567,7 +567,8 @@ computer whose heartbeat lists it (409 otherwise), with an empty session:
   and `uuid`) is a short read with its own `task_done_history` index and
   two-minute retention: one page of the Done tasks newest first (`uuid`, `id`,
   the first 200 characters of `text`, `session`, `accepted_at`), the cursor
-  `next`, `total` and `recent` (the last 7 days). Opening a Done task fetches
+  `next`, `total`, `recent` (the last 7 days) and `damaged` (the page's tasks
+  that could not be read, left out of it). Opening a Done task fetches
   its document through the exchange, with that task in the inventory.
 
 Apply the additive index with the normal coordinated runtime replacement.

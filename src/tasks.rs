@@ -460,6 +460,12 @@ fn add(config: &Config, args: &[String]) -> Result<Value> {
 }
 
 fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
+    change_within(config, action, args, None)
+}
+
+/// `change`, waiting at most `wait` for a project another command holds:
+/// the phone's Send now and Cancel are refused as busy before anything happens.
+fn change_within(config: &Config, action: &str, args: &[String], wait: Option<std::time::Duration>) -> Result<Value> {
     let text = match action {
         "edit" => Some(stdin_text("prompt")?),
         "comment" => Some(stdin_text("comment")?),
@@ -489,7 +495,12 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
             error
         }
     };
-    let store = store(config, project_id)?;
+    let store = match wait {
+        None => store(config, project_id)?,
+        Some(wait) => ProjectStore::open_within(&config.state.join("replica"), project_id, wait)
+            .map_err(fail)?
+            .ok_or_else(|| fail("the project's tasks are busy; try again"))?,
+    };
     let mut task = store.find(&r.task).map_err(fail)?;
     // A send or cancel for a session another computer runs happens there.
     let session = match action {
@@ -609,11 +620,15 @@ fn send_session(task: &TaskDoc, args: &[String], who: &Actor, machines: &Machine
     };
     match (option(args, "--session")?, &view.target, who) {
         (None, ..) if host.is_some() => Err(fail("--host needs a --session")),
-        (Some(name), Target::Session(pinned), Actor::Person) if *pinned != named(name)? => Err(fail(format!(
-            "{} is pinned to {}; change its session first",
-            task.id(),
-            pinned.session
-        ))),
+        (Some(name), Target::Session(pinned), Actor::Person) if *pinned != named(name)? => {
+            // The same name on another computer is another session: say whose.
+            let whose = if pinned.session == name && pinned.machine != machines.here {
+                format!(" on {}", machines.alias(&pinned.machine).unwrap_or_else(|| "another computer".into()))
+            } else {
+                String::new()
+            };
+            Err(fail(format!("{} is pinned to {}{whose}; change its session first", task.id(), pinned.session)))
+        }
         (Some(name), _, Actor::Person) => Ok((named(name)?, false)),
         (Some(name), _, Actor::Agent(_)) => Ok((named(name)?, true)),
         (None, Target::Session(pinned), _) => Ok((pinned.clone(), false)),
@@ -838,6 +853,28 @@ fn settings(config: &Config, args: &[String]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_task_pinned_to_the_same_name_elsewhere_names_that_computer() {
+        let task = TaskDoc::create(zerus_replica::NewTask {
+            project: "project-1",
+            id: "T-a1b2c3",
+            text: "Add rate limiting",
+            stage: Stage::Todo,
+            target: Target::Session(SessionKey { machine: "node-mac".into(), session: "codex/api".into() }),
+            author: Actor::Person,
+            rank: "V",
+            now: 1,
+        })
+        .unwrap();
+        let machines = Machines { here: "node-here".into(), peers: BTreeMap::from([("mac".to_owned(), "node-mac".to_owned())]) };
+        let args = ["--session".to_owned(), "codex/api".to_owned()];
+        let error = send_session(&task, &args, &Actor::Person, &machines).unwrap_err().message;
+        assert!(error.contains("pinned to codex/api on mac"), "{error}");
+        let unknown = Machines { here: "node-here".into(), peers: BTreeMap::new() };
+        let error = send_session(&task, &args, &Actor::Person, &unknown).unwrap_err().message;
+        assert!(error.contains("pinned to codex/api on another computer"), "{error}");
+    }
 
     #[test]
     fn phone_refusals_say_when_the_prompt_may_be_in_the_session() {

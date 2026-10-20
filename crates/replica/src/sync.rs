@@ -70,6 +70,8 @@ pub struct DonePage {
     pub next: Option<(i64, String)>,
     pub total: usize,
     pub recent: usize,
+    /// The page's tasks that could not be read, left out of it.
+    pub damaged: usize,
 }
 
 /// What an import changed, and the documents it refused.
@@ -229,8 +231,10 @@ impl ProjectStore {
         let start = before.map_or(0, |cursor| done.partition_point(|entry| *entry >= cursor));
         let end = (start + limit).min(total);
         let mut tasks = Vec::new();
+        let mut damaged = 0;
         for (at, uuid) in &done[start..end] {
             let Ok(view) = self.load(uuid).and_then(|task| task.view()) else {
+                damaged += 1;
                 continue;
             };
             tasks.push(DoneRow {
@@ -246,6 +250,7 @@ impl ProjectStore {
             next: (start < end && end < total).then(|| done[end - 1].clone()),
             total,
             recent,
+            damaged,
         })
     }
 

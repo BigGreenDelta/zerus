@@ -176,6 +176,7 @@ fn the_page_loads_only_its_tasks() {
     // The page that holds it leaves it out and still ends the list.
     let last = store.done_page(first.next, 2, 0).unwrap();
     assert!(last.tasks.is_empty());
-    assert_eq!((last.next, last.total), (None, 3));
+    assert_eq!((last.next, last.total, last.damaged), (None, 3, 1));
+    assert_eq!(first.damaged, 0);
     fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
 }

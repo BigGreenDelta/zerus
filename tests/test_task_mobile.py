@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """`hgs task mobile-send`, `mobile-cancel` and `mobile-done`: the phone's Send
 now, Cancel and Done list as the connector runs them, through the real CLI."""
+import fcntl
 import hashlib
 import json
 import os
 import subprocess
+import time
 import unittest
 import uuid
 
@@ -104,7 +106,7 @@ class Mobile(test_tasks.DeliveryFixture):
         self.assertEqual(set(row), {"uuid", "id", "text", "session", "accepted_at"})
         self.assertEqual(row["session"]["session"], self.name)
         rest = self.mobile("mobile-done", {"schema": 1, "project": "project-1", "limit": 2, "before": first["next"]})
-        self.assertEqual(([r["text"] for r in rest["tasks"]], rest["next"]), (["Task 0"], None))
+        self.assertEqual(([r["text"] for r in rest["tasks"]], rest["next"], rest["damaged"]), (["Task 0"], None, 0))
 
     def test_mobile_answers_stay_small(self):
         # A long prompt and 4 MiB of comments: the answer carries neither.
@@ -118,6 +120,31 @@ class Mobile(test_tasks.DeliveryFixture):
         self.assertLess(len(result.stdout), 4096)
         self.assertNotIn(prompt[20:80], result.stdout)
         self.assertNotIn("submitted_text", result.stdout)
+
+    def test_a_busy_project_refuses_a_send_before_anything_happens(self):
+        task = self.add("Add rate limiting")
+        lock = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / ".lock"
+        with lock.open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            started = time.monotonic()
+            refused = self.mobile("mobile-send", self.send_request(task), ok=False)
+            self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(refused["error"], "the project's tasks are busy; try again")
+        self.assertNotIn("uncertain", refused)
+        self.assertNotIn("Add rate limiting", self.received())
+
+    def test_phone_strings_that_look_like_options_are_refused(self):
+        task = self.add("Add rate limiting")
+        refused = self.mobile("mobile-send", self.send_request(task, "--host"), ok=False)
+        self.assertIn("is not a session name", refused["error"])
+        cancel = {"schema": 1, "project": "project-1", "task": task["uuid"], "reason": "--agent"}
+        self.assertIn("cannot look like an option", self.mobile("mobile-cancel", cancel, ok=False)["error"])
+        # A reason with words may start with a dash.
+        self.mobile("mobile-send", self.send_request(task))
+        self.wait_received("Add rate limiting")
+        self.confirm()
+        cancel["reason"] = "- not needed after all"
+        self.assertEqual(self.mobile("mobile-cancel", cancel)["stage"], "review")
 
     def test_invalid_mobile_requests_are_refused_in_json(self):
         task = self.add("Add rate limiting")

@@ -3,7 +3,7 @@
 //! "Phone"). Each reads one JSON request on stdin, runs the same send and
 //! cancel as `hgs task`, and answers compactly: the phone exchanges the
 //! project to see the task itself.
-use super::{change, fail, now, project, Result};
+use super::{change_within, fail, now, project, Result};
 use crate::config::Config;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -18,7 +18,7 @@ const MAX_REQUEST: u64 = 64 * 1024;
 const PAGE: usize = 50;
 /// The Done tasks counted as recent: the last 7 days, as the desktop shows them.
 const RECENT_MS: i64 = 7 * 24 * 3600 * 1000;
-/// How long a Done page waits for a project another command holds.
+/// How long a phone command waits for a project another command holds.
 const PROJECT_WAIT: Duration = Duration::from_secs(2);
 
 fn request<T: DeserializeOwned>() -> Result<T> {
@@ -38,6 +38,15 @@ fn request<T: DeserializeOwned>() -> Result<T> {
         None => return Err(fail("invalid request: missing schema")),
     }
     serde_json::from_value(value).map_err(|e| fail(format!("invalid request: {e}")))
+}
+
+/// Phone strings become hgs arguments: none may look like an option.
+fn plain(value: &str, refusal: impl FnOnce() -> String) -> Result<()> {
+    if value.starts_with('-') && !value.contains(char::is_whitespace) {
+        Err(fail(refusal()))
+    } else {
+        Ok(())
+    }
 }
 
 fn task_uuid(value: &str) -> Result<()> {
@@ -82,6 +91,10 @@ struct Done {
 pub(super) fn send(config: &Config) -> Result<Value> {
     let request: Send = request()?;
     task_uuid(&request.task)?;
+    if request.session.trim().is_empty() || request.session.starts_with('-') {
+        return Err(fail(format!("{:?} is not a session name", request.session)));
+    }
+    plain(&request.project, || format!("{:?} is not a project", request.project))?;
     let args = [
         request.task,
         "--project".into(),
@@ -89,7 +102,7 @@ pub(super) fn send(config: &Config) -> Result<Value> {
         "--session".into(),
         request.session,
     ];
-    let out = change(config, "send", &args)?;
+    let out = change_within(config, "send", &args, Some(PROJECT_WAIT))?;
     // The receipt's identity and status, never the prompt it carries: a
     // mutation's receipt stays in the relay for days.
     let receipt = &out["receipt"];
@@ -104,11 +117,13 @@ pub(super) fn send(config: &Config) -> Result<Value> {
 pub(super) fn cancel(config: &Config) -> Result<Value> {
     let request: Cancel = request()?;
     task_uuid(&request.task)?;
+    plain(&request.project, || format!("{:?} is not a project", request.project))?;
     let mut args = vec![request.task, "--project".into(), request.project];
     if let Some(reason) = request.reason.filter(|reason| !reason.is_empty()) {
+        plain(&reason, || format!("a cancel reason cannot look like an option ({reason:?})"))?;
         args.extend(["--reason".into(), reason]);
     }
-    let out = change(config, "cancel", &args)?;
+    let out = change_within(config, "cancel", &args, Some(PROJECT_WAIT))?;
     Ok(json!({"schema": 1, "ok": true, "task": out["task"]["uuid"], "stage": out["task"]["stage"],
               "cancel_message": out["cancel_message"]}))
 }
@@ -135,5 +150,5 @@ pub(super) fn done(config: &Config) -> Result<Value> {
         .map_err(fail)?;
     Ok(json!({"schema": 1, "tasks": page.tasks,
               "next": page.next.map(|(at, uuid)| json!({"at": at, "uuid": uuid})),
-              "total": page.total, "recent": page.recent}))
+              "total": page.total, "recent": page.recent, "damaged": page.damaged}))
 }
