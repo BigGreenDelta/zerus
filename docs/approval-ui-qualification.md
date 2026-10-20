@@ -112,6 +112,24 @@ feedback keyboard, actual background/foreground, and hidden/read-only cards. Req
 failures or skips; inspect the raw XCTest results and callback assertions, rather than accepting exit zero alone.
 Keyboard and dialog behavior must be observed, not inferred from the existing SwiftPM policy tests.
 
+The two fixture-only control modes use Darwin notifications through `notify_register_dispatch`, `notify_post`, and
+`notify_cancel` ([Apple API header](https://raw.githubusercontent.com/apple-oss-distributions/Libnotify/main/notify.h),
+[notification semantics](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/notify.3.html)).
+The shared namespace does not authenticate a sender. This channel is confined to the disposable simulator fixture:
+exact names bind a fresh test-launch UUID and a separate random app-generation UUID, with only the action needed by
+the chosen mode registered. Each action consumes and cancels its own token once, and the UI must acknowledge its
+action/serial. Posting success alone proves no delivery. Explicit fixture closure checks cancellation before termination;
+a failed registration, acknowledgement, timing precondition, or cleanup cannot pass. No production target uses this API.
+
+Feedback mode seeds only the fixed memory draft prefix and keeps the synthetic card unavailable while the real keyboard
+opens. The one-time `begin-feedback-review` notification makes that card available through its ordinary production
+eligibility path; a real short edit and Return must finish inside the original three-second window and leave zero
+callbacks. After the real review, another Return must record exactly the original answer. A missed early window fails
+the fixture without a bypass claim. Replacement mode posts its one-time `replace` only after native Confirm is observed,
+then requires the same native retirement and no-submit assertions. The broad disclosure check expects the entire
+production message, including its description. These controls never set a review clock, foreground flag, native dialog,
+or provider permission. Monotonic phase records and exact ACKs are evidence only; all seven UI tests still have to pass.
+
 Retain the source map, raw stdout/stderr, result bundle and actual test inventory before cleanup. Re-hash every source
 entry and the built fixture products. Shut down and delete only the newly returned simulator UUID after matching its
 name/runtime to the recorded creation. An unknown shutdown, changed identity or surviving runner is a failed/unknown

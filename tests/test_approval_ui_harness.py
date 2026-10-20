@@ -205,13 +205,13 @@ class ApprovalHarnessTests(unittest.TestCase):
         ios = module("ios_approval_ui", "scripts/ci/ios-approval-ui.py")
         source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
         self.assertIn("@MainActor final class ApprovalChoicesUITests: XCTestCase", source)
-        self.assertIn("@MainActor private func launchFixture()", source)
+        self.assertIn("@MainActor private func launchFixture(_ mode: Mode = .normal)", source)
         self.assertNotIn("override func setUp", source)
         self.assertNotIn("override func tearDown", source)
-        entries = re.findall(r"func (test\w+)\(\) \{\n        defer \{ app\?\.terminate\(\) \}\n        launchFixture\(\)", source)
+        entries = re.findall(r"func (test\w+)\(\) \{\n        defer \{ closeFixture\(\) \}\n        launchFixture\((?:\.(?:feedback|replacement))?\)", source)
         self.assertEqual(len(entries), 7)
         self.assertEqual(set(entries), set(ios.CASES))
-        self.assertEqual(source.count("        launchFixture()"), 7)
+        self.assertEqual(len(re.findall(r"^        launchFixture\(", source, re.M)), 7)
 
     def test_android_interceptor_failure_is_first_only_and_cannot_qualify_or_use_network(self):
         source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
@@ -262,6 +262,52 @@ class ApprovalHarnessTests(unittest.TestCase):
         success = source.split('            result.putString("approval_cases"', 1)[1].split('        } catch (error: Throwable)', 1)[0]
         self.assertNotIn("phases", success)
         self.assertIn('finish(Activity.RESULT_OK, result)', success)
+
+    def test_ios_controls_bind_modes_generation_first_consumption_and_checked_cleanup(self):
+        host = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalUIFixtureApp.swift").read_text()
+        tests = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
+        controls = host.split("final class FixtureControls {", 1)[1].split("// This file belongs only", 1)[0]
+        self.assertIn('case beginFeedbackReview = "begin-feedback-review", replace', controls)
+        self.assertIn("case .normal: []; case .feedback: [.beginFeedbackReview]; case .replacement: [.replace]", controls)
+        self.assertIn("!closed, failure.isEmpty, actions.contains(action), !consumed.contains(action), tokens[action] == token", controls)
+        self.assertLess(controls.index("tokens.removeValue(forKey: action)"), controls.index("guard notify_cancel(token) == 0"))
+        self.assertLess(controls.index("guard notify_cancel(token) == 0"), controls.index("consumed.insert(action)"))
+        self.assertIn('if notify_cancel(token) != 0 { failed("close-cancel") }', controls)
+        self.assertIn('if failure.isEmpty { status = "closed" }', controls)
+        self.assertIn("notify_register_dispatch(pointer, &token, DispatchQueue.main)", controls)
+        self.assertIn("MainActor.assumeIsolated { self?.consume(action, token: received) }", controls)
+        for forbidden in ("sendQuestion(", "callbacks.append(", "URLSession(", "FileManager(", "notify_register_signal("):
+            self.assertNotIn(forbidden, controls)
+        self.assertIn("let actualGeneration = UUID().uuidString", host)
+        self.assertIn("generation = actualGeneration", host)
+        self.assertIn('fixtureLaunch = UUID().uuidString.lowercased()', tests)
+        self.assertIn('XCTAssertEqual(app.staticTexts["fixture-generation"].label, fixtureGeneration)', tests)
+        self.assertIn('XCTAssertTrue(posted.insert(action).inserted, "No control replays")', tests)
+        self.assertIn("notify_post($0)", tests)
+        self.assertIn("Owned registration cleanup must be acknowledged", tests)
+        self.assertEqual(host.count("test.example.zerus.ui."), 1)
+        self.assertEqual(tests.count("test.example.zerus.ui."), 1)
+
+    def test_ios_feedback_review_and_replacement_handshakes_preserve_real_assertions(self):
+        host = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalUIFixtureApp.swift").read_text()
+        tests = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
+        self.assertIn("available = selectedMode != .feedback", host)
+        self.assertIn('"text": "Use a safer comman"', host)
+        self.assertIn('question.id == "fixture-approval" && question.hash == "fixture-hash-0"', host)
+        feedback = tests.split("    func testFeedbackKeyboardCannotBypassReview()", 1)[1].split("    func testBackground", 1)[0]
+        for earlier, later in [('field.tap()', 'post("begin-feedback-review")'), ('post("begin-feedback-review")', 'let reviewBegan = ack('),
+                               ('let reviewBegan = ack(', 'field.typeText("d\\n")'), ('field.typeText("d\\n")', 'count(0)'),
+                               ('count(0)', 'reviewed(); field.typeText("\\n")')]:
+            self.assertLess(feedback.index(earlier), feedback.index(later))
+        self.assertIn("XCTAssertLessThan(earlyElapsed, 3", feedback)
+        self.assertIn('answer.contains("Use a safer command")', feedback)
+        self.assertIn('XCTAssertEqual(answer, "fixture-hash-0|[', feedback)
+        replacement = tests.split("    func testReplacementRetiresAnOpenConfirmation()", 1)[1].split("    func testUnavailable", 1)[0]
+        self.assertLess(replacement.index('XCTAssertTrue(app.buttons["Confirm"].waitForExistence'), replacement.index('post("replace")'))
+        self.assertLess(replacement.index('post("replace")'), replacement.index('XCTWaiter.wait(for: [retired]'))
+        self.assertIn('count(0); XCTAssertFalse(send.isEnabled)', replacement)
+        self.assertNotIn('Replace in 2 seconds', host + tests)
+        self.assertIn("changes the agent's permissions beyond this request.\\n\\nExact command for this session only", tests)
 
 
 if __name__ == "__main__":
