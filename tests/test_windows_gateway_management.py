@@ -222,6 +222,73 @@ class ManagementTests(unittest.TestCase):
         self.assertIsNone(keeper.poll(), "capture must not signal the other output holder")
         self.assertFalse(manager.may_remove_root)
 
+    def test_late_wait_cannot_read_or_accept_eof(self):
+        process, clock = Process(), Clock()
+        original_wait = process.wait
+        def late_wait(timeout):
+            code = original_wait(timeout)
+            clock.value = 16
+            return code
+        read = mock.Mock(return_value=None)
+        manager = capture.ManagementCapture(self.root, read)
+        with mock.patch.object(capture.subprocess, "Popen", return_value=process), \
+                mock.patch.object(process, "wait", side_effect=late_wait), \
+                mock.patch.object(capture.time, "monotonic", clock.now):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                manager.run(["memory"], {}, {}, 0)
+        self.assertEqual(caught.exception.timeout, 15)
+        read.assert_not_called()
+        self.assertEqual(process.kills, 0)
+        self.assertTrue(manager.exited)
+        self.assertFalse(manager.pipes_ended)
+        self.assertFalse(manager.may_remove_root)
+
+    def test_last_eof_after_deadline_refuses_and_retains_collected_bytes(self):
+        process, clock, calls = Process(), Clock(), []
+        body = b'{"running":true}'
+        def read(pipe):
+            calls.append(pipe)
+            if len(calls) == 1:
+                return body
+            if len(calls) == 3:
+                clock.value = 16  # The final otherwise-valid EOF arrived late.
+            return None
+        manager = capture.ManagementCapture(self.root, read)
+        with mock.patch.object(capture.subprocess, "Popen", return_value=process), \
+                mock.patch.object(capture.time, "monotonic", clock.now), \
+                mock.patch.object(capture.time, "sleep", clock.sleep):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                manager.run(["memory"], {}, {}, 0)
+        self.assertEqual(caught.exception.timeout, 15)
+        self.assertEqual(calls, [process.stdout, process.stderr, process.stdout])
+        self.assertEqual((manager.folder / "stdout").read_bytes(), body)
+        self.assertEqual(process.kills, 0)
+        self.assertTrue(manager.exited)
+        self.assertFalse(manager.pipes_ended)
+        self.assertFalse(manager.may_remove_root)
+
+    def test_retained_output_prefix_is_capped_and_truncation_is_explicit(self):
+        process = Process()
+        values = {process.stdout: [b"a" * 65530, None], process.stderr: [b"b" * 20, None]}
+        manager = capture.ManagementCapture(self.root, lambda pipe: values[pipe].pop(0))
+        with mock.patch.object(capture.subprocess, "Popen", return_value=process):
+            manager.run(["memory"], {}, {}, 0)
+        self.assertEqual((manager.folder / "stdout").read_bytes(), b"a" * 65530)
+        self.assertEqual((manager.folder / "stderr").read_bytes(), b"b" * 20)
+        self.assertTrue(manager.pipes_ended)
+        self.assertTrue(manager.may_remove_root)
+        # Overflow in one stream must be covered separately from their combined size.
+        process = Process()
+        values = {process.stdout: [b"a" * 65530, b"b" * 20], process.stderr: [None]}
+        manager = capture.ManagementCapture(self.root, lambda pipe: values[pipe].pop(0))
+        with mock.patch.object(capture.subprocess, "Popen", return_value=process):
+            with self.assertRaisesRegex(RuntimeError, "retained prefix truncated"):
+                manager.run(["memory"], {}, {}, 0)
+        self.assertEqual((manager.folder / "stdout").read_bytes(), b"a" * 65530 + b"b" * 6)
+        self.assertEqual(json.loads((manager.folder / "truncated.json").read_bytes()),
+            {"stream": "stdout", "retained_bytes": 65536, "observed_at_least": 65550, "truncated": True})
+        self.assertFalse(manager.may_remove_root)
+
 
 if __name__ == "__main__":
     unittest.main()

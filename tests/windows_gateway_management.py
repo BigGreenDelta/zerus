@@ -80,31 +80,48 @@ class ManagementCapture:
                     stderr=subprocess.PIPE, env=env, creationflags=creationflags)
                 self.exited = False
                 deadline = time.monotonic() + SECONDS
+                def before_deadline():
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(argv, SECONDS)
                 self.process.wait(timeout=max(0, deadline - time.monotonic()))
                 self.exited = True
+                before_deadline()
                 buffers = [bytearray(), bytearray()]
-                pending = [(self.process.stdout, out, buffers[0]), (self.process.stderr, err, buffers[1])]
+                pending = [("stdout", self.process.stdout, out, buffers[0]),
+                           ("stderr", self.process.stderr, err, buffers[1])]
                 while pending:
                     remaining = []
-                    for pipe, retained, buffer in pending:
+                    for name, pipe, retained, buffer in pending:
+                        before_deadline()
                         data = self.read_available(pipe)
+                        if data:
+                            prefix = data[:OUTPUT_LIMIT - len(buffer)]
+                            observed = len(buffer) + len(data)
+                            retained.write(prefix)
+                            retained.flush()
+                            buffer.extend(prefix)
+                            if len(prefix) != len(data):
+                                with exclusive(self.folder / "truncated.json") as metadata:
+                                    metadata.write(json.dumps({"stream": name, "retained_bytes": len(buffer),
+                                        "observed_at_least": observed, "truncated": True}).encode("ascii"))
+                                    metadata.flush()
+                                before_deadline()
+                                raise RuntimeError("manager output exceeds its limit; retained prefix truncated")
+                        # Keep any collected bytes before refusing a late read/EOF.
+                        before_deadline()
                         if data is None:
                             continue
-                        if data:
-                            retained.write(data)
-                            retained.flush()
-                            buffer.extend(data)
-                            if len(buffer) > OUTPUT_LIMIT:
-                                raise RuntimeError("manager output exceeds its limit")
-                        remaining.append((pipe, retained, buffer))
+                        remaining.append((name, pipe, retained, buffer))
                     pending = remaining
                     if pending:
                         left = deadline - time.monotonic()
                         if left <= 0:
                             raise subprocess.TimeoutExpired(argv, SECONDS)
                         time.sleep(min(0.01, left))
+                before_deadline()
                 result = subprocess.CompletedProcess(argv, self.process.returncode,
                     buffers[0].decode("utf-8"), buffers[1].decode("utf-8"))
+                before_deadline()
                 self.pipes_ended = True
                 self.failed = result.returncode != 0
                 return result
