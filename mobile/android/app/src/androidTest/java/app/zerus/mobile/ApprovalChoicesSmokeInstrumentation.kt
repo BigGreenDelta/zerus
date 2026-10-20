@@ -25,6 +25,13 @@ import java.util.concurrent.atomic.AtomicReference
 /** Actual Compose/card/model paths, intercepted receipts only; never a native provider or connected workspace. */
 class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     private val cases = mutableListOf<String>()
+    private data class InterceptorFailure(val guard: String, val type: String, val method: String, val path: String)
+    private val interceptorFailure = AtomicReference<InterceptorFailure?>(null)
+    private fun requireHealthyFixture() {
+        interceptorFailure.get()?.let { failure ->
+            error("Fixture interceptor ${failure.type} at ${failure.guard}: ${failure.method} ${failure.path}")
+        }
+    }
     private fun boundary(event: String, name: String) {
         check(event in setOf("begin", "complete") && name in CASES)
         Log.i("ZerusApprovalUI", "$event $name completed=${cases.size}")
@@ -37,6 +44,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             val store = PrivateStore(targetContext)
             require(store.connections().isEmpty() && store.messageState() == MessageState() && store.readState() == ConversationReadState())
             smoke(store)
+            requireHealthyFixture()
             check(cases == CASES)
             result.putString("approval_cases", cases.size.toString())
             result.putString("approval_case_ids", cases.joinToString(","))
@@ -56,10 +64,13 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     }
     private fun await(description: String, condition: () -> Boolean) {
         val end = SystemClock.elapsedRealtime() + 10_000
+        requireHealthyFixture()
         while (!condition()) {
+            requireHealthyFixture()
             check(SystemClock.elapsedRealtime() < end) { "Timed out: $description" }
             SystemClock.sleep(30)
         }
+        requireHealthyFixture()
     }
     private fun find(root: AccessibilityNodeInfo?, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
         if (root == null) return null
@@ -127,30 +138,50 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         var pending: JSONObject? = null
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request()
-            check(request.url.host == "relay.example.test" && request.url.encodedPath == "/v1/requests" && request.method == "POST")
-            check(request.header("Authorization") == "Bearer fixture-token")
-            val input = JSONObject(okio.Buffer().also { request.body?.writeTo(it) }.readUtf8())
-            val value = when (input.string("operation")) {
-                "inspect" -> synchronized(raw) { JSONObject(raw.toString()) }
-                "voice_profiles" -> JSONObject().put("schema", 1).put("computers", JSONArray())
-                "answer" -> {
-                    val proof = checkNotNull(expected.getAndSet(null)) { "Unadmitted answer" }
-                    val payload = input.getJSONObject("payload")
-                    check(input.string("computer_id") == target.computerId && input.string("session") == target.session)
-                    check(payload.string("request_id") == input.string("request_id") && payload.string("expected_run_id") == target.run &&
-                        payload.string("expected_conversation_id") == target.conversation)
-                    check(payload.string("question_id") == proof.string("id") && payload.string("expected_question_hash") == proof.string("hash"))
-                    val answer = payload.getJSONArray("answers").objects().single()
-                    check(answer.string("question_id") == "approval" && answer.getJSONArray("selected_option_ids").toString() == proof.getJSONArray("options").toString() &&
-                        answer.string("text") == proof.string("text"))
-                    synchronized(calls) { calls.add(JSONObject(payload.toString())) }
-                    JSONObject().put("status", "submitted")
+            var guard = "request-scope"
+            try {
+                check(request.url.host == "relay.example.test" && request.url.encodedPath == "/v1/requests" && request.method == "POST")
+                guard = "authorization"
+                check(request.header("Authorization") == "Bearer fixture-token")
+                guard = "request-json"
+                val input = JSONObject(okio.Buffer().also { request.body?.writeTo(it) }.readUtf8())
+                guard = "operation"
+                val value = when (input.string("operation")) {
+                    "inspect" -> synchronized(raw) { JSONObject(raw.toString()) }
+                    "voice_profiles" -> JSONObject().put("schema", 1).put("computers", JSONArray())
+                    "answer" -> {
+                        guard = "answer-admission"
+                        val proof = checkNotNull(expected.getAndSet(null)) { "Unadmitted answer" }
+                        guard = "answer-payload"
+                        val payload = input.getJSONObject("payload")
+                        guard = "answer-target"
+                        check(input.string("computer_id") == target.computerId && input.string("session") == target.session)
+                        guard = "answer-receipt-identity"
+                        check(payload.string("request_id") == input.string("request_id") && payload.string("expected_run_id") == target.run &&
+                            payload.string("expected_conversation_id") == target.conversation)
+                        guard = "answer-question-identity"
+                        check(payload.string("question_id") == proof.string("id") && payload.string("expected_question_hash") == proof.string("hash"))
+                        guard = "answer-list"
+                        val answer = payload.getJSONArray("answers").objects().single()
+                        guard = "answer-body"
+                        check(answer.string("question_id") == "approval" && answer.getJSONArray("selected_option_ids").toString() == proof.getJSONArray("options").toString() &&
+                            answer.string("text") == proof.string("text"))
+                        synchronized(calls) { calls.add(JSONObject(payload.toString())) }
+                        JSONObject().put("status", "submitted")
+                    }
+                    else -> error("Unexpected operation ${input.string("operation")}")
                 }
-                else -> error("Unexpected operation ${input.string("operation")}")
+                guard = "receipt"
+                val receipt = JSONObject().put("request_id", input.string("request_id")).put("state", "completed").put("result", value)
+                Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                    .body(receipt.toString().toResponseBody("application/json".toMediaType())).build()
+            } catch (error: Throwable) {
+                val failure = InterceptorFailure(guard, error.javaClass.simpleName.take(80), request.method.take(16), request.url.encodedPath.take(160))
+                if (interceptorFailure.compareAndSet(null, failure))
+                    Log.e("ZerusApprovalUI", "interceptor ${failure.type} guard=${failure.guard} ${failure.method} ${failure.path}")
+                Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(500).message("Synthetic fixture refusal")
+                    .body("{\"error\":{\"message\":\"Synthetic fixture interceptor refused the request.\"}}".toResponseBody("application/json".toMediaType())).build()
             }
-            val receipt = JSONObject().put("request_id", input.string("request_id")).put("state", "completed").put("result", value)
-            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
-                .body(receipt.toString().toResponseBody("application/json".toMediaType())).build()
         }.build()
         val activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
         val model = main { activity.javaClass.getDeclaredMethod("getModel").apply { isAccessible = true }.invoke(activity) as ZerusViewModel }

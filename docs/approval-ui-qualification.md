@@ -28,7 +28,10 @@ reserved relay: every permitted request is completed inside the interceptor, whi
 Case entry/completion breadcrumbs go only to the disposable emulator's `ZerusApprovalUI` log. After a failed approval
 instrumentation attempt, the driver tries one five-second bounded read of the last 400 crash/main/system log records,
 only while the owned emulator and ADB server remain live. This uses the original 1200-second end and 20-second cleanup
-reserve. Missing, late or failed diagnostics remain unknown and cannot replace the primary failure, qualify a missing
+reserve. The read filters to fixture and Android-runtime tags. The interceptor atomically retains its first typed guard
+failure with bounded method/encoded-path metadata only, emits that named diagnostic, and returns a fixed local failure
+response without network forwarding. Every wait and final qualification refuses a retained interceptor failure.
+Missing, late or failed diagnostics remain unknown and cannot replace the primary failure, qualify a missing
 case, relax the strict result parser, or authorize a retry. The instrumentation cap remains 90 seconds.
 
 Before dispatch, review this workflow and the SDK-free `tests/test_android_project_ui.py` and

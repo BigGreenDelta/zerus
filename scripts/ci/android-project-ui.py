@@ -116,8 +116,9 @@ def failure_diagnostics(run, alive, device):
     """One bounded read on the still-owned emulator; never replace the primary failure."""
     try:
         alive()
-        run("failure-logcat", [*device, "logcat", "-d", "-b", "crash", "-b", "main", "-b", "system", "-t", "400"], 5)
-        return {"status": "captured", "scope": "owned disposable emulator, last400 crash/main/system records only"}
+        run("failure-logcat", [*device, "logcat", "-d", "-b", "crash", "-b", "main", "-b", "system", "-t", "400",
+                               "ZerusApprovalUI:I", "AndroidRuntime:E", "*:S"], 5)
+        return {"status": "captured", "scope": "owned disposable emulator, last400 crash/main/system records, fixture/runtime tags only"}
     except BaseException as error:
         return {"status": "unknown", "error": type(error).__name__}
 

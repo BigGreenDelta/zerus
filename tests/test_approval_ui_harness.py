@@ -175,7 +175,8 @@ class ApprovalHarnessTests(unittest.TestCase):
         def live():
             calls.append("owned-alive")
         self.assertEqual(self.ui.failure_diagnostics(capture, live, device)["status"], "captured")
-        self.assertEqual(calls, ["owned-alive", ("failure-logcat", [*device, "logcat", "-d", "-b", "crash", "-b", "main", "-b", "system", "-t", "400"], 5)])
+        self.assertEqual(calls, ["owned-alive", ("failure-logcat", [*device, "logcat", "-d", "-b", "crash", "-b", "main", "-b", "system", "-t", "400",
+                                                                 "ZerusApprovalUI:I", "AndroidRuntime:E", "*:S"], 5)])
         for stage in ("ownership", "capture"):
             calls.clear()
             def refused():
@@ -211,6 +212,27 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(len(entries), 7)
         self.assertEqual(set(entries), set(ios.CASES))
         self.assertEqual(source.count("        launchFixture()"), 7)
+
+    def test_android_interceptor_failure_is_first_only_and_cannot_qualify_or_use_network(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        self.assertIn("private val interceptorFailure = AtomicReference<InterceptorFailure?>(null)", source)
+        self.assertIn("interceptorFailure.compareAndSet(null, failure)", source)
+        self.assertNotIn("interceptorFailure.set(", source)
+        self.assertNotIn("chain.proceed(", source)
+        self.assertNotIn("request.url.query", source)
+        catch = source.split("            } catch (error: Throwable) {", 1)[1].split("        }.build()", 1)[0]
+        self.assertIn("request.method.take(16), request.url.encodedPath.take(160)", catch)
+        self.assertNotIn("request.body", catch)
+        self.assertNotIn('header("Authorization")', catch)
+        self.assertIn('.code(500).message("Synthetic fixture refusal")', catch)
+        self.assertIn("            smoke(store)\n            requireHealthyFixture()\n            check(cases == CASES)", source)
+        wait = source.split("    private fun await(", 1)[1].split("    private fun find(", 1)[0]
+        self.assertEqual(wait.count("requireHealthyFixture()"), 3)
+        self.assertLess(wait.index("requireHealthyFixture()"), wait.index("while (!condition())"))
+        self.assertGreater(wait.rindex("requireHealthyFixture()"), wait.index("SystemClock.sleep(30)"))
+        self.assertEqual(re.findall(r'(?:var guard|guard) = "([a-z-]+)"', source), [
+            "request-scope", "authorization", "request-json", "operation", "answer-admission", "answer-payload",
+            "answer-target", "answer-receipt-identity", "answer-question-identity", "answer-list", "answer-body", "receipt"])
 
 
 if __name__ == "__main__":
