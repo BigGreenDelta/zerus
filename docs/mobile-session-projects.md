@@ -165,6 +165,9 @@ binding without `-a`; clients explicitly use 127.0.0.1. Other attached devices
 cause refusal. App networking is disabled
 before installing the fixture. No owner device, existing profile, retained APK,
 keystore, native agent, relay or gateway is involved.
+Before installation, filtered package listings for the exact app/test IDs must
+succeed with empty stdout and stderr on the fresh user 0 profile. A package
+presence, command failure or diagnostic output is a refusal.
 
 Exactly one custom-runner invocation must report all six ordered case IDs:
 `current_selection`, `close_no_write`, `durable_single_post`, `route_refusal`,

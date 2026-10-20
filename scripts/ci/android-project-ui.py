@@ -28,6 +28,16 @@ def adb_server_command(adb):
     return [str(adb), "-L", "tcp:5037", "nodaemon", "server"]
 
 
+def package_absence_command(device, package):
+    assert package in {"app.zerus.mobile", "app.zerus.mobile.test"}
+    # `pm path` returns 1 for the desired absence; a filtered list succeeds empty.
+    return [*device, "pm", "list", "packages", "--user", "0", package]
+
+
+def package_absence_result(stdout, stderr):
+    assert not stdout.strip() and not stderr.strip(), "fresh profile package absence"
+
+
 def java_release(text):
     """Exact published base/build, with only the recognized optional LTS suffix."""
     assert len(text.encode("utf-8")) <= 65536, "java_release_size"
@@ -349,7 +359,9 @@ def main():
         assert offline
         for package in ("app.zerus.mobile", "app.zerus.mobile.test"):
             alive()
-            assert run("absent-" + package, [*device, "pm", "path", package]).strip() == ""
+            name = "absent-" + package
+            listed = run(name, package_absence_command(device, package))
+            package_absence_result(listed, (evidence / (name + ".stderr")).read_text())
         for label, apk in (("app", app), ("test", test)):
             alive()
             installed = run("install-" + label, [*adb_args, "-s", SERIAL, "install", "--no-streaming", apk], 60)

@@ -1,4 +1,7 @@
+#![cfg(unix)]
 //! Exact metadata mutation boundary: a lost acknowledgement never permits replay.
+//! This Unix fixture uses the supported project-mutation path. `windows_scope`
+//! separately checks that Windows refuses these operations before native calls.
 mod common;
 
 use common::*;

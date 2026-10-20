@@ -171,6 +171,18 @@ class InputAdmissionTests(unittest.TestCase):
 
 
 class HostedAdbCommandTests(unittest.TestCase):
+    def test_package_probe_requires_successful_empty_filtered_listing(self):
+        device = ["/fixture/adb", "-s", "emulator-5554", "shell"]
+        for package in ("app.zerus.mobile", "app.zerus.mobile.test"):
+            with self.subTest(package=package):
+                self.assertEqual(UI.package_absence_command(device, package), [*device, "pm", "list", "packages", "--user", "0", package])
+        UI.package_absence_result("", "")
+        for stdout, stderr in (("package:app.zerus.mobile\n", ""), ("Error: service unavailable\n", ""), ("", "Error: unknown package manager\n")):
+            with self.subTest(stdout=stdout, stderr=stderr), self.assertRaises(AssertionError):
+                UI.package_absence_result(stdout, stderr)
+        with self.assertRaises(AssertionError):
+            UI.package_absence_command(device, "unreviewed.package")
+
     def test_only_the_fixed_port_loopback_foreground_server_is_started(self):
         command = UI.adb_server_command(Path("/fixture/sdk/platform-tools/adb"))
         self.assertEqual(command, ["/fixture/sdk/platform-tools/adb", "-L", "tcp:5037", "nodaemon", "server"])
