@@ -21,6 +21,7 @@ import uuid
 from test_windows_host import FAKE_AGENT, HGS, HIDDEN, LIMIT
 from test_windows_lifecycle import LifecycleCase, read_json, read_events
 from windows_gateway_custody import ConnectorCustody, guard_root_cleanup, termination_adapter
+from windows_gateway_diagnostics import GatewayDiagnostics, gateway_phase
 
 CONNECTOR = Path(os.environ.get("HGS_TEST_CONNECTOR", Path(__file__).resolve().parents[1] /
                                "services/mobile/connector/target/release/zerus-mobile-connector.exe"))
@@ -43,7 +44,16 @@ subjectAltName=IP:127.0.0.1
 
 class Gateway(LifecycleCase):
     def setUp(self):
-        super().setUp()
+        self.diagnostics = GatewayDiagnostics()
+        # unittest cleanups are LIFO, including when inherited setup fails.
+        self.addCleanup(self.diagnostics.close)
+        self.diagnostics.start()
+        with self.diagnostics.phase("setup-inherited"):
+            super().setUp()
+        self.set_up_gateway()
+
+    @gateway_phase("setup-gateway")
+    def set_up_gateway(self):
         self.assertTrue(CONNECTOR.is_file(), "build the Windows Rust connector first")
         self.assertTrue(shutil.which("openssl"), "openssl is required for the throwaway TLS fixture")
         self.bundle = self.root / "gateway-bundle"
@@ -115,16 +125,28 @@ class Gateway(LifecycleCase):
         self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+        self.diagnostics.mark("tls-server", "ready")
         self.addCleanup(self.close_server)
         self.addCleanup(self.close_connector)
         self.relay = f"https://127.0.0.1:{self.server.server_port}"
         self.manage("save", {"revision": "", "server_url": self.relay, "node_token": "synthetic-windows-node-token"})
 
+    def doCleanups(self):
+        # Keep the watchdog armed through unittest's complete cleanup sequence.
+        self.diagnostics.mark("cleanup-all", "enter")
+        return super().doCleanups()
+
+    @gateway_phase("cleanup-host")
+    def stop_host(self):
+        return super().stop_host()
+
+    @gateway_phase("cleanup-server")
     def close_server(self):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(5)
 
+    @gateway_phase("manage")
     def manage(self, action, payload=None):
         result = subprocess.run([str(self.connector), "--manage", action, "--config", str(self.config)],
                                 input=json.dumps(payload or {}), capture_output=True, text=True, env=self.env,
@@ -132,6 +154,7 @@ class Gateway(LifecycleCase):
         self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
         return json.loads(result.stdout)
 
+    @gateway_phase("pin-connector")
     def pin_connector(self, control):
         """Pin only the private control's PID executing this unique copied image.
         Custody rereads the same revision/generation/control after opening it.
@@ -153,6 +176,7 @@ class Gateway(LifecycleCase):
             raise RuntimeError("connector process image did not match the owned fixture")
         return handle
 
+    @gateway_phase("start-connector")
     def start_connector(self, state):
         from ctypes import wintypes
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -177,6 +201,7 @@ class Gateway(LifecycleCase):
         self.assertEqual(running["generation"], self.custody.control["generation"])
         return running
 
+    @gateway_phase("cleanup-connector")
     def close_connector(self):
         if self.custody is None:
             return
@@ -203,6 +228,7 @@ class Gateway(LifecycleCase):
                 return rows[-1] if len(rows) > before else None
         return request, self.wait_for("the gateway receipt", receipt)
 
+    @gateway_phase("test-body")
     def test_direct_gateway_control_duplicate_receipts_and_native_host_survival(self):
         home = self.root / "codex-home"
         home.mkdir()
@@ -212,29 +238,35 @@ class Gateway(LifecycleCase):
         env = dict(self.env, CODEX_HOME=str(home), FAKE_AGENT_PROBE_TEXT="codex-cli 0.162.0",
                    FAKE_AGENT_READY=str(ready), FAKE_AGENT_RECORD=str(record), FAKE_AGENT_PROMPT="codex> ",
                    FAKE_AGENT_TRANSCRIPT_DIR=str(self.root / "transcripts"))
-        self.hgs("codex", str(self.project), "--new", "-n", "gateway", "-d", env=env)
-        self.wait_for("the synthetic Codex session", lambda: read_json(ready))
+        with self.diagnostics.phase("synthetic-launch"):
+            self.hgs("codex", str(self.project), "--new", "-n", "gateway", "-d", env=env)
+            self.wait_for("the synthetic Codex session", lambda: read_json(ready))
         name = "codex/project/gateway"
-        detail = self.wait_for("native identity", lambda: (lambda v: v if v.get("conversation_id") else None)(
-            json.loads(self.hgs("inspect", name).stdout)))
-        host = self.status()
-        state = self.manage("status")
+        with self.diagnostics.phase("native-identity"):
+            detail = self.wait_for("native identity", lambda: (lambda v: v if v.get("conversation_id") else None)(
+                json.loads(self.hgs("inspect", name).stdout)))
+            host = self.status()
+        with self.diagnostics.phase("gateway-status"):
+            state = self.manage("status")
         running = self.start_connector(state)
         self.assertTrue(running["running"])
-        again = self.manage("start", {"revision": running["revision"]})
-        self.assertEqual(again["generation"], running["generation"])
-        self.wait_for("the direct Windows heartbeat", lambda: any(
-            any(row["name"] == name for row in snapshot["sessions"]) for snapshot in self.snapshots))
+        with self.diagnostics.phase("duplicate-start"):
+            again = self.manage("start", {"revision": running["revision"]})
+            self.assertEqual(again["generation"], running["generation"])
+        with self.diagnostics.phase("heartbeat"):
+            self.wait_for("the direct Windows heartbeat", lambda: any(
+                any(row["name"] == name for row in snapshot["sessions"]) for snapshot in self.snapshots))
         caps = self.snapshots[-1]["mobile_capabilities"]
         self.assertIn("terminal_snapshot", caps["operations"])
         for operation in ("voice_submit", "speech_submit", "worktree_create", "file_read", "launch"):
             self.assertNotIn(operation, caps["operations"])
         identity = {"expected_run_id": detail["run_id"], "expected_conversation_id": detail["conversation_id"]}
         request_id = str(uuid.uuid4())
-        request, receipt = self.submit("terminal_snapshot", name, {**identity, "request_id": request_id},
-                                      {"request_id": request_id, "operation": "terminal_snapshot", "session": name,
-                                       "payload": {**identity, "request_id": request_id}})
-        self.assertEqual(receipt["state"], "completed", receipt)
+        with self.diagnostics.phase("terminal-snapshot"):
+            request, receipt = self.submit("terminal_snapshot", name, {**identity, "request_id": request_id},
+                                          {"request_id": request_id, "operation": "terminal_snapshot", "session": name,
+                                           "payload": {**identity, "request_id": request_id}})
+            self.assertEqual(receipt["state"], "completed", receipt)
         snapshot = receipt["result"]
         self.assertEqual(snapshot["status"], "snapshot")
         self.assertTrue(snapshot["input_supported"])
@@ -243,28 +275,35 @@ class Gateway(LifecycleCase):
                    "payload": {**identity, "request_id": input_id,
                                "terminal_binding_id": snapshot["terminal_binding_id"],
                                "text": "synthetic gateway input", "enter": False}, "expires_at": time.time()+5}
-        _, submitted = self.submit("terminal_input", name, {}, command)
-        self.assertEqual(submitted["state"], "completed", submitted)
-        _, replayed = self.submit("terminal_input", name, {}, command)
-        self.assertEqual(replayed, submitted)
+        with self.diagnostics.phase("terminal-input"):
+            _, submitted = self.submit("terminal_input", name, {}, command)
+            self.assertEqual(submitted["state"], "completed", submitted)
+        with self.diagnostics.phase("duplicate-input"):
+            _, replayed = self.submit("terminal_input", name, {}, command)
+            self.assertEqual(replayed, submitted)
         def received_text():
             return "".join(row.get("text", "") for row in read_events(record) if row.get("kind") in ("text", "paste"))
-        self.wait_for("the literal terminal input", lambda: "synthetic gateway input" in received_text())
-        self.assertEqual(received_text().count("synthetic gateway input"), 1)
-        phones = self.hgs("mobile", "phones", "--json")
-        self.assertTrue(json.loads(phones.stdout)["configured"])
-        invitation = self.hgs("mobile", "invite", "--workspace", "synthetic-workspace", "--server", self.relay, "--json")
-        self.assertTrue(json.loads(invitation.stdout)["pair_url"].startswith("zerus://pair?"))
+        with self.diagnostics.phase("input-once"):
+            self.wait_for("the literal terminal input", lambda: "synthetic gateway input" in received_text())
+            self.assertEqual(received_text().count("synthetic gateway input"), 1)
+        with self.diagnostics.phase("mobile-phones"):
+            phones = self.hgs("mobile", "phones", "--json")
+            self.assertTrue(json.loads(phones.stdout)["configured"])
+        with self.diagnostics.phase("mobile-invite"):
+            invitation = self.hgs("mobile", "invite", "--workspace", "synthetic-workspace", "--server", self.relay, "--json")
+            self.assertTrue(json.loads(invitation.stdout)["pair_url"].startswith("zerus://pair?"))
         # The management process exited after Start; the independent connector
         # and session host both remain. Stop must leave the same host/session.
-        self.manage("stop", {"revision": running["revision"], "generation": running["generation"]})
-        self.wait_for("graceful connector stop", lambda: not self.manage("status")["running"])
-        after_host = self.status()
-        self.assertEqual(after_host["host"], host["host"])
-        current = json.loads(self.hgs("inspect", name).stdout)
-        self.assertEqual((current["run_id"], current["conversation_id"]),
-                         (detail["run_id"], detail["conversation_id"]))
-        self.assertTrue(self.pane(name))
+        with self.diagnostics.phase("graceful-stop"):
+            self.manage("stop", {"revision": running["revision"], "generation": running["generation"]})
+            self.wait_for("graceful connector stop", lambda: not self.manage("status")["running"])
+        with self.diagnostics.phase("host-survival"):
+            after_host = self.status()
+            self.assertEqual(after_host["host"], host["host"])
+            current = json.loads(self.hgs("inspect", name).stdout)
+            self.assertEqual((current["run_id"], current["conversation_id"]),
+                             (detail["run_id"], detail["conversation_id"]))
+            self.assertTrue(self.pane(name))
 
 
 if __name__ == "__main__":
