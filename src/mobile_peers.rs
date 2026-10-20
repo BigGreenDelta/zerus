@@ -352,6 +352,9 @@ fn validate(request: &LocalRequest) -> Result<()> {
                 ensure!(request.payload.as_ref().is_some_and(Value::is_object), "the task exchange needs its JSON request");
             }
             [action, json] if action == "digests" && json == "--json" => no_payload()?,
+            [action, json] if ["mobile-send", "mobile-cancel", "mobile-done"].contains(&action.as_str()) && json == "--json" => {
+                ensure!(request.payload.as_ref().is_some_and(Value::is_object), "the task action needs its JSON request");
+            }
             _ => bail!("native operation is not allowed"),
         },
         "worktrees" => {
@@ -1151,6 +1154,9 @@ mod tests {
         let payload = || Some(json!({"schema": 1, "project": "project-1", "inventory": {"project": {}, "tasks": {}}}));
         assert!(validate(&request(&["task", "exchange", "--json"], payload())).is_ok());
         assert!(validate(&request(&["task", "digests", "--json"], None)).is_ok());
+        for action in ["mobile-send", "mobile-cancel", "mobile-done"] {
+            assert!(validate(&request(&["task", action, "--json"], payload())).is_ok(), "{action}");
+        }
         for (args, body) in [
             (vec!["task", "exchange"], payload()),
             (vec!["task", "exchange", "--json"], None),
@@ -1158,6 +1164,9 @@ mod tests {
             (vec!["task", "digests", "--json"], payload()),
             (vec!["task", "send", "T-a1b2c3", "--json"], None),
             (vec!["task", "list", "--project", "p"], None),
+            (vec!["task", "mobile-send"], payload()),
+            (vec!["task", "mobile-done", "--json"], None),
+            (vec!["task", "mobile-cancel", "--json", "extra"], payload()),
         ] {
             assert!(validate(&request(&args, body)).is_err(), "{args:?}");
         }

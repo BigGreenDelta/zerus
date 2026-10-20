@@ -18,9 +18,14 @@ use zerus_replica::{
 };
 
 mod answers;
+mod mobile;
 mod phone;
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | report REF | comment REF | settings --project P [--set] | digests --json | exchange --json
+/// A send that pasted the prompt but could not record it: its outcome is
+/// uncertain, and the phone's receipt says so.
+const SENT_UNRECORDED: &str = "the prompt was sent, but the task could not record it";
+
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | report REF | comment REF | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -294,15 +299,20 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     if dry {
         return Err(fail("task commands do not support --dry-run"));
     }
-    // The phone's exchange refuses in JSON, which the connector passes on.
-    if args.first().is_some_and(|action| action == "exchange") && flag(args, "--json") {
+    // The phone's commands refuse in JSON, which the connector passes on.
+    let phone = ["exchange", "mobile-send", "mobile-cancel", "mobile-done"];
+    if args.first().is_some_and(|action| phone.contains(&action.as_str())) && flag(args, "--json") {
         return Ok(match execute(config, args) {
             Ok(out) => {
                 println!("{out}");
                 0
             }
             Err(error) => {
-                println!("{}", json!({"schema": 1, "ok": false, "error": error.message}));
+                let mut refusal = json!({"schema": 1, "ok": false, "error": error.message});
+                if error.message.starts_with(SENT_UNRECORDED) {
+                    refusal["uncertain"] = json!(true);
+                }
+                println!("{refusal}");
                 1
             }
         });
@@ -343,6 +353,14 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 phone::digests(config)
             } else {
                 phone::exchange(config)
+            }
+        }
+        // The phone's Send now, Cancel and Done list; each takes exactly --json.
+        "mobile-send" | "mobile-cancel" | "mobile-done" if args.len() == 1 && args[0] == "--json" => {
+            match action.as_str() {
+                "mobile-send" => mobile::send(config),
+                "mobile-cancel" => mobile::cancel(config),
+                _ => mobile::done(config),
             }
         }
         _ => Err(fail(USAGE)),
@@ -451,7 +469,7 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
         if matches!(who, Actor::Agent(_))
             && !forwarded_here
             && action == "send"
-            && !error.message.starts_with("the prompt was sent")
+            && !error.message.starts_with(SENT_UNRECORDED)
         {
             fail(answers::refused(to, &error.message))
         } else {
@@ -548,7 +566,14 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
         "cancel" => extra = cancel(&store, &mut task, project_name, args, &who, None)?,
         _ => return Err(fail(USAGE)),
     }
-    store.save(&mut task).map_err(fail)?;
+    store.save(&mut task).map_err(|e| {
+        // The prompt is in the session already: say so, never "refused".
+        if action == "send" {
+            fail(format!("{SENT_UNRECORDED}: {e}"))
+        } else {
+            fail(e)
+        }
+    })?;
     let at = if action == "move" { place(&store, &task)? } else { 0 };
     let mut out = json!({"task": view(&task, project_name, true, &machines)?});
     for (key, value) in extra.as_object().expect("object") {
@@ -712,11 +737,7 @@ fn send(
     let receipt = crate::state::submit_task_text(&session.session, &prompt).map_err(fail)?;
     let request_id = receipt["request_id"].as_str().unwrap_or_default().to_owned();
     task.record_send(&session, &request_id, who, now())
-        .map_err(|e| {
-            fail(format!(
-                "the prompt was sent, but the task could not record it: {e}"
-            ))
-        })?;
+        .map_err(|e| fail(format!("{SENT_UNRECORDED}: {e}")))?;
     Ok(json!({"receipt": receipt}))
 }
 
