@@ -77,6 +77,7 @@ import org.json.JSONObject
     val context = LocalContext.current
     val canReadAll = target.archiveId.isBlank() && !model.demo && model.canReadAll(target)
     val sessionReference = remember(target,model.machines) { SessionReference.resolve(target,model.machines) }
+    val notificationPreference = SessionNotificationPreferences.parse(model.activity ?: session.raw,target)
     // A Sessions long-press action opened this session; confirm it here against fresh native details.
     LaunchedEffect(model.sessionMenuRequest,target.key) {
         model.takeSessionMenuRequest(target)?.let { operation -> if(operation == "terminal") terminal = true else request = operation }
@@ -105,12 +106,21 @@ import org.json.JSONObject
                 else if (!model.readAllPending(target)) "Read all unavailable. Nothing in this conversation is unread on this phone"
                 else "Read all unavailable. This conversation needs verified history or loaded replies on this phone"
         }) { Icon(Icons.Default.DoneAll,null,Modifier.size(20.dp)) }
+        if(notificationPreference?.muted == true) Icon(Icons.Default.NotificationsOff,"Notifications muted on all devices",Modifier.size(18.dp))
         IconButton(onClick = { terminal = true }) { Icon(Icons.Default.Terminal, "Terminal",Modifier.size(20.dp)) }
         Box {
             IconButton(onClick = { readEvidence = if(target.agentId.isBlank()) model.captureReadAttention(target) else null;menu = true }) { Icon(Icons.Default.MoreVert, "Session actions",Modifier.size(20.dp)) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false },modifier = Modifier.heightIn(max = 480.dp)) {
                 DropdownMenuItem(text = { Text("Search loaded messages") },leadingIcon = { Icon(Icons.Default.Search,null) },
                     onClick = { menu = false;search = true })
+                val notificationReason = model.actionReason(target,SessionNotificationPreferences.operation)
+                DropdownMenuItem(text = { Column {
+                    Text(SessionNotificationPreferences.label(notificationPreference))
+                    if(notificationReason.isNotBlank()) Text(notificationReason,style=MaterialTheme.typography.bodySmall)
+                } },
+                    leadingIcon = { Icon(if(notificationPreference?.muted == true) Icons.Default.NotificationsActive else Icons.Default.NotificationsOff,null) },
+                    enabled = notificationReason.isBlank(),
+                    onClick = { menu = false;request = SessionNotificationPreferences.operation })
                 readEvidence?.let { evidence ->
                     val emptyReminder = model.reviewLater(target) && !evidence.authoritative && evidence.loadedIds.isEmpty()
                     DropdownMenuItem(text = { Text(if(emptyReminder) "Clear review reminder" else if(evidence.authoritative) "Mark read on this phone" else "Mark loaded replies read") },
@@ -334,8 +344,14 @@ import org.json.JSONObject
 @Composable internal fun SessionActionDialog(model: ZerusViewModel, session: Session, operation: String, onDismiss: () -> Unit) {
     val target = session.target
     var tag by remember(target,operation) { mutableStateOf(if(operation == "rename" && target.session.split('/').size == 3) target.session.substringAfterLast('/') else "") }
+    var notificationPreference by remember(target,operation) { mutableStateOf<SessionNotificationPreference?>(null) }
+    LaunchedEffect(model.activity,model.activityVerified,target,operation) {
+        if(notificationPreference == null && model.activityVerified) notificationPreference = SessionNotificationPreferences.parse(model.activity,target)
+    }
+    val label = if(operation == SessionNotificationPreferences.operation) SessionNotificationPreferences.label(notificationPreference) else actionLabel(operation,target)
     val computer = remember(target) { model.machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.name ?: "selected machine" }
     val args = when(operation) {
+        SessionNotificationPreferences.operation -> JSONObject().put("muted",notificationPreference?.muted != true).put("expected_revision",notificationPreference?.revision ?: -1)
         "rename" -> JSONObject().put("new_name",target.session.split('/').take(2).joinToString("/") + "/" + tag)
         "fork" -> JSONObject().put("tag",tag)
         else -> JSONObject()
@@ -343,10 +359,11 @@ import org.json.JSONObject
     val reason = model.actionReason(target,operation).ifBlank { SessionControlPresentation.reason(target,operation,model.activity) }.ifBlank {
         runCatching { SessionActionPolicies.arguments(operation,args); SessionActionPolicies.inspectReason(target,operation,args,model.activity ?: JSONObject()) }.getOrElse { it.message ?: "Enter a valid name." }
     }
-    ZerusAlertDialog(onDismissRequest = onDismiss, title = { Text(actionLabel(operation,target) + " " + session.title + "?") },
+    ZerusAlertDialog(onDismissRequest = onDismiss, title = { Text(if(operation == SessionNotificationPreferences.operation) label + " / " + session.title else label + " " + session.title + "?") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("${target.session} on $computer")
             when(operation) {
+                SessionNotificationPreferences.operation -> Text("Applies to this conversation on all devices. Unread replies and pending requests stay unchanged. Unmuting does not replay earlier notifications.")
                 "pause" -> Text("Pause keeps the exact native conversation for Resume. Open network connections, child processes and unsent terminal input are not kept.")
                 "resume" -> Text("Start the agent again with its saved native conversation.")
                 "archive" -> Text("Move this saved session to Archive. Your private drafts stay on this phone.")
@@ -359,7 +376,7 @@ import org.json.JSONObject
             }
             if(reason.isNotBlank()) Text(reason, style = MaterialTheme.typography.bodySmall)
         } },
-        confirmButton = { TextButton(onClick = { model.flushDrafts(); model.sessionAction(target,operation,args); onDismiss() }, enabled = reason.isBlank()) { Text(actionLabel(operation,target)) } },
+        confirmButton = { TextButton(onClick = { model.flushDrafts(); model.sessionAction(target,operation,args); onDismiss() }, enabled = reason.isBlank()) { Text(label) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
@@ -419,6 +436,7 @@ import org.json.JSONObject
 }
 
 internal fun actionLabel(operation: String,target: Target? = null) = when(operation) {
+    SessionNotificationPreferences.operation -> "Shared notification settings"
     "pause" -> "Pause"; "resume" -> "Resume"; "archive" -> "Archive"; "rename" -> "Rename"; "fork" -> "Fork"
     "terminate" -> "Terminate"; "restore" -> "Restore"; "forget" -> if(target?.archiveId?.isNotBlank() == true) "Forget archived version" else "Forget session"; "send_now" -> "Send queued message"
     "directory_create" -> "Create folder"; "set_mobile_delivery" -> "Phone notification timing"; "settings" -> "Change settings"; "process_stop" -> "Stop process"; "recovery_action" -> "Recovery action"; else -> "Native action"

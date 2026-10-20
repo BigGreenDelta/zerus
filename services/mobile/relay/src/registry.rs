@@ -447,6 +447,47 @@ pub(crate) fn explicit_wait(v: &Value) -> bool {
         && w["run_id"] == v["run_id"]
         && w["conversation_id"] == v["conversation_id"]
 }
+
+/// An older listing may finish after a successful preference mutation. Reject
+/// that heartbeat so its next fresh listing cannot roll back shared Mute.
+pub fn notification_revisions_current(previous: Option<&str>, snapshot: &Value) -> Result<bool> {
+    let Some(previous) = previous else {
+        return Ok(true);
+    };
+    let previous = crate::json::parse(previous.as_bytes(), 32, 50000)?;
+    let empty = vec![];
+    let mut known = BTreeMap::new();
+    for before in previous["sessions"].as_array().unwrap_or(&empty) {
+        if let Some(preference) = crate::alerts::notification_preferences(before) {
+            let key = (
+                s(before, "name").split('/').next().unwrap_or_default(),
+                s(before, "conversation_id"),
+            );
+            let entry = known.entry(key).or_insert(preference);
+            if preference["revision"].as_i64() > entry["revision"].as_i64() {
+                *entry = preference;
+            }
+        }
+    }
+    for row in snapshot["sessions"].as_array().unwrap_or(&empty) {
+        let key = (
+            s(row, "name").split('/').next().unwrap_or_default(),
+            s(row, "conversation_id"),
+        );
+        if let Some(known) = known.get(&key) {
+            let Some(incoming) = crate::alerts::notification_preferences(row) else {
+                return Ok(false);
+            };
+            let old_revision = known["revision"].as_i64().unwrap();
+            let revision = incoming["revision"].as_i64().unwrap();
+            if revision < old_revision || (revision == old_revision && incoming != *known) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 pub fn event_changes(previous: Option<&str>, snapshot: &Value) -> Result<Vec<(String, String)>> {
     let Some(previous) = previous else {
         return Ok(vec![]);
@@ -484,6 +525,11 @@ pub fn event_changes(previous: Option<&str>, snapshot: &Value) -> Result<Vec<(St
             .iter()
             .find(|b| b["name"] == v["name"] && !archived(b))
             .unwrap_or(&Value::Null);
+        if v["notification_preferences"] != before["notification_preferences"] {
+            // Plain refresh event: withdraw existing notices on every online
+            // client, without inventing a new attention/completion edge.
+            events.push((s(v, "name").into(), "notification_preferences".into()));
+        }
         let p = pending(v)?;
         let b = pending(before)?;
         let phase = s(v, "phase");

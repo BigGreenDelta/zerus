@@ -3,6 +3,7 @@
 #include "SessionsWindow.h"
 #include <QStandardPaths>
 #include "WorktreeBatchCleanupDialog.h"
+#include "SessionNotifications.h"
 #include "DownloadCache.h"
 #include "SessionFileDrop.h"
 #include "SessionCommands.h"
@@ -517,6 +518,24 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_sessions, &SessionList::rowExpanded, this, [this](const QString &key) {
         const auto found = std::find_if(m_entries.cbegin(), m_entries.cend(), [&key](const Entry &e) { return e.key == key; });
         if (found != m_entries.cend()) setSessionRowCollapsed(*found, false);
+    });
+    connect(&m_client, &HgsClient::notificationsFinished, this, [this](quint64 request, bool ok, const QJsonObject &result, const QString &error) {
+        const auto found = m_pendingNotifications.find(request); if (found == m_pendingNotifications.end()) return;
+        const auto original = found->entry; m_pendingNotifications.erase(found);
+        const auto *box = original.host.isEmpty() ? &m_fleet.local() : m_fleet.peer(original.host);
+        const bool current = box && std::any_of(box->sessions.cbegin(), box->sessions.cend(), [&](const SessionInfo &s) {
+            return s.name == original.session.name && s.runId == original.session.runId
+                && s.conversationId == original.session.conversationId && s.created == original.session.created && s.state != "archived";
+        });
+        if (!current) return; // A late answer cannot touch or refresh a replacement run.
+        if (!ok) { showNotice(error, true); return; }
+        const auto preferences = result.value("preferences").toObject();
+        if (!m_fleet.applyNotificationPreferences(original.host, original.session, preferences)) {
+            showNotice(tr("The shared notification setting changed while this request was pending. Refresh the session."), true); return;
+        }
+        rebuild(); updateDashboard();
+        emit notificationPreferencesChanged(original.host, original.session.name, original.session.runId,
+                                            original.session.conversationId, preferences);
     });
     connect(m_sessions, &SessionList::sessionMoved, this, [this](const QString &id, const QString &group, const QString &before) {
         m_organization.moveSession(id, group, before); saveOrganization(); rebuild();
@@ -3084,7 +3103,7 @@ void SessionsWindow::rebuild()
         const int optionalQuestions = roles.value(SessionRoles::OptionalQuestions).toInt();
         if (optionalQuestions > 0) accessibleFields << SessionPresentation::optionalQuestionsLabel(optionalQuestions);
         if (s.reviewLater) accessibleFields << tr("Marked needs attention: review later");
-        if (s.muted) accessibleFields << tr("Muted on this device");
+        if (s.muted) accessibleFields << (s.sharedNotifications && e.online ? tr("Muted on all devices") : tr("Muted on all devices (last confirmed)"));
         accessibleFields << desc;
         if (!childCount(s, false, e.online, includeCompleted).isEmpty()) accessibleFields << tr("Subagents: %1").arg(childCount(s, true, e.online, includeCompleted));
         if (!currentActivity(s, e.online) && !s.currentTool.isEmpty()) accessibleFields << tr("Last recorded: %1").arg(s.currentTool + " / " + s.toolDetail);
@@ -4877,8 +4896,19 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
         (archived || NativeSessionCapabilities::terminal(target)) && (!archived || !original.session.archiveId.isEmpty()));
     if (!archived) {
         m_sessionMenu->addSeparator();
-        auto *mute = add(target.muted ? tr("Unmute") : tr("Mute"), "contextToggleMute", SessionMenuAction::ToggleMute, true,
-            target.muted ? tr("Allow future notifications for this session on this device") : tr("Mute notifications for this session on this device"));
+        const bool pending = std::any_of(m_pendingNotifications.cbegin(), m_pendingNotifications.cend(), [&](const PendingNotifications &p) {
+            return p.entry.host == original.host && p.entry.session.conversationId == target.conversationId;
+        });
+        QString muteReason = target.muted ? tr("Allow future notifications for this session on all devices") : tr("Mute notifications for this session on all devices");
+        const bool notifications = original.online && (!original.host.isEmpty() || m_connectionError.isEmpty()) && target.sharedNotifications
+            && target.notificationPreferencesError.isEmpty() && SessionNotifications::identity(target.runId,128) && SessionNotifications::identity(target.conversationId,256)
+            && !pending && m_pendingNotifications.size() < 16;
+        if (!original.online || (original.host.isEmpty() && !m_connectionError.isEmpty())) muteReason = tr("Connect to this session's host to change shared notifications.");
+        else if (!target.sharedNotifications) muteReason = tr("Update hgs on this session's host to support shared notification preferences.");
+        else if (!SessionNotifications::identity(target.runId,128) || !SessionNotifications::identity(target.conversationId,256)) muteReason = tr("Refresh this session's identity before changing shared notifications.");
+        else if (!target.notificationPreferencesError.isEmpty()) muteReason = tr("Conflicting shared notification preferences. Refresh the session.");
+        else if (pending || m_pendingNotifications.size() >= 16) muteReason = tr("A shared notification change is pending. Wait for its result.");
+        auto *mute = add(target.muted ? tr("Unmute") : tr("Mute"), "contextToggleMute", SessionMenuAction::ToggleMute, notifications, muteReason);
         mute->setIcon(workspaceIcon(target.muted ? "attention" : "mute", SessionStatusBadge::mutedTone(m_dark)));
         if (entryNeedsAttention(original))
             add(tr("Mark as read"), "contextMarkRead", SessionMenuAction::MarkRead, true);
@@ -4959,12 +4989,17 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
     const auto directory = current.key == m_selectedKey && m_subagentId.isEmpty() ? selectedDirectory() : current.session.cwd;
     switch (action) {
     case SessionMenuAction::ToggleMute: {
-        if (!m_fleet.setMuted(original.host, original.session, !original.session.muted)) {
-            showNotice(tr("This session is no longer available. Open its actions again."), true); return;
-        }
-        const auto marks = m_fleet.attentionMarks();
-        QSettings().setValue("attention/sessionMarks", QJsonDocument(marks).toJson(QJsonDocument::Compact));
-        rebuild(); updateDashboard(); emit attentionMarksChanged(marks, m_fleet.readReplies()); return;
+        if (!current.online || (current.host.isEmpty() && !m_connectionError.isEmpty()) || !current.session.sharedNotifications
+            || !current.session.notificationPreferencesError.isEmpty() || current.session.runId != original.session.runId
+            || !SessionNotifications::identity(current.session.runId,128) || !SessionNotifications::identity(current.session.conversationId,256)
+            || current.session.notificationPreferences != original.session.notificationPreferences || m_pendingNotifications.size() >= 16
+            || std::any_of(m_pendingNotifications.cbegin(), m_pendingNotifications.cend(), [&](const PendingNotifications &p) {
+                return p.entry.host == current.host && p.entry.session.conversationId == current.session.conversationId;
+            })) return;
+        const QJsonObject payload{{"run_id", current.session.runId}, {"conversation_id", current.session.conversationId},
+            {"muted", !current.session.muted}, {"expected_revision", current.session.notificationPreferences.value("revision")}};
+        const auto request = m_client.requestNotifications(current.host, current.session.name, payload);
+        m_pendingNotifications.insert(request, {current}); return;
     }
     case SessionMenuAction::CollapseRow:
     case SessionMenuAction::ExpandRow:

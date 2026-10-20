@@ -261,10 +261,11 @@ public struct SessionAction: Codable, Hashable, Sendable {
     public var pendingId: String
     public var applyAttemptId: String
     public var resultPath: String
+    public var confirmedNotificationPreference: String?
 
     public init(requestId: String, target: Target, operation: String, arguments: JSONObject, status: String = "sending",
                 createdAt: Int64 = Clock.milliseconds(), error: String = "", resultTarget: Target? = nil, pendingId: String = "",
-                applyAttemptId: String = "", resultPath: String = "") {
+                applyAttemptId: String = "", resultPath: String = "", confirmedNotificationPreference: String? = nil) {
         self.requestId = requestId
         self.target = target
         self.operation = operation
@@ -276,6 +277,7 @@ public struct SessionAction: Codable, Hashable, Sendable {
         self.pendingId = pendingId
         self.applyAttemptId = applyAttemptId
         self.resultPath = resultPath
+        self.confirmedNotificationPreference = confirmedNotificationPreference
     }
 
     public var blocksSending: Bool { status == "sending" || status == "uncertain" }
@@ -427,7 +429,7 @@ public struct MessageState: Codable, Hashable, Sendable {
         copy.outgoing = outgoing.map { $0.recover() }
         copy.pickerDraft = pickerDraft?.recover()
         copy.contextOperations = contextOperations.map { $0.recover() }
-        copy.sessionActions = sessionActions.map { $0.recover() }
+        copy.sessionActions = SessionNotificationPreferences.boundedProofs(sessionActions.map { $0.recover() })
         copy.conversationIndex = Array(conversationIndex.prefix(1000))
         copy.speechAppliedIds = Array(speechAppliedIds.suffix(100))
         return copy
@@ -437,7 +439,7 @@ public struct MessageState: Codable, Hashable, Sendable {
         let next = sessionActions.filter { $0.requestId != action.requestId } + [action]
         let retained: (SessionAction) -> Bool = { $0.blocksSending || $0.status == "scheduled" || $0.needsProjectReview }
         var copy = self
-        copy.sessionActions = next.filter(retained) + next.filter { !retained($0) }.suffix(100)
+        copy.sessionActions = SessionNotificationPreferences.boundedProofs(next.filter(retained) + next.filter { !retained($0) }.suffix(100))
         return copy
     }
 

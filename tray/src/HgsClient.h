@@ -43,8 +43,11 @@ struct SessionInfo {
     double backgroundStarted = 0, backgroundObservedAt = 0;
     QString backgroundCommand;
     bool reviewLater = false, attentionAcknowledged = false;
-    // This desktop's explicit notification preference; never changes read or agent state.
+    // Confirmed notification preference from the session's host, shared by devices.
     bool muted = false;
+    bool sharedNotifications = false;
+    QJsonObject notificationPreferences;
+    QString notificationPreferencesError;
     // Shared read state from the session's host. sharedRead is false for hosts
     // whose hgs predates `hgs read`; those keep this device's own marks.
     bool sharedRead = false;
@@ -66,7 +69,7 @@ struct SessionInfo {
     QJsonArray subagentPreviews;
     QJsonObject subagents;
     QString processState, conversationState, runtimeState;
-    double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0;
+    double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0, attentionStarted = 0;
     int subagentCount = 0;
     // Pending optional Codex questions ("optional_questions"): the exact count,
     // the IDs the host lists (the newest ones) and the newest question's time.
@@ -269,6 +272,7 @@ public:
     // `hgs [@host] read <session> --json`: the host applies each field only while
     // it is current. A JSON answer, including not_found, is delivered.
     quint64 requestRead(const QString &host, const QString &name, const QJsonObject &payload);
+    quint64 requestNotifications(const QString &host, const QString &name, const QJsonObject &payload);
 
     // Чистые функции разбора: тестируются без запуска процессов.
     void cancelArchivePages();
@@ -338,6 +342,7 @@ signals:
     void questionAnswerFailed(quint64 request, const QString &host, const QString &name,
                               const QString &detail, bool deliveryUncertain);
     void readFinished(quint64 request, bool delivered, const QJsonObject &result, const QString &error);
+    void notificationsFinished(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void queueSendFinished(quint64 request, bool ok, const QJsonObject &receipt, const QString &error);
     void messageSent(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt);
     void messageFailed(quint64 request, const QString &host, const QString &name, const QString &detail, bool deliveryUncertain);
@@ -440,6 +445,7 @@ private:
     QSet<QString> m_messagesInFlight;
     quint64 m_answerRequest = 0;
     quint64 m_readRequest = 0;
+    quint64 m_notificationsRequest = 0;
     bool m_presenceInFlight = false, m_presencePending = false;
     QPair<double, bool> m_pendingPresence;
     QSet<QString> m_answersInFlight;

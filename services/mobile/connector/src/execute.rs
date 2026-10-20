@@ -476,6 +476,11 @@ impl<N: Native + 'static> Connector<N> {
         if crate::capabilities::WORKTREES.contains(&operation) && !flags.worktree {
             return Err(Failure::text("native mobile worktree ABI is unavailable"));
         }
+        if operation == crate::session_notifications::OPERATION && !flags.session_notifications {
+            return Err(Failure::text(
+                "native shared notification ABI is unavailable",
+            ));
+        }
         if operation == "mark_read" && !flags.read {
             return Err(Failure::text("native shared read ABI is unavailable"));
         }
@@ -517,6 +522,22 @@ impl<N: Native + 'static> Connector<N> {
             "process_output" => {
                 self.processes("--output", session, payload.expect("validated"), request_id)
                     .await
+            }
+            "session_notifications" => {
+                let payload = payload.expect("validated");
+                let result = self
+                    .call(
+                        Call::new(["notifications", session, "--json"])
+                            .payload(payload.clone())
+                            .failure_json(),
+                    )
+                    .await?;
+                if !crate::session_notifications::result_valid(&result, payload) {
+                    return Err(Failure::text(
+                        "native notification preference acknowledgement did not match",
+                    ));
+                }
+                Ok(result)
             }
             "mark_read" => {
                 let payload = payload.expect("validated");

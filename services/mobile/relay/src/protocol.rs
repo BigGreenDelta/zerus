@@ -100,6 +100,7 @@ pub const OPERATIONS: &[&str] = &[
     "interrupt",
     "launch",
     "mark_read",
+    "session_notifications",
     "pause",
     "process_output",
     "process_stop",
@@ -499,6 +500,21 @@ pub fn request(v: &Value) -> Result<()> {
         }
         if p.get("archive_id").is_some() {
             uuid(&p["archive_id"], false)?;
+        }
+    } else if op == "session_notifications" {
+        fields(
+            p,
+            &["run_id", "conversation_id", "muted", "expected_revision"],
+            &[],
+        )?;
+        for (key, maximum) in [("run_id", 128), ("conversation_id", 256)] {
+            let value = text(&p[key], maximum, false)?;
+            if value.len() > maximum {
+                return Err(Error::BAD);
+            }
+        }
+        if !p["muted"].is_boolean() || !p["expected_revision"].as_i64().is_some_and(|r| r >= 0) {
+            return Err(Error::BAD);
         }
     } else if op == "mark_read" {
         // C4: exact host read-mark identity; the host decides what is current.

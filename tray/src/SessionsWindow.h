@@ -90,6 +90,8 @@ signals:
     void replyViewed(const QString &host, const QString &name, const QString &conversation, const QString &reply);
     void repliesMarkedRead(const QJsonObject &replies);
     void attentionMarksChanged(const QJsonObject &marks, const QJsonObject &readReplies);
+    void notificationPreferencesChanged(const QString &host, const QString &name, const QString &run,
+                                        const QString &conversation, const QJsonObject &preferences);
     void refreshRequested();
     void sessionActivated(const QString &host, const QString &name, const QString &tty);
     void terminalOpenRequested(const QString &host, const QString &name, const QString &tty);
@@ -509,6 +511,8 @@ private:
     void finishSendEvidence(const QString &key);
     struct PendingAnswer { QString key, questionId, questionHash; };
     QHash<quint64, PendingAnswer> m_pendingAnswers;
+    struct PendingNotifications { Entry entry; };
+    QHash<quint64, PendingNotifications> m_pendingNotifications;
     bool m_confirmingQuestionCache = false;
     QStackedWidget *m_detailStack;
     QSplitter *m_splitter;

@@ -2056,6 +2056,14 @@ Sessions</source>
   <context>
     <name>HgsClient</name>
     <message>
+      <source>The session notification identity is unavailable. Refresh the session.</source>
+      <translation>Данные сессии для настройки уведомлений недоступны. Обновите сессию.</translation>
+    </message>
+    <message>
+      <source>The shared notification change was not confirmed. Refresh the session before trying again.</source>
+      <translation>Изменение общих уведомлений не подтверждено. Обновите сессию перед повторной попыткой.</translation>
+    </message>
+    <message>
       <location filename="../src/HgsClient.cpp" line="261" />
       <source>Recovery request timed out. Reload its state before trying again.</source>
       <translation>Время ожидания запроса на восстановление истекло. Обновите его состояние, прежде чем повторить попытку.</translation>
@@ -8254,16 +8262,44 @@ New messages and Stop cancel recovery. Sign-in, balance, other quota and context
       <translation>Включить уведомления</translation>
     </message>
     <message>
-      <source>Mute notifications for this session on this device</source>
-      <translation>Отключить уведомления этой сессии на этом устройстве</translation>
+      <source>Mute notifications for this session on all devices</source>
+      <translation>Отключить уведомления этой сессии на всех устройствах</translation>
     </message>
     <message>
-      <source>Allow future notifications for this session on this device</source>
-      <translation>Включить будущие уведомления этой сессии на этом устройстве</translation>
+      <source>Allow future notifications for this session on all devices</source>
+      <translation>Включить будущие уведомления этой сессии на всех устройствах</translation>
     </message>
     <message>
-      <source>Muted on this device</source>
-      <translation>Уведомления отключены на этом устройстве</translation>
+      <source>Muted on all devices</source>
+      <translation>Уведомления отключены на всех устройствах</translation>
+    </message>
+    <message>
+      <source>Muted on all devices (last confirmed)</source>
+      <translation>Уведомления отключены на всех устройствах (последнее подтверждение)</translation>
+    </message>
+    <message>
+      <source>Connect to this session's host to change shared notifications.</source>
+      <translation>Подключитесь к компьютеру этой сессии, чтобы изменить общие уведомления.</translation>
+    </message>
+    <message>
+      <source>Update hgs on this session's host to support shared notification preferences.</source>
+      <translation>Обновите hgs на компьютере этой сессии для поддержки общих настроек уведомлений.</translation>
+    </message>
+    <message>
+      <source>A shared notification change is pending. Wait for its result.</source>
+      <translation>Изменение общих уведомлений выполняется. Дождитесь результата.</translation>
+    </message>
+    <message>
+      <source>Refresh this session's identity before changing shared notifications.</source>
+      <translation>Обновите данные сессии перед изменением общих уведомлений.</translation>
+    </message>
+    <message>
+      <source>Conflicting shared notification preferences. Refresh the session.</source>
+      <translation>Общие настройки уведомлений противоречат друг другу. Обновите сессию.</translation>
+    </message>
+    <message>
+      <source>The shared notification setting changed while this request was pending. Refresh the session.</source>
+      <translation>Общая настройка уведомлений изменилась во время запроса. Обновите сессию.</translation>
     </message>
     <message>
       <location filename="../src/SessionSelection.cpp" line="45" />

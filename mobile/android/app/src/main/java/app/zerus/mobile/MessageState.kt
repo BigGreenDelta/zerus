@@ -26,7 +26,7 @@ data class MessageState(val drafts: List<Draft> = emptyList(), val outgoing: Lis
         val referenced=next.filter { it.operation=="settings" && it.status=="scheduled" && ScheduledSettingsAttempt.expectedPendingId(it)==null }.map { it.applyAttemptId }.toSet()
         fun retain(value:SessionAction)=value.blocksSending || value.needsProjectReview || value.status=="scheduled" &&
             (value.operation!="settings" || ScheduledSettingsAttempt.expectedPendingId(value)==null || value.requestId in referenced)
-        return copy(sessionActions = next.filter(::retain) + next.filterNot(::retain).takeLast(100))
+        return copy(sessionActions = SessionNotificationPreferences.boundedProofs(next.filter(::retain) + next.filterNot(::retain).takeLast(100)))
     }
     fun context(operation: ContextOperation): MessageState {
         val next = contextOperations.filterNot { it.requestId == operation.requestId } + operation
@@ -107,13 +107,14 @@ object MessageCodec {
     fun state(value: JSONObject) = MessageState(value.optJSONArray("drafts")?.objects().orEmpty().map(::draft),
         value.optJSONArray("outgoing")?.objects().orEmpty().map(::outgoing), value.optJSONObject("picker")?.let(::draft), value.string("picker_id"),
         value.optJSONArray("context_operations")?.objects().orEmpty().map(::contextOperation),
-        value.optJSONArray("session_actions")?.objects().orEmpty().map { SessionAction(it.getString("request"), target(it), it.getString("operation"), it.getString("arguments"), it.getString("status"), it.optLong("created"), it.string("error"), it.optJSONObject("result_target")?.let(::target), it.string("pending_id"),it.string("apply_attempt_id"),it.string("result_path")).recover() }, value.optJSONArray("conversation_index")?.objects().orEmpty().take(1000).map(ConversationIndex::decode),value.optJSONArray("terminal_buffers")?.objects().orEmpty().map(TerminalBuffers::decode),value.optJSONArray("machine_aliases")?.objects().orEmpty().map(MachineNames::decode),MachineColors.decodeArray(value.optJSONArray("machine_colors")), value.optJSONArray("speech_applied_ids")?.let { ids -> (0 until ids.length()).map { ids.getString(it) }.takeLast(100) }.orEmpty())
+        SessionNotificationPreferences.boundedProofs(value.optJSONArray("session_actions")?.objects().orEmpty().map { SessionAction(it.getString("request"), target(it), it.getString("operation"), it.getString("arguments"), it.getString("status"), it.optLong("created"), it.string("error"), it.optJSONObject("result_target")?.let(::target), it.string("pending_id"),it.string("apply_attempt_id"),it.string("result_path"),it.string("confirmed_notification_preference")).recover() }), value.optJSONArray("conversation_index")?.objects().orEmpty().take(1000).map(ConversationIndex::decode),value.optJSONArray("terminal_buffers")?.objects().orEmpty().map(TerminalBuffers::decode),value.optJSONArray("machine_aliases")?.objects().orEmpty().map(MachineNames::decode),MachineColors.decodeArray(value.optJSONArray("machine_colors")), value.optJSONArray("speech_applied_ids")?.let { ids -> (0 until ids.length()).map { ids.getString(it) }.takeLast(100) }.orEmpty())
     fun stateJson(state: MessageState) = JSONObject().put("drafts", JSONArray(state.drafts.map(::draftJson)))
         .put("outgoing", JSONArray(state.outgoing.map(::outgoingJson))).put("picker", state.pickerDraft?.let(::draftJson) ?: JSONObject.NULL).put("picker_id", state.pickerId).put("context_operations", JSONArray(state.contextOperations.map(::contextOperationJson)))
         .put("session_actions", JSONArray(state.sessionActions.map { action ->
             targetJson(action.target).put("request", action.requestId).put("operation", action.operation).put("arguments", action.arguments)
                 .put("status", action.status).put("created", action.createdAt).put("error", action.error)
                 .put("result_target", action.resultTarget?.let(::targetJson) ?: JSONObject.NULL).put("pending_id", action.pendingId).put("apply_attempt_id",action.applyAttemptId).put("result_path",action.resultPath)
+                .put("confirmed_notification_preference",action.confirmedNotificationPreference)
         })).put("conversation_index", JSONArray(state.conversationIndex.map(ConversationIndex::encode))).put("terminal_buffers",JSONArray(state.terminalBuffers.map(TerminalBuffers::encode))).put("machine_aliases",JSONArray(state.machineAliases.map(MachineNames::encode))).put("machine_colors",JSONArray(state.machineColors.map(MachineColors::encode))).put("speech_applied_ids", JSONArray(state.speechAppliedIds))
 }
 

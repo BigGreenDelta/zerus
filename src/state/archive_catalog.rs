@@ -212,6 +212,16 @@ pub(super) fn contains(db: &Connection, record: &Value) -> Result<bool> {
         |r| r.get(0),
     ))
 }
+/// Notification admission must neither rebuild the catalog nor reconcile an
+/// archive. A stale/missing index is unknown until the next ordinary listing.
+pub(super) fn contains_existing(record: &Value) -> Result<bool> {
+    let directory = root().join("archives");
+    if !directory.exists() { return Ok(false); }
+    let db = sql(Connection::open_with_flags(root().join("archive-catalog-v1.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY))?;
+    let prior: String = sql(db.query_row("SELECT COALESCE((SELECT value FROM catalog_meta WHERE key='stamp'),'')", [], |row| row.get(0)))?;
+    if prior != stamp(&directory)? { return Err("Archive catalog changed; refresh the session list before changing notifications".into()); }
+    contains(&db, record)
+}
 pub(super) fn find(db: &Connection, record: &Value) -> Result<Option<String>> {
     use rusqlite::OptionalExtension;
     sql(db.query_row("SELECT id FROM archive_rows WHERE name=? AND run=? AND conversation=? ORDER BY id LIMIT 1",params![string(record,"name"),string(record,"run_id"),string(record,"conversation_id")],|r|r.get(0)).optional())

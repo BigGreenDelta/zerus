@@ -17,19 +17,21 @@ class SessionActionsMenuTest {
     private fun item(f: SessionMenuFacts, id: String) = items(f).single { it.id == id }
 
     @Test fun liveRunningSessionMirrorsDesktopOrder() {
-        assertEquals(listOf("terminal","review_later","pause","rename","fork","copy_name","copy_reference","copy_folder","terminate"),items(facts()).map { it.id })
-        assertTrue(items(facts()).all { it.enabled })
+        assertEquals(listOf("terminal","review_later","session_notifications","pause","rename","fork","copy_name","copy_reference","copy_folder","terminate"),items(facts()).map { it.id })
+        assertTrue(items(facts()).filterNot { it.id==SessionNotificationPreferences.operation }.all { it.enabled })
+        assertFalse(item(facts(),SessionNotificationPreferences.operation).enabled)
     }
     @Test fun savedSessionOffersResumeArchiveAndForgetButNotTerminate() {
         val saved = facts("paused",row("resume","archive","rename","fork","forget"))
-        assertEquals(listOf("terminal","review_later","resume","rename","fork","archive","copy_name","copy_reference","copy_folder","forget"),items(saved).map { it.id })
+        assertEquals(listOf("terminal","review_later","session_notifications","resume","rename","fork","archive","copy_name","copy_reference","copy_folder","forget"),items(saved).map { it.id })
         assertEquals("Forget saved session…",item(saved,"forget").label)
         assertEquals("Move to archive…",item(saved,"archive").label)
         assertTrue(items(facts("stopped",row("resume","archive"))).any { it.id == "archive" })
     }
     @Test fun archivedVersionHasNoTerminalOrReadItemsAndCannotPause() {
         val archived = facts("archived",row("restore","rename","fork","forget"),t = target.copy(archiveId = "11111111-1111-4111-8111-111111111111"))
-        assertEquals(listOf("restore","rename","fork","copy_name","copy_reference","copy_folder","forget"),items(archived).map { it.id })
+        assertEquals(listOf("session_notifications","restore","rename","fork","copy_name","copy_reference","copy_folder","forget"),items(archived).map { it.id })
+        assertFalse(item(archived,SessionNotificationPreferences.operation).enabled)
         assertEquals("Forget archived version…",item(archived,"forget").label)
         assertEquals("This archived conversation is read-only.",SessionActionsMenu.operationReason(archived,"pause"))
         assertEquals("Select an archived version first.",SessionActionsMenu.operationReason(facts(),"restore"))

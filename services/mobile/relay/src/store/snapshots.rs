@@ -104,6 +104,9 @@ impl Store {
             let previous=if let Some((route,_))=peer {
                 self.db.one("SELECT snapshot,snapshot_hash,computer_id FROM computer_routes WHERE gateway_id=? AND route_id=? AND local=0",args![&c.id,route]).await?
             }else{self.db.one("SELECT snapshot,snapshot_hash,computer_id FROM nodes WHERE id=? AND workspace_id=? AND revoked=0",args![&c.id,&c.workspace]).await?}.ok_or(Error::NOT_FOUND)?;
+            if !registry::notification_revisions_current(previous["snapshot"].as_str(), snapshot)? {
+                return Err(Error::CONFLICT);
+            }
             let changes = registry::event_changes(previous["snapshot"].as_str(), snapshot)?;
             let mut t = self.db.begin().await?;
             if !changes.is_empty() {
@@ -260,10 +263,21 @@ impl Store {
         candidates: &[Candidate],
     ) -> Result<()> {
         for c in candidates {
-            self.append_event(t, w, computer, &c.session, &c.kind, None)
+            let event = self
+                .append_event(t, w, computer, &c.session, &c.kind, None)
                 .await?;
+            if c.kind == "notification_preferences" {
+                // Data-only wakes let sleeping phones withdraw an old card;
+                // they never create a user-visible alert candidate.
+                self.wake_devices(t, w, &event["id"]).await?;
+            }
         }
-        self.record_candidates(t, w, computer, candidates).await
+        let alerts: Vec<_> = candidates
+            .iter()
+            .filter(|c| matches!(c.kind.as_str(), "attention" | "error" | "completed"))
+            .cloned()
+            .collect();
+        self.record_candidates(t, w, computer, &alerts).await
     }
     /// Appends one event inside the workspace and fleet caps. The caller holds event locks.
     pub(super) async fn append_event(

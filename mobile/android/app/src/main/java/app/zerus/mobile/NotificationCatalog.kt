@@ -9,9 +9,10 @@ data class NotificationCatalog(val sessions: List<NotificationCurrent>, val iden
 }
 
 object NotificationCatalogParser {
-    fun parse(connection: Connection, records: List<JSONObject>, aliases: List<MachineAlias>): NotificationCatalog {
+    fun parse(connection: Connection, records: List<JSONObject>, aliases: List<MachineAlias>, actions: List<SessionAction> = emptyList()): NotificationCatalog {
         val identities = mutableMapOf<String, String?>()
         val current = mutableListOf<NotificationCurrent>()
+        val known=SessionNotificationPreferences.known(actions=actions)
         val unique = records.groupBy { it.getString("id") }.filterValues { it.size == 1 }.values.map { it.single() }
         for (raw in unique) {
             val machine = MachineNames.apply(MachineCatalog.parse(connection.id, raw), aliases)
@@ -21,7 +22,7 @@ object NotificationCatalogParser {
             }
             for (session in NativeParser.sessions(connection, raw)) {
                 if (session.target.session.isBlank() || session.target.session.length > 1024 || SessionFilters.archived(session)) continue
-                val value = session.raw
+                val value = SessionNotificationPreferences.merge(session.raw,session.target,known)
                 val phase = value.string("phase")
                 val recovery = value.optJSONObject("recovery")?.string("state").orEmpty()
                 val (optionalItems, blocking) = value.optJSONArray("mobile_attention")?.objects().orEmpty()
@@ -34,7 +35,7 @@ object NotificationCatalogParser {
                 val kind = when {
                     phase == "error" && recovery !in setOf("waiting", "dispatching", "retrying") ||
                         recovery in setOf("uncertain", "blocked", "exhausted") -> SessionAlertKind.Error
-                    phase in setOf("input", "approval") || pending.isNotEmpty() || value.optInt("pending_question_count") > 0 -> SessionAlertKind.Input
+                    phase in setOf("input", "approval") || pending.isNotEmpty() || value.optInt("pending_question_count") > 0 || SessionNotificationPreferences.hasChildAttention(value) -> SessionAlertKind.Input
                     optional.isNotEmpty() -> SessionAlertKind.Optional
                     else -> null
                 }
@@ -48,7 +49,7 @@ object NotificationCatalogParser {
                     clean(SessionFilters.label(session).ifBlank { session.title }, "Session"), clean(machine.name, "Computer"), kind,
                     identity, value.string("activity") == "idle", machine.online,
                     SessionFilters.state(session) == "running" && value.string("process_state") != "exited",
-                    session.target.conversation, optional)
+                    session.target.conversation, optional,SessionNotificationPreferences.suppressed(value,session.target,kind,optional),SessionNotificationPreferences.parse(value,session.target))
             }
         }
         return NotificationCatalog(current, identities)

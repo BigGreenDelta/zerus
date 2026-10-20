@@ -394,6 +394,14 @@ pub fn validate(
     if request.contains_key("archive_id") {
         return Err(error("archive identity belongs only in inspect payload"));
     }
+    if operation == crate::session_notifications::OPERATION {
+        if !context.sessions.contains(session) {
+            return Err(error(NONARCHIVED));
+        }
+        let payload = request.get("payload").unwrap_or(&Value::Null);
+        crate::session_notifications::validate(payload).map_err(error)?;
+        return Ok(validated(session, Some(payload.clone())));
+    }
     if operation == "mark_read" {
         if !context.sessions.contains(session) {
             return Err(error(NONARCHIVED));

@@ -399,6 +399,7 @@ pub(crate) fn launch(
 
 pub(crate) fn snapshots() -> Result<Vec<Value>> {
     let mut out = Vec::new();
+    let preferences = notifications::load();
     let Ok(files) = fs::read_dir(bindings()) else {
         return Ok(out);
     };
@@ -432,6 +433,7 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
         if !list.is_null() {
             value["host_generation"] = list["generation"].clone();
         }
+        notifications::enrich(&mut value, preferences.as_ref(), journal::journal_name(&record));
         out.push(value);
     }
     Ok(out)
@@ -1119,7 +1121,26 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
         ));
         result["model_options"]=json!(catalog["groups"].as_array().into_iter().flatten().flat_map(|g|g["models"].as_array().into_iter().flatten().map(|m|json!({"id":format!("{}/{}",string(g,"id"),string(m,"id")),"label":format!("{} ({})",string(m,"name"),string(g,"name")),"effort_options":m["reasoning"]["efforts"].as_array().into_iter().flatten().map(|e|e["id"].clone()).collect::<Vec<_>>()}))).collect::<Vec<_>>());
     }
+    if agent_id.is_none() { notifications::enrich(&mut result, notifications::load().as_ref(), journal::journal_name(&record)); }
     Ok(result)
+}
+
+/// Read-only resident host methods; never ensure_host or a lifecycle RPC.
+pub(super) fn notification_snapshot(record: &Value) -> Result<(Value, Option<Vec<Value>>)> {
+    notification_snapshot_with(record, |method, params| rpc(record, method, params))
+}
+fn notification_snapshot_with(record: &Value, mut observe: impl FnMut(&str, Value) -> Result<Value>) -> Result<(Value, Option<Vec<Value>>)> {
+    let inspected = observe("inspect", json!({"sessionId":record["conversation_id"],"includeProcesses":false}))?;
+    let listed = observe("list", json!({}))?;
+    if !inspected["generation"].is_string() || inspected["generation"] != listed["generation"] { return Err("baseline_unavailable".into()); }
+    let pending = inspected["pendingQuestions"].as_array().ok_or("baseline_unavailable")?;
+    if pending.iter().any(|question| string(question, "id").is_empty() || string(question, "id").len() > 256 || string(question, "id").chars().any(char::is_control)) { return Err("baseline_unavailable".into()); }
+    let row = listed["items"].as_array().and_then(|rows| rows.iter().find(|row| row["sessionId"] == record["conversation_id"])).ok_or("baseline_unavailable")?;
+    let mut view = normalize(record, row, &inspected);
+    child_summaries(record, &mut view, &listed, &inspected["generation"]);
+    // Listing read signatures represent these requests through attention_id;
+    // only Codex optional questions have a separate listing question set here.
+    Ok((view, Some(Vec::new())))
 }
 
 fn question_cards(record: &Value, inspected: &Value) -> Vec<Value> {
@@ -1221,7 +1242,7 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
     match action {
         "pause"=>record["paused"]=json!(true),
         "resume"=>{record["paused"]=json!(false);record["run_id"]=json!(uuid::Uuid::new_v4().to_string());record.as_object_mut().unwrap().remove("permissions_pending");},
-        "rename"=>{record["name"]=json!(new_name.unwrap());recovery::rename_job(name,new_name.unwrap(),string(&record,"run_id"))?;},
+        "rename"=>{notifications::anchor(&mut record);record["name"]=json!(new_name.unwrap());recovery::rename_job(name,new_name.unwrap(),string(&record,"run_id"))?;},
         "forget"=>{archive::remove_synced(&binding_path(name))?;return Ok(());},
         _=>unreachable!(),
     }
@@ -1490,6 +1511,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 "rename",
                 json!({"sessionId":record["conversation_id"],"title":new.rsplit('/').next()}),
             )?;
+            notifications::anchor(&mut record);
             record["name"] = json!(new);
             recovery::rename_job(name,new,string(&record,"run_id"))?;
             save(&record)?;
@@ -1631,5 +1653,35 @@ mod question_identity_tests {
         let next = normalize(&record, &row, &json!({"pendingQuestions":[{"id":"question-2"}]}));
         assert_ne!(next["attention_id"], first["attention_id"]);
         assert!(normalize(&record, &row, &json!({}))["attention_id"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    #[test]
+    fn notification_baseline_observes_only_inspect_and_list_with_matching_generation() {
+        let record = json!({"name":"dsh/test/session","backend":"dsh","conversation_id":"session-A","run_id":"run-A"});
+        let mut called = Vec::new();
+        let (view, questions) = notification_snapshot_with(&record, |method, params| {
+            called.push(method.to_owned());
+            match method {
+                "inspect" => { assert_eq!(params, json!({"sessionId":"session-A","includeProcesses":false})); Ok(json!({"generation":"host-1","pendingQuestions":[],"live":true})) },
+                "list" => { assert_eq!(params, json!({})); Ok(json!({"generation":"host-1","items":[{"sessionId":"session-A","agentAvailable":true,"running":false}]})) },
+                _ => panic!("a preference must not issue a native action"),
+            }
+        }).unwrap();
+        assert_eq!(called, ["inspect", "list"]);
+        assert_eq!(view["conversation_id"], "session-A"); assert_eq!(view["run_id"], "run-A");
+        assert_eq!(view["phase"], "idle"); assert_eq!(questions, Some(Vec::new()));
+        let (pending, questions) = notification_snapshot_with(&record, |method, _| Ok(if method == "inspect" {
+            json!({"generation":"host","pendingQuestions":[{"id":"question-1"}],"live":true})
+        } else { json!({"generation":"host","items":[{"sessionId":"session-A","agentAvailable":true,"running":false}]}) })).unwrap();
+        assert_eq!(pending["phase"], "input");
+        assert_eq!(pending["attention_id"], "dsh_question:question-1");
+        assert_eq!(read_marks::signature(&pending, questions.as_deref()), read_marks::signature(&pending, Some(&[])));
+        assert!(notification_snapshot_with(&record, |method, _| Ok(if method == "inspect" { json!({"generation":"host","pendingQuestions":[{}]}) } else { json!({"generation":"host"}) })).is_err());
+        assert!(notification_snapshot_with(&record, |method, _| Ok(if method == "inspect" { json!({"generation":"old","pendingQuestions":[]}) } else { json!({"generation":"new"}) })).is_err());
+        assert!(notification_snapshot_with(&record, |_, _| Ok(json!({"generation":"host"}))).is_err());
     }
 }

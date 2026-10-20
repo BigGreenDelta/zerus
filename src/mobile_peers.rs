@@ -460,6 +460,26 @@ fn validate(request: &LocalRequest) -> Result<()> {
             );
             read_mark(&request.payload)?;
         }
+        "notifications" => {
+            ensure!(
+                rest.len() == 2 && session(&rest[0]) && rest[1] == "--json",
+                "native notifications requires scoped JSON"
+            );
+            let value = request.payload.as_ref().context("notification preference payload is required")?;
+            let object = value.as_object().context("native payload must be an object")?;
+            ensure!(
+                object.len() == 4 && ["run_id", "conversation_id", "muted", "expected_revision"]
+                    .iter().all(|key| object.contains_key(*key)),
+                "invalid notification preference fields"
+            );
+            ensure!(
+                value["run_id"].as_str().is_some_and(|v| text(v, 128, false) && v.len() <= 128)
+                    && value["conversation_id"].as_str().is_some_and(|v| text(v, 256, false) && v.len() <= 256)
+                    && value["muted"].is_boolean()
+                    && value["expected_revision"].as_i64().is_some_and(|r| r >= 0),
+                "invalid notification preference identity or revision"
+            );
+        }
         "hooks" => {
             ensure!(rest.len()==2 && session(&rest[0]) && rest[1]=="--json", "hook health requires scoped JSON");
             scoped(&request.payload)?;
@@ -1543,6 +1563,24 @@ mod tests {
         let mut empty = mark;
         empty["run_id"] = json!("");
         assert!(validate(&request(&["read", "codex/project", "--json"], Some(empty))).is_err());
+    }
+
+    #[test]
+    fn notifications_require_exact_non_read_payload_before_peer_dispatch() {
+        let preference = json!({"run_id":"run","conversation_id":"conversation","muted":true,"expected_revision":0});
+        let argv = ["notifications", "codex/project", "--json"];
+        assert!(validate(&request(&argv, Some(preference.clone()))).is_ok());
+        for args in [vec!["notifications", "codex/project"], vec!["notifications", "@peer", "--json"],
+            vec!["notifications", "codex/project", "--json", "--archive", ID]] {
+            assert!(validate(&request(&args, Some(preference.clone()))).is_err());
+        }
+        assert!(validate(&request(&argv, None)).is_err());
+        for (key, value) in [("muted", json!(1)), ("expected_revision", json!(true)),
+            ("expected_revision", json!(-1)), ("expected_revision", json!(0.0)),
+            ("run_id", json!("é".repeat(65))), ("conversation_id", json!("")), ("request_id", json!(ID))] {
+            let mut bad = preference.clone(); bad[key] = value;
+            assert!(validate(&request(&argv, Some(bad))).is_err());
+        }
     }
 
     fn fixture_config(dir: &std::path::Path) -> Config {

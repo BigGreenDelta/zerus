@@ -143,7 +143,8 @@ object SessionNotifications {
                     operations++
                     currentCoroutineContext().ensureActive()
                     if (!connected(store, connection)) return@withLock false
-                    val catalog = NotificationCatalogParser.parse(connection, raw, store.messageState().machineAliases)
+                    val messages=store.messageState()
+                    val catalog = NotificationCatalogParser.parse(connection, raw, messages.machineAliases,messages.sessionActions)
                     val active = synchronized(NotificationSettings.deliveryLock) {
                         cards(context).mapNotNull { it.notification.extras.getString("zerus_slot") }.toSet()
                     }
@@ -198,7 +199,8 @@ object SessionNotifications {
             if (existing != null && !changed && !recovering && !notice.fresh) continue
             pace()
             val preferences = store.notificationPreferences()
-            if (!preferences.allows(notice.kind) || !connected(store, connection)) continue
+            if (!preferences.allows(notice.kind) || !connected(store, connection) ||
+                !SessionNotificationPreferences.deliveryAllowed(notice.current,store.messageState().sessionActions)) continue
             val admitted = synchronized(NotificationSettings.deliveryLock) {
                 val active = cards(context)
                 if (active.any { it.tag == notice.current.slot.tag } || active.size < 24) true
@@ -220,7 +222,8 @@ object SessionNotifications {
             currentCoroutineContext().ensureActive()
             val posted = synchronized(NotificationSettings.deliveryLock) {
                 val latest = store.notificationPreferences()
-                if (!latest.allows(notice.kind) || !connected(store, connection)) false else {
+                if (!latest.allows(notice.kind) || !connected(store, connection) ||
+                    !SessionNotificationPreferences.deliveryAllowed(notice.current,store.messageState().sessionActions)) false else {
                     manager(context).notify(notice.current.slot.tag, CARD_ID, notification(context, notice, !audible))
                     lastPost = android.os.SystemClock.elapsedRealtime(); true
                 }

@@ -439,12 +439,22 @@ input, approvals, errors and unread main-agent replies. An offline host retains
 its last total but adds no live attention requests; a dot marks incomplete data.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
-The session menu's **Mute** disables its notifications and removes it from this
-desktop's attention counters and bell. A crossed-out bell and neutral gray or
-white attention and unread badges identify a muted session. The preference stays
-on this device across restart, rename and resume of the same conversation;
-other desktops and phones keep their own notification behavior. Muting preserves
-the agent's actual state, unread replies, questions, approvals and review reminders.
+The session menu's **Mute** disables notifications for that conversation on all
+devices and removes it from their notification counters and bells. The session's
+host stores the preference; other desktops and phones receive it in their next
+host snapshot. A crossed-out bell and neutral gray or white attention and unread
+badges identify a muted session. The preference survives restart, rename and
+resume of the same conversation. Muting preserves the agent's actual state,
+unread replies, questions, approvals and review reminders. The menu requires an
+online host with shared notification preferences; older hosts show an explanation
+instead of a separate local-only preference. A pending or failed change never
+replaces the last confirmed host value.
+If a host later becomes unavailable or stops reporting this feature, its last
+confirmed muted display is retained and labelled as such; it does not enable a
+new change. Concurrent changes use the host's revision and require a fresh
+snapshot after a conflict. Unmute records the host's current notification
+identities, so a device that missed the muted interval does not announce those
+old events when it reconnects. This does not mark the underlying work as read.
 **Unmute** restores future notifications without replaying events seen while
 muted or acknowledging pending work. Muted sessions remain available in the
 Needs attention filter.

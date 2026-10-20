@@ -1068,6 +1068,26 @@ an alert candidate. Push payloads contain only generic wake information, never
 conversation text, project names or credentials. Opening a notification
 refreshes the authenticated session state.
 
+The live parent conversation offers Mute notifications and Unmute notifications
+when both relay and computer advertise `session_notifications` and report valid
+`notification_preferences`. This host-owned setting follows the conversation
+across rename and resume and applies on every device. Its exact run/conversation
+and expected revision are checked by the durable request; no client changes the
+setting optimistically. Archives and child sessions cannot change it. Missing
+metadata leaves the control unavailable rather than creating a phone-only mute.
+
+Muted conversations retain their native state, unread replies, pending requests
+and Needs attention/Active membership. Attention and unread styling becomes
+neutral with a mute icon; Working and error signals remain visible. Notification
+cards, sounds and overflow totals exclude muted conversations. Unmute captures
+the host's complete current reply, main/child attention and optional-question
+identities, so an offline device cannot replay them. New identities can notify.
+The quiet `notification_preferences` event triggers refresh and withdrawal but
+never announces a transition. Clients retain the highest confirmed preference
+revision through late catalog/detail reads; receipt proofs share the existing
+bounded action history, deduplicate by computer/provider/conversation and use at most
+1 MiB of encoded proof storage. Evicting a proof keeps its request and outcome.
+
 ### Presence-aware delivery
 
 Relays advertising the `presence_alerts` feature hold candidates while the

@@ -13,7 +13,7 @@ object DesktopSessionPalette {
             (SessionFilters.needsAction(session) || childAttention(session, online))
         val working = SessionFilters.working(session, online)
         val unread = SessionFilters.visibleUnreadReply(session, online)
-        val kind = when {
+        val nativeKind = when {
             attention -> if (detailKind(session, online) == DetailKind.Error) DesktopBadgeKind.Error else DesktopBadgeKind.Attention
             working -> if (SessionFilters.backgroundIdle(session)) DesktopBadgeKind.Background else DesktopBadgeKind.Working
             unread -> DesktopBadgeKind.Unread
@@ -22,6 +22,8 @@ object DesktopSessionPalette {
             online && SessionFilters.state(session) == "paused" && !SessionFilters.archived(session) -> DesktopBadgeKind.Paused
             else -> DesktopBadgeKind.Neutral
         }
+        val muted = SessionNotificationPreferences.muted(session)
+        val kind = if(muted && nativeKind in setOf(DesktopBadgeKind.Attention,DesktopBadgeKind.Unread)) DesktopBadgeKind.Neutral else nativeKind
         val caption = when {
             working -> if (raw.string("phase") == "compacting") "Compacting" else if (SessionFilters.backgroundIdle(session)) "Background" else "Working"
             kind == DesktopBadgeKind.Waiting -> SessionFilters.waitingLabel(session,includeProducer=false,compact=true)

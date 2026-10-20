@@ -97,7 +97,7 @@ struct SessionStatusBadge: View {
             .padding(.vertical, 4)
             .background(Color(rgb: colors.background), in: RoundedRectangle(cornerRadius: 5))
             if badge.additionalUnread {
-                let unread = DesktopSessionPalette.colors(.unread, dark: true)
+                let unread = DesktopSessionPalette.colors(SessionNotificationPreferences.muted(session) ? .neutral : .unread, dark: true)
                 Image(systemName: "envelope.badge")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Color(rgb: unread.foreground))
@@ -118,7 +118,7 @@ struct OptionalQuestionChipView: View {
 
     var body: some View {
         if let chip = SessionCardPresentation.optionalQuestionChip(session, online) {
-            let colors = DesktopSessionPalette.colors(.attention, dark: true)
+            let colors = DesktopSessionPalette.colors(SessionNotificationPreferences.muted(session) ? .neutral : .attention, dark: true)
             HStack(spacing: 3) {
                 GlyphView(glyph: .question, color: Color(rgb: colors.foreground)).frame(width: 15, height: 15)
                 Text(chip.label).font(.caption2.weight(.semibold)).lineLimit(1)

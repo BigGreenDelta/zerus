@@ -5580,16 +5580,45 @@ void TestSessionsWindow::terminalDropKeepsActivityDraftAndDoesNotSubmit()
 
 void TestSessionsWindow::sessionMuteMenuPersistsWithoutAcknowledging()
 {
+    const auto preferences=[](bool muted,qint64 revision) { return QJsonObject{{"conversation_id","mute-conversation"},{"muted",muted},
+        {"revision",revision},{"suppressed",QJsonObject{{"reply_id",QJsonValue()},{"attention_signature",QJsonValue()},
+        {"optional_question_ids",QJsonArray()},{"main_attention",QJsonValue()},{"child_attention",QJsonObject()}}}}; };
+    const auto fixture=m_dir->filePath("shared-notifications");QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray behavior=R"PY(elif c=='notifications':
+ import pathlib,time
+ payload=json.load(sys.stdin)
+ with open(__file__+'.calls','a') as output:output.write(json.dumps({'argv':sys.argv[1:],'payload':payload})+'\n')
+ deadline=time.monotonic()+15
+ while not pathlib.Path(__file__+'.release').exists():
+  if time.monotonic()>=deadline:sys.exit(2)
+  time.sleep(.01)
+ print(pathlib.Path(__file__+'.reply').read_text())
+)PY";
+    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+behavior)));
+    const auto reply=[&](bool muted,qint64 revision,const QString &run="run") {
+        return FakeCli::replace(fixture+".reply",QJsonDocument(QJsonObject{{"ok",true},{"applied",true},{"run_id",run},
+            {"conversation_id","mute-conversation"},{"preferences",preferences(muted,revision)}}).toJson());
+    };
+    const auto calls=[&] { QFile file(fixture+".calls");return file.open(QIODevice::ReadOnly)?file.readAll().count('\n'):0; };
     auto state=fleet(); auto box=state.local();
     box.sessions[0].conversationId="mute-conversation"; box.sessions[0].runId="run";
     box.sessions[0].phase="approval"; box.sessions[0].activity="waiting"; box.sessions[0].replyId="reply-1";
+    box.sessions[0].sharedNotifications=true; box.sessions[0].notificationPreferences=preferences(false,0);
     state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
-    SessionsWindow window(program()); window.setFleet(state); window.show();
+    const auto originalMarks=QSettings().value("attention/sessionMarks");
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(state); window.show();
     auto *list=window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
     auto *menu=window.findChild<QMenu *>("sessionContextMenu"); QVERIFY(menu);
     auto *rail=window.findChild<QLabel *>("railAttentionBadge"); QVERIFY(rail);
     QSignalSpy marks(&window,&SessionsWindow::attentionMarksChanged);
+    QSignalSpy shared(&window,&SessionsWindow::notificationPreferencesChanged), refreshed(&window,&SessionsWindow::refreshRequested);
+    auto *client=window.findChild<HgsClient *>();QVERIFY(client);QSignalSpy completed(client,&HgsClient::notificationsFinished);
+    bool applied=false;
+    connect(&window,&SessionsWindow::notificationPreferencesChanged,&window,[&](const QString &host,const QString &,const QString &,const QString &,const QJsonObject &value) {
+        applied=state.applyNotificationPreferences(host,state.local().sessions.first(),value);window.setFleet(state);
+    });
     list->setCurrentRow(1);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer,"Keep this draft");
     const auto open=[&] {
         menu->hide(); const auto point=list->visualItemRect(list->item(0)).center();
         QContextMenuEvent event(QContextMenuEvent::Mouse,point,list->viewport()->mapToGlobal(point));
@@ -5598,17 +5627,45 @@ void TestSessionsWindow::sessionMuteMenuPersistsWithoutAcknowledging()
     QVERIFY(list->item(0)->data(SessionRoles::Attention).toBool()); QVERIFY(list->item(0)->data(SessionRoles::Unread).toBool());
     const int count=rail->text().toInt(); QVERIFY(count>0);
     open(); auto *mute=menu->findChild<QAction *>("contextToggleMute"); QVERIFY(mute); QCOMPARE(mute->text(),QString("Mute"));
-    mute->trigger(); menu->hide(); QCOMPARE(marks.size(),1); QCOMPARE(list->currentRow(),1);
+    QVERIFY(mute->isEnabled());mute->trigger();menu->hide();QTRY_COMPARE(calls(),1);
+    QVERIFY(!list->item(0)->data(SessionRoles::Muted).toBool());QCOMPARE(marks.size(),0);QCOMPARE(shared.size(),0);
+    open();mute=menu->findChild<QAction *>("contextToggleMute");QVERIFY(!mute->isEnabled());menu->hide();
+    QVERIFY(reply(true,1));QVERIFY(FakeCli::replace(fixture+".release","release"));QTRY_COMPARE(shared.size(),1);QVERIFY(applied);
+    QCOMPARE(marks.size(),0); QCOMPARE(list->currentRow(),1);QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));
     QVERIFY(list->item(0)->data(SessionRoles::Muted).toBool()); QVERIFY(list->item(0)->data(SessionRoles::Attention).toBool());
     QVERIFY(list->item(0)->data(SessionRoles::Unread).toBool()); QCOMPARE(rail->text().toInt(),count-1);
-    QVERIFY(list->item(0)->data(Qt::AccessibleTextRole).toString().contains("Muted on this device"));
+    QVERIFY(list->item(0)->data(Qt::AccessibleTextRole).toString().contains("Muted on all devices"));
+    QCOMPARE(QSettings().value("attention/sessionMarks"),originalMarks);
+    QFile log(fixture+".calls");QVERIFY(log.open(QIODevice::ReadOnly));const auto call=QJsonDocument::fromJson(log.readLine()).object();log.close();
+    QCOMPARE(call["argv"].toArray(),(QJsonArray{"notifications",box.sessions.first().name,"--json"}));
+    QCOMPARE(call["payload"].toObject(),(QJsonObject{{"run_id","run"},{"conversation_id","mute-conversation"},{"muted",true},{"expected_revision",0}}));
     window.setFleet(state); QVERIFY(list->item(0)->data(SessionRoles::Muted).toBool());
-    SessionsWindow reopened(program()); reopened.setFleet(state); reopened.show();
+    SessionsWindow reopened(FakeCli::program(fixture)); keepDetailsPollsOut(reopened); reopened.setFleet(state); reopened.show();
     QVERIFY(reopened.findChild<QListWidget *>("sessionList")->item(0)->data(SessionRoles::Muted).toBool());
     open(); mute=menu->findChild<QAction *>("contextToggleMute"); QVERIFY(mute); QCOMPARE(mute->text(),QString("Unmute"));
-    mute->trigger(); menu->hide(); QCOMPARE(marks.size(),2); QCOMPARE(list->currentRow(),1);
-    QVERIFY(!list->item(0)->data(SessionRoles::Muted).toBool()); QVERIFY(list->item(0)->data(SessionRoles::Attention).toBool());
-    QVERIFY(list->item(0)->data(SessionRoles::Unread).toBool()); QCOMPARE(rail->text().toInt(),count);
+    // Failure retains the last confirmed value. No local mark, read or retry is created.
+    QVERIFY(QFile::remove(fixture+".release"));mute->trigger();menu->hide();QTRY_COMPARE(calls(),2);
+    QVERIFY(FakeCli::replace(fixture+".reply","{\"ok\":false,\"error\":\"stale\"}"));
+    QVERIFY(FakeCli::replace(fixture+".release","release"));QTRY_COMPARE(completed.size(),2);
+    QCOMPARE(shared.size(),1);QVERIFY(list->item(0)->data(SessionRoles::Muted).toBool());QCOMPARE(calls(),2);
+    QVERIFY(QFile::remove(fixture+".release"));open();mute=menu->findChild<QAction *>("contextToggleMute");QVERIFY(mute->isEnabled());
+    mute->trigger();menu->hide();QTRY_COMPARE(calls(),3);
+    QVERIFY(reply(false,2));QVERIFY(FakeCli::replace(fixture+".release","release"));QTRY_COMPARE(shared.size(),2);QVERIFY(applied);
+    QVERIFY(!list->item(0)->data(SessionRoles::Muted).toBool());QCOMPARE(rail->text().toInt(),count);
+    QVERIFY(list->item(0)->data(SessionRoles::Attention).toBool());QVERIFY(list->item(0)->data(SessionRoles::Unread).toBool());
+    // A confirmed old-run reply cannot affect a replacement, even in the same conversation.
+    QVERIFY(QFile::remove(fixture+".release"));open();mute=menu->findChild<QAction *>("contextToggleMute");QVERIFY(mute->isEnabled());
+    mute->trigger();menu->hide();QTRY_COMPARE(calls(),4);
+    box=state.local();box.sessions[0].runId="replacement";state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QVERIFY(reply(true,3));QVERIFY(FakeCli::replace(fixture+".release","release"));QTRY_COMPARE(completed.size(),4);
+    QCOMPARE(shared.size(),2);QVERIFY(!list->item(0)->data(SessionRoles::Muted).toBool());QCOMPARE(refreshed.size(),0);
+    box=state.local();box.ok=false;state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);open();
+    mute=menu->findChild<QAction *>("contextToggleMute");QVERIFY(!mute->isEnabled());QVERIFY(mute->toolTip().contains("Connect"));menu->hide();QCOMPARE(calls(),4);
+    // An older host has no local-only fallback or command admission.
+    box=state.local();box.ok=true;box.sessions[0].sharedNotifications=false;box.sessions[0].notificationPreferences={};box.sessions[0].muted=false;
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);open();
+    mute=menu->findChild<QAction *>("contextToggleMute");QVERIFY(!mute->isEnabled());QVERIFY(mute->toolTip().contains("Update hgs"));menu->hide();
+    QCOMPARE(calls(),4);QCOMPARE(marks.size(),0);QCOMPARE(QSettings().value("attention/sessionMarks"),originalMarks);
     QVERIFY(state.takeNewReadMarks().isEmpty());
 }
 

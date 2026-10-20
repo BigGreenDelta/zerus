@@ -18,7 +18,7 @@ import uuid
 from aiohttp import web
 
 from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_read, validate_send
-from . import analytics, archives, speech, speech_config, voice
+from . import analytics, archives, speech, speech_config, voice, session_notifications
 from .recovery import validate_recovery
 from .history import validate_history
 from .context import CLEAR_CONTEXT_DISMISS_FEATURE, validate_clear_context
@@ -319,6 +319,9 @@ def validate_request(value):
             archive_id = text(payload["archive_id"], 36)
             if str(uuid.UUID(archive_id)) != archive_id:
                 raise web.HTTPBadRequest()
+        return
+    if op == "session_notifications":
+        session_notifications.validate(payload)
         return
     if op == "mark_read":
         validate_mark_read(payload)

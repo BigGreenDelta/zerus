@@ -378,13 +378,14 @@ final class SessionActionsMenuTests: XCTestCase {
     private func item(_ facts: SessionMenuFacts, _ id: String) -> SessionMenuItem { items(facts).first { $0.id == id }! }
 
     func testLiveRunningSessionMirrorsDesktopOrder() {
-        XCTAssertEqual(["terminal", "review_later", "pause", "rename", "fork", "copy_name", "copy_reference", "copy_folder", "terminate"], items(facts()).map(\.id))
-        XCTAssertTrue(items(facts()).allSatisfy(\.enabled))
+        XCTAssertEqual(["terminal", "review_later", "session_notifications", "pause", "rename", "fork", "copy_name", "copy_reference", "copy_folder", "terminate"], items(facts()).map(\.id))
+        XCTAssertTrue(items(facts()).filter { $0.id != SessionNotificationPreferences.operation }.allSatisfy(\.enabled))
+        XCTAssertFalse(item(facts(),SessionNotificationPreferences.operation).enabled)
     }
 
     func testSavedSessionOffersResumeArchiveAndForgetButNotTerminate() {
         let saved = facts("paused", raw: row("resume", "archive", "rename", "fork", "forget"))
-        XCTAssertEqual(["terminal", "review_later", "resume", "rename", "fork", "archive", "copy_name", "copy_reference", "copy_folder", "forget"], items(saved).map(\.id))
+        XCTAssertEqual(["terminal", "review_later", "session_notifications", "resume", "rename", "fork", "archive", "copy_name", "copy_reference", "copy_folder", "forget"], items(saved).map(\.id))
         XCTAssertEqual("Forget saved session…", item(saved, "forget").label)
         XCTAssertEqual("Move to archive…", item(saved, "archive").label)
         XCTAssertTrue(items(facts("stopped", raw: row("resume", "archive"))).contains { $0.id == "archive" })
@@ -392,7 +393,8 @@ final class SessionActionsMenuTests: XCTestCase {
 
     func testArchivedVersionHasNoTerminalOrReadItemsAndCannotPause() {
         let archived = facts("archived", raw: row("restore", "rename", "fork", "forget"), target: target.with(archiveId: "11111111-1111-4111-8111-111111111111"))
-        XCTAssertEqual(["restore", "rename", "fork", "copy_name", "copy_reference", "copy_folder", "forget"], items(archived).map(\.id))
+        XCTAssertEqual(["session_notifications", "restore", "rename", "fork", "copy_name", "copy_reference", "copy_folder", "forget"], items(archived).map(\.id))
+        XCTAssertFalse(item(archived,SessionNotificationPreferences.operation).enabled)
         XCTAssertEqual("Forget archived version…", item(archived, "forget").label)
         XCTAssertEqual("This archived conversation is read-only.", SessionActionsMenu.operationReason(archived, "pause"))
         XCTAssertEqual("Select an archived version first.", SessionActionsMenu.operationReason(facts(), "restore"))

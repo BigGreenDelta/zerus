@@ -1,5 +1,6 @@
 #include "AttentionTracker.h"
 #include "SessionPresentation.h"
+#include "SessionNotifications.h"
 
 #include <QGuiApplication>
 #include <QJsonArray>
@@ -22,6 +23,23 @@ QString concise(QString value, int limit)
 // transient empty listing, a resume or a connector restart must not announce
 // the same question again.
 constexpr qsizetype SeenQuestions = 64;
+QJsonObject suppressed(const SessionInfo &s) {
+    return s.sharedNotifications ? s.notificationPreferences.value("suppressed").toObject() : QJsonObject();
+}
+bool suppressedMain(const SessionInfo &s) {
+    const auto main = suppressed(s).value("main_attention").toObject();
+    return !main.isEmpty() && main.value("run_id").toString() == s.runId
+        && SessionNotifications::matches(main, s.phase, s.attentionId, s.attentionStarted);
+}
+bool suppressedChild(const SessionInfo &s, const QString &id, const QJsonObject &child) {
+    const auto saved = suppressed(s).value("child_attention").toObject().value(id).toObject();
+    return !saved.isEmpty() && SessionNotifications::matches(saved, SessionNotifications::childPhase(child),
+        SessionNotifications::childRequest(child), SessionNotifications::childStarted(child));
+}
+QString notificationRequest(const QString &request, const QJsonValue &started) {
+    return QString::fromUtf8(QJsonDocument(QJsonArray{request,
+        request.isEmpty() ? SessionNotifications::positive(started) : QJsonValue()}).toJson(QJsonDocument::Compact));
+}
 }
 
 AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &box, qint64 now)
@@ -35,7 +53,7 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
     AttentionChanges changes;
     const auto previous = m_hosts.value(host).toObject();
     if (!box.ok) {
-        // An explicit local mute can withdraw an offline peer's existing banner.
+        // A confirmed host mute can withdraw an offline peer's existing banner.
         // Retain its observed event/seen IDs: an offline listing cannot resolve
         // requests, discover events or turn unmute into a delayed notification.
         QSet<QString> mutedRuns, mutedConversations;
@@ -98,7 +116,8 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
                 : s.phase == "input" ? QObject::tr("Input needed")
                 : !s.recovery.value("reason").toString().isEmpty() ? concise(s.recovery.value("reason").toString(), 240)
                 : !s.activityDetail.isEmpty() ? concise(s.activityDetail, 240) : QObject::tr("Agent needs attention");
-            notice(s, identity(s), s.phase, s.attentionId, reason, false, s.attentionAcknowledged);
+            notice(s, identity(s), s.phase, s.sharedNotifications ? notificationRequest(s.attentionId, s.attentionStarted) : s.attentionId,
+                reason, false, s.attentionAcknowledged || suppressedMain(s));
         }
         // Read state comes from FleetState, not the raw CLI snapshot. Replies
         // belong to conversations so a rename/resume does not repeat a banner.
@@ -113,7 +132,7 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             // Hosts do not report routine ticks of a recurring scheduled job as
             // replies; consume any that arrive. The reply after the schedule
             // ends, or once its count is known, notifies as usual.
-            if (s.muted || (idle && s.replyScheduled && s.recurringSchedules > 0))
+            if (s.muted || suppressed(s).value("reply_id").toString() == s.replyId || (idle && s.replyScheduled && s.recurringSchedules > 0))
                 notice(s, key, "reply", s.replyId, {}, true, true);
             else if (idle && (!s.replyScheduled || s.recurringSchedules == 0))
                 notice(s, key, "reply", s.replyId, QObject::tr("Agent has a new reply"), true);
@@ -123,13 +142,14 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             || (s.conversationState == "ended" && s.activity != "idle") || s.subagentSource == "hook_profiles") continue;
         for (auto it = s.subagents.begin(); it != s.subagents.end(); ++it) {
             const auto child = it.value().toObject();
-            const auto phase = child.value("display_state").toString(child.value("state").toString());
+            const auto phase = SessionNotifications::childPhase(child);
             if (phase != "approval" && phase != "input" && phase != "attention") continue;
-            const auto request = child.value("attention_id").toString(child.value("question_id").toString());
+            const auto request = SessionNotifications::childRequest(child);
             const auto label = child.value("label").toString(child.value("name").toString(it.key()));
-            notice(s, "child:" + identity(s) + ':' + it.key(), phase, request,
+            notice(s, "child:" + identity(s) + ':' + it.key(), phase,
+                s.sharedNotifications ? notificationRequest(request, SessionNotifications::childStarted(child)) : request,
                 QObject::tr("Subagent %1: %2").arg(concise(label, 100), phase == "approval" ? QObject::tr("Approval needed") : QObject::tr("Input needed")),
-                false, s.attentionAcknowledged);
+                false, s.attentionAcknowledged || suppressedChild(s, it.key(), child));
         }
     }
     // Optional questions belong to conversations, like replies. Every listed row
@@ -148,8 +168,20 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
     }
     QList<AttentionNotice> questions;
     for (auto it = optional.begin(); it != optional.end(); ++it) {
-        const auto old = previous.value(it.key()).toObject();
+        auto old = previous.value(it.key()).toObject();
         const auto &s = *it->session;
+        const auto baseline = suppressed(s).value("optional_question_ids").toArray();
+        auto observed = old.value("seen").toArray();
+        for (const auto &id : baseline) if (!observed.contains(id)) observed.append(id);
+        while (observed.size() > SeenQuestions) observed.removeFirst();
+        if (!baseline.isEmpty()) {
+            old["seen"] = observed;
+            const auto posted = target(old.value("token").toString());
+            if (posted.value("host").toString() == host && posted.value("agent").toString() == s.cmd
+                && posted.value("conversation").toString() == s.conversationId && baseline.contains(posted.value("question"))) {
+                old.remove("token"); old.remove("retry_at");
+            }
+        }
         if (it->unknown) {
             // An unreadable index is not an answer: keep the banner and IDs.
             if (!old.isEmpty()) {

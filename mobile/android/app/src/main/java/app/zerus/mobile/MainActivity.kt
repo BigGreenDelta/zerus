@@ -400,7 +400,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         if (badge.additionalUnread) {
-            val unread = DesktopSessionPalette.colors(DesktopBadgeKind.Unread, dark)
+            val unread = DesktopSessionPalette.colors(if(SessionNotificationPreferences.muted(session)) DesktopBadgeKind.Neutral else DesktopBadgeKind.Unread,dark)
             Surface(color = Color(unread.background), shape = RoundedCornerShape(5.dp)) {
                 Icon(Icons.Default.MarkEmailUnread, "New reply", Modifier.padding(4.dp).size(12.dp), tint = Color(unread.foreground))
             }
@@ -668,11 +668,13 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             ProviderBadge(session.agent, Modifier.size(24.dp))
                             Text(SessionFilters.label(session), Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if(SessionNotificationPreferences.muted(session)) Icon(Icons.Default.NotificationsOff,"Notifications muted on all devices",tint=Muted,modifier=Modifier.size(18.dp))
                             // A reply read on another device needs no badge here.
                             (if (SharedReadPolicies.replyRead(session) || SessionFilters.replyInProgress(session, online)) null else UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
                                 SessionFilters.visibleUnreadReply(session, online)))?.let { unread ->
-                                Surface(color = Mint, shape = CircleShape, modifier = Modifier.semantics { contentDescription = unread.description }) {
-                                    Text(unread.text, Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Background,
+                                val muted = SessionNotificationPreferences.muted(session)
+                                Surface(color = if(muted) Color(0xFF2B343E) else Mint, shape = CircleShape, modifier = Modifier.semantics { contentDescription = unread.description }) {
+                                    Text(unread.text, Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = if(muted) Muted else Background,
                                         style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                                 }
                             }
@@ -968,7 +970,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(unread?.let { "${it.text} unread" }.orEmpty(), Modifier.weight(1f),
-                    color = if (unread != null) Mint else Muted, style = MaterialTheme.typography.bodySmall)
+                    color = if (unread != null && SessionNotificationPreferences.parse(raw ?: session.raw,target)?.muted != true) Mint else Muted, style = MaterialTheme.typography.bodySmall)
                 if (offeredQuestionCount > 0) TextButton(onClick = {
                     if (!questionDisplay.expanded) questionQueue.selected?.let { question -> updateQuestionDisplay { it.open(question) } }
                 }) { Text("Questions ($offeredQuestionCount)") }
