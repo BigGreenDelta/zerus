@@ -325,8 +325,22 @@ fn checked_input(
     {
         return Err("previous input has not been confirmed by the agent; inspect Terminal before sending again".into());
     }
+    if settings_unconfirmed(&record) {
+        return Err(SETTINGS_UNCONFIRMED.into());
+    }
     Ok(record)
 }
+
+/// Keys of a model or effort change the agent may not have read yet. Unlike
+/// sent text it is not a first message, so a new session keeps its first
+/// message state; a later native event settles it.
+fn settings_unconfirmed(record: &Value) -> bool {
+    record["settings_unconfirmed_at"]
+        .as_f64()
+        .is_some_and(|at| record["last_event_at"].as_f64().unwrap_or(0.0) <= at)
+}
+
+const SETTINGS_UNCONFIRMED: &str = "the agent did not react to the last model settings change; finish or cancel it in Terminal, then send a message there to continue";
 
 /// Capture ANSI attributes so a faint Codex placeholder is distinguishable from
 /// a user's existing draft. Never clear/edit the terminal's current draft.
@@ -862,6 +876,17 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unread_settings_keys_wait_for_a_native_event() {
+        let mut record = json!({"settings_unconfirmed_at": 10.0, "last_event_at": 9.0});
+        assert!(settings_unconfirmed(&record));
+        record["last_event_at"] = json!(10.0);
+        assert!(settings_unconfirmed(&record));
+        record["last_event_at"] = json!(10.5);
+        assert!(!settings_unconfirmed(&record));
+        assert!(!settings_unconfirmed(&json!({"last_event_at": 0.0})));
+    }
+
     #[test]
     fn idle_only_dispatch_and_new_session_settings_follow_the_listing() {
         // Clear, compaction and settings dispatch accept the Ready session the

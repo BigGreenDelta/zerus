@@ -1429,7 +1429,11 @@ can allow selection without creating a conversation. Startup prompts, drafts,
 unconfirmed resume and an already submitted first message block that operation.
 Unverified states fall back to Terminal with an explanation.
 A choice that the agent's status line already shows is confirmed without typing
-anything into Terminal.
+anything into Terminal. A change that fails after the agent visibly read every
+typed key and returned to its empty prompt leaves nothing unconfirmed, so another
+change or a message can follow, including a new session's first message. When the
+agent has not reacted to a typed key, further changes and messages wait for its
+next native event: finish or cancel the change in Terminal and send a message there.
 
 Codex model choices use the selected account's `models_cache.json` and sort by
 ascending signed 32-bit `priority`, preserving source order for ties, as in
