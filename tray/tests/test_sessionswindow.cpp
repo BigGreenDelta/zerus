@@ -1347,7 +1347,7 @@ void TestSessionsWindow::rebuildKeepsProjectOrderAtScale()
     organization.markImported(box.host);
     QSettings().setValue("workspace/organization", QJsonDocument(organization.toJson()).toJson(QJsonDocument::Compact));
     FleetState state; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
-    SessionsWindow window(program()); keepDetailsPollsOut(window);
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.show();
     QElapsedTimer elapsed; elapsed.start(); window.setFleet(state);
     const auto first = elapsed.nsecsElapsed();
     auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list);
