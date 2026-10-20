@@ -19,6 +19,7 @@ class SessionList : public WorkspaceList {
     Q_OBJECT
 public:
     explicit SessionList(QWidget *parent = nullptr);
+    ~SessionList() override;
     void setActivityAnimationEnabled(bool enabled);
     void syncActivityAnimation();
     bool activityAnimationRunning() const { return m_activityTimer.isActive(); }

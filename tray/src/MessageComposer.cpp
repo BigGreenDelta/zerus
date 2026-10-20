@@ -5,6 +5,7 @@
 #include "ContentScale.h"
 #include "ExternalFile.h"
 #include "LocalFile.h"
+#include "MachinePlatform.h"
 #include "Shortcuts.h"
 #include "SessionCardDelegate.h"
 #include "WorkspaceIcons.h"
@@ -18,6 +19,7 @@
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDropEvent>
 #include <QDragLeaveEvent>
 #include <QFile>
@@ -30,13 +32,16 @@
 #include <QKeyEvent>
 #include <QToolTip>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QLocale>
 #include <QMessageBox>
+#include <QMenu>
 #include <QMimeData>
 #include <QMimeDatabase>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QScreen>
 #include <QSignalBlocker>
@@ -216,6 +221,13 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     m_attach->setFixedSize(34, 34); m_attach->setIconSize(QSize(19, 19));
     m_attach->setToolTip(tr("Attach files, paste an image, or drop files onto this session"));
     m_attach->setAccessibleName(tr("Attach files to message"));
+    m_reference = new QPushButton; m_reference->setObjectName("referenceMessageFile");
+    m_reference->setFixedSize(34, 34); m_reference->setIconSize(QSize(19, 19));
+    m_reference->setAccessibleName(tr("Reference an existing file"));
+    m_fileMenu = new QMenu(m_attach);
+    m_attachFileAction = m_fileMenu->addAction(tr("Attach files…"), this, &MessageComposer::attachFiles);
+    m_referenceFileAction = m_fileMenu->addAction(tr("Reference an existing file…"), this, &MessageComposer::referenceFile);
+    m_referenceFileAction->setObjectName("referenceExistingFileAction");
     m_status = new StatusMessage; m_status->setObjectName("messageStatus"); m_status->setFixedHeight(34);
     m_status->setTextFormat(Qt::PlainText); m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_retry = new QPushButton(tr("Allow retry")); m_retry->setObjectName("allowMessageRetry"); m_retry->hide();
@@ -262,7 +274,7 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
         const QString model = m_models->currentData().toString(), effort = m_efforts->currentData().toString();
         m_settingsPopup->hide(); emit settingsRequested(m_key, model, effort);
     });
-    actions->addWidget(m_attach); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_refreshStatus); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
+    actions->addWidget(m_attach); actions->addWidget(m_reference); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_refreshStatus); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
     inputLayout->addLayout(actions);
     connect(edit, &QPlainTextEdit::textChanged, this, [this]() {
         if (m_loading || m_key.isEmpty()) return;
@@ -307,7 +319,8 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     edit->addAction(m_sendAction);
     connect(&ShortcutRegistry::instance(), &ShortcutRegistry::changed, this, &MessageComposer::applyShortcuts);
     applyShortcuts();
-    connect(m_attach, &QPushButton::clicked, this, &MessageComposer::attachFiles);
+    connect(m_attach, &QPushButton::clicked, this, [this] { if (!m_attach->menu()) attachFiles(); });
+    connect(m_reference, &QPushButton::clicked, this, &MessageComposer::referenceFile);
     connect(m_send, &QPushButton::clicked, this, &MessageComposer::send);
     connect(m_retry, &QPushButton::clicked, this, [this]() {
         if (m_key.isEmpty()) return;
@@ -345,6 +358,7 @@ void MessageComposer::setSessionKey(const QString &key)
 {
     if (key == m_key) return;
     ++m_navigationRevision;
+    setFileReferenceTarget({}, {}, {});
     m_sessionStatus.clear(); m_sessionStatusError = false; m_sessionStatusBlocksInput = false;
     m_settingsPopup->hide();
     m_toolbar->closePopovers(); m_preview->hide();
@@ -667,6 +681,102 @@ void MessageComposer::attachFiles()
     for (const auto &file : files) attachFile(file);
 }
 
+void MessageComposer::setFileReferenceTarget(const QString &key, const QString &host, const QString &machine, const QString &context)
+{
+    const QString bound = key == m_key ? key : QString();
+    if (m_referenceKey == bound && m_referenceHost == host && m_referenceMachine == machine && m_referenceContext == context) return;
+    m_referenceKey = bound; m_referenceHost = host; m_referenceMachine = machine; m_referenceContext = context;
+    ++m_referenceRevision;
+    updateControls();
+}
+
+void MessageComposer::referenceFile()
+{
+    if (m_referenceKey.isEmpty() || m_referenceKey != m_key || !canEditAttachments() || isPreparingSending(m_key)) return;
+    const auto target = voiceTarget();
+    const auto revision = m_referenceRevision;
+    const QPointer<MessageComposer> owner(this);
+    const auto current = [owner, target, revision] {
+        if (!owner) return false;
+        const auto now = owner->voiceTarget();
+        return now.key == target.key && now.navigation == target.navigation && now.revision == target.revision
+            && revision == owner->m_referenceRevision && owner->m_referenceKey == owner->m_key
+            && owner->canEditAttachments() && !owner->isPreparingSending(owner->m_key);
+    };
+    const bool local = m_referenceHost.isEmpty();
+    const auto machine = local ? tr("this computer") : m_referenceMachine.isEmpty() ? m_referenceHost : m_referenceMachine;
+    const QPointer<QDialog> dialog = new QDialog(this); dialog->setObjectName("fileReferenceDialog");
+    dialog->setWindowTitle(tr("Reference file — %1").arg(machine));
+    auto *layout = new QVBoxLayout(dialog);
+    auto *hint = new QLabel(local
+        ? tr("Insert a path to an existing file on this computer. Only the path is added; the file is not read or uploaded.")
+        : tr("Enter the path of an existing file on %1 (%2), not on this computer. Only the path is added; its existence is not checked here.").arg(machine, m_referenceHost));
+    hint->setObjectName("fileReferenceHint"); hint->setTextFormat(Qt::PlainText); hint->setWordWrap(true); layout->addWidget(hint);
+    auto *row = new QHBoxLayout;
+    const QPointer<QLineEdit> path = new QLineEdit; path->setObjectName("fileReferencePath"); path->setAccessibleName(tr("File path on %1").arg(machine));
+    path->setPlaceholderText(local ? tr("Absolute file path") : tr("/path/to/file, ~/file or C:\\path\\file")); row->addWidget(path, 1);
+    if (local) {
+        auto *browse = new QPushButton(tr("Browse…")); browse->setObjectName("browseReferenceFile"); row->addWidget(browse);
+        connect(browse, &QPushButton::clicked, dialog, [owner, dialog, path] {
+            if (!owner || !dialog) return;
+            const QPointer<QFileDialog> picker = new QFileDialog(dialog, tr("Reference an existing file"));
+            picker->setObjectName("fileReferencePicker"); picker->setFileMode(QFileDialog::ExistingFile);
+            picker->setNameFilter(tr("All files (*)"));
+            const auto outcome = picker->exec();
+            const auto selected = picker && outcome == QDialog::Accepted ? picker->selectedFiles().value(0) : QString();
+            delete picker.data();
+            if (owner && dialog && path && !selected.isEmpty()) path->setText(selected);
+        });
+    }
+    layout->addLayout(row);
+    auto *error = new QLabel; error->setObjectName("fileReferenceError"); error->setWordWrap(true); error->setTextFormat(Qt::PlainText); layout->addWidget(error);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
+    auto *insert = buttons->addButton(tr("Insert reference"), QDialogButtonBox::AcceptRole); insert->setObjectName("insertFileReference");
+    layout->addWidget(buttons); connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    QString reference;
+    connect(buttons, &QDialogButtonBox::accepted, dialog, [&, owner, dialog] {
+        if (!dialog) return;
+        if (!current()) {
+            dialog->reject(); return;
+        }
+        QString value = path->text();
+        if (value.isEmpty() || value.toUtf8().size() > 32768
+            || std::any_of(value.cbegin(), value.cend(), [](QChar c) { return c.category() == QChar::Other_Control; })) {
+            error->setText(tr("Enter a file path without line breaks or control characters.")); return;
+        }
+        if (local) {
+            if (value.startsWith("~/")) value = QDir::homePath() + value.mid(1);
+            const QFileInfo info(value);
+            if (!info.isAbsolute() || !info.isFile()) { error->setText(tr("Choose an existing file on this computer.")); return; }
+            value = info.absoluteFilePath();
+        } else if (!((value.startsWith('/') && !value.startsWith("//")) || value.startsWith("~/")
+            || MachinePlatform::absolute(value, MachinePlatform::Style::Windows))) {
+            error->setText(tr("Enter an absolute path or ~/ path on %1.").arg(machine)); return;
+        }
+        // JSON quoting preserves spaces, literal quotes and Windows separators.
+        // These are draft instructions, never a shell command or an upload.
+        const auto quoted = QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact);
+        reference = tr("Use the existing file at %1.").arg(QString::fromUtf8(quoted.mid(1, quoted.size() - 2)));
+        const auto text = owner->m_editor->toPlainText();
+        const auto cursor = owner->m_editor->textCursor();
+        const auto begin = cursor.selectionStart(), end = cursor.selectionEnd();
+        if (begin > 0 && !text[begin - 1].isSpace()) reference.prepend(' ');
+        if (end < text.size() && !text[end].isSpace()) reference.append(' ');
+        auto result = text;
+        result.replace(begin, end - begin, reference);
+        if (result.toUtf8().size() > MaxTextBytes) {
+            error->setText(tr("Message exceeds 64 KiB.")); return;
+        }
+        dialog->accept();
+    });
+    dialog->resize(520, dialog->sizeHint().height()); path->setFocus();
+    const auto outcome = dialog->exec();
+    delete dialog.data();
+    if (outcome != QDialog::Accepted || !current()) return;
+    auto cursor = owner->m_editor->textCursor(); cursor.insertText(reference); owner->m_editor->setTextCursor(cursor);
+    owner->m_editor->setFocus(Qt::OtherFocusReason);
+}
+
 void MessageComposer::attachDroppedFiles(const QStringList &paths)
 {
     if(!canAttachFiles())return;
@@ -866,8 +976,25 @@ void MessageComposer::updateControls()
         :m_sessionStatusBlocksInput?m_sessionStatus:QString();
     m_editor->setToolTip(lockHint);
     m_editor->setAccessibleDescription(lockHint);
-    m_attach->setEnabled(!m_key.isEmpty() && !locked && m_attachmentsAvailable);
-    m_attach->setToolTip(m_attachmentsAvailable?tr("Attach files, paste an image, or drop files onto this session"):m_attachmentsReason);
+    const bool referenceTarget = !m_referenceKey.isEmpty() && m_referenceKey == m_key;
+    const bool fileMenu = m_narrow && referenceTarget;
+    // Keep Files, model settings, Stop and Send within a narrow column.
+    // The existing Stop icon and accessible name retain the same action.
+    m_stop->setText(fileMenu ? QString() : tr("Stop"));
+    m_stop->setAccessibleName(tr("Stop current turn"));
+    m_stop->setMinimumWidth(fileMenu ? 34 : 0); m_stop->setMaximumWidth(fileMenu ? 34 : QWIDGETSIZE_MAX);
+    m_attach->setMenu(fileMenu ? m_fileMenu : nullptr);
+    m_attach->setEnabled(!m_key.isEmpty() && !locked && (m_attachmentsAvailable || fileMenu));
+    m_attach->setAccessibleName(fileMenu ? tr("Files: attach or reference an existing file") : tr("Attach files to message"));
+    m_attachFileAction->setEnabled(canAttachFiles());
+    m_referenceFileAction->setEnabled(referenceTarget && canEditAttachments() && !isPreparingSending(m_key));
+    m_reference->setVisible(referenceTarget && !fileMenu);
+    m_reference->setEnabled(!m_key.isEmpty() && !locked && !isPreparingSending(m_key));
+    m_reference->setToolTip(m_referenceHost.isEmpty()
+        ? tr("Reference an existing file on this computer without uploading it")
+        : tr("Reference an existing file on %1 without uploading it").arg(m_referenceMachine.isEmpty() ? m_referenceHost : m_referenceMachine));
+    m_attach->setToolTip(fileMenu ? tr("Files: attach copies or reference an existing file on the agent's computer")
+        : m_attachmentsAvailable ? tr("Attach files, paste an image, or drop files onto this session") : m_attachmentsReason);
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
     m_send->setText(draft.sending ? tr("Sending…") : waiting ? tr("Waiting to send…") : tr("Send"));
@@ -901,7 +1028,7 @@ void MessageComposer::updateControls()
     if (!showSettings) m_settingsPopup->hide();
     // Do not transfer an unfinished settings interaction to the Stop action.
     if (returnFocus) m_editor->setFocus(Qt::OtherFocusReason);
-    m_actions->setStretch(1, status.isEmpty() ? 1 : 0);
+    m_actions->setStretch(2, status.isEmpty() ? 1 : 0);
     setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg(ownError || (status == m_sessionStatus && m_sessionStatusError)
         ? (m_dark ? "#f4ab9b" : "#a13224") : waiting ? (m_dark ? "#efc978" : "#92641b") : (m_dark ? "#a2adbc" : "#627082")));
     emit controlsChanged();
@@ -1190,6 +1317,7 @@ void MessageComposer::setTheme(bool dark)
     updateSettingsButton();
     m_toolbar->setTheme(dark);
     m_attach->setIcon(workspaceIcon("attachment", dark ? QColor("#c5cfdb") : QColor("#536477")));
+    m_reference->setIcon(workspaceIcon("connect", dark ? QColor("#c5cfdb") : QColor("#536477")));
     m_refreshStatus->setIcon(composerIcon("refresh", QColor(dark ? "#efc978" : "#92641b"), QColor(dark ? "#85909e" : "#6d7784")));
     m_retry->setIcon(composerIcon("refresh", QColor(dark ? "#efc978" : "#92641b"), QColor(dark ? "#85909e" : "#6d7784")));
     m_stop->setIcon(workspaceIcon("stop",dark ? QColor("#ff9ca8") : QColor("#b52d48")));

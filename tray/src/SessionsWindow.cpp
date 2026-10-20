@@ -115,6 +115,14 @@
 
 namespace {
 
+QString fileReferenceContext(const SessionInfo &session, const QJsonObject &details, const QString &childConversation = {})
+{
+    // Either source can first reveal a replacement run. Never let an older
+    // accepted inspection conceal a newer listing identity while a dialog is open.
+    return QString::fromUtf8(QJsonDocument(QJsonArray{session.runId, session.conversationId,
+        details.value("run_id"), details.value("conversation_id"), childConversation}).toJson(QJsonDocument::Compact));
+}
+
 QJsonObject sendEvidence(const QJsonObject &data)
 {
     QJsonObject result;
@@ -3224,6 +3232,7 @@ void SessionsWindow::selectSession()
     const QString child = item ? item->data(SessionRoles::ChildId).toString() : QString();
     const QString key = item ? item->data(child.isEmpty() ? KeyRole : SessionRoles::ParentKey).toString() : QString();
     if (key != m_selectedKey) {
+        m_subagentComposer->setFileReferenceTarget({}, {}, {});
         pushSelectionChanged(key);
         m_readCandidate.clear(); m_readSelectionKey.clear();
         m_selectedKey = key; m_details = {}; m_events = {}; m_cursor = 0; m_inspectError.clear();
@@ -3306,8 +3315,11 @@ void SessionsWindow::openSubagent(const QString &id)
     const auto roster = entry ? childRoster(*entry) : QJsonObject();
     if (!entry || !roster.contains(id)) return;
     if (m_subagentId == id) return;
+    m_composer->setFileReferenceTarget({}, {}, {});
     m_subagentDetails = {}; m_subagentComposer->setInputVisible(false);
     m_subagentComposer->setSessionKey(childKey(*entry, id));
+    m_subagentComposer->setFileReferenceTarget(childKey(*entry, id), entry->host, entry->machine,
+        fileReferenceContext(entry->session, m_details));
     m_subagentId = id; m_subagentConversation = m_details.value("conversation_id").toString(entry->session.conversationId);
     m_subagentCwd = selectedDirectory();
     m_subagentTitle->setText(childName(roster.value(id).toObject(), id));
@@ -3324,6 +3336,7 @@ void SessionsWindow::closeSubagent()
 {
     const bool wasOpen = !m_subagentId.isEmpty();
     m_subagentId.clear(); m_subagentConversation.clear(); m_subagentCwd.clear(); m_subagentDetails = {};
+    m_subagentComposer->setFileReferenceTarget({}, {}, {});
     m_activityStack->setCurrentIndex(0);
     const QSignalBlocker block(m_sessions);
     for (int i = 0; i < m_sessions->count(); ++i) if (m_sessions->item(i)->data(KeyRole).toString() == m_selectedKey) { m_sessions->setCurrentRow(i); break; }
@@ -3491,6 +3504,8 @@ void SessionsWindow::renderDetails()
         m_terminal->setAvailable(false, tr("Select a running session."));
         m_composer->setAvailability(false, tr("Select a session.")); return;
     }
+    m_composer->setFileReferenceTarget(m_subagentId.isEmpty() ? entry->key : QString(), entry->host, entry->machine,
+        fileReferenceContext(entry->session, m_details));
     auto s = entry->session;
     if (m_details.value("tracked").toBool() && m_details.value("last_event_at").toDouble() >= s.lastEventAt
         && m_details.value("provider_status_at").toDouble() >= s.providerStatusAt) {
@@ -3802,6 +3817,8 @@ void SessionsWindow::renderDetails()
     }
     if (!m_subagentId.isEmpty()) {
         const auto child = childRoster(*entry).value(m_subagentId).toObject();
+        m_subagentComposer->setFileReferenceTarget(childKey(*entry, m_subagentId), entry->host, entry->machine,
+            fileReferenceContext(entry->session, m_details, m_subagentDetails.value("conversation_id").toString()));
         children = QString("<h3>%1</h3><p>%2</p><p>%3</p><h3>%4</h3>")
             .arg(htmlText(childName(child, m_subagentId)), htmlText(childStatus(child)),
                 htmlText(child.value("task").toString(child.value("detail").toString())), tr("Tasks"));

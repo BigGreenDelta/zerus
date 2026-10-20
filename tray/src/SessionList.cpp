@@ -1,6 +1,7 @@
 #include "SessionList.h"
 #include "SessionCardDelegate.h"
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -64,6 +65,16 @@ SessionList::SessionList(QWidget *parent) : WorkspaceList(parent), m_token(QUuid
                 viewport()->update(SessionDelegate::elapsedRegion(animationOption(index), index));
         }
     });
+}
+
+SessionList::~SessionList()
+{
+    // QWidget deletes the owned model/scrollbar after our members are gone;
+    // QObject's automatic disconnection happens later than that teardown.
+    disconnect(model(), nullptr, this, nullptr);
+    disconnect(verticalScrollBar(), nullptr, this, nullptr);
+    m_activityTimer.stop(); m_elapsedTimer.stop();
+    QCoreApplication::removePostedEvents(this, QEvent::MetaCall);
 }
 
 void SessionList::setActivityAnimationEnabled(bool enabled)

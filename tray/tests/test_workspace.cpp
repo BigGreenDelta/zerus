@@ -20,6 +20,7 @@
 #include <QHelpEvent>
 #include <QToolTip>
 #include <QTextDocument>
+#include <QPointer>
 #include <QDir>
 #include <algorithm>
 
@@ -66,7 +67,48 @@ private slots:
     void compactRowPreferencesKeepExactBoundedIdentities();
     void mutedAttentionUsesNeutralPresentation_data();
     void mutedAttentionUsesNeutralPresentation();
+    void sessionListDestructionStopsOwnedCallbacks_data();
+    void sessionListDestructionStopsOwnedCallbacks();
 };
+
+void TestWorkspace::sessionListDestructionStopsOwnedCallbacks_data()
+{
+    QTest::addColumn<bool>("populated");
+    QTest::newRow("empty") << false;
+    QTest::newRow("populated") << true;
+}
+
+void TestWorkspace::sessionListDestructionStopsOwnedCallbacks()
+{
+    QFETCH(bool, populated);
+    QWidget owner; owner.resize(340, 200);
+    auto *list = new SessionList(&owner); list->resize(320, 180);
+    list->setItemDelegate(new SessionDelegate(list));
+    if (populated) {
+        for (int i = 0; i < 4; ++i) {
+            auto *row = new QListWidgetItem(list); row->setData(SessionRoles::Key, QString::number(i));
+            row->setData(SessionRoles::Title, "Working session " + QString::number(i)); row->setData(SessionRoles::Agent, "codex");
+            row->setData(SessionRoles::Status, "Working"); row->setData(SessionRoles::Working, 1);
+            row->setData(SessionRoles::WorkingSince, QDateTime::currentSecsSinceEpoch() - 10);
+            row->setData(SessionRoles::RowCollapsed, true);
+        }
+        owner.show(); QTRY_VERIFY(list->isVisible()); list->syncRowExpandButtons(); list->syncActivityAnimation();
+        QVERIFY(!list->findChildren<QToolButton *>("expandSessionRow").isEmpty());
+        QVERIFY(list->activityAnimationRunning()); QVERIFY(list->elapsedTimerRunning());
+        list->item(0)->setData(SessionRoles::Title, "A pending compact-row update");
+    }
+    QPointer<QObject> remaining(list); QSignalSpy destroyed(list, &QObject::destroyed);
+    QObject observer; bool modelDestroyed = false; int lateCalls = 0;
+    // Pending work must expire with the derived widget, even if another child
+    // destructor drains queued calls before QObject's automatic cleanup runs.
+    QTimer::singleShot(0, list, [&lateCalls] { ++lateCalls; });
+    QObject::connect(list->model(), &QObject::destroyed, &observer, [receiver = static_cast<QObject *>(list), &modelDestroyed] {
+        modelDestroyed = true; QCoreApplication::sendPostedEvents(receiver, QEvent::MetaCall);
+    });
+    delete list;
+    QVERIFY(remaining.isNull()); QCOMPARE(destroyed.size(), 1); QVERIFY(modelDestroyed); QCOMPARE(lateCalls, 0);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall); QCOMPARE(lateCalls, 0);
+}
 
 void TestWorkspace::compactRowsKeepTheirGeometryAndHideDetails_data()
 {
