@@ -150,6 +150,14 @@ class TaskSyncTest {
         assertTrue(computer.envelopes.isEmpty())
     }
 
+    @Test fun aSlowExchangeStopsAtItsDeadline() = world { computer, connection, replicas ->
+        computer.store.add("Add rate limiting", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End)
+        computer.delayMs = 1_000
+        val failures = TaskSync({ RelayApi() }, replicas, exchangeTimeoutMs = 300).sync(connection, key, "orchard", listOf(peer(computer)))
+        assertEquals(setOf("computer-1"), failures.keys)
+        assertTrue(failures.getValue("computer-1"), failures.getValue("computer-1").contains("took longer"))
+    }
+
     @Test fun aFailedExchangeWaitsAMinute() = world { computer, connection, replicas ->
         computer.store.add("Add rate limiting", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End)
         var now = 0L

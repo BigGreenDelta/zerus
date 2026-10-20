@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
@@ -55,6 +56,7 @@ object TaskSyncPlan {
  * decides every request; this only carries its JSON.
  */
 class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplicas,
+               private val exchangeTimeoutMs: Long = EXCHANGE_MS,
                private val clock: () -> Long = System::currentTimeMillis) {
     private val locks = ConcurrentHashMap<ProjectKey, Mutex>()
     private val waiting = ConcurrentHashMap<Pair<ProjectKey, String>, Long>()
@@ -75,7 +77,9 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
                         if (mine == peer.digest) continue
                         val known = quiet[wait]
                         if (known != null && known.first == mine && peer.digest in setOf(known.second, known.third)) continue
-                        val theirs = exchange(connection, store, peer.computerId)
+                        // Besides its request budget, an exchange ends after five minutes.
+                        val theirs = withTimeoutOrNull(exchangeTimeoutMs) { exchange(connection, store, peer.computerId) }
+                            ?: error("The task exchange took longer than ${exchangeTimeoutMs / 1000} seconds.")
                         quiet[wait] = Triple(withContext(Dispatchers.IO) { store.liveDigest() }, peer.digest, theirs)
                         waiting.remove(wait)
                     } catch (e: CancellationException) { throw e }
@@ -117,5 +121,8 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
         } finally { exchange.close() }
     }
 
-    companion object { const val RETRY_MS = 60_000L }
+    companion object {
+        const val RETRY_MS = 60_000L
+        const val EXCHANGE_MS = 5 * 60_000L
+    }
 }

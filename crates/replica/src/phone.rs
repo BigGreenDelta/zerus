@@ -16,8 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const PAGE: usize = 512 * 1024;
 /// The most updates one request carries; a phone sends the rest in its next.
 pub const MAX_UPDATES: usize = 256;
-/// The largest document a phone puts together from parts.
-const MAX_ASSEMBLY: usize = 64 << 20;
+/// The largest document a phone puts together from parts: twice the 4 MiB a
+/// task document may reach.
+const MAX_ASSEMBLY: usize = 2 * crate::MAX_DOCUMENT;
 
 /// One document's updates on the wire: `task` is its UUID, or none for the
 /// project document; `bytes` are base64.
@@ -446,6 +447,7 @@ impl Exchange {
             .into_iter()
             .map(|update| update.decode("invalid base64 in an answer"))
             .collect::<Result<Vec<_>>>()?;
+        let with_part = answer.part.is_some();
         match answer.part {
             Some(part) => updates.extend(self.assemble(part)?),
             // The request asked for the next part and none came: the computer no
@@ -453,6 +455,13 @@ impl Exchange {
             None => self.part = None,
         }
         let brought = updates.len();
+        // More promised and nothing brought would come back the same.
+        if answer.more && brought == 0 && !with_part {
+            self.ranges.clear();
+            return Err(Error::failed(
+                "the computer's answer brought nothing but said more remains",
+            ));
+        }
         let imported = store.import_updates(updates)?;
         self.skip
             .extend(answer.refused.iter().map(|damaged| damaged.uuid.clone()));

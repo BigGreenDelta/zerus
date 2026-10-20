@@ -238,7 +238,9 @@ class MainActivity : ComponentActivity() {
         }
     } }
     // The phone's task replicas follow their computers while the app is visible, on every tab.
+    // The first check waits for the catalog the loop above reads after five seconds.
     LaunchedEffect(model, lifecycle) { lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        delay(6_000)
         while (true) {
             model.syncTasks()
             delay(15_000)

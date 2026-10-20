@@ -578,3 +578,51 @@ fn a_document_that_leaves_while_in_parts_ends_the_exchange() {
     assert!(run.requests < 5, "{} requests", run.requests);
     assert!(phone.inventory().unwrap().0.tasks.is_empty());
 }
+
+fn empty_answer(computer: &ProjectStore) -> Answer {
+    Answer {
+        schema: 1,
+        imported: 0,
+        refused: vec![],
+        updates: vec![],
+        part: None,
+        more: false,
+        digest: live_digest(computer),
+        inventory: None,
+    }
+}
+
+#[test]
+fn a_part_of_a_document_larger_than_any_task_is_refused() {
+    let (_a, _b, phone, computer) = pair();
+    let mut exchange = Exchange::new();
+    exchange.next_request(&phone).unwrap().unwrap();
+    let huge = Answer {
+        part: Some(zerus_replica::phone::Part {
+            task: Some("0b9d6c55-2f5e-4c39-9a51-0d6f3c2a7e11".into()),
+            size: 9 << 20,
+            sha256: "00".repeat(32),
+            offset: 0,
+            bytes: "bG9ybw==".into(),
+        }),
+        more: true,
+        ..empty_answer(&computer)
+    };
+    let error = exchange.accept(&phone, huge).unwrap_err().to_string();
+    assert!(error.contains("too large"), "{error}");
+}
+
+#[test]
+fn an_answer_that_promises_more_and_brings_nothing_ends_the_exchange() {
+    let (_a, _b, phone, computer) = pair();
+    add(&computer, "Add rate limiting");
+    let mut exchange = Exchange::new();
+    exchange.next_request(&phone).unwrap().unwrap();
+    let empty = Answer {
+        more: true,
+        ..empty_answer(&computer)
+    };
+    let error = exchange.accept(&phone, empty).unwrap_err().to_string();
+    assert!(error.contains("brought nothing"), "{error}");
+    assert!(exchange.finished());
+}
