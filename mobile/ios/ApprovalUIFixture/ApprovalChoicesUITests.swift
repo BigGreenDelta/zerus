@@ -4,14 +4,13 @@ import XCTest
 /// simulator-only memory host; callback assertions do not prove provider, relay or persistence delivery.
 @MainActor final class ApprovalChoicesUITests: XCTestCase {
     private var app: XCUIApplication!
-    override func setUpWithError() throws {
+    @MainActor private func launchFixture() {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launch()
         XCTAssertTrue(app.staticTexts["Synthetic UI only — no native delivery"].waitForExistence(timeout: 5))
         count(0)
     }
-    override func tearDownWithError() throws { app.terminate() }
     private var send: XCUIElement { app.buttons["Send answer"] }
     private func choice(_ label: String) -> XCUIElement {
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch
@@ -30,6 +29,8 @@ import XCTest
         count(0)
     }
     func testRealCountdownAndOneTimeChoice() {
+        defer { app?.terminate() }
+        launchFixture()
         choice("Approve once").tap()
         XCTAssertFalse(send.isEnabled); count(0)
         reviewed(); send.tap()
@@ -38,6 +39,8 @@ import XCTest
         XCTAssertTrue(app.staticTexts["last-callback"].label.contains("\"selected_option_ids\":[\"1\"]"))
     }
     func testBroaderCancelThenSeparateConfirm() {
+        defer { app?.terminate() }
+        launchFixture()
         broad(); app.buttons["Cancel"].tap(); count(0)
         XCTAssertTrue(send.exists); send.tap()
         XCTAssertTrue(app.buttons["Confirm"].waitForExistence(timeout: 2)); count(0)
@@ -47,6 +50,8 @@ import XCTest
         XCTAssertTrue(app.staticTexts["last-callback"].label.contains("\"selected_option_ids\":[\"2\"]"))
     }
     func testReplacementRetiresAnOpenConfirmation() {
+        defer { app?.terminate() }
+        launchFixture()
         choice("Approve for this session").tap(); reviewed()
         app.buttons["Replace in 2 seconds"].tap(); send.tap()
         XCTAssertTrue(app.buttons["Confirm"].waitForExistence(timeout: 1)); count(0)
@@ -55,6 +60,8 @@ import XCTest
         count(0); XCTAssertFalse(send.isEnabled)
     }
     func testUnavailableRetiresAnOpenConfirmation() {
+        defer { app?.terminate() }
+        launchFixture()
         choice("Approve for this session").tap(); reviewed()
         app.buttons["Unavailable in 2 seconds"].tap(); send.tap()
         XCTAssertTrue(app.buttons["Confirm"].waitForExistence(timeout: 1)); count(0)
@@ -63,6 +70,8 @@ import XCTest
         count(0); XCTAssertFalse(send.isEnabled)
     }
     func testFeedbackKeyboardCannotBypassReview() {
+        defer { app?.terminate() }
+        launchFixture()
         let field = app.textFields["Reject with feedback"]
         XCTAssertTrue(field.exists); field.tap(); field.typeText("Use a safer command\n")
         count(0)
@@ -73,6 +82,8 @@ import XCTest
         XCTAssertTrue(answer.contains("\"selected_option_ids\":[]")); XCTAssertTrue(answer.contains("Use a safer command"))
     }
     func testBackgroundClosesConfirmationWithoutSending() {
+        defer { app?.terminate() }
+        launchFixture()
         broad(); let generation = app.staticTexts["fixture-generation"].label
         XCUIDevice.shared.press(.home)
         app.activate()
@@ -82,6 +93,8 @@ import XCTest
         XCTAssertFalse(send.isEnabled)
     }
     func testHiddenAndReadOnlyCardsNeverSubmit() {
+        defer { app?.terminate() }
+        launchFixture()
         choice("Approve once").tap(); reviewed()
         app.buttons["Hide card"].tap(); count(0); XCTAssertFalse(send.exists)
         app.buttons["Show card"].tap(); XCTAssertFalse(send.isEnabled); count(0)

@@ -200,6 +200,18 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(re.findall(r'boundary\("(begin|complete)", "([a-z_]+)"\)', fixture), expected)
         self.assertEqual(re.findall(r'cases \+= "([a-z_]+)"', fixture), self.ui.CASES.split(","))
 
+    def test_ios_fixture_launch_and_cleanup_stay_inside_each_main_actor_test(self):
+        ios = module("ios_approval_ui", "scripts/ci/ios-approval-ui.py")
+        source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
+        self.assertIn("@MainActor final class ApprovalChoicesUITests: XCTestCase", source)
+        self.assertIn("@MainActor private func launchFixture()", source)
+        self.assertNotIn("override func setUp", source)
+        self.assertNotIn("override func tearDown", source)
+        entries = re.findall(r"func (test\w+)\(\) \{\n        defer \{ app\?\.terminate\(\) \}\n        launchFixture\(\)", source)
+        self.assertEqual(len(entries), 7)
+        self.assertEqual(set(entries), set(ios.CASES))
+        self.assertEqual(source.count("        launchFixture()"), 7)
+
 
 if __name__ == "__main__":
     unittest.main()
