@@ -237,6 +237,13 @@ class MainActivity : ComponentActivity() {
             else if (tab != 2) model.refresh()
         }
     } }
+    // The phone's task replicas follow their computers while the app is visible, on every tab.
+    LaunchedEffect(model, lifecycle) { lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        while (true) {
+            model.syncTasks()
+            delay(15_000)
+        }
+    } }
     fun back() {
         if (model.selected == null && tab == 0 && model.sessionProjectScope != null) { model.clearSessionScope(); tab = 1 }
         else model.back()

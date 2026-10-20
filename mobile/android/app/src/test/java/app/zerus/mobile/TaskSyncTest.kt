@@ -4,6 +4,9 @@ import app.zerus.mobile.replica.TaskPosition
 import app.zerus.mobile.replica.TaskStage
 import app.zerus.mobile.replica.TaskStore
 import app.zerus.mobile.replica.TaskTarget
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -28,7 +31,9 @@ class TaskSyncTest {
         val envelopes = mutableListOf<JSONObject>()
         val paths = mutableListOf<String>()
         @Volatile var refusal: String? = null
+        @Volatile var delayMs = 0L
         override fun dispatch(request: RecordedRequest): MockResponse {
+            Thread.sleep(delayMs)
             val envelope = JSONObject(request.body.readUtf8())
             synchronized(this) { envelopes += envelope; paths += request.path.orEmpty() }
             val id = envelope.getString("request_id")
@@ -120,6 +125,19 @@ class TaskSyncTest {
         replicas.purge("workspace-a")
         assertFalse(replicas.folder(key).exists())
         replicas.store(elsewhere, "orchard").use { assertEquals("Measure first", it.list().tasks.single().text) }
+    }
+
+    @Test fun purgeWaitsForARunningExchangeAndDropsItsReplica() = world { computer, connection, replicas ->
+        computer.store.add("Add rate limiting", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End)
+        val sync = TaskSync({ RelayApi() }, replicas)
+        computer.delayMs = 400
+        coroutineScope {
+            val running = async { sync.sync(connection, key, "orchard", listOf(peer(computer))) }
+            delay(150)
+            sync.purge(key.connectionId)
+            running.await()
+        }
+        assertFalse(replicas.folder(key).exists())
     }
 
     @Test fun onlyComputersThatCanExchangeNowAreKept() {

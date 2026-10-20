@@ -79,6 +79,14 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
             failures
         }
 
+    /** Drops the connection's replicas once its running exchanges end, so none writes them again. */
+    suspend fun purge(connectionId: String) {
+        val held = locks.filterKeys { it.connectionId == connectionId }.toSortedMap(compareBy { it.key }).values.toList()
+        held.forEach { it.lock() }
+        try { withContext(Dispatchers.IO) { replicas.purge(connectionId) } }
+        finally { held.forEach { it.unlock() } }
+    }
+
     private suspend fun exchange(connection: Connection, store: TaskStore, computerId: String) {
         val exchange = withContext(Dispatchers.IO) { store.exchange() }
         try {

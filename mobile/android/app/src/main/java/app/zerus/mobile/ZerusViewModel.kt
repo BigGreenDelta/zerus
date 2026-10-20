@@ -11,6 +11,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
@@ -132,6 +133,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val previewAccounts by lazy { AccountSnapshots.demo(System.currentTimeMillis()/1000.0) }
     var projects by mutableStateOf<List<ProjectSummary>>(emptyList()); private set
     var projectWarnings by mutableStateOf<List<String>>(emptyList()); private set
+    // The phone's task replicas and their sync (TaskSync.kt); tasks have no screen yet.
+    private val taskReplicas by lazy { TaskReplicas(java.io.File(getApplication<Application>().noBackupFilesDir, "task-replicas-v1")) }
+    private val taskSync by lazy { TaskSync({ api }, taskReplicas) }
+    private var taskDigests: Map<ProjectKey, Map<String, String>> = emptyMap()
+    private var taskDigestsAt = 0L
+    private var taskSyncRunning = false
+    private var taskSyncJob: Job? = null
     var selectedProject by mutableStateOf<ProjectSummary?>(null); private set
     var sessionProjectScope by mutableStateOf<ProjectSummary?>(null); private set
     var sessionFilter by mutableStateOf(SessionFilter.All); private set
@@ -1858,6 +1866,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             historyFlights.values.filter { it.first.connectionId==connection.id }.forEach { it.second.cancel() }
             historyFlights.entries.removeAll { it.value.first.connectionId==connection.id }
             runCatching { historyCache.purgeWorkspace(connection.id);pageCache.purgeWorkspace(connection.id) }
+            taskDigests = taskDigests.filterKeys { it.connectionId != connection.id }
+            // A merge is idempotent: the running exchange stops here, and the replicas go.
+            taskSyncJob?.cancelAndJoin()
+            runCatching { taskSync.purge(connection.id) }
             attachments.clear()
             computerFiles.clear()
             catalogSessions = catalogSessions.filterNot { it.target.connectionId == connection.id }
@@ -1889,6 +1901,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val newSessions = mutableListOf<Session>(); val newMachines = mutableListOf<Machine>(); val newAccounts=mutableListOf<AccountCatalog>()
         val successfulConnections=mutableSetOf<String>()
         val newProjects = mutableListOf<ProjectSummary>(); val newOperations = mutableMapOf<MachineKey, Set<String>>(); val warnings = mutableListOf<String>()
+        val newDigests = mutableMapOf<ProjectKey, Map<String, String>>()
         try {
             for (connection in originalConnections) {
                 try {
@@ -1910,6 +1923,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     newOperations += prepared.operations; machineFeatures = machineFeatures + prepared.features
                     val catalog = prepared.projects
                     newSessions += catalog.sessions; newProjects += catalog.projects; warnings += catalog.unavailableComputers
+                    newDigests += catalog.taskDigests
                     successfulConnections += connection.id
                     if (catalogGate.owns(operation.id) && connections == originalConnections && catalogErrorOwner == connection.id) error = ""
                 } catch (e: CancellationException) { throw e }
@@ -1928,6 +1942,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
             newMachines += machines.filter { it.connectionId in unavailable }.map { it.copy(online=false,lastKnown=true) }
             newProjects += projects.filter { it.key.connectionId in unavailable }
+            taskDigests = newDigests + taskDigests.filterKeys { it.connectionId in unavailable }
+            taskDigestsAt = android.os.SystemClock.elapsedRealtime()
             accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 sessions = newSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
@@ -1950,6 +1966,45 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if (connections != originalConnections) refresh()
             }
         }
+        }
+    }
+    /**
+     * Exchanges every catalogued project's tasks with each computer whose digest differs
+     * (TaskSync); the activity calls it every 15 s while started. With no catalog read
+     * for 20 s, as while a conversation is open, it reads the computers itself.
+     */
+    fun syncTasks() {
+        if (demo || taskSyncRunning) return
+        taskSyncRunning = true
+        val original = connections
+        taskSyncJob = viewModelScope.launch {
+            try {
+                var digests = taskDigests; var operations = machineOperations; var known = machines
+                if (android.os.SystemClock.elapsedRealtime() - taskDigestsAt > 20_000) {
+                    val fresh = mutableMapOf<ProjectKey, Map<String, String>>(); val freshOperations = mutableMapOf<MachineKey, Set<String>>()
+                    val seen = mutableListOf<Machine>()
+                    for (connection in original) {
+                        try {
+                            val computers = api.computers(connection)
+                            val prepared = withContext(Dispatchers.Default) {
+                                SessionCatalogParser.parse(connection, computers.optJSONArray("computers")?.objects().orEmpty())
+                            }
+                            fresh += prepared.projects.taskDigests; freshOperations += prepared.operations; seen += prepared.machines
+                        } catch (e: CancellationException) { throw e }
+                        catch (_: Exception) { /* That connection syncs once it answers again. */ }
+                    }
+                    digests = fresh; operations = freshOperations; known = seen
+                }
+                val names = projects.associate { it.key to it.name }
+                for ((key, peers) in TaskSyncPlan.peers(digests, relayOperations, operations, known)) {
+                    if (connections != original) return@launch
+                    val connection = original.find { it.id == key.connectionId } ?: continue
+                    taskSync.sync(connection, key, names[key] ?: "Project", peers)
+                }
+            } catch (e: CancellationException) { throw e }
+            // Failures wait in TaskSync's backoff; tasks have no screen to report them yet.
+            catch (_: Exception) { }
+            finally { taskSyncRunning = false }
         }
     }
     fun openProject(project: ProjectSummary) { selectedProject = project }

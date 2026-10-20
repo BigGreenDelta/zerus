@@ -288,6 +288,24 @@ view. Back returns to project details and preserves the normal Sessions query
 and filter. Archives are assigned by their UUID, so an archived and live session
 with the same name can belong to different projects.
 
+### Project tasks
+
+The phone keeps a replica of every catalogued project's tasks (the project
+document, every task that is not Done and any task it already holds) below
+`noBackupFilesDir/task-replicas-v1`, one folder per relay connection and swarm,
+without further encryption; backups and device transfer never include it, and
+removing a connection removes its replicas. While the app is visible it checks
+every 15 seconds, on every tab, with the catalog's tasks digests, or with its own
+read of the computers when the catalog has not been read for 20 seconds. It
+exchanges a project with every online computer that advertises `task_exchange`
+(on its relay too) and names a digest other than the phone's own, one computer
+at a time; a computer whose exchange failed waits a minute. The Rust exchange
+(`zerus-replica`'s `phone` module through `TaskExchange`) decides each request:
+ranges of task UUIDs that fit the relay, large documents in parts, and the
+phone's own changes the computer lacks; `TaskSync.kt` only carries its JSON.
+Tasks have no screen yet. See "Phone" in
+`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md`.
+
 ## Conversation history and native controls
 
 The conversation keeps a bounded hot window rather than imposing a total chat

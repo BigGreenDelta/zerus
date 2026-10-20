@@ -206,8 +206,9 @@ exchange is safe and needs no durable request identity (owner decision,
   not been read for 20 seconds, of its own read of the computers; it exchanges
   with every online computer of the project that advertises the exchange and
   names a digest other than its own, one at a time, and waits a minute before
-  it tries a computer whose exchange failed again. An update of its own too
-  large for one request (about 700 KiB) is not sent; the exchange names it.
+  it tries a computer whose exchange failed again. An update of its own larger
+  than 512 KiB, more than one request carries, is not sent; the exchange names
+  it.
 
 ### Done tasks
 
