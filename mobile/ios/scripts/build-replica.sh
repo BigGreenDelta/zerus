@@ -41,6 +41,7 @@ stamp=$(
   cd "$repo"
   {
     echo "$mode"
+    cat "$here/build-replica.sh"
     rustc --version
     cat crates/replica-ffi/Cargo.lock crates/replica-ffi/Cargo.toml crates/replica-ffi/uniffi.toml crates/replica/Cargo.toml
     find crates/replica/src crates/replica-ffi/src -type f | LC_ALL=C sort | while read -r file; do

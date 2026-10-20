@@ -45,6 +45,8 @@ struct TasksView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var openTask: String?
     @State private var cancelling: TaskInfo?
+    /// Cancel chosen in the task settings: its alert waits until the sheet has gone.
+    @State private var cancelAfterSheet: TaskInfo?
     @State private var cancelReason = ""
     @State private var projectSettings = false
     @State private var allSessions = false
@@ -55,7 +57,9 @@ struct TasksView: View {
         let tasks = app.tasks!
         NavigationStack {
             VStack(spacing: 0) {
-                if let key = tasks.tasksKey {
+                if !tasks.storageError.isEmpty && tasks.tasksKey != nil {
+                    Text(tasks.storageError).foregroundStyle(Theme.muted).frame(maxWidth: .infinity, alignment: .leading).padding(20)
+                } else if let key = tasks.tasksKey {
                     chips(tasks, key)
                     tabStrip(tasks)
                     ProgressView().progressViewStyle(.linear).tint(Theme.mint).frame(height: 3).opacity(tasks.taskBusy ? 1 : 0)
@@ -98,11 +102,13 @@ struct TasksView: View {
             try? await Task.sleep(for: .seconds(3))
             if !Task.isCancelled { shown = nil }
         }
-        .sheet(item: Binding(get: { openTask.map(OpenTask.init) }, set: { openTask = $0?.id })) { open in
-            TaskSettingsSheet(uuid: open.id) { task in
-                cancelReason = ""
-                cancelling = task
-            }
+        .sheet(item: Binding(get: { openTask.map(OpenTask.init) }, set: { openTask = $0?.id }), onDismiss: {
+            guard let task = cancelAfterSheet else { return }
+            cancelAfterSheet = nil
+            cancelReason = ""
+            cancelling = task
+        }) { open in
+            TaskSettingsSheet(uuid: open.id) { task in cancelAfterSheet = task }
         }
         .sheet(isPresented: $projectSettings) { ProjectTaskSettingsSheet() }
         .sheet(isPresented: $allSessions) { AllSessionsSheet() }

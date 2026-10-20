@@ -9,7 +9,6 @@ import ZerusReplica
 final class TaskActionsTests: XCTestCase {
     private let key = ProjectKey(connectionId: "workspace-a", swarmId: "swarm-1", id: "project-1")
     private let connection = Connection(id: "workspace-a", label: "Workspace", url: "https://gateway.example", token: "synthetic")
-    private let done: FakeComputer.Receipt = { _ in ("completed", ["schema": 1, "ok": true], .null) }
 
     private func world() throws -> (FakeComputer, TaskReplicas, TaskSync) {
         let computer = FakeComputer()

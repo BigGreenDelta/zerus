@@ -110,8 +110,8 @@ struct TaskSettingsSheet: View {
                     ForEach(actions, id: \.action) { state in
                         Button {
                             if state.action == .cancel {
-                                dismiss()
                                 onCancel(task)
+                                dismiss()
                             } else {
                                 tasks.saveThen(task, text: textChanged ? text : nil, target: targetChanged ? chosenTarget : nil, action: state.action)
                                 dismiss()
@@ -156,14 +156,15 @@ struct TaskSettingsSheet: View {
             if textChanged || targetChanged {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
+                        // The edits stay shown until the listing brings them back.
                         tasks.saveTask(task.uuid, text: textChanged ? text : nil, target: targetChanged ? chosenTarget : nil)
-                        edited = nil
-                        target = nil
                     }
                     .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
+        .onChange(of: task.text) { _, saved in if saved == edited { edited = nil } }
+        .onChange(of: task.target) { _, saved in if saved == target { target = nil } }
         .sheet(isPresented: $choosing) {
             if let key = tasks.tasksKey {
                 TaskSessionSheet(key: key) { picked in

@@ -13,6 +13,8 @@ final class TasksModel {
     @ObservationIgnored unowned let app: AppModel
     @ObservationIgnored private let replicas: TaskReplicas?
     @ObservationIgnored private let taskSync: TaskSync?
+    /// Why the phone keeps no task replicas, when its storage could not be prepared.
+    let storageError: String
 
     private(set) var tasksKey: ProjectKey?
     private(set) var tasksChosen: ChosenSession?
@@ -42,9 +44,20 @@ final class TasksModel {
     /// The latest first-page read; an older one's answer is dropped.
     @ObservationIgnored private var doneRequest = 0
 
-    init(app: AppModel, replicas: TaskReplicas? = try? TaskReplicas.live()) {
+    convenience init(app: AppModel) {
+        let (replicas, failure) = Self.liveReplicas()
+        self.init(app: app, replicas: replicas, storageError: failure)
+    }
+
+    private static func liveReplicas() -> (TaskReplicas?, String) {
+        do { return (try TaskReplicas.live(), "") }
+        catch { return (nil, "The phone could not prepare its task storage: \(TaskSyncError.reason(error))") }
+    }
+
+    init(app: AppModel, replicas: TaskReplicas?, storageError: String = "") {
         self.app = app
         self.replicas = replicas
+        self.storageError = replicas == nil && storageError.isEmpty ? "The phone keeps no task storage." : storageError
         taskSync = replicas.map { TaskSync(client: app.client, replicas: $0) }
     }
 
@@ -124,10 +137,13 @@ final class TasksModel {
         if tasksKey == key { refreshTasks() }
     }
 
-    /// Drops the connection's replicas once their running exchanges end.
+    /// Drops the connection's replicas. A merge is idempotent: the running exchanges stop here, as on Android, and the replicas go.
     func purge(_ connectionId: String) async {
         if tasksKey?.connectionId == connectionId { closeTasks() }
         reviewCounts = reviewCounts.filter { $0.key.connectionId != connectionId }
+        let running = [syncTask].compactMap { $0 } + Array(projectSyncs.values)
+        stopTaskSync()
+        for task in running { await task.value }
         await taskSync?.purge(connectionId: connectionId)
     }
 

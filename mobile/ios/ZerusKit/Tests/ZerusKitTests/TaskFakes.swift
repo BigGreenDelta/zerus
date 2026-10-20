@@ -12,6 +12,8 @@ final class FakeComputer: Sendable {
         var paths: [String] = []
         /// A failed exchange receipt with this error.
         var refusal: String?
+        /// Operations whose receipts stay queued, as a computer that has not claimed them yet.
+        var queued: Set<String> = []
         var delay: Duration = .zero
         var receipts: [String: Receipt] = [:]
         /// Whole replies for an operation instead of its receipt: a lost answer, a relay refusal.
@@ -35,16 +37,18 @@ final class FakeComputer: Sendable {
     private func reply(_ recorded: StubProtocol.Recorded) -> StubProtocol.Reply {
         guard let envelope = recorded.json?.object else { return StubProtocol.json(400, #"{"error":"no envelope"}"#) }
         let operation = envelope.string("operation")
-        let (delay, refusal, receipt, raw) = state.withLock { state in
+        let (delay, refusal, receipt, raw, queued) = state.withLock { state in
             state.envelopes.append(envelope)
             state.paths.append(recorded.url.path)
-            return (state.delay, state.refusal, state.receipts[operation], state.raw[operation])
+            return (state.delay, state.refusal, state.receipts[operation], state.raw[operation], state.queued.contains(operation))
         }
         if delay > .zero { Thread.sleep(forTimeInterval: Double(delay.components.seconds) + Double(delay.components.attoseconds) / 1e18) }
         if let raw { return raw() }
         let payload = envelope.object("payload") ?? JSONObject()
         let outcome: (state: String, result: JSON, error: JSON)
-        if operation == "task_exchange" {
+        if queued {
+            outcome = ("queued", .null, .null)
+        } else if operation == "task_exchange" {
             if let refusal {
                 outcome = ("failed", .null, .string(refusal))
             } else {

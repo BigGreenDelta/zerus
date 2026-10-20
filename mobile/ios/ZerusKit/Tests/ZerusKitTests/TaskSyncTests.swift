@@ -123,8 +123,11 @@ final class TaskSyncTests: XCTestCase {
     func testASlowExchangeStopsAtItsDeadline() async throws {
         let computer = FakeComputer(), replicas = try replicas()
         try computer.store.filed("Add rate limiting")
-        computer.update { $0.delay = .seconds(1) }
+        // The computer does not claim the exchange; the phone stops waiting at its deadline.
+        computer.update { $0.queued = ["task_exchange"] }
+        let started = Date()
         let failures = await sync(replicas, timeout: .milliseconds(300)).sync(connection, key, name: "orchard", peers: [try peer(computer)])
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
         XCTAssertEqual(Set(failures.keys), ["computer-1"])
         XCTAssertTrue(failures["computer-1"]?.contains("took longer") == true, failures["computer-1"] ?? "")
     }
