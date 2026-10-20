@@ -198,13 +198,14 @@ async fn projection_returns_one_intact_fixed_range_and_rejects_malformed_native_
             json!({"state":"completed","result":result,"error":null})
         } else { json!({"state":"failed","result":null,"error":ERROR}) };
         assert_eq!(connector.execute(submitted.clone()).await.unwrap(), Outcome::Finished(expected), "{}", case["id"]);
-        let calls = connector.native.calls.borrow();
-        assert_eq!(calls.len(), 1, "{}", case["id"]);
-        assert_eq!(calls[0].argv, ["history-projection", SESSION, "--json"]);
-        assert_eq!(calls[0].payload.as_ref(), Some(&payload));
-        assert_eq!(calls[0].timeout, Some(2.0));
-        assert_eq!(calls[0].max_output_bytes, Some(1024 * 1024));
-        drop(calls);
+        {
+            let calls = connector.native.calls.borrow();
+            assert_eq!(calls.len(), 1, "{}", case["id"]);
+            assert_eq!(calls[0].argv, ["history-projection", SESSION, "--json"]);
+            assert_eq!(calls[0].payload.as_ref(), Some(&payload));
+            assert_eq!(calls[0].timeout, Some(2.0));
+            assert_eq!(calls[0].max_output_bytes, Some(1024 * 1024));
+        }
         assert_eq!(connector.execute(submitted).await.unwrap(), Outcome::Replayed);
         assert_eq!(connector.native.calls.borrow().len(), 1);
     }
@@ -310,14 +311,15 @@ async fn projection_peer_context_preserves_bound_scope_and_refuses_a_rebound_rou
     submitted["gateway_route"] = json!({"schema":1,"route_id":identity,"computer_id":computer,"machine_id":machine});
     assert_eq!(gateway.execute(submitted.clone()).await.unwrap(), Outcome::Finished(
         json!({"state":"completed","result":corpus["result"],"error":null})));
-    let calls = gateway.native.calls.borrow();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].argv, ["swarm", "mobile-peer", "--json"]);
-    assert_eq!(calls[0].payload, Some(json!({"schema":1,"via":"peer.example.test","target_machine_id":machine,
-        "argv":["history-projection",SESSION,"--json"],"payload":corpus["payload"]})));
-    assert_eq!(calls[0].timeout, Some(2.0));
-    assert_eq!(calls[0].max_output_bytes, Some(1024 * 1024));
-    drop(calls);
+    {
+        let calls = gateway.native.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].argv, ["swarm", "mobile-peer", "--json"]);
+        assert_eq!(calls[0].payload, Some(json!({"schema":1,"via":"peer.example.test","target_machine_id":machine,
+            "argv":["history-projection",SESSION,"--json"],"payload":corpus["payload"]})));
+        assert_eq!(calls[0].timeout, Some(2.0));
+        assert_eq!(calls[0].max_output_bytes, Some(1024 * 1024));
+    }
     fleet.routes.borrow_mut().get_mut(&identity).unwrap().machine_id = computer.into();
     let next = "60000000-0000-4000-8000-000000000006";
     submitted["request_id"] = json!(next);
