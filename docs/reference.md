@@ -1161,8 +1161,8 @@ Polling and inspection never edit native drafts. The exact form payload and
 matching native acknowledgement determine delivery; uncertain attempts are
 never replayed automatically.
 
-With Claude Code 2.1.296 or later on Linux and macOS, hgs also registers its
-own `PermissionRequest` hook for AskUserQuestion and tool approvals,
+With Claude Code 2.1.296 or later on Linux, macOS and Windows, hgs also
+registers its own `PermissionRequest` hook for AskUserQuestion and tool approvals,
 `hgs __state answer-channel`, beside its usual hooks. The entry an earlier hgs
 registered for AskUserQuestion alone is widened in place.
 - It waits next to Claude's question panel and is bound to the one exact
@@ -1178,8 +1178,10 @@ registered for AskUserQuestion alone is widened in place.
   further answers are refused until the question is resolved in Terminal.
 - An answer, decline or cancellation in Terminal ends the hook, and so do a run
   change and its one-day deadline.
-- Sessions started before the hook was registered, Windows and other agents keep
-  Terminal delivery. Tool approvals through this hook are described below.
+- Sessions started before the hook was registered and other agents keep
+  Terminal delivery. On Windows the hook runs only in Claude Code's exec form;
+  settings that still use the shell form, written for an older Claude Code,
+  keep Terminal delivery. Tool approvals through this hook are described below.
 
 A disabled **Submit** always shows why, including while a saved answer is still
 loading.
@@ -1211,18 +1213,20 @@ larger Terminal.
 
 Claude keeps no scrollback for a question or approval panel taller than its
 pane, so a long question or command can lose its title and beginning
-everywhere. Kimi 2.1's startup folder trust prompt can lose its title the same
-way when the project MCP disclosure is long. Kimi 2.2 pages that disclosure,
-or asks for a larger terminal, when its pane is short; Zerus offers the trust
-choice only once the whole disclosure shows on one page, and never chooses
-for you. A session no client views keeps tmux's default 80x24 size. While a
+everywhere. Kimi question dialogs and Kimi 2.1's startup folder trust prompt
+can lose their title the same way when their disclosure is long. Kimi 2.2
+pages its trust disclosure, or asks for a larger terminal, when its pane is
+short; Zerus offers the trust choice only once the whole disclosure shows on
+one page, and never chooses for you. A session no client views keeps tmux's
+default 80x24 size, and so does a pane of the Windows session host. While a
 recorded question or permission request waits and such a pane shows a clipped
 panel, Zerus makes that pane taller, doubling its height up to 192 rows without
-changing its width, until the agent redraws the complete panel. The exact request match still decides; the next
-client that attaches sets the size again. A pane a client views keeps that
-client's size, so its clipped panel stays in Terminal. Only a question listing,
-such as `hgs inspect`, grows a pane, and never while an answer to that run
-drives it: both hold the run's answer lock.
+changing its width, until the agent redraws the complete panel. The exact
+request match still decides; the next client that attaches sets the size
+again. A pane a client views keeps that client's size, so its clipped panel
+stays in Terminal, as it does under a Windows session host older than this
+behavior. Only a question listing, such as `hgs inspect`, grows a pane, and
+never while an answer to that run drives it: both hold the run's answer lock.
 
 Claude tool approvals keep the session at **Needs approval** and appear in
 Activity while Claude shows its chooser. When the complete panel matches the

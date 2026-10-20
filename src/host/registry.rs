@@ -32,7 +32,7 @@ use super::{
     log,
     protocol::{
         Attach, Attached, Captured, ClientEntry, ClientList, ConsoleEvidence, CreateSession,
-        Created, Done, EnvValue, ErrorBody, ErrorCode, HostStatus, InputClaim, InputReady,
+        Created, Done, EnvValue, ErrorBody, ErrorCode, Grown, HostStatus, InputClaim, InputReady,
         LaunchState, Listed, Op, PaneDetails, PaneEntry, Resolved, SessionEntry, Signal,
         SupervisorOp, SupervisorRegistration, Target, RUN_MARKER,
     },
@@ -71,6 +71,8 @@ const ENDED_LAUNCHES: usize = 256;
 /// What `launch_status` keeps of an ended session's screen: its last lines.
 const ENDING_LINES: usize = 8;
 const ENDING_BYTES: usize = 2048;
+/// The tallest pane `grow_unviewed` makes: its screen model stays small.
+const MAX_GROWN_ROWS: u16 = 1024;
 
 /// When an idle host exits (D3).
 #[derive(Debug)]
@@ -399,6 +401,17 @@ impl<L: Launcher> Host<L> {
             Op::Capture { target, styled } => payload(&Captured {
                 text: self.find(&target)?.capture(styled),
             }),
+            Op::GrowUnviewed { target, rows } => {
+                if rows > MAX_GROWN_ROWS {
+                    return Err(error(
+                        ErrorCode::Invalid,
+                        format!("a pane grows to at most {MAX_GROWN_ROWS} rows"),
+                    ));
+                }
+                payload(&Grown {
+                    grown: self.find(&target)?.grow_unviewed(rows)?,
+                })
+            }
             Op::SendKeys { target, keys } => {
                 let session = self.find(&target)?;
                 session.send_keys(&keys, || self.evidence(&session).ok())?;

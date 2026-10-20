@@ -268,6 +268,39 @@ native session host of Windows Phase 2 has its own isolated recipe and tests,
 `tests/test_windows_native_agents.py`, which `scripts/ci/agent-compatibility.py`
 runs with the reviewed Claude Code and Codex packages, each against a local fake
 API: [testing the Windows session host](docs/windows-host-testing.md).
+
+Kimi's optional native input, question and startup-trust fixtures are
+`test_kimi_native.NativeKimi` (two cases),
+`test_kimi_questions_native.NativeKimiQuestions` (three) and
+`test_kimi_questions_native.NativeKimiTrust` (three). Run them only with an
+explicitly reviewed `HGS_KIMI_TEST_BIN` and exact `HGS_KIMI_TEST_SHA256`, a sealed
+`HGS_TEST_BIN`, private helper PATH and evidence directory; never point them at
+the installed Kimi. Each case runs a private copy, disables automatic updates,
+uses its loopback model and platform fixture, proves the child image and private
+environment, and retains uncertain cleanup. The macOS cases compile one exec
+shim per case, so they require both native and compiler resources. A campaign
+over two reviewed Kimi versions is sixteen native cases, not the seventeen R2
+and seven question-fixture controls. The latter use stand-ins and loopback
+servers and establish fixture behavior only. `test_kimi_trust` and
+`test_kimi_cache_hint` additionally execute hgs and private tmux fixtures; they
+are synthetic integration tests, not pure controls. Historical native results
+do not qualify a newly composed candidate.
+
+The separate [pinned Kimi native workflow](.github/workflows/kimi-native.yml)
+runs these sixteen cases on disposable standard Linux and macOS runners for
+relevant PR changes or a manual run. It builds hgs once with Rust 1.99.1 and
+two jobs, runs the existing pinned tmux in a private prefix, and checks both
+official version manifests and all image sizes/SHA-256 pins before native
+execution. It receives no provider or publication credentials, uses no cache,
+and never installs Kimi globally. Linux x64 and Darwin arm64 are the only
+reviewed images; an unexpected runner architecture fails before the build.
+Every case keeps its existing image/environment/custody assertions. A timeout
+or uncertain cleanup fails, retains the recorded private roots and images as
+bounded diagnostics, and never claims that stopping the test leader stopped
+its detached agents. Ephemeral VM disposal is the final boundary. Public model
+endpoints are not configured; the fixtures' model and platform are loopback
+only. This is not a kernel network enclosure or Windows Kimi qualification.
+The historical NP50 owner-Mac campaigns are separate and are not replayed.
 `scripts/fetch-conpty.py` downloads the ConPTY package pinned in
 `packaging/windows/conpty.json` from nuget.org and writes only its checked
 `conpty.dll` and `OpenConsole.exe`; `package-windows.py` puts them next to

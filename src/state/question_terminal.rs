@@ -224,8 +224,65 @@ fn questions(card: &Value) -> Result<&Vec<Value>> {
     Ok(items)
 }
 
+fn rule(row: &str) -> bool {
+    let row = row.trim();
+    row.chars().count() > 3 && row.chars().all(|ch| ch == '─')
+}
+
+/// Rows of a Kimi question dialog's bottom: its controls, every variant of
+/// which ends in "esc cancel", directly above its closing rule.
+fn dialog_bottom(rows: &[&str]) -> Option<usize> {
+    let end = rows.iter().rposition(|row| rule(row))?;
+    let controls = rows[..end].iter().rposition(|row| !row.trim().is_empty())?;
+    rows[controls].contains("esc cancel").then_some(end)
+}
+
+/// A Kimi question dialog taller than its pane: its bottom shows while the
+/// " question" heading at its top has scrolled off.
+pub(super) fn clipped(screen: &str) -> bool {
+    let Ok(plain) = plain(screen) else {
+        return false;
+    };
+    let rows: Vec<&str> = plain.lines().collect();
+    dialog_bottom(&rows)
+        .is_some_and(|end| !rows[..end].iter().any(|row| row.trim() == "question"))
+}
+
+/// A Kimi question dialog whose heading and bottom both show.
+pub(super) fn complete(screen: &str) -> bool {
+    let Ok(plain) = plain(screen) else {
+        return false;
+    };
+    let rows: Vec<&str> = plain.lines().collect();
+    dialog_bottom(&rows)
+        .is_some_and(|end| rows[..end].iter().any(|row| row.trim() == "question"))
+}
+
+/// Grow the pane no client views until this recorded Kimi question's clipped
+/// dialog shows completely (`fit_unviewed`); the exact match in `available`
+/// still decides. Only a question listing calls it.
+pub(super) fn fit(record: &Value, card: &Value) {
+    if string(record, "agent") != "kimi"
+        || string(card, "source") != "kimi_wire"
+        || record["active_tools"]
+            .get(string(card, "tool_call_id"))
+            .is_none_or(|tool| string(tool, "name") != "AskUserQuestion")
+    {
+        return;
+    }
+    let Ok(current) = Native::new(record, card).identity() else {
+        return;
+    };
+    if let Ok(screen) = Native::capture(&current) {
+        fit_unviewed(&current, screen, Native::capture, clipped, complete);
+    }
+}
+
 fn parse_panel(screen: &str, card: &Value) -> Result<Panel> {
     let items = questions(card)?;
+    if clipped(screen) {
+        return Err("the question dialog is clipped; enlarge Terminal".into());
+    }
     let plain = plain(screen)?;
     let rows: Vec<String> = plain.lines().map(str::to_owned).collect();
     let start = rows
@@ -236,10 +293,7 @@ fn parse_panel(screen: &str, card: &Value) -> Result<Panel> {
         .iter()
         .enumerate()
         .skip(start + 1)
-        .find(|(_, row)| {
-            let row = row.trim();
-            row.chars().count() > 3 && row.chars().all(|ch| ch == '─')
-        })
+        .find(|(_, row)| rule(row))
         .map(|(index, _)| index)
         .ok_or("the question dialog is clipped; enlarge Terminal")?;
     // The TUI container adds a left margin around the dialog. The dialog's
@@ -1263,6 +1317,37 @@ mod tests {
             let mut dialog = Dialog::new();
             assert!(drive(&mut dialog, &card(), &answers).is_err());
             assert!(dialog.keys.is_empty());
+        }
+    }
+    #[test]
+    fn clipped_dialog_differs_from_complete_one() {
+        // Kimi 2.1.1 and 2.2.0 at 80x24: the bottom of a tall dialog shows, its heading does not.
+        let clipped_dialog = include_str!("../../tests/fixtures/kimi-question-clipped-80x24.txt");
+        assert!(clipped(clipped_dialog));
+        assert!(!complete(clipped_dialog));
+        let option = json!({"label":"Option","description":"Любой провайдер из списка"});
+        let tall = json!({"questions":[{"question":"Which release should we prepare?",
+            "options":[option,option,option,option]}]});
+        assert_eq!(
+            parse_panel(clipped_dialog, &tall).unwrap_err(),
+            "the question dialog is clipped; enlarge Terminal"
+        );
+        let mut dialog = Dialog::new();
+        for _ in 0..2 {
+            for screen in [dialog.rendered(), format!("transcript\n{}\n status", dialog.rendered())] {
+                assert!(complete(&screen) && !clipped(&screen), "{screen}");
+            }
+            dialog.editing = true;
+        }
+        dialog.tab = 3;
+        assert!(complete(&dialog.rendered()) && !clipped(&dialog.rendered()));
+        // Without its controls row above the closing rule it is neither.
+        for screen in [
+            "│ > draft\n╰─────────────╯".to_owned(),
+            clipped_dialog.replace("esc cancel", ""),
+            " ▶ Ready to build with this plan?\n\n ▶ 1. Approve\n\n ↑/↓ select · 1/2/3 choose · ↵ confirm\n ──────".to_owned(),
+        ] {
+            assert!(!clipped(&screen) && !complete(&screen), "{screen}");
         }
     }
 }

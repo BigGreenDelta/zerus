@@ -540,6 +540,14 @@ pub enum Op {
         #[serde(default)]
         styled: bool,
     },
+    /// Make the pane `rows` tall, keeping its width, while no client is
+    /// attached, as tmux `resize-window -y` does for a window without a size
+    /// of its own: the next client that attaches sets the size again. It never
+    /// shrinks a pane (`Grown`).
+    GrowUnviewed {
+        target: Target,
+        rows: u16,
+    },
     /// Keys in order; an empty list only checks that the pane exists.
     SendKeys {
         target: Target,
@@ -879,6 +887,12 @@ pub struct PaneDetails {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Captured {
     pub text: String,
+}
+
+/// `grow_unviewed`: whether the pane is now taller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Grown {
+    pub grown: bool,
 }
 
 /// `show_environment`: null when the variable is not set.
