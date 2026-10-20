@@ -526,7 +526,7 @@ class NativeKimiApprovals(ApprovalCases, lifecycle.Harness):
                            answers=[dict(question_id='trust', selected_option_ids=['trust_0'], text='')])
             self.assertEqual(self.call('answer', payload)['status'], 'answered')
         else:
-            self.assertTrue(trust_chooser_2_2(screen, self.project), screen)
+            self.assertTrue(trust_chooser_2_2(screen, self.project.resolve()), screen)
             print('ZERUS_KIMI_TRUST=' + json.dumps(dict(case=self.id(), version=self.version, screen=screen)), flush=True)
             self.t('send-keys', '-t', '=' + self.name + ':', 'Enter')
 

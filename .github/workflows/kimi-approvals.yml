@@ -10,6 +10,7 @@ on:
       - 'scripts/ci/kimi-native.py'
       - 'scripts/ci/kimi-native-pins.json'
       - 'scripts/ci/kimi-native-manifests/**'
+      - 'scripts/ci/outside-job.py'
       - 'scripts/fetch-conpty.py'
       - 'scripts/conpty_pair.py'
       - 'packaging/windows/conpty.json'
@@ -18,6 +19,7 @@ on:
       - 'tests/test_kimi_approvals_ci.py'
       - 'tests/kimi_windows_process.py'
       - 'tests/test_kimi_native.py'
+      - 'tests/test_outside_job.py'
   workflow_dispatch:
 
 permissions:

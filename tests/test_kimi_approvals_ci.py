@@ -5,7 +5,9 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -96,6 +98,18 @@ class ApprovalGateControls(unittest.TestCase):
         item['body'] = 'cwd: /different/project with spaces\n$ printf approved'
         with self.assertRaises(AssertionError):
             case.answerable()
+        case.version, case.name = '2.2.0', 'kimi/p/approval'
+        case.project.resolve.return_value = PurePosixPath('/tmp/hgs-pause-x/project with spaces')
+        case.until = lambda predicate: native.FixtureControls.CHOOSER
+        case.t = mock.Mock()
+        with mock.patch('builtins.print'):
+            case.trust()
+        case.t.assert_called_once_with('send-keys', '-t', '=kimi/p/approval:', 'Enter')
+        case.t.reset_mock()
+        case.project.resolve.return_value = Path('/different/project')
+        with mock.patch('builtins.print'), self.assertRaises(AssertionError):
+            case.trust()
+        case.t.assert_not_called()
 
     def test_workflow_uses_exact_pr_head_or_manual_standard_hosted_without_write_permissions(self):
         source = (ROOT / '.github/workflows/kimi-approvals.yml').read_text(encoding='utf-8')
@@ -112,6 +126,51 @@ class ApprovalGateControls(unittest.TestCase):
         self.assertIn('cache-mode: none', source)
         self.assertIn("env:\n  PYTHONUTF8: '1'\n", source)
         self.assertIn('cargo +1.99.1 build --locked --bin hgs -j 2', source)
+
+
+class WindowsWrapperControls(unittest.TestCase):
+    def test_each_native_version_uses_the_reviewed_custody_only_wrapper_with_the_original_cap(self):
+        for oracle in (False, True):
+            with self.subTest(oracle=oracle), tempfile.TemporaryDirectory(prefix='kimi-wrapper-control-') as directory:
+                out, selected, child = Path(directory), ('synthetic.case',), object()
+                result = dict(tests=1, started=list(selected), completed=list(selected), failures=0, errors=0,
+                              skipped=0, expected_failures=0, unexpected_successes=0)
+                (out / 'fixture-result.json').write_text(json.dumps(result), encoding='utf-8')
+                if not oracle:
+                    (out / 'fixture-outside-job.log').write_bytes(b'synthetic native log')
+                env = dict(SystemRoot=str(Path('/fixture/windows')), PATH='original-private-path')
+                with mock.patch.object(gate, 'target', return_value='win32-x64'), \
+                        mock.patch.object(gate.subprocess, 'Popen', return_value=child) as launch, \
+                        mock.patch.object(gate.retained, 'await_child', return_value=0) as wait:
+                    self.assertEqual(gate.invoke(out, 'fixture', env, selected, oracle=oracle), result)
+                launch.assert_called_once()
+                wait.assert_called_once_with(child, out / 'fixture.log', seconds=900)
+                argv = launch.call_args.args[0]
+                self.assertNotIn('--end', argv)
+                if oracle:
+                    self.assertNotIn('--custody-only', argv)
+                    self.assertEqual(argv[-1], '--oracle')
+                    self.assertEqual(launch.call_args.kwargs['env'], env)
+                else:
+                    self.assertEqual(argv[3], str(ROOT / 'scripts/ci/outside-job.py'))
+                    self.assertEqual(argv[4:7], ['--custody-only', '--timeout', '900'])
+                    self.assertIn('--suite-child', argv)
+                    self.assertEqual(launch.call_args.kwargs['env']['PATH'], os.pathsep.join(
+                        (str(Path(env['SystemRoot']) / 'System32'),
+                         str(Path(env['SystemRoot']) / 'System32/WindowsPowerShell/v1.0'))))
+
+    def test_an_unknown_wrapper_timeout_is_never_retried_or_accepted(self):
+        with tempfile.TemporaryDirectory(prefix='kimi-wrapper-timeout-control-') as directory:
+            out, child = Path(directory), object()
+            with mock.patch.object(gate, 'target', return_value='win32-x64'), \
+                    mock.patch.object(gate.subprocess, 'Popen', return_value=child) as launch, \
+                    mock.patch.object(gate.retained, 'await_child', side_effect=TimeoutError('unknown fixture')) as wait, \
+                    mock.patch.object(gate, 'qualifies') as accept:
+                with self.assertRaisesRegex(TimeoutError, 'unknown fixture'):
+                    gate.invoke(out, 'fixture', dict(SystemRoot=str(Path('/fixture/windows'))), ('synthetic.case',))
+            launch.assert_called_once()
+            wait.assert_called_once_with(child, out / 'fixture.log', seconds=900)
+            accept.assert_not_called()
 
 
 class WindowsEnvironmentControls(unittest.TestCase):
@@ -152,6 +211,30 @@ class WindowsEnvironmentControls(unittest.TestCase):
 
 
 class WindowsCustodyControls(unittest.TestCase):
+    def test_only_a_typed_absence_before_launch_acknowledgement_can_omit_the_screen(self):
+        import test_kimi_approvals_windows as windows
+        with tempfile.TemporaryDirectory(prefix='kimi-absent-control-') as directory:
+            case = windows.NativeWindowsKimiApprovals('test_approve_once_runs_the_command')
+            case.name, case.home, case.server = 'kimi/p/approval', None, None
+            case.launch_acknowledged = False
+            case.binding = mock.Mock(return_value={})
+            response = dict(error=dict(code='not_found', message='no such private session'))
+            case.run_hgs = mock.Mock(return_value=SimpleNamespace(returncode=1,
+                                      stdout=json.dumps(response), stderr=''))
+            with mock.patch.object(windows.approvals, 'EVIDENCE', directory):
+                case.retain()
+                out = Path(directory) / case._testMethodName
+                self.assertFalse((out / 'screen.txt').exists())
+                self.assertEqual(json.loads((out / 'capture-absent.json').read_bytes())['response'], response)
+                for acknowledged, record, code in ((True, {}, 'not_found'),
+                        (False, dict(pid=7), 'not_found'), (False, {}, 'unknown')):
+                    case.launch_acknowledged = acknowledged
+                    case.binding.return_value = record
+                    case.run_hgs.return_value.stdout = json.dumps(dict(error=dict(code=code)))
+                    with self.subTest(acknowledged=acknowledged, record=record, code=code), \
+                            self.assertRaises(AssertionError):
+                        case.retain()
+
     def test_a_cleanup_failure_does_not_skip_later_stop_or_seal(self):
         import test_kimi_approvals_windows as windows
         case = windows.NativeWindowsKimiApprovals('test_approve_once_runs_the_command')

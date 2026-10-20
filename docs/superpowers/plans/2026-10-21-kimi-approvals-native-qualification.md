@@ -129,3 +129,47 @@ post-snapshot found neither declared case root nor image copy, and retained only
 the empty outer runtime. This scoped observation does not establish global
 process quiescence. These source corrections require a new reviewed exact head
 and grant; they do not qualify either platform or replay the spent attempt.
+
+## Second hosted attempt and Windows job boundary
+
+On exact `ab870da3`, macOS Kimi 2.1.1 passed all seven native approval cases.
+Kimi 2.2.0 stopped during the first case's setup: the strict trust chooser was
+given the `/tmp` project alias while the actual complete chooser displayed
+`/private/tmp`. Its initial environment/image proof passed and no trust key was
+sent. The call now supplies the resolved project path; the strict chooser and
+seven semantic method bodies stay unchanged.
+
+Windows passed all fifteen source/memory controls and its actual private-child
+environment-layout oracle before both pinned Kimi downloads. The first native
+launch then received the host's intentional refusal to escape a CI job that
+forbids breakaway. No Kimi session or approval semantics were reached. An
+independent evidence step also failed to capture the absent session. The
+fixture and image roots remained retained, with unchanged image seals; no
+successful Windows runtime archive or complete campaign is claimed.
+
+Each Windows native version now invokes the existing reviewed
+`scripts/ci/outside-job.py --custody-only` harness. The private-child oracle
+remains direct and precedes every Kimi download. The wrapper uses its existing
+WMI handoff and private breakaway-enabled job only for this hosted fixture;
+the product's job guard stays unchanged. It receives the exact Python child
+argv and private harness environment. Its only additional PATH entry is the
+fixed system Windows PowerShell directory, and that executable is included in
+the tool seals. There is no `--end`, wildcard image cleanup or PID/tree kill.
+
+The original parent 900-second wait includes wrapper handoff and suite work;
+the wrapper also receives a 900-second ceiling. A timeout stops the campaign
+without renewing that budget and retains unknown wrapper/fixture state. The
+parent owns only its original Popen handle, not the WMI child's numeric PID.
+Neither timeout nor wrapper exit proves detached native cleanup. Acceptance
+still requires the exact suite result plus wrapper success and all ordinary
+post-seals. The followed log and native wrapper log together must fit the
+original 64 MiB cap before acceptance. Log/deadline guards remain cooperative;
+they do not promise hard preemption of host I/O stalls.
+
+Evidence may omit a screenshot only when launch was never acknowledged, its
+durable binding is empty and the capture returns typed `not_found`; the exact
+absence response is retained instead. An acknowledged launch, an existing
+binding or another refusal still fails evidence capture. The primary launch
+failure and every independent custody step remain intact. This is source-only
+preparation for a separately reviewed fresh head, not permission to replay
+either failed attempt.

@@ -144,7 +144,9 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, unittest.TestCase):
         self.private_guards = approvals.seals(private_images)
         self.name = 'kimi/p/approval'
         self.names.append(self.name)  # Custody is reserved even if launch times out.
+        self.launch_acknowledged = False
         self.hgs('kimi', str(self.project), '--new', '-n', 'approval', '-d')
+        self.launch_acknowledged = True
         self.until(lambda: self.binding(self.name).get('pid'))
         self.pin_host()
         self.assert_process('initial')
@@ -278,8 +280,22 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, unittest.TestCase):
         out = Path(approvals.EVIDENCE) / self._testMethodName
         out.mkdir(parents=True, exist_ok=True)
         if getattr(self, 'name', None):
-            (out / 'screen.txt').write_text(self.screen(), encoding='utf-8')
-            (out / 'record.json').write_text(json.dumps(self.binding(self.name)), encoding='utf-8')
+            record = self.binding(self.name)
+            captured = self.run_hgs('__host', 'call', json.dumps(dict(op='capture',
+                target=dict(name=self.name), styled=False)))
+            response = json.loads(captured.stdout)
+            if captured.returncode:
+                # A definitive current absence after a failed launch is useful
+                # evidence. It never turns the primary launch failure into PASS.
+                self.assertFalse(getattr(self, 'launch_acknowledged', False), captured.stdout + captured.stderr)
+                self.assertEqual(record, {}, record)
+                self.assertEqual((response.get('error') or {}).get('code'), 'not_found', response)
+                (out / 'capture-absent.json').write_text(json.dumps(dict(
+                    status='absent_before_launch_acknowledgement', response=response,
+                    exit=captured.returncode)), encoding='utf-8')
+            else:
+                (out / 'screen.txt').write_text(response['ok']['text'], encoding='utf-8')
+            (out / 'record.json').write_text(json.dumps(record), encoding='utf-8')
         if getattr(self, 'home', None) and self.home.exists():
             for source in [self.home / 'logs', *self.home.glob('sessions/*/*/agents')]:
                 if source.is_dir():

@@ -147,12 +147,29 @@ def invoke(out, name, env, selected, oracle=False):
     argv = [sys.executable, '-s', '-B', str(Path(__file__).resolve()), '--suite-child', str(result), str(custody)]
     if oracle:
         argv.append('--oracle')
-    write(out / (name + '-command.json'), dict(argv=argv, environment=env, methods=selected, seconds=SECONDS))
+    suite_argv = argv
+    launch_env = env
+    outside_log = None
+    if target() == 'win32-x64' and not oracle:
+        # Only this fixture's private host may leave the runner's enclosing
+        # job. The reviewed wrapper never uses PID/tree/image cleanup here.
+        outside_log = out / (name + '-outside-job.log')
+        argv = [sys.executable, '-s', '-B', str(ROOT / 'scripts/ci/outside-job.py'),
+                '--custody-only', '--timeout', str(SECONDS), '--log', str(outside_log), '--', *suite_argv]
+        system = Path(env['SystemRoot'])
+        launch_env = dict(env, PATH=os.pathsep.join((str(system / 'System32'),
+                         str(system / 'System32/WindowsPowerShell/v1.0'))))
+    write(out / (name + '-command.json'), dict(argv=argv, suite_argv=suite_argv, environment=launch_env,
+          methods=selected, seconds=SECONDS, outside_job_log=str(outside_log) if outside_log else None,
+          combined_log_limit=LOG_LIMIT,
+          timeout_outcome='UNKNOWN; retain wrapper/fixture, never replay'))
     log = out / (name + '.log')
     with log.open('xb') as stream:
-        process = subprocess.Popen(argv, env=env, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=stream,
+        process = subprocess.Popen(argv, env=launch_env, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=stream,
                                    stderr=stream, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         code = retained.await_child(process, log, seconds=SECONDS)
+    if outside_log and (not outside_log.is_file() or outside_log.stat().st_size + log.stat().st_size > LOG_LIMIT):
+        raise ValueError('outside-job native log is missing or combined logs exceed the original cap')
     value = strict(result.read_bytes())
     if code != 0 or not qualifies(value, selected):
         raise ValueError('the exact native methods failed or skipped; retained roots are not retried')
@@ -243,6 +260,8 @@ def main():
                    HGS_TEST_CONPTY_DIR=str(conpty), HGS_KIMI_GIT_BASH=str(bash),
                    HGS_KIMI_GIT_BASH_SHA256=digest(bash), PATH=str(system / 'System32'))
         tools.update({str(bash): digest(bash)})
+        powershell = system / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        tools[str(powershell)] = digest(powershell)
         for name in ('conpty.dll', 'OpenConsole.exe'):
             tools[str(conpty / name)] = digest(conpty / name)
     write(evidence / 'plan.json', dict(source=args.source_sha, platform=platform_id, tools=tools,
