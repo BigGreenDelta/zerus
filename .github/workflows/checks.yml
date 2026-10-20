@@ -901,6 +901,8 @@ jobs:
             2>&1 | tee artifacts/test-results/windows-gateway-locks.log
           cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --test windows_gateway </dev/null \
             2>&1 | tee artifacts/test-results/windows-gateway-config.log
+          cargo +1.99.1 test --locked --offline -j2 --manifest-path services/mobile/connector/Cargo.toml --target-dir target -p zerus-windows-private --lib -- --test-threads=2 </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-launch-builder.log
           cargo +1.99.1 build --locked --release --manifest-path services/mobile/connector/Cargo.toml --target-dir target
       - name: Windows client integration tests
         run: |

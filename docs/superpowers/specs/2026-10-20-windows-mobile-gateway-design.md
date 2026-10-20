@@ -157,6 +157,11 @@ Set `CARGO_BUILD_JOBS=2` and `ZERUS_BUILD_JOBS=2` for the approved local gate.
    files/absent sidecars, held Start revision A versus Save B, and same-revision
    already-running Start. Retain both raw logs. Zero tests/skips do not qualify
    either suite.
+   Also select `-p zerus-windows-private --lib` through the connector manifest
+   and its existing lockfile. Its two launch-builder cases must actually report
+   2 passed, 0 failed and 0 skipped on Windows; retain
+   `windows-gateway-launch-builder.log`. Cross-target checks only type-check
+   those test bodies and do not satisfy this requirement.
 2. Run the Windows Qt settings fixtures, including all malformed status/save/
    start/stop cases and real successful response forms. Run supported native
    host/agent contracts only under a separately reviewed runtime scope.
