@@ -2293,6 +2293,20 @@ pub(super) fn resume_argv(record: &Value, mut args: Vec<String>) -> Vec<String> 
 mod tests {
     use super::*;
     #[test]
+    fn a_failed_attempt_without_keys_preserves_the_first_message() {
+        let mut record = json!({
+            "agent": "codex", "run_id": "fresh", "run_identity_version": 1,
+            "supervisor": {}, "last_event_at": 0, "activity": "unknown", "phase": "unknown"
+        });
+        let before = record.clone();
+        assert!(input::first_message_candidate(&record));
+        start_attempt();
+        mark_unconfirmed(&mut record);
+        assert_eq!(record, before);
+        assert!(input::first_message_candidate(&record));
+    }
+
+    #[test]
     fn settings_apply_now_when_the_listing_reports_ready() {
         assert!(ready(&telemetry::stale_hook_child()));
         for (case, record) in telemetry::remaining_work() {

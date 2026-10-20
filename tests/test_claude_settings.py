@@ -247,6 +247,33 @@ class ClaudeSettings(unittest.TestCase):
         self.assertIn('did not react', result.stderr)
         self.assertEqual(self.received(), b'/model')
 
+    def test_native_event_releases_the_guard_but_never_replays_the_failed_request(self):
+        (self.root / 'freeze').touch()
+        payload = self.payload('claude-sonnet-5-5', 'high')
+        self.assertIn('not confirmed', self.settings(payload, success=False))
+        before = self.received()
+        self.assertEqual(before, b'/model')
+        event = dict(hook_event_name='Stop', session_id=self.conversation_id,
+                     transcript_path=str(self.transcript))
+        # A foreign run's hook cannot settle this run's uncertain keys.
+        for run in ('old-run', self.run_id):
+            result = subprocess.run([str(test_input.HGS), '__state', 'hook'],
+                                    env=dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=run),
+                                    input=json.dumps(event), text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.received(), before)
+            if run == 'old-run':
+                self.assertIn('did not react', self.settings(self.payload('claude-haiku-5-5', 'high'), success=False))
+        record = json.loads(self.record_path.read_text())
+        self.assertGreater(record['last_event_at'], record['settings_unconfirmed_at'])
+        self.assertFalse(record.get('input_pending_at'))
+        (self.root / 'freeze').unlink()
+        self.assertIn('already', self.settings(payload, success=False))
+        self.assertEqual(self.received(), before)
+        self.assertEqual(self.settings(self.payload('claude-sonnet-5-5', 'high'))['status'], 'applied')
+        self.assertEqual(self.inspect()['model'], 'claude-sonnet-5-5')
+        self.assertDefaultsUntouched()
+
     def test_draft_and_foreign_transcript_send_no_input(self):
         self.record['transcript'] = str(self.root / 'another-conversation.jsonl'); self.write_record()
         self.assertFalse(self.inspect()['settings_change_supported'])
