@@ -38,6 +38,13 @@ returns approximate matches, so candidates must refresh and retain the exact vis
 The original subtree traversal remains the fallback. Monotonic phase records cover card opening, physical touch and the
 first disabled/zero-answer assertion; they never override the three-second policy or establish UI acceptance alone.
 
+The three early-window assertions first use the same real Home/resume route as the lifecycle case, with the exact owned
+Activity required to lose and regain focus. Only these assertions use a scoped cached Send node captured for the verified
+card: refresh, exact visible label, window and card/run/conversation identity must still match, without a fallback search.
+The cache is cleared in `finally`. Monotonic time begins before resume and must remain below the original three seconds
+after the early assertion or Enter; a slow fixture cannot qualify that precondition. The independent lifecycle case keeps
+its original Home/resume boundary, without an additional reset. No production visibility, foreground or review clock is set.
+
 Before dispatch, review this workflow and the SDK-free `tests/test_android_project_ui.py` and
 `tests/test_approval_ui_harness.py` controls. The new app/test are built under a fresh synthetic debug signer; this does
 not establish compatibility with the operator's installed signer. Do not reuse an old private D01/ISO resource grant,

@@ -26,6 +26,8 @@ import java.util.concurrent.atomic.AtomicReference
 class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     private val cases = mutableListOf<String>()
     private val phases = ArrayDeque<String>()
+    private data class EarlySend(val node: AccessibilityNodeInfo, val window: Int, val current: () -> Boolean)
+    private var earlySend: EarlySend? = null
     private data class InterceptorFailure(val guard: String, val type: String, val method: String, val path: String)
     private val interceptorFailure = AtomicReference<InterceptorFailure?>(null)
     private fun requireHealthyFixture() {
@@ -101,7 +103,14 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         return checkNotNull(matched)
     }
     private fun button(label: String): AccessibilityNodeInfo {
-        var current = node(label)
+        val cached = earlySend?.takeIf { label == "Send answer" }
+        var current = if (cached != null) {
+            check(cached.current()) { "Early-review card identity changed" }
+            check(cached.node.refresh() && cached.node.windowId == cached.window && exactVisible(cached.node, label)) {
+                "Early-review Send node is stale"
+            }
+            cached.node // No root search or fallback for a stale scoped cache.
+        } else node(label)
         while (true) {
             check(current.refresh())
             if (current.isClickable || !current.isEnabled || current.parent == null) return current
@@ -227,6 +236,42 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             check(expected.compareAndSet(null, JSONObject().put("id", q.string("question_id")).put("hash", q.string("question_hash"))
                 .put("options", JSONArray(if (option == null) emptyList<String>() else listOf(option))).put("text", text)))
         }
+        fun earlyReview(name: String, checkEarly: () -> Unit) {
+            val q = checkNotNull(pending)
+            val id = q.string("question_id"); val hash = q.string("question_hash")
+            val current = {
+                main {
+                    val card = model.conversationQuestions.singleOrNull()
+                    model.selected?.target == target && model.activityVerified && card != null && card.id == id && card.hash == hash &&
+                        card.run == target.run && card.conversation == target.conversation
+                }
+            }
+            check(earlySend == null && current())
+            val send = node("Send answer")
+            check(send.refresh() && exactVisible(send, "Send answer"))
+            earlySend = EarlySend(send, send.windowId, current)
+            var resumedAt: Long? = null
+            try {
+                phase("early-home:$name")
+                sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)
+                await("owned Activity lost focus before $name") { !main { activity.hasWindowFocus() } }
+                // Home/foreground uses the same actual Activity and production eligibility path as the lifecycle case.
+                // The timestamp precedes resume, so a late resume or accessibility read cannot qualify as early.
+                val resumeStart = SystemClock.elapsedRealtime()
+                resumedAt = resumeStart
+                phase("early-resume-begin:$name")
+                targetContext.startActivity(Intent(targetContext, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+                await("same Activity regained focus for $name") { main { activity.hasWindowFocus() } }
+                check(current()) { "Early-review card identity changed after resume" }
+                checkEarly()
+                val elapsed = SystemClock.elapsedRealtime() - resumeStart
+                check(elapsed >= 0 && elapsed < 3_000) { "Fixture missed the real early-review window: $name elapsedMs=$elapsed" }
+            } finally {
+                earlySend = null
+                phase("early-end:$name:${resumedAt?.let { SystemClock.elapsedRealtime() - it }}")
+            }
+        }
         try {
             await("private model storage") { main { model.storageReady } }
             main {
@@ -239,10 +284,12 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             boundary("begin", "countdown_once")
             open("countdown")
             reveal("Approve once"); tap("Approve once")
-            phase("disabled-assert-begin:countdown")
-            try {
-                check(!button("Send answer").isEnabled && count() == 0)
-            } finally { phase("disabled-assert-end:countdown") }
+            earlyReview("countdown") {
+                phase("disabled-assert-begin:countdown")
+                try {
+                    check(!button("Send answer").isEnabled && count() == 0)
+                } finally { phase("disabled-assert-end:countdown") }
+            }
             reviewed(); expect("1"); tap("Send answer"); await("once receipt") { count() == 1 }
             cases += "countdown_once"
             boundary("complete", "countdown_once")
@@ -264,7 +311,8 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             reveal("Approve for this session"); tap("Approve for this session"); reviewed(); tap("Send answer"); node("Confirm this option?")
             open("replacement-new")
             await("replacement drops old confirmation") { visible("Confirm this option?") == null }
-            reveal("Reject"); tap("Reject"); check(!button("Send answer").isEnabled && count() == 2)
+            reveal("Reject"); tap("Reject")
+            earlyReview("replacement") { check(!button("Send answer").isEnabled && count() == 2) }
             reviewed(); expect("3"); tap("Send answer"); await("new card reject receipt") { count() == 3 }
             cases += "card_replacement"
             boundary("complete", "card_replacement")
@@ -274,7 +322,10 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             val editor = checkNotNull(find(uiAutomation.rootInActiveWindow) { it.isVisibleToUser && it.isEditable })
             check(editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Use a safer command") }))
             check(editor.performAction(AccessibilityNodeInfo.ACTION_FOCUS))
-            sendKeyDownUpSync(KeyEvent.KEYCODE_ENTER); check(count() == 3)
+            earlyReview("feedback") {
+                check(!button("Send answer").isEnabled)
+                sendKeyDownUpSync(KeyEvent.KEYCODE_ENTER); check(count() == 3)
+            }
             reviewed(); expect(text = "Use a safer command"); sendKeyDownUpSync(KeyEvent.KEYCODE_ENTER)
             await("one feedback receipt") { count() == 4 }; check(expected.get() == null)
             cases += "feedback_keyboard"

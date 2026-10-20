@@ -286,6 +286,33 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertNotIn("phases", success)
         self.assertIn('finish(Activity.RESULT_OK, result)', success)
 
+    def test_android_early_windows_use_owned_lifecycle_and_scoped_fresh_identity_cache(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        button = source.split("    private fun button(", 1)[1].split("    private fun tap(", 1)[0]
+        self.assertIn('earlySend?.takeIf { label == "Send answer" }', button)
+        self.assertIn('check(cached.current())', button)
+        self.assertIn('cached.node.refresh() && cached.node.windowId == cached.window && exactVisible(cached.node, label)', button)
+        self.assertIn('} else node(label)', button)
+        helper = source.split("        fun earlyReview(", 1)[1].split("        try {\n            await(\"private model storage\")", 1)[0]
+        for identity in ('model.selected?.target == target && model.activityVerified', 'card.id == id && card.hash == hash',
+                         'card.run == target.run && card.conversation == target.conversation'):
+            self.assertIn(identity, helper)
+        self.assertLess(helper.index('earlySend = EarlySend('), helper.index('sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)'))
+        self.assertLess(helper.index('!main { activity.hasWindowFocus() }'), helper.index('val resumeStart = SystemClock.elapsedRealtime()'))
+        self.assertLess(helper.index('val resumeStart = SystemClock.elapsedRealtime()'), helper.index('targetContext.startActivity('))
+        self.assertLess(helper.index('main { activity.hasWindowFocus() }'), helper.index('checkEarly()'))
+        self.assertLess(helper.index('checkEarly()'), helper.index('val elapsed = SystemClock.elapsedRealtime() - resumeStart'))
+        self.assertIn('elapsed >= 0 && elapsed < 3_000', helper)
+        self.assertIn('finally {\n                earlySend = null', helper)
+        self.assertEqual(re.findall(r'earlyReview\("([a-z]+)"\)', source), ['countdown', 'replacement', 'feedback'])
+        self.assertLess(source.index('await("replacement drops old confirmation")'), source.index('earlyReview("replacement")'))
+        self.assertLess(source.index('check(editor.performAction(AccessibilityNodeInfo.ACTION_FOCUS))'), source.index('earlyReview("feedback")'))
+        lifecycle = source.split('boundary("begin", "lifecycle_no_submit")', 1)[1].split('boundary("complete", "lifecycle_no_submit")', 1)[0]
+        self.assertNotIn('earlyReview(', lifecycle)
+        self.assertIn('check(count() == 4 && !button("Send answer").isEnabled)', lifecycle)
+        for forbidden in ('setActivityVerified', 'setDeclaredField("activeFrameVerified"', 'setReviewDelayForTests', 'CountDownLatch'):
+            self.assertNotIn(forbidden, source)
+
     def test_ios_controls_bind_modes_generation_first_consumption_and_checked_cleanup(self):
         host = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalUIFixtureApp.swift").read_text()
         tests = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
