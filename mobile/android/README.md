@@ -408,6 +408,14 @@ retains configuration order, and DeepSeek retains native group/model order.
 OpenCode retains the service's model order. Desktop consumes
 the same catalog, deduplicates model IDs and prepends the current model when absent.
 
+OpenCode launch and session model pickers group the computer's short list by
+provider and offer search when more than eight models are reported. Default,
+Favorite and Free marks are read-only. A shortened list points to the desktop
+for other models; opening the picker never starts the service or fetches a full
+catalog. Accounts shows bounded provider details and the last known catalog
+state, including offline or stopped-service reports. Provider credentials and
+favorite changes remain managed on the computer.
+
 Terminal uses a separate saved input buffer and a fresh exact native binding.
 Snapshots poll adaptively while visible; input sends literal text or fixed keys,
 with confirmation for Ctrl+C and Ctrl+D. Submitted means native input handoff,

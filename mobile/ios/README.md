@@ -11,6 +11,14 @@ authorizes an action. iOS 18 or later is supported; the bundle ID is
 Design and roadmap: [iOS architecture and foundation](../../docs/superpowers/specs/2026-10-16-ios-foundation-design.md)
 (epic `zerus-gfph` in Beads).
 
+OpenCode launch and session settings group the computer's model short list by
+provider, with search above eight models and read-only Default, Favorite and Free
+marks. Selection only stages the form; launch and Apply keep their existing
+native identity and effort-membership checks. Accounts shows the computer's
+bounded provider details, retained catalog state and truncation notices. Opening
+these views never starts the service, fetches a full catalog, edits a favorite or
+manages provider credentials.
+
 ## Layout
 
 - `ZerusKit/` is a Swift package with the platform-neutral core: JSON values,

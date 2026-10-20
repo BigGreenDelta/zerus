@@ -174,6 +174,7 @@ private fun compactBalance(account:ReportedAccount):String?=when {
                     if(problem.isNotBlank()) Text(problem,style=MaterialTheme.typography.bodySmall,color=muted)
                     if(AccountPresentation.stale(member.catalog,a,now)) Text("Last known report",style=MaterialTheme.typography.bodySmall,color=muted)
                     AccountPresentation.date(a.checkedAt)?.let { Text("Provider updated $it",style=MaterialTheme.typography.bodySmall,color=muted) }
+                    a.openCode?.let { OpenCodeProvidersDetails(it) }
                 }
             }
         }
@@ -210,5 +211,27 @@ private fun compactBalance(account:ReportedAccount):String?=when {
         account.balances.forEach { balance -> Text(listOf(balance.kind.ifBlank { "Balance" },balance.balance ?: "Unknown",balance.currency).filter(String::isNotBlank).joinToString(" / "),style=MaterialTheme.typography.bodyMedium) }
         val checked=account.checkedAt?.takeIf { it<=now+60 }?.let(AccountPresentation::date)
         Text(if(checked==null) "Provider update time not reported" else "Provider updated $checked",style=MaterialTheme.typography.bodySmall,color=muted)
+    }
+}
+
+@Composable private fun OpenCodeProvidersDetails(catalog:OpenCodeAccountCatalog) {
+    Column(verticalArrangement=Arrangement.spacedBy(6.dp)) {
+        Text("Providers",style=MaterialTheme.typography.titleSmall)
+        catalog.providers.forEach { provider ->
+            Text(provider.label,style=MaterialTheme.typography.bodyMedium)
+            Text(listOf(OpenCodeCatalog.kindLabel(provider.kind),provider.activeLabel.ifBlank {
+                provider.credentials?.takeIf { it>1 }?.let { "$it accounts" }.orEmpty()
+            },provider.models?.let { "$it models" }.orEmpty()).filter(String::isNotBlank).joinToString(" · "),
+                style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        OpenCodeCatalog.stateMessage(catalog.state,catalog.reason).takeIf(String::isNotBlank)?.let {
+            Text(it,style=MaterialTheme.typography.bodySmall)
+        }
+        if(catalog.state!="ready") AccountPresentation.date(catalog.catalogAt)?.let {
+            Text("Last known catalog from $it",style=MaterialTheme.typography.bodySmall)
+        }
+        OpenCodeCatalog.truncationMessage(catalog.modelsTruncated,catalog.providersTruncated).takeIf(String::isNotBlank)?.let {
+            Text(it,style=MaterialTheme.typography.bodySmall)
+        }
     }
 }
