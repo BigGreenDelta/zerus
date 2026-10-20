@@ -98,13 +98,14 @@ struct SessionHeaderTitle: View {
     }
 }
 
-/// Provider and model, Read all, Terminal and the session menu, as on Android.
+/// Provider and model, Read all, Terminal, Tasks and the session menu, as on Android.
 struct SessionHeaderTools: View {
     @Environment(AppModel.self) private var app
     let session: Session
     @Binding var details: Bool
     @Binding var search: Bool
     @Binding var terminal: Bool
+    @Binding var tasks: Bool
     @State private var settings = false
     @State private var request: String?
     @State private var notice = ""
@@ -143,6 +144,27 @@ struct SessionHeaderTools: View {
                     .accessibilityLabel("Read all")
                 Button { terminal = true } label: { Image(systemName: "apple.terminal").frame(width: 40, height: 40) }
                     .accessibilityLabel("Terminal")
+                // Tasks belong to catalogued projects; the badge counts the tasks In review.
+                if let key = app.tasks.taskProject(session), target.agentId.isEmpty, target.archiveId.isEmpty, !app.demo {
+                    let review = app.tasks.reviewCounts[key] ?? 0
+                    Button { tasks = true } label: {
+                        Image(systemName: "checklist")
+                            .frame(width: 40, height: 40)
+                            .overlay(alignment: .topTrailing) {
+                                if review > 0 {
+                                    Text(review > 99 ? "99+" : "\(review)")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(Theme.background)
+                                        .padding(.horizontal, 4)
+                                        .frame(minWidth: 16, minHeight: 16)
+                                        .background(Theme.mint, in: Capsule())
+                                }
+                            }
+                    }
+                    .accessibilityLabel("Tasks")
+                    .accessibilityValue(review > 0 ? "\(review) In review" : "")
+                    .task(id: key) { app.tasks.refreshReviewCount(key) }
+                }
                 menu(model: model, target: target)
             }
             .padding(.horizontal, 10)
