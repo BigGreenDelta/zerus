@@ -109,9 +109,10 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             p.drawEllipse(QRectF(3, 3, 18, 18));
             QPainterPath question; question.moveTo(10, 10); question.cubicTo(10, 7, 15, 7, 15, 10);
             question.cubicTo(15, 12, 12, 11, 12, 14); p.drawPath(question); p.drawPoint(QPointF(12, 17));
-        } else if (name == "attention") {
+        } else if (name == "attention" || name == "mute") {
             QPainterPath path; path.moveTo(6, 10); path.cubicTo(6, 3, 18, 3, 18, 10); path.lineTo(18, 15); path.lineTo(20, 18); path.lineTo(4, 18); path.lineTo(6, 15); path.closeSubpath();
             p.drawPath(path); p.drawArc(QRectF(10, 18, 4, 4), 180*16, 180*16);
+            if (name == "mute") p.drawLine(3, 3, 21, 21);
         } else if (name == "working" || name == "active") {
             QPainterPath path; path.moveTo(13, 3); path.lineTo(5, 13); path.lineTo(11, 13); path.lineTo(10, 21); path.lineTo(19, 10); path.lineTo(13, 10); path.closeSubpath(); p.drawPath(path);
         } else if (name == "paused" || name == "pause") {
@@ -169,6 +170,11 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             const int tip = name == "collapse-sessions" ? 9 : 19, tail = name == "collapse-sessions" ? 19 : 9;
             p.drawLine(4, 4, 4, 20); p.drawLine(tail, 12, tip, 12);
             p.drawLine(14, 7, tip, 12); p.drawLine(14, 17, tip, 12);
+        } else if (name == "expand-row") {
+            p.drawLine(5, 4, 19, 4); p.drawLine(5, 20, 19, 20);
+            p.drawLine(12, 8, 12, 16);
+            p.drawLine(8, 11, 12, 7); p.drawLine(12, 7, 16, 11);
+            p.drawLine(8, 13, 12, 17); p.drawLine(12, 17, 16, 13);
         } else if (name == "search") {
             p.drawEllipse(QPointF(10.5, 10.5), 6, 6); p.drawLine(QPointF(15, 15), QPointF(20, 20));
         } else if (name == "collapse-panel") {

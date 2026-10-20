@@ -6,7 +6,8 @@ import java.util.UUID
 /** One immutable native action attempt. Uncertain attempts are checked, never replayed. */
 data class SessionAction(val requestId: String, val target: Target, val operation: String, val arguments: String,
     val status: String = "sending", val createdAt: Long = System.currentTimeMillis(), val error: String = "",
-    val resultTarget: Target? = null, val pendingId: String = "", val applyAttemptId:String = "", val resultPath:String = "") {
+    val resultTarget: Target? = null, val pendingId: String = "", val applyAttemptId:String = "", val resultPath:String = "",
+    val confirmedNotificationPreference: String = "") {
     val blocksSending get() = status in listOf("sending", "uncertain")
     val needsProjectReview get() = operation=="launch" && status=="completed" && error.isNotBlank() && resultTarget!=null
     fun recover() = if (status == "sending") copy(status = "uncertain", error = "The action was interrupted. Check its original receipt; it has not been retried.") else this
@@ -14,7 +15,7 @@ data class SessionAction(val requestId: String, val target: Target, val operatio
 
 object SessionActionPolicies {
     val lifecycle = setOf("pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget")
-    val operations = lifecycle + setOf("send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create", "directory_create", "recovery_action")
+    val operations = lifecycle + setOf("send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create", "directory_create", "recovery_action", SessionNotificationPreferences.operation)
     val terminalKeys=setOf("Enter","Escape","Tab","BTab","BSpace","Up","Down","Left","Right","Home","End","PPage","NPage","DC","C-c","C-d","C-l","C-a","C-e","C-u","C-w")
     /** Effort names every relay accepts in `settings`. */
     val relayEfforts = setOf("", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on")
@@ -31,6 +32,7 @@ object SessionActionPolicies {
     fun nativeEfforts(target: Target, inspected: JSONObject?, advertised: Boolean) =
         advertised && target.session.startsWith("opencode/") && inspected?.string("agent") == "opencode"
     fun arguments(operation: String, raw: JSONObject, nativeEfforts: Boolean = false): JSONObject {
+        if(operation == SessionNotificationPreferences.operation) return SessionNotificationPreferences.arguments(raw)
         require(operation in operations) { "Unsupported session action." }
         val allowed = when(operation) { "rename" -> setOf("new_name"); "fork" -> setOf("tag"); "send_now" -> setOf("queue_id")
             "launch" -> setOf("agent","directory","tag","account_id","model","effort","swarm_id","project_id","project_folder_id","add_folder","worktree_folder_id","worktree_common_dir")
@@ -95,6 +97,7 @@ object SessionActionPolicies {
             }.toString()
         }
         val fields=when(operation) {
+            SessionNotificationPreferences.operation -> listOf("run_id","conversation_id","archive_id","notification_preferences")
             "settings" -> listOf("model", "effort", "model_options", "effort_options", "pending_model", "pending_effort", "pending_settings_id", "settings_apply_when", "settings_change_supported")
             "send_now" -> listOf("input_queue")
             "recovery_action" -> listOf("recovery")
@@ -104,6 +107,9 @@ object SessionActionPolicies {
         return JSONObject().also { value -> fields.forEach { field -> value.put(field,raw.opt(field) ?: JSONObject.NULL) } }.toString()
     }
     fun inspectReason(target: Target, operation: String, args: JSONObject, raw: JSONObject): String {
+        if(operation == SessionNotificationPreferences.operation) return SessionNotificationPreferences.reason(target,raw).ifBlank {
+            if(SessionNotificationPreferences.parse(raw,target)?.revision != args.getLong("expected_revision")) "Shared notification settings changed. Refresh before applying." else ""
+        }
         if(operation in lifecycle && raw.optJSONArray("allowed_actions")?.let { values -> (0 until values.length()).any { values.optString(it) == operation } } != true)
             return raw.optJSONObject("action_reasons")?.string(operation).orEmpty().ifBlank { "The native session no longer allows this action." }
         when(operation) {
@@ -147,6 +153,7 @@ object SessionActionPolicies {
     fun result(action: SessionAction, receipt: JSONObject): SessionAction {
         if(receipt.string("request_id") != action.requestId) return action.copy(status="uncertain",error="The receipt belongs to another request.")
         if(receipt.string("state") == "failed") return action.copy(status="failed",error=receipt.string("error").ifBlank { "The computer rejected this action." })
+        if(action.operation == SessionNotificationPreferences.operation) return SessionNotificationPreferences.result(action,receipt)
         if(action.operation == MobileDelivery.OPERATION) return MobileDelivery.result(action,receipt)
         if(action.operation == DirectoryCreation.operation) return DirectoryCreation.result(action,receipt)
         val native = receipt.optJSONObject("result")

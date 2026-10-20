@@ -34,6 +34,7 @@ pub mod pyjson;
 pub mod pyvalue;
 pub mod request;
 pub mod runtime;
+pub mod session_notifications;
 pub mod speech;
 pub mod url;
 pub mod validate;

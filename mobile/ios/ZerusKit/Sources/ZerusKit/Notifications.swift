@@ -142,9 +142,12 @@ public struct NotificationCurrent: Hashable, Sendable {
     public var conversation: String
     /// Sorted IDs of pending optional questions in the session's conversation.
     public var optional: [String]
+    public var suppressed: Bool
+    public var notificationPreference: SessionNotificationPreference?
 
     public init(slot: NotificationSlot, target: String, title: String, machine: String, kind: SessionAlertKind?, identity: String, idle: Bool,
-                online: Bool = true, live: Bool = true, conversation: String = "", optional: [String] = []) {
+                online: Bool = true, live: Bool = true, conversation: String = "", optional: [String] = [], suppressed: Bool = false,
+                notificationPreference: SessionNotificationPreference? = nil) {
         self.slot = slot
         self.target = target
         self.title = title
@@ -156,6 +159,8 @@ public struct NotificationCurrent: Hashable, Sendable {
         self.live = live
         self.conversation = conversation
         self.optional = optional
+        self.suppressed = suppressed
+        self.notificationPreference = notificationPreference
     }
 }
 
@@ -374,7 +379,7 @@ public enum NotificationPolicy {
                             preferences: NotificationPreferences, now: Double, active: Set<String> = [], alertsOnly: Bool = false) -> NotificationPlan {
         let old = Dictionary(state.records.map { ($0.slot.key, $0) }, uniquingKeysWith: { first, _ in first })
         // With presence alerts only relay alert rows announce; other rows refresh state.
-        let announcing = events.filter { alertsOnly ? $0.1.isAlert : $0.1.kind != "alert" }
+        let announcing = events.filter { $0.1.kind != "notification_preferences" && (alertsOnly ? $0.1.isAlert : $0.1.kind != "alert") }
         let candidates = Dictionary(grouping: announcing, by: { $0.0.key })
         // Relay and phone order input and error differently, so either need alert announces either card.
         let needs: Set<String> = ["attention", "error"]
@@ -391,6 +396,12 @@ public enum NotificationPolicy {
         for session in current where seenSlots.insert(session.slot.key).inserted {
             let key = session.slot.key
             let previous = old[key]
+            if session.suppressed {
+                records.append(NotificationRecord(slot:session.slot,target:session.target,observedAt:now,
+                    observedFingerprint:session.kind.map { fingerprint(JSON.array([.string(session.target),.string($0.rawValue),.string(session.identity)]).compact) } ?? "",
+                    optionalSeen:Array(Set((previous?.optionalSeen ?? []) + session.optional)).sorted().suffix(maxOptionalSeen).map { $0 }))
+                continue
+            }
             if !session.live {
                 // A stopped session keeps only the optional questions it announced; resuming the
                 // same conversation does not announce them again.
@@ -574,8 +585,9 @@ public struct NotificationCatalog: Sendable {
 public enum NotificationCatalogParser {
     static let alertKinds: Set<String> = ["attention", "error", "completed"]
 
-    public static func parse(_ connection: Connection, records: [JSONObject], aliases: [MachineAlias]) -> NotificationCatalog {
+    public static func parse(_ connection: Connection, records: [JSONObject], aliases: [MachineAlias], actions: [SessionAction] = []) -> NotificationCatalog {
         var identities: [String: String?] = [:]
+        let known = SessionNotificationPreferences.known(actions:actions)
         var current: [NotificationCurrent] = []
         var counts: [String: Int] = [:]
         for raw in records { counts[raw.string("id"), default: 0] += 1 }
@@ -591,7 +603,7 @@ public enum NotificationCatalogParser {
             }
             for session in NativeSessions.sessions(connection, raw) {
                 if session.target.session.isEmpty || session.target.session.count > 1024 || SessionFilters.archived(session) { continue }
-                let value = session.raw
+                let value = SessionNotificationPreferences.merge(session.raw,session.target,known)
                 let phase = value.string("phase")
                 let recovery = value.object("recovery")?.string("state") ?? ""
                 let items = value.objects("mobile_attention")
@@ -599,16 +611,17 @@ public enum NotificationCatalogParser {
                 // Optional questions never change the identity of a request that needs action.
                 let pending = blocking.map { JSON.array([.string($0.string("question_id")), .string($0.string("question_hash"))]).compact }.sorted()
                 let optional = Array(Set(items.filter(QuestionPolicies.optionalAttention).map { $0.string("question_id") }.filter { !$0.isEmpty })).sorted()
-                let kind: SessionAlertKind?
+                let nativeKind: SessionAlertKind?
                 if (phase == "error" && !["waiting", "dispatching", "retrying"].contains(recovery)) || ["uncertain", "blocked", "exhausted"].contains(recovery) {
-                    kind = .error
-                } else if ["input", "approval"].contains(phase) || !pending.isEmpty || value.int("pending_question_count") > 0 {
-                    kind = .input
+                    nativeKind = .error
+                } else if ["input", "approval"].contains(phase) || !pending.isEmpty || value.int("pending_question_count") > 0 || SessionNotificationPreferences.hasChildAttention(value) {
+                    nativeKind = .input
                 } else if !optional.isEmpty {
-                    kind = .optional
+                    nativeKind = .optional
                 } else {
-                    kind = nil
+                    nativeKind = nil
                 }
+                let kind = SessionNotificationPreferences.alertKind(value,session.target,kind:nativeKind,optional:optional)
                 let providerError: JSON = value.object("provider_error").map { error in
                     .array([.string(error.string("source")), .string(error.string("message_id")),
                             .string(error.string("code").isEmpty ? error.string("type") : error.string("code")), .string(error.string("message"))])
@@ -618,7 +631,7 @@ public enum NotificationCatalogParser {
                 } ?? .null
                 let identity = NotificationPolicy.fingerprint(JSON.array([.string(phase), .string(value.string("attention_id")), value["question_request"] ?? .null,
                                                                           value["question_requests"] ?? .null, .array(pending.map(JSON.string)), .string(recovery),
-                                                                          providerError, recoveryDetail]).compact)
+                                                                          providerError, recoveryDetail,SessionNotificationPreferences.attentionIdentity(value,session.target),.int(Int64(value.int("pending_question_count")))]).compact)
                 let target = !session.target.run.isEmpty && !session.target.conversation.isEmpty
                     ? JSON.array([.string(session.target.run), .string(session.target.conversation)]).compact : ""
                 current.append(NotificationCurrent(slot: NotificationSlot(connection: connection.id, computer: machine.id, session: session.target.session),
@@ -626,7 +639,9 @@ public enum NotificationCatalogParser {
                                                    machine: clean(machine.name, "Computer"), kind: kind, identity: identity, idle: value.string("activity") == "idle",
                                                    online: machine.online,
                                                    live: SessionFilters.state(session) == "running" && value.string("process_state") != "exited",
-                                                   conversation: session.target.conversation, optional: optional))
+                                                   conversation: session.target.conversation, optional: optional,
+                                                   suppressed:SessionNotificationPreferences.suppressed(value,session.target,kind:kind,optional:optional),
+                                                   notificationPreference:SessionNotificationPreferences.parse(value,session.target)))
             }
         }
         return NotificationCatalog(sessions: current, identities: identities)

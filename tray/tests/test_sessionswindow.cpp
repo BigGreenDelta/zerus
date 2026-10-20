@@ -240,6 +240,7 @@ private slots:
     void unreadRepliesNeedAnActiveVisibleResult();
     void markAllReadIgnoresFiltersAndKeepsCurrentDraft();
     void markAllReadFromTheRailAndBesideDraftsSkipsReviewReminders();
+    void sessionMuteMenuPersistsWithoutAcknowledging();
     void sharedReadsQueueOnTheSessionHost();
     void unsentDraftBecomesARowStatus();
     void compactWorkspaceGeometry();
@@ -303,6 +304,8 @@ private slots:
     void composerNavigationDuringPolling();
     void attentionNavigationResetsFiltersAndTab();
     void sessionContextMenuSignalsAndKeyboard();
+    void compactSessionRowActionsPreserveSelectionAndDraft();
+    void compactSessionRowsPersistAndExpandAllIncludesHidden();
     void sessionAttentionMenuPersistsWithoutSelection();
     void sessionAttentionMenuSurvivesRoutinePoll();
     void activityMarkReadKeepsReadingPosition_data();
@@ -1893,7 +1896,9 @@ void TestSessionsWindow::markAllReadFromTheRailAndBesideDraftsSkipsReviewReminde
     QCOMPARE(action->text(), QString("Mark all as read (2)"));
     // Right-clicking the Sessions icon in the rail offers the same action.
     auto *railMenu = window.findChild<QMenu *>("sessionsNavMenu"); QVERIFY(railMenu);
-    QCOMPARE(railMenu->actions().size(), 1); QCOMPARE(railMenu->actions().constFirst(), action);
+    QCOMPARE(railMenu->actions().size(), 2); QCOMPARE(railMenu->actions().constFirst(), action);
+    auto *expandAll = window.findChild<QAction *>("expandAllCollapsedSessionRows"); QVERIFY(expandAll);
+    QCOMPARE(railMenu->actions()[1], expandAll);
     auto *rail = qobject_cast<QPushButton *>(railMenu->parent()); QVERIFY(rail); QCOMPARE(rail->property("glyph").toString(), QString("sessions"));
     QContextMenuEvent event(QContextMenuEvent::Mouse, QPoint(8, 8), rail->mapToGlobal(QPoint(8, 8))); QApplication::sendEvent(rail, &event);
     QTRY_VERIFY(railMenu->isVisible()); railMenu->close();
@@ -5219,6 +5224,82 @@ void TestSessionsWindow::activityEscapingAndActions()
     QVERIFY(completed[0][1].toBool());
 }
 
+void TestSessionsWindow::compactSessionRowActionsPreserveSelectionAndDraft()
+{
+    auto state = fleet(); auto box = state.local();
+    box.sessions[0].conversationId = "conversation-one"; box.sessions[0].runId = "run-one";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); window.setDetailsPollForTests(60000, 60000); window.setFleet(state); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList"); auto *menu = window.findChild<QMenu *>("sessionContextMenu");
+    QVERIFY(list); QVERIFY(menu); list->setCurrentRow(1);
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); setComposerText(composer, "Keep this other conversation draft");
+    const QString selected = list->currentItem()->data(SessionRoles::Key).toString();
+    auto *target = list->item(0); const QString targetKey = target->data(SessionRoles::Key).toString();
+    const auto showMenu = [&] {
+        const auto point = list->visualItemRect(target).center();
+        QContextMenuEvent context(QContextMenuEvent::Mouse, point, list->viewport()->mapToGlobal(point));
+        QApplication::sendEvent(list->viewport(), &context);
+    };
+    QSignalSpy writes(window.findChild<HgsClient *>(), &HgsClient::writeDone);
+    QSignalSpy reads(&window, &SessionsWindow::replyViewed), sends(window.findChild<HgsClient *>(), &HgsClient::messageSent);
+    QSignalSpy activated(&window, &SessionsWindow::sessionActivated), copied(&window, &SessionsWindow::copyTextRequested);
+    const int normalHeight = list->visualItemRect(target).height(); showMenu(); QVERIFY(menu->isVisible());
+    auto *density = menu->findChild<QAction *>("contextSessionRowDensity"); QVERIFY(density); QVERIFY(density->isEnabled());
+    QVERIFY(menu->actions().contains(window.findChild<QAction *>("expandAllCollapsedSessionRows")));
+    QCOMPARE(density->text(), QString("Compact session row")); density->trigger(); menu->hide();
+    QVERIFY(target->data(SessionRoles::RowCollapsed).toBool()); QCOMPARE(list->visualItemRect(target).height(), 40); QVERIFY(normalHeight > 40);
+    QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selected); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this other conversation draft"));
+    showMenu(); density = menu->findChild<QAction *>("contextSessionRowDensity"); QCOMPARE(density->text(), QString("Expand session row"));
+    menu->findChild<QAction *>("contextCopyName")->trigger(); QCOMPARE(copied.size(), 1); QCOMPARE(copied.last()[0].toString(), box.sessions[0].name);
+    QVERIFY(menu->findChild<QAction *>("contextOpenTerminal")); QVERIFY(menu->findChild<QAction *>("contextRenameSession")); menu->hide();
+    list->syncRowExpandButtons(); QToolButton *expand = nullptr;
+    for (auto *button : list->findChildren<QToolButton *>("expandSessionRow")) if (button->property("sessionKey") == targetKey) expand = button;
+    QVERIFY(expand); QVERIFY(expand->accessibleName().contains(target->data(SessionRoles::Title).toString())); QTest::mouseClick(expand, Qt::LeftButton);
+    QVERIFY(!target->data(SessionRoles::RowCollapsed).toBool()); QCOMPARE(list->visualItemRect(target).height(), normalHeight);
+    QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selected); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this other conversation draft"));
+    QCOMPARE(writes.size(), 0); QCOMPARE(sends.size(), 0); QCOMPARE(reads.size(), 0); QCOMPARE(activated.size(), 0);
+    QVERIFY(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty());
+}
+
+void TestSessionsWindow::compactSessionRowsPersistAndExpandAllIncludesHidden()
+{
+    auto state = fleet(); auto box = state.local(); box.sessions = box.sessions.mid(0, 3);
+    for (int i = 0; i < box.sessions.size(); ++i) box.sessions[i].conversationId = "row-conversation-" + QString::number(i);
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    // Save real menu edits first. The paused row and a running row then live in
+    // separate state filters, and the saved preference survives a fresh window.
+    {
+        SessionsWindow window(program()); window.setDetailsPollForTests(60000, 60000); window.setFleet(state); window.show();
+        auto *list = window.findChild<SessionList *>("sessionList"); auto *menu = window.findChild<QMenu *>("sessionContextMenu");
+        for (int row : {0, 1}) {
+            const auto point = list->visualItemRect(list->item(row)).center();
+            QContextMenuEvent context(QContextMenuEvent::Mouse, point, list->viewport()->mapToGlobal(point)); QApplication::sendEvent(list->viewport(), &context);
+            auto *action = menu->findChild<QAction *>("contextSessionRowDensity"); QVERIFY(action); action->trigger(); menu->hide();
+        }
+        QVERIFY(!QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty());
+    }
+    SessionsWindow restored(program()); restored.setDetailsPollForTests(60000, 60000); restored.setFleet(state); restored.show();
+    auto *list = restored.findChild<SessionList *>("sessionList");
+    QVERIFY(list->item(0)->data(SessionRoles::RowCollapsed).toBool()); QVERIFY(list->item(1)->data(SessionRoles::RowCollapsed).toBool());
+    auto *expandAll = restored.findChild<QAction *>("expandAllCollapsedSessionRows"); QVERIFY(expandAll); QVERIFY(expandAll->isEnabled());
+    QVERIFY(restored.findChild<QMenu *>("sessionProjectsMenu")->actions().contains(expandAll));
+    QVERIFY(restored.findChild<QMenu *>("sessionsNavMenu")->actions().contains(expandAll));
+    auto *batch = restored.findChild<QPushButton *>("batchActions"); QVERIFY(batch); QMetaObject::invokeMethod(batch->menu(), "aboutToShow"); QVERIFY(batch->menu()->actions().contains(expandAll));
+    QPushButton *saved = nullptr, *all = nullptr;
+    for (auto *filter : restored.findChildren<QPushButton *>("sessionFilter")) {
+        if (filter->property("filter") == "paused") saved = filter;
+        if (filter->property("filter") == "all") all = filter;
+    }
+    QVERIFY(saved); QVERIFY(all); saved->click(); QCOMPARE(list->count(), 1); QVERIFY(list->item(0)->data(SessionRoles::RowCollapsed).toBool());
+    QSignalSpy writes(restored.findChild<HgsClient *>(), &HgsClient::writeDone);
+    expandAll->trigger(); QVERIFY(!list->item(0)->data(SessionRoles::RowCollapsed).toBool()); QVERIFY(!expandAll->isEnabled());
+    QVERIFY(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty()); QCOMPARE(writes.size(), 0);
+    all->click(); for (int i = 0; i < list->count(); ++i) QVERIFY(!list->item(i)->data(SessionRoles::RowCollapsed).toBool());
+    SessionsWindow reopened(program()); reopened.setFleet(state); reopened.show();
+    auto *again = reopened.findChild<SessionList *>("sessionList"); QCOMPARE(again->count(), list->count());
+    for (int i = 0; i < again->count(); ++i) QVERIFY(!again->item(i)->data(SessionRoles::RowCollapsed).toBool());
+}
+
 void TestSessionsWindow::sessionContextMenuSignalsAndKeyboard()
 {
     // A POSIX folder, also when this GUI runs on Windows.
@@ -5495,6 +5576,98 @@ void TestSessionsWindow::terminalDropKeepsActivityDraftAndDoesNotSubmit()
     QCOMPARE(output.size(),0);
 #endif
     QCOMPARE(composer->findChildren<QWidget *>("attachmentRow").size(),0);
+}
+
+void TestSessionsWindow::sessionMuteMenuPersistsWithoutAcknowledging()
+{
+    const auto preferences=[](bool muted,qint64 revision) { return QJsonObject{{"conversation_id","mute-conversation"},{"muted",muted},
+        {"revision",revision},{"suppressed",QJsonObject{{"reply_id",QJsonValue()},{"attention_signature",QJsonValue()},
+        {"optional_question_ids",QJsonArray()},{"main_attention",QJsonValue()},{"child_attention",QJsonObject()}}}}; };
+    const auto fixture=m_dir->filePath("shared-notifications");QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray behavior=R"PY(elif c=='--help':print('session-notifications-v1')
+elif c=='notifications':
+ import pathlib,time
+ payload=json.load(sys.stdin)
+ with open(__file__+'.calls','a') as output:output.write(json.dumps({'argv':sys.argv[1:],'payload':payload})+'\n')
+ deadline=time.monotonic()+15
+ while not pathlib.Path(__file__+'.release').exists():
+  if time.monotonic()>=deadline:sys.exit(2)
+  time.sleep(.01)
+ print(pathlib.Path(__file__+'.reply').read_text())
+)PY";
+    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+behavior)));
+    const auto reply=[&](bool muted,qint64 revision,const QString &run="run") {
+        return FakeCli::replace(fixture+".reply",QJsonDocument(QJsonObject{{"ok",true},{"applied",true},{"run_id",run},
+            {"conversation_id","mute-conversation"},{"preferences",preferences(muted,revision)}}).toJson());
+    };
+    const auto calls=[&] { QFile file(fixture+".calls");return file.open(QIODevice::ReadOnly)?file.readAll().count('\n'):0; };
+    auto state=fleet(); auto box=state.local();
+    box.sessions[0].conversationId="mute-conversation"; box.sessions[0].runId="run";
+    box.sessions[0].phase="approval"; box.sessions[0].activity="waiting"; box.sessions[0].replyId="reply-1";
+    box.sessions[0].sharedNotifications=true; box.sessions[0].notificationPreferences=preferences(false,0);
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    const auto originalMarks=QSettings().value("attention/sessionMarks");
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(state); window.show();
+    auto *list=window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
+    auto *menu=window.findChild<QMenu *>("sessionContextMenu"); QVERIFY(menu);
+    auto *rail=window.findChild<QLabel *>("railAttentionBadge"); QVERIFY(rail);
+    QSignalSpy marks(&window,&SessionsWindow::attentionMarksChanged);
+    QSignalSpy shared(&window,&SessionsWindow::notificationPreferencesChanged), refreshed(&window,&SessionsWindow::refreshRequested);
+    auto *client=window.findChild<HgsClient *>();QVERIFY(client);QSignalSpy completed(client,&HgsClient::notificationsFinished);
+    bool applied=false;
+    connect(&window,&SessionsWindow::notificationPreferencesChanged,&window,[&](const QString &host,const QString &,const QString &,const QString &,const QJsonObject &value) {
+        applied=state.applyNotificationPreferences(host,state.local().sessions.first(),value);window.setFleet(state);
+    });
+    list->setCurrentRow(1);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");setComposerText(composer,"Keep this draft");
+    const auto open=[&] {
+        menu->hide(); const auto point=list->visualItemRect(list->item(0)).center();
+        QContextMenuEvent event(QContextMenuEvent::Mouse,point,list->viewport()->mapToGlobal(point));
+        QApplication::sendEvent(list->viewport(),&event);
+    };
+    QVERIFY(list->item(0)->data(SessionRoles::Attention).toBool()); QVERIFY(list->item(0)->data(SessionRoles::Unread).toBool());
+    const int count=rail->text().toInt(); QVERIFY(count>0);
+    open(); auto *mute=menu->findChild<QAction *>("contextToggleMute"); QVERIFY(mute); QCOMPARE(mute->text(),QString("Mute"));
+    QVERIFY(mute->isEnabled());mute->trigger();menu->hide();QTRY_COMPARE(calls(),1);
+    QVERIFY(!list->item(0)->data(SessionRoles::Muted).toBool());QCOMPARE(marks.size(),0);QCOMPARE(shared.size(),0);
+    open();mute=menu->findChild<QAction *>("contextToggleMute");QVERIFY(!mute->isEnabled());menu->hide();
+    QVERIFY(reply(true,1));QVERIFY(FakeCli::replace(fixture+".release","release"));QTRY_COMPARE(shared.size(),1);QVERIFY(applied);
+    QCOMPARE(marks.size(),0); QCOMPARE(list->currentRow(),1);QCOMPARE(composer->editor()->toPlainText(),QString("Keep this draft"));
+    QVERIFY(list->item(0)->data(SessionRoles::Muted).toBool()); QVERIFY(list->item(0)->data(SessionRoles::Attention).toBool());
+    QVERIFY(list->item(0)->data(SessionRoles::Unread).toBool()); QCOMPARE(rail->text().toInt(),count-1);
+    QVERIFY(list->item(0)->data(Qt::AccessibleTextRole).toString().contains("Muted on all devices"));
+    QCOMPARE(QSettings().value("attention/sessionMarks"),originalMarks);
+    QFile log(fixture+".calls");QVERIFY(log.open(QIODevice::ReadOnly));const auto call=QJsonDocument::fromJson(log.readLine()).object();log.close();
+    QCOMPARE(call["argv"].toArray(),(QJsonArray{"notifications",box.sessions.first().name,"--json"}));
+    QCOMPARE(call["payload"].toObject(),(QJsonObject{{"run_id","run"},{"conversation_id","mute-conversation"},{"muted",true},{"expected_revision",0}}));
+    window.setFleet(state); QVERIFY(list->item(0)->data(SessionRoles::Muted).toBool());
+    SessionsWindow reopened(FakeCli::program(fixture)); keepDetailsPollsOut(reopened); reopened.setFleet(state); reopened.show();
+    QVERIFY(reopened.findChild<QListWidget *>("sessionList")->item(0)->data(SessionRoles::Muted).toBool());
+    open(); mute=menu->findChild<QAction *>("contextToggleMute"); QVERIFY(mute); QCOMPARE(mute->text(),QString("Unmute"));
+    // Failure retains the last confirmed value. No local mark, read or retry is created.
+    QVERIFY(QFile::remove(fixture+".release"));mute->trigger();menu->hide();QTRY_COMPARE(calls(),2);
+    QVERIFY(FakeCli::replace(fixture+".reply","{\"ok\":false,\"error\":\"stale\"}"));
+    QVERIFY(FakeCli::replace(fixture+".release","release"));QTRY_COMPARE(completed.size(),2);
+    QCOMPARE(shared.size(),1);QVERIFY(list->item(0)->data(SessionRoles::Muted).toBool());QCOMPARE(calls(),2);
+    QVERIFY(QFile::remove(fixture+".release"));open();mute=menu->findChild<QAction *>("contextToggleMute");QVERIFY(mute->isEnabled());
+    mute->trigger();menu->hide();QTRY_COMPARE(calls(),3);
+    QVERIFY(reply(false,2));QVERIFY(FakeCli::replace(fixture+".release","release"));QTRY_COMPARE(shared.size(),2);QVERIFY(applied);
+    QVERIFY(!list->item(0)->data(SessionRoles::Muted).toBool());QCOMPARE(rail->text().toInt(),count);
+    QVERIFY(list->item(0)->data(SessionRoles::Attention).toBool());QVERIFY(list->item(0)->data(SessionRoles::Unread).toBool());
+    // A confirmed old-run reply cannot affect a replacement, even in the same conversation.
+    QVERIFY(QFile::remove(fixture+".release"));open();mute=menu->findChild<QAction *>("contextToggleMute");QVERIFY(mute->isEnabled());
+    mute->trigger();menu->hide();QTRY_COMPARE(calls(),4);
+    box=state.local();box.sessions[0].runId="replacement";state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QVERIFY(reply(true,3));QVERIFY(FakeCli::replace(fixture+".release","release"));QTRY_COMPARE(completed.size(),4);
+    QCOMPARE(shared.size(),2);QVERIFY(!list->item(0)->data(SessionRoles::Muted).toBool());QCOMPARE(refreshed.size(),0);
+    box=state.local();box.ok=false;state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);open();
+    mute=menu->findChild<QAction *>("contextToggleMute");QVERIFY(!mute->isEnabled());QVERIFY(mute->toolTip().contains("Connect"));menu->hide();QCOMPARE(calls(),4);
+    // An older host has no local-only fallback or command admission.
+    box=state.local();box.ok=true;box.sessions[0].sharedNotifications=false;box.sessions[0].notificationPreferences={};box.sessions[0].muted=false;
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);open();
+    mute=menu->findChild<QAction *>("contextToggleMute");QVERIFY(!mute->isEnabled());QVERIFY(mute->toolTip().contains("Update hgs"));menu->hide();
+    QCOMPARE(calls(),4);QCOMPARE(marks.size(),0);QCOMPARE(QSettings().value("attention/sessionMarks"),originalMarks);
+    QVERIFY(state.takeNewReadMarks().isEmpty());
 }
 
 void TestSessionsWindow::sessionAttentionMenuPersistsWithoutSelection()
@@ -7073,7 +7246,8 @@ void TestSessionsWindow::batchActionsAndReturnToSessions()
     auto *menu = button->menu(); QVERIFY(menu);
     auto refreshMenu = [&]() { QMetaObject::invokeMethod(menu, "aboutToShow"); };
     refreshMenu();
-    QCOMPARE(menu->actions().size(), 5); // Machines, separator, mark-all-read and archive cleanup.
+    QCOMPARE(menu->actions().size(), 6); // Machines, separator, expand-all, mark-all-read and archive cleanup.
+    auto *expandAll = window.findChild<QAction *>("expandAllCollapsedSessionRows"); QVERIFY(expandAll); QVERIFY(menu->actions().contains(expandAll));
     auto *clear=window.findChild<QAction *>("clearArchive");QVERIFY(menu->actions().contains(clear));
     QVERIFY(clear->isVisible());QVERIFY(!clear->isEnabled()); // No archived entries yet.
     auto *arch = menu->actions()[0]->menu(); auto *mac = menu->actions()[1]->menu();

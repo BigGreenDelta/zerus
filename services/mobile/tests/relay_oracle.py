@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import uuid
 
-from zerus_mobile import analytics, archives, hook_health, file_reads, speech, speech_config, voice
+from zerus_mobile import analytics, archives, hook_health, file_reads, speech, speech_config, voice, session_notifications
 from zerus_mobile.attachments import validate_read, validate_send
 from zerus_mobile.context import validate_clear_context
 from zerus_mobile.context import (COMPUTER_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS,
@@ -111,6 +111,9 @@ def validate_request(value):
             archive_id = text(payload["archive_id"], 36)
             if str(uuid.UUID(archive_id)) != archive_id:
                 raise HTTPBadRequest()
+        return
+    if op == "session_notifications":
+        session_notifications.validate(payload)
         return
     if op == "mark_read":
         validate_mark_read(payload)

@@ -283,10 +283,10 @@ class ContextFixtureTests(unittest.IsolatedAsyncioTestCase):
         hint = {"status": "cold", "source": "native_footer", "tokens": 60000}
         self.config(all_states=True, session_usage=usage, cache_hint=hint)
         snapshot = await self.connector.snapshot()
-        # This retained fixture deliberately has no hook health, analytics, speech, file read or folder creation ABI
+        # This retained fixture deliberately has no shared notifications, hook health, analytics, speech, file read or folder creation ABI
         # in its CLI help, so those operations stay unadvertised.
         self.assertEqual(set(snapshot["mobile_capabilities"]["operations"]),
-                         OPERATIONS - SPEECH_OPERATIONS - SPEECH_CONFIG_OPERATIONS - VOICE_OPERATIONS - {"directory_create", "file_read", "archive_list", "hooks_status", "analytics_read"})
+                         OPERATIONS - SPEECH_OPERATIONS - SPEECH_CONFIG_OPERATIONS - VOICE_OPERATIONS - {"session_notifications", "directory_create", "file_read", "archive_list", "hooks_status", "analytics_read"})
         self.assertEqual(len(snapshot["sessions"]), 7)
         inspect = await self.connector.native(["inspect", NAME])
         self.assertEqual(inspect["session_usage"], usage)

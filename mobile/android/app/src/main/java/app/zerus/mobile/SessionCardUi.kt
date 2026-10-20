@@ -52,7 +52,7 @@ private fun subagentChildren(model: ZerusViewModel, session: Session, online: Bo
  */
 @Composable internal fun SessionOptionalQuestionChip(session: Session, online: Boolean) {
     val chip = SessionCardPresentation.optionalQuestionChip(session, online) ?: return
-    val colors = DesktopSessionPalette.colors(DesktopBadgeKind.Attention, MaterialTheme.colorScheme.background.luminance() < .5f)
+    val colors = DesktopSessionPalette.colors(if(SessionNotificationPreferences.muted(session)) DesktopBadgeKind.Neutral else DesktopBadgeKind.Attention, MaterialTheme.colorScheme.background.luminance() < .5f)
     val foreground = Color(colors.foreground)
     Row(Modifier.clip(RoundedCornerShape(5.dp)).background(Color(colors.background))
         .clearAndSetSemantics { contentDescription = chip.description }
@@ -81,7 +81,7 @@ private fun subagentChildren(model: ZerusViewModel, session: Session, online: Bo
                 child.id to if (child.group) "" else model.agentListReason(session.target, child.id, online)
             }
             children.forEachIndexed { index, child ->
-                SubagentRow(child, reasons.getValue(child.id), last = index == children.lastIndex) {
+                SubagentRow(child, reasons.getValue(child.id), last = index == children.lastIndex, notificationsMuted=SessionNotificationPreferences.muted(session)) {
                     model.openAgent(session, child.id, online)
                 }
             }
@@ -117,7 +117,7 @@ private fun subagentChildren(model: ZerusViewModel, session: Session, online: Bo
     }
 }
 
-@Composable private fun SubagentRow(child: SessionCardChild, reason: String, last: Boolean, onOpen: () -> Unit) {
+@Composable private fun SubagentRow(child: SessionCardChild, reason: String, last: Boolean, notificationsMuted: Boolean, onOpen: () -> Unit) {
     val enabled = reason.isBlank() && !child.group
     val dark = MaterialTheme.colorScheme.surface.luminance() < .5f
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
@@ -141,7 +141,7 @@ private fun subagentChildren(model: ZerusViewModel, session: Session, online: Bo
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                val colors = DesktopSessionPalette.colors(child.kind, dark)
+                val colors = DesktopSessionPalette.colors(if(notificationsMuted && child.kind in setOf(DesktopBadgeKind.Attention,DesktopBadgeKind.Unread)) DesktopBadgeKind.Neutral else child.kind, dark)
                 Surface(color = Color(colors.background), shape = RoundedCornerShape(5.dp)) {
                     Text(child.status, Modifier.padding(horizontal = 7.dp, vertical = 2.dp), color = Color(colors.foreground),
                         style = MaterialTheme.typography.labelSmall, maxLines = 1)

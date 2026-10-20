@@ -41,6 +41,7 @@ public:
     QJsonObject attentionMarks() const { return m_attentionMarks; }
     bool markSessionRead(const QString &host, const SessionInfo &expected);
     bool setReviewLater(const QString &host, const SessionInfo &expected, bool marked);
+    bool applyNotificationPreferences(const QString &host, const SessionInfo &expected, const QJsonObject &preferences);
     // Shared read state. Hosts with `hgs read` own unread/acknowledged state;
     // marks this GUI queued but no snapshot shows yet keep the UI read.
     void setPendingReads(const QJsonObject &pending);

@@ -109,6 +109,8 @@ class Registry:
             mapped = yield from query('SELECT c.* FROM native_computers m JOIN computers c ON c.id=m.computer_id WHERE m.workspace_id=? AND m.machine_id=?', node['workspace_id'], machine)
             root_revoked=bool(own['revoked'] or (mapped and mapped['revoked']))
             if mapped and mapped['id'] != computer and not own['exposed']:
+                from . import notification_highwater
+                yield from notification_highwater.merge(node['workspace_id'], computer, mapped['id'])
                 computer = mapped['id']
                 yield from self.alias(node['workspace_id'], node['id'], computer)
             elif not mapped:
@@ -186,7 +188,12 @@ class Registry:
         if not rows:return None
         row=min(rows,key=lambda r:(not r['local'],r['gateway_id'],r['route_id']))
         fetched=yield from query('SELECT CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END AS snapshot FROM computer_routes r JOIN nodes n ON n.id=r.gateway_id WHERE r.gateway_id=? AND r.route_id=?',row['gateway_id'],row['route_id'])
-        row['snapshot']=fetched['snapshot']
+        from . import notification_highwater
+        raw = fetched['snapshot']
+        if raw is not None:
+            projected = yield from notification_highwater.overlay(computer, json.loads(raw))
+            raw = notification_highwater.canonical(projected)
+        row['snapshot']=raw
         return row
 
     def frozen(self, request, allow_gateway):
@@ -217,12 +224,22 @@ class Registry:
         by_computer={}
         for alias in aliases:by_computer.setdefault(alias['computer_id'],[]).append(alias['alias'])
         result=[]
+        projected_bytes=2
         for row in sorted(selected,key=lambda row:(row['name'],row['id'])):
-            row.update(snapshot=by_route[(row['gateway_id'],row['route_id'])],aliases=by_computer.get(row['id'],[]),via=None if row['local'] else {'gateway_id':row['gateway_id'],'gateway_name':row['gateway_name']},available=self.available(row,now))
+            from . import notification_highwater
+            raw = by_route[(row['gateway_id'],row['route_id'])]
+            if raw is not None:
+                projected = yield from notification_highwater.overlay(row['id'],json.loads(raw))
+                raw = notification_highwater.canonical(projected)
+            row.update(snapshot=raw,aliases=by_computer.get(row['id'],[]),via=None if row['local'] else {'gateway_id':row['gateway_id'],'gateway_name':row['gateway_name']},available=self.available(row,now))
+            projected_bytes += len(notification_highwater.canonical(row).encode()) + 1
+            if projected_bytes>maximum:raise RouteError(413, 'projected catalog is too large')
             result.append(row)
         unexposed=[row['id'] for row in selected if not row['exposed']]
         if unexposed:
             yield from query('UPDATE computers SET exposed=1 WHERE id IN ('+','.join('?' for _ in unexposed)+')',*unexposed,result='none')
+        if len(json.dumps(result,sort_keys=True,separators=(',',':'),allow_nan=False).encode())>maximum:
+            raise RouteError(413, 'projected catalog is too large')
         return result
 
     def peer_heartbeat(self, node, route_id, machine_id, encoded):
@@ -254,6 +271,8 @@ class Registry:
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS computers(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),name TEXT NOT NULL,machine_id TEXT,revoked INTEGER NOT NULL DEFAULT 0,exposed INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS computer_workspace ON computers(workspace_id,id);
+CREATE TABLE IF NOT EXISTS computer_notification_preferences(computer_id TEXT PRIMARY KEY REFERENCES computers(id),workspace_id TEXT NOT NULL REFERENCES workspaces(id),preferences TEXT NOT NULL,payload_bytes INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS computer_notification_workspace ON computer_notification_preferences(workspace_id,computer_id);
 CREATE TABLE IF NOT EXISTS native_computers(workspace_id TEXT NOT NULL REFERENCES workspaces(id),machine_id TEXT NOT NULL,computer_id TEXT NOT NULL REFERENCES computers(id),PRIMARY KEY(workspace_id,machine_id));
 CREATE TABLE IF NOT EXISTS computer_aliases(workspace_id TEXT NOT NULL REFERENCES workspaces(id),alias TEXT NOT NULL,computer_id TEXT NOT NULL REFERENCES computers(id),PRIMARY KEY(workspace_id,alias));
 CREATE INDEX IF NOT EXISTS computer_alias_target ON computer_aliases(computer_id);

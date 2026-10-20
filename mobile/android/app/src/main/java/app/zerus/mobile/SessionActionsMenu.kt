@@ -57,6 +57,8 @@ object SessionActionsMenu {
         return listOf(
             if (archived) emptyList() else listOf(SessionMenuItem("terminal","Open terminal",terminalReason(facts))),
             if (archived || facts.target.agentId.isNotBlank()) emptyList() else listOf(readItem(facts)),
+            listOf(SessionMenuItem(SessionNotificationPreferences.operation,
+                SessionNotificationPreferences.label(SessionNotificationPreferences.parse(facts.row,facts.target)),notificationReason(facts),"Applies to this conversation on all devices.")),
             buildList {
                 add(if (archived) native("restore","Restore session…") else if (running) native("pause","Pause session…") else native("resume","Resume session…"))
                 add(native("rename","Rename…"))
@@ -111,6 +113,14 @@ object SessionActionsMenu {
             else -> SessionControlPresentation.reason(target,operation,facts.row)
         }
     }
+    fun notificationReason(facts: SessionMenuFacts): String = when {
+        facts.blocked.isNotBlank() -> facts.blocked
+        facts.target.agentId.isNotBlank() || facts.archived || facts.target.archiveId.isNotBlank() -> "Notification controls belong to the live parent conversation."
+        !facts.online -> "The machine is offline."
+        SessionNotificationPreferences.operation !in facts.supported -> SessionNotificationPreferences.unavailable
+        facts.busy.isNotBlank() -> facts.busy
+        else -> SessionNotificationPreferences.reason(facts.target,facts.row)
+    }
 }
 
 /** Tap opens the session; long press (with haptic feedback) or the accessibility long-press action opens its actions. */
@@ -160,6 +170,7 @@ internal fun Modifier.sessionCardGestures(shape: Shape, onOpen: () -> Unit, onAc
 }
 
 private fun menuIcon(id: String): ImageVector = when (id) {
+    SessionNotificationPreferences.operation -> Icons.Default.NotificationsOff
     "terminal" -> Icons.Default.Terminal
     "mark_read" -> Icons.Default.DoneAll
     "clear_reminder" -> Icons.Default.NotificationsOff

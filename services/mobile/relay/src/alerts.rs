@@ -147,6 +147,24 @@ fn text(v: &Value, key: &str) -> Option<String> {
     v[key].as_str().map(str::to_owned)
 }
 
+/// Notification suppression never changes the underlying native/read state.
+/// A preference for a previous conversation cannot mute a reused session name.
+pub fn notification_preferences(v: &Value) -> Option<&Value> {
+    let p = &v["notification_preferences"];
+    (p["conversation_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty())
+        && p["conversation_id"] == v["conversation_id"]
+        && p["muted"].is_boolean()
+        && p["revision"].as_i64().is_some_and(|r| r >= 0)
+        && p["suppressed"].is_object())
+    .then_some(p)
+}
+
+pub fn notifications_muted(v: &Value) -> bool {
+    notification_preferences(v).is_some_and(|p| p["muted"] == true)
+}
+
 /// The identity a derived event had when it became a candidate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
@@ -200,6 +218,29 @@ impl Candidate {
             || current("conversation_id") != self.conversation_id.as_deref()
         {
             return true;
+        }
+        if let Some(p) = notification_preferences(v) {
+            if p["muted"] == true {
+                return true;
+            }
+            let baseline = &p["suppressed"];
+            if self.kind == "completed"
+                && self.reply_id.is_some()
+                && baseline["reply_id"].as_str() == self.reply_id.as_deref()
+            {
+                return true;
+            }
+            if self.kind != "completed"
+                && baseline["attention_signature"]
+                    .as_str()
+                    .is_some_and(|signature| {
+                        !signature.is_empty()
+                            && (Some(signature) == self.attention_signature.as_deref()
+                                || Some(signature) == current("attention_signature"))
+                    })
+            {
+                return true;
+            }
         }
         // A mark for another conversation never acknowledges this one.
         let read = if v["read"]["conversation_id"].as_str() == self.conversation_id.as_deref() {

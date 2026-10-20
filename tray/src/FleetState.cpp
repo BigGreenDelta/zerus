@@ -1,4 +1,5 @@
 #include "FleetState.h"
+#include "SessionNotifications.h"
 
 #include <QStringList>
 #include <QJsonDocument>
@@ -83,6 +84,36 @@ void keepOptionalQuestions(QList<SessionInfo> &sessions, const QList<SessionInfo
     }
 }
 
+// A poll started before a confirmed write must not roll its host revision back.
+// No local preference is created: only values already confirmed by that host
+// can bridge an older, otherwise supported snapshot of the same conversation.
+void keepNotificationPreferences(QList<SessionInfo> &sessions, const QList<SessionInfo> &before)
+{
+    QHash<QString, const SessionInfo *> known;
+    for (const auto &old : before) if (SessionNotifications::valid(old.notificationPreferences, old.conversationId)) {
+        const auto key = QString::fromUtf8(QJsonDocument(QJsonArray{old.cmd, old.conversationId}).toJson(QJsonDocument::Compact)); // Host-scoped by the caller.
+        const auto found = known.value(key);
+        if (!found || SessionNotifications::revision(found->notificationPreferences.value("revision"))
+                < SessionNotifications::revision(old.notificationPreferences.value("revision"))) known[key] = &old;
+    }
+    for (auto &next : sessions) {
+        const auto key = QString::fromUtf8(QJsonDocument(QJsonArray{next.cmd, next.conversationId}).toJson(QJsonDocument::Compact));
+        const auto old = known.value(key); if (!old) continue;
+        if (!next.sharedNotifications) {
+            // Keep the last host-confirmed display through downgrade/unknown
+            // snapshots, while leaving command authority explicitly disabled.
+            next.notificationPreferences = old->notificationPreferences; next.muted = old->muted;
+            continue;
+        }
+        const auto previous = SessionNotifications::revision(old->notificationPreferences.value("revision"));
+        const auto incoming = SessionNotifications::revision(next.notificationPreferences.value("revision"));
+        if (incoming > previous || (incoming == previous && next.notificationPreferences == old->notificationPreferences)) continue;
+        const bool conflict = incoming == previous;
+        next.notificationPreferences = old->notificationPreferences; next.muted = old->muted;
+        if (conflict) next.notificationPreferencesError = QStringLiteral("Conflicting shared notification preferences. Refresh the session.");
+    }
+}
+
 // A queued mark is finished once the host shows it, or once none of its values
 // is current any more: the host would report every field stale.
 bool settled(const ReadMark &mark, const SessionInfo &s) {
@@ -154,6 +185,17 @@ bool FleetState::setReviewLater(const QString &host, const SessionInfo &expected
     auto mark = m_attentionMarks.value(key).toObject(); mark["review"] = marked;
     m_attentionMarks[key] = mark; s->reviewLater = marked; return true;
 }
+bool FleetState::applyNotificationPreferences(const QString &host, const SessionInfo &expected, const QJsonObject &preferences)
+{
+    auto *s = matchingSession(host, expected);
+    if (!s || !s->sharedNotifications || s->runId.isEmpty() || s->runId != expected.runId
+        || !SessionNotifications::valid(preferences, s->conversationId)) return false;
+    const auto current = SessionNotifications::revision(s->notificationPreferences.value("revision"));
+    const auto incoming = SessionNotifications::revision(preferences.value("revision"));
+    if (incoming < current || (incoming == current && preferences != s->notificationPreferences)) return false;
+    s->notificationPreferences = preferences; s->muted = preferences.value("muted").toBool();
+    s->notificationPreferencesError.clear(); return true;
+}
 bool FleetState::markSessionRead(const QString &host, const SessionInfo &expected)
 {
     auto *s = matchingSession(host, expected);
@@ -221,7 +263,7 @@ void FleetState::setLocal(const BoxState &box, qint64 /*nowMs*/)
     // Свой бокс не имеет понятия "опрошен давно": мы и есть этот бокс, вызов hgs
     // локальный и синхронный по сути (миллисекунды). localIsAlwaysFresh() полагается
     // на то, что isStale() вообще не смотрит на m_local.
-    BoxState next = box; keepOptionalQuestions(next.sessions, m_local.sessions);
+    BoxState next = box; keepOptionalQuestions(next.sessions, m_local.sessions); keepNotificationPreferences(next.sessions, m_local.sessions);
     m_local = std::move(next); updateUnread({}, m_local);
     m_haveLocal = true;
     if (box.peersKnown) {
@@ -247,7 +289,7 @@ void FleetState::setPeer(const BoxState &box, qint64 nowMs)
 
     if (box.ok) {
         const auto before = std::exchange(entry.box.sessions, {});
-        entry.box = box; keepOptionalQuestions(entry.box.sessions, before); updateUnread(box.host, entry.box);
+        entry.box = box; keepOptionalQuestions(entry.box.sessions, before); keepNotificationPreferences(entry.box.sessions, before); updateUnread(box.host, entry.box);
     } else {
         // Пир ответил "я офлайн/сплю" — это не то же самое, что "мы не знаем, что там".
         // hgs в таком случае не может опросить tmux и присылает sessions:[], но реальные
@@ -301,14 +343,14 @@ int FleetState::attentionSessions(qint64 nowMs) const
 {
     auto count = [](const BoxState &box) {
         return int(std::count_if(box.sessions.cbegin(), box.sessions.cend(),
-            [&box](const SessionInfo &s) { return s.reviewLater || (box.ok && s.needsAttention()); }));
+            [&box](const SessionInfo &s) { return !s.muted && (s.reviewLater || (box.ok && s.needsAttention())); }));
     };
     int total = m_haveLocal ? count(m_local) : 0;
     for (const auto &entry : m_peers)
         if (entry.everPolled) {
             if (nowMs - entry.polledAt < kPeerStaleMs) total += count(entry.box);
             else total += int(std::count_if(entry.box.sessions.cbegin(), entry.box.sessions.cend(),
-                [](const SessionInfo &s) { return s.reviewLater; }));
+                [](const SessionInfo &s) { return !s.muted && s.reviewLater; }));
         }
     return total;
 }

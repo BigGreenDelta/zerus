@@ -376,6 +376,21 @@ final class AppModel {
 
     // MARK: Catalog
 
+    @ObservationIgnored private var notificationPreferenceRevision = 0
+    func confirmNotificationPreference(_ action: SessionAction) async {
+        notificationPreferenceRevision += 1
+        while true {
+            let rows = catalogSessions, revision = catalogRevision, version = notificationPreferenceRevision
+            let actions = messageState.sessionActions + [action]
+            let merged = await Task.detached { SessionNotificationPreferences.mergeRows(rows,retained:rows,actions:actions) }.value
+            guard revision == catalogRevision,version == notificationPreferenceRevision else { continue }
+            catalogSessions = merged
+            publishSessions()
+            conversation.confirmNotificationPreference(action)
+            return
+        }
+    }
+
     func refresh(explicit: Bool = false) {
         guard !demo, storageReady else { return }
         if explicit { showCatalogProgress() }
@@ -428,7 +443,8 @@ final class AppModel {
             }
             do {
                 let computers = try await client.computers(connection)
-                let catalog = await Task.detached { SessionCatalogParser.parse(connection, computers.objects("computers")) }.value
+                let retained = catalogSessions, actions = messageState.sessionActions
+                let catalog = await Task.detached { SessionCatalogParser.parse(connection, computers.objects("computers"),retained:retained,actions:actions) }.value
                 guard generation == catalogGeneration, connections == original else { return }
                 nextMachines += catalog.machines
                 nextAccounts += catalog.accounts
@@ -463,6 +479,13 @@ final class AppModel {
             nextProjects += projects.filter { unavailable.contains($0.key.connectionId) }
         }
         let accounts = nextAccounts, successful = reached, connected = Set(original.map(\.id))
+        while true {
+            let incoming = nextSessions,retained = catalogSessions,actions = messageState.sessionActions,revision = catalogRevision,version = notificationPreferenceRevision
+            let merged = await Task.detached { SessionNotificationPreferences.mergeRows(incoming,retained:retained,actions:actions) }.value
+            guard generation == catalogGeneration,connections == original else { return }
+            if revision != catalogRevision || version != notificationPreferenceRevision { continue }
+            nextSessions = merged;break
+        }
         accountsStore?.edit { old in AccountSnapshots.merge(old, accounts, successful: successful, connected: connected) }
         catalogSessions = nextSessions
         let aliases = messageState.machineAliases

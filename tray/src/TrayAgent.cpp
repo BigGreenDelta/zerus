@@ -624,7 +624,27 @@ void TrayAgent::showSessions()
         connect(m_sessionsWindow, &SessionsWindow::attentionMarksChanged, this, [this, publishReadState](const QJsonObject &marks, const QJsonObject &read) {
             m_state.setAttentionMarks(marks); m_state.setReadReplies(read);
             QSettings().setValue("attention/sessionMarks", QJsonDocument(marks).toJson(QJsonDocument::Compact));
+            // Consume muted events and withdraw current banners immediately.
+            // Unmute keeps the recorded edge, so it never replays an old event.
+            observeAttention({}, m_state.local());
+            for (const auto &host : m_state.peerNames()) if (const auto *box = m_state.peer(host)) observeAttention(host, *box);
             publishReadState();
+        });
+        connect(m_sessionsWindow, &SessionsWindow::notificationPreferencesChanged, this,
+                [this](const QString &host, const QString &name, const QString &run, const QString &conversation, const QJsonObject &preferences) {
+            const auto *box = host.isEmpty() ? &m_state.local() : m_state.peer(host); if (!box) return;
+            const auto found = std::find_if(box->sessions.cbegin(), box->sessions.cend(), [&](const SessionInfo &s) {
+                return s.name == name && s.runId == run && s.conversationId == conversation;
+            });
+            if (found == box->sessions.cend()) return;
+            const auto expected = *found;
+            if (!m_state.applyNotificationPreferences(host, expected, preferences)) return;
+            const auto *updated = host.isEmpty() ? &m_state.local() : m_state.peer(host);
+            observeAttention(host, *updated);
+            m_sessionsWindow->setFleet(m_state); refreshIcon(); if (!m_menu.isOpen()) rebuildMenu();
+            // One fresh read of this host, not a retry of the mutation or an
+            // inspection of whichever unrelated conversation is now selected.
+            if (host.isEmpty()) m_client.requestLocal(); else m_client.requestPeer(host);
         });
         connect(m_sessionsWindow, &SessionsWindow::sessionActivated, this, &TrayAgent::activateSession);
         connect(m_sessionsWindow, &SessionsWindow::terminalOpenRequested, this, &TrayAgent::openSessionTerminal);

@@ -496,6 +496,15 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     output
 }
 
+/// Same read-only status observations as a listing, with no reconciliation,
+/// adoption, fitting or action. A reply failure refuses an unmute baseline.
+pub(super) fn notification_summary(record: &Value, live_pane: bool) -> Result<Value> {
+    let mut output = summary(record, live_pane);
+    let reply = latest_reply(record, output["schedules"]["recurring"].as_u64())?;
+    output.as_object_mut().unwrap().extend(reply.as_object().unwrap().clone());
+    Ok(output)
+}
+
 /// The native chooser the terminal shows, which no hook reports: its
 /// question, the phase the summary shows and its detail. A later recognized
 /// panel wins. Dispatch refuses each of them (`input::checked_input`).
@@ -783,6 +792,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     // this inspection reports (zerus-byyw, as in `merge_listing`).
     workspace::enrich(std::slice::from_mut(&mut output), &workspace::snapshot_cwds(&names));
     waits::decorate(std::slice::from_mut(&mut output));
+    notifications::enrich(&mut output, notifications::load().as_ref(), journal_name);
     Ok(output)
 }
 

@@ -319,7 +319,7 @@ struct ConversationView: View {
             HStack(spacing: 8) {
                 Text(unread.map { "\($0.text) unread" } ?? "")
                     .font(.caption)
-                    .foregroundStyle(Theme.mint)
+                    .foregroundStyle(SessionNotificationPreferences.parse(model.activity ?? session.raw,target)?.muted == true ? Theme.muted : Theme.mint)
                 Spacer()
                 if offered > 0 {
                     Button("Questions (\(offered))") {

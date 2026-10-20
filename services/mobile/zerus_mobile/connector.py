@@ -28,7 +28,7 @@ import aiohttp
 from .managed_relay import transport, identity_url
 from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
-from . import analytics, speech, speech_config, voice
+from . import analytics, speech, speech_config, voice, session_notifications
 from . import attachment_reads, file_reads, archives, hook_health
 from .recovery import validate_recovery
 from .history import validate_history
@@ -315,6 +315,7 @@ class Connector:
         self.worktree_supported = False
         self.directory_create_supported = False
         self.read_supported = False
+        self.session_notifications_supported = False
         self.preference_supported = False
         self.attachment_read_supported = False
         self.archive_supported = False
@@ -526,7 +527,7 @@ class Connector:
             snapshot["mobile_projects"]={**groups,"projects":[{k:v for k,v in p.items() if k!="archives"} for p in groups.get("projects",[]) if isinstance(p,dict)]}
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
-        operations = (OPERATIONS - (set() if self.analytics_supported else analytics.OPERATIONS) - (set() if getattr(self,"hook_health_supported",False) else {"hooks_status"})) - (set() if self.archive_supported else {"archive_list"}) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
+        operations = (OPERATIONS - (set() if self.analytics_supported else analytics.OPERATIONS) - (set() if getattr(self,"hook_health_supported",False) else {"hooks_status"})) - (set() if self.archive_supported else {"archive_list"}) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if getattr(self, "session_notifications_supported", False) else {"session_notifications"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | {"accounts_snapshot"} | ({CLEAR_CONTEXT_DISMISS_FEATURE} if getattr(self, "clear_context_dismiss_supported", False) else set()) | ({voice.video.FEATURE} if self.voice_supported and self.video_supported else set()) | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -550,6 +551,7 @@ class Connector:
         self.worktree_supported = False
         self.directory_create_supported = False
         self.read_supported = False
+        self.session_notifications_supported = False
         self.preference_supported = False
         self.attachment_read_supported = False
         self.file_read_supported = False
@@ -575,6 +577,7 @@ class Connector:
             self.worktree_supported = isinstance(help_text,str) and "Mobile worktree ABI: worktrees-v1" in help_text
             self.directory_create_supported = isinstance(help_text, str) and DIRECTORY_CREATE_HELP in help_text
             self.read_supported = isinstance(help_text, str) and "read <session> --json" in help_text
+            self.session_notifications_supported = isinstance(help_text, str) and any(line.strip() == session_notifications.HELP_MARKER for line in help_text.splitlines())
             self.preference_supported = isinstance(help_text,str) and "swarm preference set mobile_delivery" in help_text
             self.attachment_read_supported = isinstance(help_text, str) and attachment_reads.HELP_MARKER in help_text
             self.archive_supported = isinstance(help_text,str) and archives.HELP_MARKER in help_text
@@ -711,6 +714,12 @@ class Connector:
             raise ConnectorError("session must match an exact local snapshot entry")
         if "archive_id" in request:
             raise ConnectorError("archive identity belongs only in inspect payload")
+        if operation == session_notifications.OPERATION:
+            if session not in self.sessions:
+                raise ConnectorError("session must match an exact nonarchived snapshot entry")
+            try: session_notifications.validate(request.get("payload"))
+            except ValueError as error: raise ConnectorError(str(error)) from None
+            return operation, session, request["payload"]
         if operation == "mark_read":
             if session not in self.sessions:
                 raise ConnectorError("session must match an exact nonarchived snapshot entry")
@@ -1008,6 +1017,8 @@ class Connector:
                 raise ConnectorError("the shared delivery setting is changed on the gateway computer with a current hgs")
             if operation in worktrees.OPERATIONS and not self.worktree_supported:
                 raise ConnectorError("native mobile worktree ABI is unavailable")
+            if operation == session_notifications.OPERATION and not getattr(self, "session_notifications_supported", False):
+                raise ConnectorError("native shared notification ABI is unavailable")
             if operation == "mark_read" and not self.read_supported:
                 raise ConnectorError("native shared read ABI is unavailable")
             if operation == "file_read" and not self.file_read_supported:
@@ -1306,6 +1317,10 @@ class Connector:
                 result = await self.read_computer_file(session, payload, request_id)
             elif operation == "attachment_read":
                 result = await self.read_attachment(session, payload, request_id)
+            elif operation == session_notifications.OPERATION:
+                result = await self.native(["notifications", session, "--json"], payload, failure_json=True)
+                if not session_notifications.result_valid(result, payload):
+                    raise ConnectorError("native notification preference acknowledgement did not match")
             elif operation == "mark_read":
                 result = await self.native(["read", session, "--json"], payload, failure_json=True)
                 if not mark_read_result(result, payload):

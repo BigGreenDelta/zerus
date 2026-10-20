@@ -833,6 +833,21 @@ fn parent_view(
     );
     Ok(result)
 }
+
+/// GET-only preference baseline. Never adopts a legacy binding or starts a service.
+pub(super) fn notification_snapshot(record: &Value) -> Result<(Value, Option<Vec<Value>>)> {
+    if record["service"] != "opencode2" { return Err("baseline_unavailable".into()); }
+    let service = service::connect().map_err(|_| "baseline_unavailable")?;
+    notification_snapshot_with(&service, record, || history::fetch(&service, record))
+}
+fn notification_snapshot_with(native: &dyn Native, record: &Value, history: impl FnOnce() -> Result<history::Page>) -> Result<(Value, Option<Vec<Value>>)> {
+    let active = active_sessions(native)?;
+    let observed = observe(native, record, &active, history, false)?;
+    let result = normalize(record, Some(&observed));
+    let questions = result["pending_questions"].as_array().cloned();
+    Ok((result, questions))
+}
+
 /// Inspects bindings against one service connection: at most one
 /// `/api/session/active` and one migration check per instance.
 struct Inspector {
@@ -922,6 +937,7 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     }
     let mut inspector = Inspector::connect();
     let mut value = inspector.row(&record, Detail::Full);
+    notifications::enrich(&mut value, notifications::load().as_ref(), journal::journal_name(&record));
     inspector.finish();
     waits::decorate(std::slice::from_mut(&mut value));
     Ok(value)
@@ -951,8 +967,10 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
     }
     let mut inspector = Inspector::connect();
     let mut rows = Vec::new();
+    let preferences = notifications::load();
     for record in &records {
         let mut row = inspector.row(record, Detail::Listing);
+        notifications::enrich(&mut row, preferences.as_ref(), journal::journal_name(record));
         if let Some(map) = row.as_object_mut() {
             for key in [
                 "events",
@@ -1828,6 +1846,7 @@ fn action_in<N: Native>(
             scope.changing();
         }
         change_title(&connect()?, record, b[2])?;
+        notifications::anchor(record);
         record["name"] = json!(new);
     } else if let Some(scope) = scope {
         scope.changing();
@@ -2146,6 +2165,24 @@ mod tests {
             assert_eq!(expected, format!("{method} {path}"));
             Ok(Response { status, body })
         }
+    }
+    #[test]
+    fn notification_baseline_uses_only_gets_and_retains_current_identity() {
+        let record = json!({"name":"opencode/test/session","service":"opencode2","backend":"opencode","conversation_id":"ses_A","run_id":"run-A","cwd":"/workspace/fixture"});
+        let native = Scripted(std::cell::RefCell::new(vec![
+            ("GET /api/session/active".into(), 200, json!({"data":{}})),
+            ("GET /api/session/ses_A".into(), 200, json!({"data":{"id":"ses_A","location":{"directory":"/workspace/fixture"}}})),
+            ("GET /api/session/ses_A/form".into(), 200, json!({"data":[]})),
+            ("GET /api/session/ses_A/permission".into(), 200, json!({"data":[]})),
+            ("GET /api/session/ses_A/inbox".into(), 200, json!({"data":[]})),
+        ]));
+        let (view, questions) = notification_snapshot_with(&native, &record, || Ok(history::Page { messages: Vec::new(), truncated: false })).unwrap();
+        assert!(native.0.borrow().is_empty());
+        assert_eq!(view["conversation_id"], "ses_A");
+        assert_eq!(view["run_id"], "run-A");
+        assert_eq!(view["phase"], "idle");
+        assert_eq!(questions, Some(Vec::new()));
+        assert_eq!(record["service"], "opencode2");
     }
     fn fixture(bytes: &[u8]) -> Value {
         serde_json::from_slice(bytes).unwrap()

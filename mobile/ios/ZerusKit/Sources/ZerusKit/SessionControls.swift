@@ -5,7 +5,7 @@ import Foundation
 public enum SessionActionPolicies {
     public static let lifecycle: Set<String> = ["pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget"]
     public static let operations: Set<String> = lifecycle.union(["send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create",
-                                                                 "directory_create", "recovery_action"])
+                                                                 "directory_create", "recovery_action", SessionNotificationPreferences.operation])
     public static let terminalKeys: Set<String> = ["Enter", "Escape", "Tab", "BTab", "BSpace", "Up", "Down", "Left", "Right", "Home", "End", "PPage",
                                                    "NPage", "DC", "C-c", "C-d", "C-l", "C-a", "C-e", "C-u", "C-w"]
     /// The relay's fixed effort levels; other native variants need `effortVariants`.
@@ -28,6 +28,7 @@ public enum SessionActionPolicies {
     /// Validated exact arguments for one operation; unknown keys are refused. A settings effort outside the relay's
     /// fixed levels needs `effortVariants` for this session, relay and computer.
     public static func arguments(_ operation: String, _ raw: JSONObject, effortVariants: Bool = false) throws -> JSONObject {
+        if operation == SessionNotificationPreferences.operation { return try SessionNotificationPreferences.arguments(raw) }
         guard operations.contains(operation) else { throw ZerusError.invalid("Unsupported session action.") }
         let allowed: Set<String>
         switch operation {
@@ -132,6 +133,7 @@ public enum SessionActionPolicies {
         }
         let fields: [String]
         switch operation {
+        case SessionNotificationPreferences.operation: fields = ["run_id","conversation_id","archive_id","notification_preferences"]
         case "settings": fields = ["model", "effort", "model_options", "effort_options", "pending_model", "pending_effort", "pending_settings_id",
                                    "settings_apply_when", "settings_change_supported"]
         case "send_now": fields = ["input_queue"]
@@ -145,6 +147,11 @@ public enum SessionActionPolicies {
 
     /// Why a fresh inspection no longer permits this action, or "" when it does.
     public static func inspectReason(_ target: Target, _ operation: String, _ args: JSONObject, _ raw: JSONObject) -> String {
+        if operation == SessionNotificationPreferences.operation {
+            let reason = SessionNotificationPreferences.reason(target,raw)
+            if !reason.isEmpty { return reason }
+            return SessionNotificationPreferences.parse(raw,target)?.revision == args.int64("expected_revision") ? "" : "Shared notification settings changed. Refresh before applying."
+        }
         if lifecycle.contains(operation) && !raw.strings("allowed_actions").contains(operation) {
             let reason = raw.object("action_reasons")?.string(operation) ?? ""
             return reason.isEmpty ? "The native session no longer allows this action." : reason
@@ -211,6 +218,7 @@ public enum SessionActionPolicies {
             copy.error = message.isEmpty ? "The computer rejected this action." : message
             return copy
         }
+        if action.operation == SessionNotificationPreferences.operation { return SessionNotificationPreferences.result(action,receipt) }
         if action.operation == MobileDelivery.operation { return MobileDelivery.result(action, receipt) }
         if action.operation == DirectoryCreation.operation { return DirectoryCreation.result(action, receipt) }
         let native = receipt.object("result")
@@ -301,6 +309,7 @@ public enum SessionActionFollowUp {
 public enum SessionControlPresentation {
     /// Native presentation decisions; exact-identity authorization remains with the model.
     public static func reason(_ target: Target, _ operation: String, _ raw: JSONObject?) -> String {
+        if operation == SessionNotificationPreferences.operation { return SessionNotificationPreferences.reason(target,raw) }
         guard let raw else { return "Refresh native session details." }
         if !target.agentId.isEmpty { return "Session controls belong to the parent conversation." }
         guard let allowed = raw.array("allowed_actions") else {
@@ -666,6 +675,8 @@ public enum SessionActionsMenu {
         let sections: [[SessionMenuItem]] = [
             archived ? [] : [SessionMenuItem("terminal", "Open terminal", reason: terminalReason(facts))],
             archived || !facts.target.agentId.isEmpty ? [] : [readItem(facts)],
+            [SessionMenuItem(SessionNotificationPreferences.operation,SessionNotificationPreferences.label(SessionNotificationPreferences.parse(facts.row,facts.target)),
+                reason:notificationReason(facts),hint:"Applies to this conversation on all devices.")],
             lifecycle,
             [SessionMenuItem("copy_name", "Copy session name", reason: facts.target.session.isEmpty ? "The session name is not reported." : ""),
              SessionMenuItem("copy_reference", "Copy session reference", reason: facts.reference == nil
@@ -707,6 +718,14 @@ public enum SessionActionsMenu {
             return "OpenCode runs through its native server. Use the conversation instead of Terminal."
         }
         return ""
+    }
+    public static func notificationReason(_ facts: SessionMenuFacts) -> String {
+        if !facts.blocked.isEmpty { return facts.blocked }
+        if !facts.target.agentId.isEmpty || facts.archived || !facts.target.archiveId.isEmpty { return "Notification controls belong to the live parent conversation." }
+        if !facts.online { return "The machine is offline." }
+        if !facts.supported.contains(SessionNotificationPreferences.operation) { return SessionNotificationPreferences.unavailable }
+        if !facts.busy.isEmpty { return facts.busy }
+        return SessionNotificationPreferences.reason(facts.target,facts.row)
     }
 
     public static func terminalReason(_ facts: SessionMenuFacts) -> String {

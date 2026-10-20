@@ -821,7 +821,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         frames[frame.target.key] = frame
         while (frames.size > 20 || frames.values.sumOf { it.bytes.toLong() } > 20L * 1024 * 1024) frames.remove(frames.keys.first())
     }
-    private fun installFrame(incoming: Frame, verified: Boolean) {
+    private fun installFrame(source: Frame, verified: Boolean) {
+        val retained=listOfNotNull(activeFrame?.takeIf { SessionNotificationPreferences.sameConversation(it.target,source.target) }?.raw,
+            selected?.takeIf { SessionNotificationPreferences.sameConversation(it.target,source.target) }?.raw,
+            catalogSessions.firstOrNull { SessionNotificationPreferences.sameConversation(it.target,source.target) }?.raw)
+        val raw=SessionNotificationPreferences.mergeDetail(source.raw,source.target,retained,messageState.sessionActions)
+        val incoming=if(raw===source.raw) source else source.copy(raw=raw)
         val window=historyWindows[incoming.target.key]
         val priorInspection=activeFrame?.takeIf { previous -> previous.target==incoming.target }?.inspectedEvents.orEmpty()
         val changed=window!=null && incoming.window!=window && HistoryInspection.changed(window,incoming.inspectedEvents,priorInspection)
@@ -1549,6 +1554,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if (operation !in SessionActionPolicies.operations || operation !in relayOperations[target.connectionId].orEmpty() || operation !in machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()) return "This gateway or computer does not support this action."
         if (target.archiveId.isNotBlank() && operation !in setOf("restore", "forget", "rename", "fork")) return "This archived conversation is read-only."
         if (target.archiveId.isBlank() && operation == "restore") return "Select an archived version first."
+        if(operation == SessionNotificationPreferences.operation) SessionNotificationPreferences.reason(target,raw).takeIf { it.isNotBlank() }?.let { return it }
         if(operation in SessionActionPolicies.lifecycle && raw.optJSONArray("allowed_actions")?.let { value -> (0 until value.length()).any { value.optString(it) == operation } } != true) return raw.optJSONObject("action_reasons")?.string(operation).orEmpty().ifBlank { "Native session controls are unavailable for this action." }
         if (contextBlocked(target) || outgoing.any { it.belongsTo(target) && it.blocksSending } || target.key in preparingTargets || compactContinuationActive) return "Resolve the pending delivery or action first."
         if (attachmentImporting || attachmentPreparing || pickerDraft?.target == target || drafts.any { it.target == target && it.status in listOf("submitting", "uncertain") }) return "Wait for the current answer or file selection."
@@ -1588,7 +1594,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var sessionMenuRequest by mutableStateOf<SessionMenuRequest?>(null); private set
     /** A Sessions action opens its exact session; the conversation header then confirms it against fresh native details. */
     fun openWithSessionAction(session: Session, operation: String) {
-        if(operation != "terminal" && operation !in SessionActionPolicies.lifecycle) return
+        if(operation != "terminal" && operation != SessionNotificationPreferences.operation && operation !in SessionActionPolicies.lifecycle) return
         open(session,preserveProject = true)
         sessionMenuRequest = SessionMenuRequest(session.target,operation,navigationId)
     }
@@ -1632,7 +1638,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(operation == "terminal_input") check(terminalCurrent(target,arguments.string("terminal_binding_id"))) { "Terminal binding expired before delivery. Input was not sent." }
                 if(operation != "terminal_input") check(SessionActionPolicies.evidence(operation,live,arguments) == evidence) { "The displayed native action details changed before delivery." }
                 check(SessionActionPolicies.inspectReason(target,operation,arguments,live).isBlank()) { "The native action target or catalog changed before delivery." }
-                val payload = JSONObject(arguments.toString()).put("request_id",action.requestId).put("expected_run_id",target.run).put("expected_conversation_id",target.conversation)
+                val payload = if(operation == SessionNotificationPreferences.operation) SessionNotificationPreferences.payload(target,arguments)
+                    else JSONObject(arguments.toString()).put("request_id",action.requestId).put("expected_run_id",target.run).put("expected_conversation_id",target.conversation)
                 if(target.archiveId.isNotBlank()) payload.put("archive_id",target.archiveId)
                 attempted=true
                 val initial=try { api.submit(connection,target,operation,payload,action.requestId) }
@@ -1647,7 +1654,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                         activityVerified=false;activeFrameVerified=false;historyCached=activity != null
                         resolveActionResult(completed,navigation,target)
                     }
-                    SessionActionFollowUp.Kind.Refresh -> refreshActivity()
+                    SessionActionFollowUp.Kind.Refresh -> {
+                        refreshActivity()
+                    }
                     SessionActionFollowUp.Kind.None -> Unit
                 }
             } catch(e:Exception) {
@@ -1726,12 +1735,34 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             written.sessionActions.find { it.applyAttemptId == action.requestId }?.let { next=next.action(it) }
             next
         })
+        if(action.operation == SessionNotificationPreferences.operation) {
+            if(result.status=="completed") confirmNotificationPreference(result)
+            refresh(explicit=true)
+            SessionNotifications.enqueue(getApplication(),action.target.connectionId,forceCatalog=true)
+        }
         // Only this process's authorized submit callback can establish another cycle.
         // Receipt checking/restoration deliberately uses the default null authorization.
         if(scheduledAuthorization!=null && result.operation=="settings" && result.status=="scheduled") {
             val original=messageState.sessionActions.find { it.requestId==scheduledAuthorization.requestId && it.applyAttemptId==action.requestId } ?: return
             val child=messageState.sessionActions.find { it.requestId==action.requestId && it==result } ?: return
             receipt.optJSONObject("result")?.let { scheduledSettingsRetry.register(original,child,android.os.SystemClock.elapsedRealtimeNanos(),it) }
+        }
+    }
+    private var notificationPreferenceRevision=0L
+    private suspend fun confirmNotificationPreference(result:SessionAction) {
+        notificationPreferenceRevision++
+        while(true) {
+            val rows=catalogSessions;val actions=messageState.sessionActions + result
+            val version=notificationPreferenceRevision
+            val merged=withContext(Dispatchers.Default) { SessionNotificationPreferences.mergeRows(rows,rows,actions) }
+            if(version!=notificationPreferenceRevision || rows!==catalogSessions) continue
+            catalogSessions=merged
+            selected?.let { row ->
+                val raw=SessionNotificationPreferences.mergeDetail(row.raw,row.target,emptyList(),actions)
+                if(raw!==row.raw) selected=row.copy(raw=raw)
+            }
+            activeFrame?.let { frame -> installFrame(frame,activeFrameVerified) }
+            return
         }
     }
     fun recoveryActionReason(target:Target,jobId:String,choice:String):String {
@@ -2005,8 +2036,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     val computers = api.computers(connection)
+                    val retained=catalogSessions;val actions=messageState.sessionActions
                     val prepared = withContext(Dispatchers.Default) {
-                        SessionCatalogParser.parse(connection, computers.optJSONArray("computers")?.objects().orEmpty())
+                        SessionCatalogParser.parse(connection, computers.optJSONArray("computers")?.objects().orEmpty(),retained,actions)
                     }
                     if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
                     newAccounts += prepared.accounts; newMachines += prepared.machines
@@ -2031,6 +2063,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
             newMachines += machines.filter { it.connectionId in unavailable }.map { it.copy(online=false,lastKnown=true) }
             newProjects += projects.filter { it.key.connectionId in unavailable }
+            // A receipt or newer catalog may arrive while background parsing is suspended.
+            while(true) {
+                val retained=catalogSessions;val actions=messageState.sessionActions;val version=notificationPreferenceRevision
+                val merged=withContext(Dispatchers.Default) { SessionNotificationPreferences.mergeRows(newSessions,retained,actions) }
+                if(!catalogGate.owns(operation.id) || connections!=originalConnections) return@launch
+                if(version!=notificationPreferenceRevision || retained!==catalogSessions) continue
+                newSessions.clear();newSessions.addAll(merged);break
+            }
             accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 sessions = newSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations

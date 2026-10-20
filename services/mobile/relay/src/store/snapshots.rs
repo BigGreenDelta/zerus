@@ -78,11 +78,14 @@ impl Store {
             return Err(Error::LARGE);
         }
         let hash = digest(encoded);
+        // Only valid incoming preferences can grow the permanent highwater.
+        // Missing/old-host fields still pass accept()'s read-only stale check.
+        let needs_payload = crate::notification_highwater::present(snapshot);
         // Older connectors forward the desktop's presence inside the snapshot.
         let received = now();
         let presence = Presence::from_value(presence, received)
             .or_else(|| Presence::from_value(&snapshot["desktop_presence"], received));
-        if peer.is_none() {
+        if peer.is_none() && !needs_payload {
             let mut t = self.db.begin().await?;
             if t.exec("UPDATE nodes SET last_seen=? WHERE id=? AND workspace_id=? AND revoked=0 AND (snapshot_hash=? OR EXISTS(SELECT 1 FROM computers c WHERE c.id=nodes.computer_id AND c.revoked=1))",args![now(),&c.id,&c.workspace,&hash]).await? != 0 {
                 // Unchanged content: remember presence without rewriting the snapshot.
@@ -104,13 +107,23 @@ impl Store {
             let previous=if let Some((route,_))=peer {
                 self.db.one("SELECT snapshot,snapshot_hash,computer_id FROM computer_routes WHERE gateway_id=? AND route_id=? AND local=0",args![&c.id,route]).await?
             }else{self.db.one("SELECT snapshot,snapshot_hash,computer_id FROM nodes WHERE id=? AND workspace_id=? AND revoked=0",args![&c.id,&c.workspace]).await?}.ok_or(Error::NOT_FOUND)?;
+            if !registry::notification_revisions_current(previous["snapshot"].as_str(), snapshot)? {
+                return Err(Error::CONFLICT);
+            }
             let changes = registry::event_changes(previous["snapshot"].as_str(), snapshot)?;
             let mut t = self.db.begin().await?;
             if !changes.is_empty() {
-                self.event_locks(&mut t, &[c.workspace.as_str()], changes.len())
-                    .await?;
+                self.event_locks_with_payload(
+                    &mut t,
+                    &[c.workspace.as_str()],
+                    changes.len(),
+                    needs_payload.then_some(c.workspace.as_str()),
+                )
+                .await?;
+            } else if needs_payload {
+                self.db.payload_usage(&mut t, &c.workspace).await?;
             }
-            // Changed event-free snapshots take only the node or route lock.
+            // Global events (when needed), payload shard, sorted workspaces, then route.
             let current = if let Some((route, machine)) = peer {
                 self.authorized_tx(&mut t, c).await?;
                 let r=t.one("SELECT snapshot_hash,computer_id,machine_id,active,online,guarded FROM computer_routes WHERE gateway_id=? AND route_id=? AND local=0 FOR UPDATE",args![&c.id,route]).await?.ok_or(Error::NOT_FOUND)?;
@@ -153,6 +166,14 @@ impl Store {
             if current["snapshot_hash"] != previous["snapshot_hash"] {
                 continue;
             }
+            crate::notification_highwater::accept(
+                &self.db,
+                &mut t,
+                &c.workspace,
+                s(&current, "computer_id"),
+                snapshot,
+            )
+            .await?;
             if let Some((route, _)) = peer {
                 t.exec("UPDATE computer_routes SET snapshot=?,snapshot_hash=?,last_seen=? WHERE gateway_id=? AND route_id=?",args![encoded,&hash,now(),&c.id,route]).await?;
             } else {
@@ -226,6 +247,15 @@ impl Store {
         spaces: &[&str],
         count: usize,
     ) -> Result<()> {
+        self.event_locks_with_payload(t, spaces, count, None).await
+    }
+    async fn event_locks_with_payload(
+        &self,
+        t: &mut Tx,
+        spaces: &[&str],
+        count: usize,
+        payload: Option<&str>,
+    ) -> Result<()> {
         let fleet = t
             .one(
                 "SELECT events,push_jobs FROM global_usage WHERE id=1 FOR UPDATE",
@@ -246,6 +276,14 @@ impl Store {
         // At most 1000 registrations per workspace can create jobs during one publication.
         let jobs = i(&fleet, "push_jobs") + 1000 * spaces.len() as i64 - 10000;
         for r in t.all("SELECT d.workspace_id FROM push_jobs j JOIN devices d ON d.id=j.device_id ORDER BY j.id LIMIT ?",args![jobs.max(0)]).await?{workspaces.insert(s(&r,"workspace_id").into());}
+        if let Some(w) = payload {
+            t.one(
+                "SELECT payload_bytes FROM payload_shards WHERE id=? FOR UPDATE",
+                args![self.db.shard(w)],
+            )
+            .await?
+            .ok_or(Error::BAD)?;
+        }
         for w in workspaces {
             self.db.usage(t, &w).await?;
         }
@@ -260,10 +298,21 @@ impl Store {
         candidates: &[Candidate],
     ) -> Result<()> {
         for c in candidates {
-            self.append_event(t, w, computer, &c.session, &c.kind, None)
+            let event = self
+                .append_event(t, w, computer, &c.session, &c.kind, None)
                 .await?;
+            if c.kind == "notification_preferences" {
+                // Data-only wakes let sleeping phones withdraw an old card;
+                // they never create a user-visible alert candidate.
+                self.wake_devices(t, w, &event["id"]).await?;
+            }
         }
-        self.record_candidates(t, w, computer, candidates).await
+        let alerts: Vec<_> = candidates
+            .iter()
+            .filter(|c| matches!(c.kind.as_str(), "attention" | "error" | "completed"))
+            .cloned()
+            .collect();
+        self.record_candidates(t, w, computer, &alerts).await
     }
     /// Appends one event inside the workspace and fleet caps. The caller holds event locks.
     pub(super) async fn append_event(

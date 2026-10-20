@@ -4,6 +4,7 @@ import ZerusKit
 enum ActionText {
     static func label(_ operation: String, _ target: Target? = nil) -> String {
         switch operation {
+        case SessionNotificationPreferences.operation: "Shared notification settings"
         case "pause": "Pause"
         case "resume": "Resume"
         case "archive": "Archive"
@@ -143,6 +144,9 @@ struct SessionHeaderTools: View {
                     .accessibilityLabel("Read all")
                 Button { terminal = true } label: { Image(systemName: "apple.terminal").frame(width: 40, height: 40) }
                     .accessibilityLabel("Terminal")
+                if SessionNotificationPreferences.parse(model.activity ?? session.raw,target)?.muted == true {
+                    Image(systemName:"bell.slash").foregroundStyle(Theme.muted).accessibilityLabel("Notifications muted on all devices")
+                }
                 menu(model: model, target: target)
             }
             .padding(.horizontal, 10)
@@ -184,6 +188,12 @@ struct SessionHeaderTools: View {
         return Menu {
             Button("Search loaded messages", systemImage: "magnifyingglass") { search = true }
             Button("Refresh", systemImage: "arrow.clockwise") { model.refreshActivity(explicit: true) }
+            let preference = SessionNotificationPreferences.parse(model.activity ?? session.raw,target)
+            let notificationReason = model.actionReason(target,SessionNotificationPreferences.operation)
+            Button { request = SessionNotificationPreferences.operation } label: {
+                Label(SessionNotificationPreferences.label(preference),systemImage:preference?.muted == true ? "bell" : "bell.slash")
+                if !notificationReason.isEmpty { Text(notificationReason) }
+            }.disabled(!notificationReason.isEmpty)
             if let evidence {
                 Section {
                     let emptyReminder = model.reviewLater(target) && !evidence.authoritative && evidence.loadedIds.isEmpty

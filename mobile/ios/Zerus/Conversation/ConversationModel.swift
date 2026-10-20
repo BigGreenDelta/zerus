@@ -48,6 +48,11 @@ final class ConversationFrame: @unchecked Sendable {
         ConversationFrame(target: target, raw: raw, events: events, questions: questions, observedAt: observedAt, bytes: bytes, truncated: truncated,
                           window: window, indexComplete: indexComplete, indexing: indexing, unreadBoundary: unreadBoundary, inspectedEvents: inspectedEvents)
     }
+    func with(raw: JSONObject) -> ConversationFrame {
+        let copy = ConversationFrame(target:target,raw:raw,events:events,questions:questions,observedAt:observedAt,bytes:bytes,truncated:truncated,
+                                     window:window,indexComplete:indexComplete,indexing:indexing,unreadBoundary:unreadBoundary,inspectedEvents:inspectedEvents)
+        copy.presentation = presentation;return copy
+    }
 }
 
 /// A small access-ordered map for retained frames and history windows.
@@ -516,7 +521,12 @@ final class ConversationModel {
         frames.trim { map in map.count > 20 || map.values.values.reduce(0) { $0 + $1.bytes } > 20 * 1024 * 1024 }
     }
 
-    func installFrame(_ incoming: ConversationFrame, verified: Bool) {
+    func installFrame(_ source: ConversationFrame, verified: Bool) {
+        let retained = [activeFrame.flatMap { SessionNotificationPreferences.sameConversation($0.target,source.target) ? $0.raw : nil },
+                        selected.flatMap { SessionNotificationPreferences.sameConversation($0.target,source.target) ? $0.raw : nil },
+                        app.catalogRows.first { SessionNotificationPreferences.sameConversation($0.target,source.target) }?.raw].compactMap { $0 }
+        let raw = SessionNotificationPreferences.mergeDetail(source.raw,source.target,retained:retained,actions:messageState.sessionActions)
+        let incoming = raw == source.raw ? source : source.with(raw:raw)
         let key = incoming.target.key
         let window = historyWindows[key]
         let priorInspection = activeFrame.flatMap { $0.target == incoming.target ? $0.inspectedEvents : nil } ?? []
@@ -548,6 +558,15 @@ final class ConversationModel {
             captureUnreadBoundary(frame.target, prepared.events)
         }
         preparePresentation()
+    }
+
+    func confirmNotificationPreference(_ action: SessionAction) {
+        if let row = selected {
+            var copy = row
+            copy.raw = SessionNotificationPreferences.mergeDetail(row.raw,row.target,retained:[],actions:messageState.sessionActions + [action])
+            selected = copy
+        }
+        if let frame = activeFrame { installFrame(frame,verified:activeFrameVerified) }
     }
 
     func publishPagingMetadata(_ frame: ConversationFrame) {

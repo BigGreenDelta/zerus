@@ -72,16 +72,12 @@ impl Store {
         {
             return Ok(None);
         }
-        let routes=t.all("SELECT CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END AS snapshot,CASE WHEN r.local=1 THEN n.last_seen ELSE r.last_seen END AS seen FROM computer_routes r JOIN nodes n ON n.id=r.gateway_id WHERE r.computer_id=? AND r.active=1 AND n.revoked=0",args![computer]).await?;
-        let latest = routes
-            .iter()
-            .filter(|r| r["snapshot"].is_string())
-            .max_by(|a, b| f(a, "seen").total_cmp(&f(b, "seen")));
-        Ok(Some(
-            latest
-                .and_then(|r| crate::json::parse(s(r, "snapshot").as_bytes(), 32, 50000).ok())
-                .unwrap_or(Value::Null),
-        ))
+        let latest=t.one("SELECT CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END AS snapshot FROM computer_routes r JOIN nodes n ON n.id=r.gateway_id WHERE r.computer_id=? AND r.active=1 AND n.revoked=0 AND (CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END) IS NOT NULL ORDER BY COALESCE(CASE WHEN r.local=1 THEN n.last_seen ELSE r.last_seen END,0) DESC,r.gateway_id,r.route_id LIMIT 1",args![computer]).await?;
+        let mut snapshot = latest
+            .and_then(|r| crate::json::parse(s(&r, "snapshot").as_bytes(), 32, 50000).ok())
+            .unwrap_or(Value::Null);
+        crate::notification_highwater::overlay(t, computer, &mut snapshot).await?;
+        Ok(Some(snapshot))
     }
     /// Plans one workspace. `accepted` is a snapshot just committed for one
     /// computer; `due` limits maintenance to candidates whose recheck came.
@@ -110,11 +106,13 @@ impl Store {
         let mut resolved = vec![false; rows.len()];
         let mut checked = vec![false; rows.len()];
         if let Some((id, snapshot)) = accepted {
+            let mut snapshot = snapshot.clone();
+            crate::notification_highwater::overlay(t, id, &mut snapshot).await?;
             for (k, r) in rows.iter().enumerate() {
                 if s(r, "computer_id") == id {
                     checked[k] = true;
                     resolved[k] =
-                        Candidate::from_row(r).resolved(alerts::live(snapshot, s(r, "session")));
+                        Candidate::from_row(r).resolved(alerts::live(&snapshot, s(r, "session")));
                 }
             }
         }
@@ -185,6 +183,22 @@ impl Store {
                     .await?;
                 }
                 Action::Deliver => {
+                    // Planning preceded the workspace lock. Recheck the current
+                    // projected preference after it, before the one delivery claim.
+                    match self.computer_snapshot(t, s(&r, "computer_id")).await? {
+                        Some(Value::Null) => continue, // Missing current data cannot prove an alert is still audible.
+                        current => {
+                            let resolved = current.as_ref().is_none_or(|snapshot| {
+                                Candidate::from_row(&r)
+                                    .resolved(alerts::live(snapshot, s(&r, "session")))
+                            });
+                            if resolved {
+                                t.exec("DELETE FROM alert_candidates WHERE id=?", args![&r["id"]])
+                                    .await?;
+                                continue;
+                            }
+                        }
+                    }
                     // Another worker may already have delivered or replaced this row.
                     if t.exec("DELETE FROM alert_candidates WHERE id=?", args![&r["id"]])
                         .await?

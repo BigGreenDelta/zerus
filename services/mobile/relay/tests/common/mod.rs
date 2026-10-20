@@ -244,7 +244,7 @@ impl Fixture {
     }
     pub async fn check_accounting(&self) {
         let mut t = self.store.db.begin().await.unwrap();
-        let row=t.one("SELECT CAST(COALESCE(sum(body_bytes+result_bytes+reserved_bytes),0) AS BIGINT) AS bytes FROM requests WHERE workspace_id=?",args![&self.phone.workspace]).await.unwrap().unwrap();
+        let row=t.one("SELECT CAST((SELECT COALESCE(sum(body_bytes+result_bytes+reserved_bytes),0) FROM requests WHERE workspace_id=?)+(SELECT COALESCE(sum(payload_bytes),0) FROM computer_notification_preferences WHERE workspace_id=?) AS BIGINT) AS bytes",args![&self.phone.workspace,&self.phone.workspace]).await.unwrap().unwrap();
         let usage = t
             .one(
                 "SELECT * FROM workspace_usage WHERE workspace_id=?",

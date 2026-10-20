@@ -2056,6 +2056,18 @@ Sessions</source>
   <context>
     <name>HgsClient</name>
     <message>
+      <source>Update the configured local hgs to support shared notification preferences.</source>
+      <translation>Обновите настроенный локальный hgs для поддержки общих настроек уведомлений.</translation>
+    </message>
+    <message>
+      <source>The session notification identity is unavailable. Refresh the session.</source>
+      <translation>Данные сессии для настройки уведомлений недоступны. Обновите сессию.</translation>
+    </message>
+    <message>
+      <source>The shared notification change was not confirmed. Refresh the session before trying again.</source>
+      <translation>Изменение общих уведомлений не подтверждено. Обновите сессию перед повторной попыткой.</translation>
+    </message>
+    <message>
       <location filename="../src/HgsClient.cpp" line="261" />
       <source>Recovery request timed out. Reload its state before trying again.</source>
       <translation>Время ожидания запроса на восстановление истекло. Обновите его состояние, прежде чем повторить попытку.</translation>
@@ -7994,6 +8006,14 @@ New messages and Stop cancel recovery. Sign-in, balance, other quota and context
       <source>New reply</source>
       <translation>Новый ответ</translation>
     </message>
+    <message>
+      <source>Expand session row</source>
+      <translation>Развернуть строку сессии</translation>
+    </message>
+    <message>
+      <source>Expand session row: %1</source>
+      <translation>Развернуть строку сессии: %1</translation>
+    </message>
   </context>
   <context>
     <name>SessionSearch</name>
@@ -8237,6 +8257,54 @@ New messages and Stop cancel recovery. Sign-in, balance, other quota and context
   </context>
   <context>
     <name>SessionsWindow</name>
+    <message>
+      <source>Mute</source>
+      <translation>Отключить уведомления</translation>
+    </message>
+    <message>
+      <source>Unmute</source>
+      <translation>Включить уведомления</translation>
+    </message>
+    <message>
+      <source>Mute notifications for this session on all devices</source>
+      <translation>Отключить уведомления этой сессии на всех устройствах</translation>
+    </message>
+    <message>
+      <source>Allow future notifications for this session on all devices</source>
+      <translation>Включить будущие уведомления этой сессии на всех устройствах</translation>
+    </message>
+    <message>
+      <source>Muted on all devices</source>
+      <translation>Уведомления отключены на всех устройствах</translation>
+    </message>
+    <message>
+      <source>Muted on all devices (last confirmed)</source>
+      <translation>Уведомления отключены на всех устройствах (последнее подтверждение)</translation>
+    </message>
+    <message>
+      <source>Connect to this session's host to change shared notifications.</source>
+      <translation>Подключитесь к компьютеру этой сессии, чтобы изменить общие уведомления.</translation>
+    </message>
+    <message>
+      <source>Update hgs on this session's host to support shared notification preferences.</source>
+      <translation>Обновите hgs на компьютере этой сессии для поддержки общих настроек уведомлений.</translation>
+    </message>
+    <message>
+      <source>A shared notification change is pending. Wait for its result.</source>
+      <translation>Изменение общих уведомлений выполняется. Дождитесь результата.</translation>
+    </message>
+    <message>
+      <source>Refresh this session's identity before changing shared notifications.</source>
+      <translation>Обновите данные сессии перед изменением общих уведомлений.</translation>
+    </message>
+    <message>
+      <source>Conflicting shared notification preferences. Refresh the session.</source>
+      <translation>Общие настройки уведомлений противоречат друг другу. Обновите сессию.</translation>
+    </message>
+    <message>
+      <source>The shared notification setting changed while this request was pending. Refresh the session.</source>
+      <translation>Общая настройка уведомлений изменилась во время запроса. Обновите сессию.</translation>
+    </message>
     <message>
       <location filename="../src/SessionSelection.cpp" line="45" />
       <location filename="../src/SessionsWindow.cpp" line="886" />
@@ -10956,6 +11024,30 @@ Working folder: %1</source>
       <location filename="../src/SessionsWindowShortcuts.cpp" line="444" />
       <source>Content scale %1%</source>
       <translation type="unfinished" />
+    </message>
+    <message>
+      <source>Expand all collapsed</source>
+      <translation>Развернуть все свёрнутые</translation>
+    </message>
+    <message>
+      <source>Restore full session rows, including sessions hidden by filters</source>
+      <translation>Восстановить полные строки сессий, включая скрытые фильтрами</translation>
+    </message>
+    <message>
+      <source>Compact session row</source>
+      <translation>Свернуть строку сессии</translation>
+    </message>
+    <message>
+      <source>Expand session row</source>
+      <translation>Развернуть строку сессии</translation>
+    </message>
+    <message>
+      <source>Collapsed session row. Press Right to expand.</source>
+      <translation>Строка сессии свёрнута. Нажмите стрелку вправо, чтобы развернуть.</translation>
+    </message>
+    <message>
+      <source>The compact row limit has been reached. Expand another session row first.</source>
+      <translation>Достигнут лимит свёрнутых строк. Сначала разверните другую строку сессии.</translation>
     </message>
   </context>
   <context>

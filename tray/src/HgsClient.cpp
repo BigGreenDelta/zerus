@@ -5,6 +5,7 @@
 #include "ProcessRunner.h"
 #include "LocalFile.h"
 #include "MachinePlatform.h"
+#include "SessionNotifications.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -121,6 +122,10 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.backgroundObservedAt = work.value("sampled_at").toDouble();
     s.backgroundCommand = work.value("command").toString();
     s.runId = obj.value(QStringLiteral("run_id")).toString();
+    s.notificationPreferences = obj.value("notification_preferences").toObject();
+    s.sharedNotifications = SessionNotifications::valid(s.notificationPreferences, s.conversationId);
+    if (s.sharedNotifications) s.muted = s.notificationPreferences.value("muted").toBool();
+    else s.notificationPreferences = {};
     s.launchId = obj.value(QStringLiteral("launch_id")).toString();
     s.attentionId = obj.value(QStringLiteral("attention_id")).toString();
     s.sharedRead = obj.contains(QStringLiteral("attention_signature"));
@@ -171,6 +176,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.currentTool = obj.value(QStringLiteral("current_tool")).toString();
     s.toolDetail = obj.value(QStringLiteral("tool_detail")).toString();
     s.lastEventAt = obj.value(QStringLiteral("last_event_at")).toDouble();
+    s.attentionStarted = obj.value("attention_started").toDouble();
     s.turnStarted = obj.value(QStringLiteral("turn_started")).toDouble();
     s.compactionStarted = obj.value(QStringLiteral("compaction_started")).toDouble();
     s.subagentCount = obj.value(QStringLiteral("subagent_count")).toInt();
@@ -1977,6 +1983,66 @@ quint64 HgsClient::requestSettings(const QString &host, const QString &name, con
         process->deleteLater();
     });
     timer->start(host.isEmpty() ? 20000 : 35000); process->start(); return request;
+}
+
+quint64 HgsClient::requestNotifications(const QString &host, const QString &name, const QJsonObject &payload)
+{
+    const auto request = ++m_notificationsRequest;
+    const auto expected = SessionNotifications::revision(payload.value("expected_revision"));
+    if (name.isEmpty() || !SessionNotifications::keys(payload, {"run_id", "conversation_id", "muted", "expected_revision"})
+        || !SessionNotifications::identity(payload.value("run_id"), 128)
+        || !SessionNotifications::identity(payload.value("conversation_id"), 256) || !payload.value("muted").isBool() || expected < 0) {
+        QTimer::singleShot(0, this, [this, request] {
+            emit notificationsFinished(request, false, {}, tr("The session notification identity is unavailable. Refresh the session."));
+        });
+        return request;
+    }
+    // Probe the configured LOCAL CLI before giving it an unfamiliar command:
+    // an old CLI can pass a new peer's listing through, yet interpret an unknown
+    // command as an agent launch. The receiving CLI checks the remote marker.
+    const auto executable = m_hgs;
+    auto capability = processRequest(executable, {"--help"});
+    capability.input = QByteArray();
+    capability.timeoutMs = 5000;
+    capability.maximumOutputBytes = 256 * 1024;
+    ProcessRunner::run(std::move(capability), this, [this, request, executable, host, name, payload, expected](const ProcessRunner::Result &help) {
+        bool marker = false;
+        for (auto line : help.standardOutput.split('\n')) {
+            if (line.endsWith('\r')) line.chop(1); // Permit only the CRLF line ending.
+            if (line == "session-notifications-v1") marker = true;
+        }
+        if (help.outcome != ProcessRunner::Result::Finished || help.exitStatus != QProcess::NormalExit || help.exitCode != 0 || !marker) {
+            emit notificationsFinished(request, false, {}, tr("Update the configured local hgs to support shared notification preferences."));
+            return;
+        }
+        QStringList args{"notifications", name, "--json"}; if (!host.isEmpty()) args.prepend('@' + host);
+        auto job = processRequest(executable, args);
+        job.input = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+        job.timeoutMs = host.isEmpty() ? 15000 : 35000;
+        job.maximumOutputBytes = 512 * 1024; // Includes the bounded 256-child suppression baseline.
+        ProcessRunner::run(std::move(job), this, [this, request, payload, expected](const ProcessRunner::Result &reply) {
+            QJsonParseError parse;
+            const auto document = QJsonDocument::fromJson(reply.standardOutput, &parse);
+            const auto result = document.object(), preferences = result.value("preferences").toObject();
+            const auto revision = SessionNotifications::revision(preferences.value("revision"));
+            const bool applied = result.value("applied").toBool();
+            const bool confirmed = reply.outcome == ProcessRunner::Result::Finished && reply.exitStatus == QProcess::NormalExit
+                && reply.exitCode == 0 && parse.error == QJsonParseError::NoError && document.isObject()
+                && SessionNotifications::keys(result, {"ok", "applied", "run_id", "conversation_id", "preferences"})
+                && result.value("ok").isBool() && result.value("ok").toBool() && result.value("applied").isBool()
+                && result.value("run_id") == payload.value("run_id") && result.value("conversation_id") == payload.value("conversation_id")
+                && SessionNotifications::valid(preferences, payload.value("conversation_id").toString())
+                && preferences.value("muted") == payload.value("muted")
+                && (applied ? expected < std::numeric_limits<qint64>::max() && revision == expected + 1 : revision == expected);
+            QString error;
+            if (!confirmed) {
+                error = QString::fromUtf8(reply.standardError).trimmed().left(2000);
+                if (error.isEmpty()) error = tr("The shared notification change was not confirmed. Refresh the session before trying again.");
+            }
+            emit notificationsFinished(request, confirmed, confirmed ? result : QJsonObject(), error);
+        });
+    });
+    return request;
 }
 
 quint64 HgsClient::requestRead(const QString &host, const QString &name, const QJsonObject &payload)

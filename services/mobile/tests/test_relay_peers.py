@@ -262,9 +262,11 @@ class SQLitePeerTests(unittest.IsolatedAsyncioTestCase):
         await self.manifest(peers)
         value=snapshot();value['padding']='x'*50500
         for peer in peers:await self.call('peer_heartbeat',self.node,peer['route_id'],peer['machine_id'],value)
-        # SQL preflight accepts bounded stored snapshots; escaping display
-        # names adds bytes, so HTTP checks the actual phone envelope as well.
-        rows=await self.call('computers',self.workspace);self.assertIsNotNone(rows)
+        # Projected catalog and HTTP both count escaped display names before
+        # returning an oversized phone envelope.
+        with self.assertRaises(RouteError) as refusal:
+            await self.call('computers',self.workspace)
+        self.assertEqual(refusal.exception.status,413)
         client=TestClient(TestServer(create_app(self.store,Config(background=False))))
         await client.start_server()
         try:

@@ -34,6 +34,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "hooks_status",
     "inspect",
     "mark_read",
+    "session_notifications",
     "process_output",
     "speech_cancel",
     "speech_config",
@@ -211,6 +212,7 @@ pub struct Flags {
     pub worktree: bool,
     pub directory_create: bool,
     pub read: bool,
+    pub session_notifications: bool,
     pub preference: bool,
     pub attachment_read: bool,
     pub file_read: bool,
@@ -243,6 +245,9 @@ impl Flags {
             worktree: has("Mobile worktree ABI: worktrees-v1"),
             directory_create: has("dirs --create <path>"),
             read: has("read <session> --json"),
+            session_notifications: help
+                .lines()
+                .any(|line| line.trim() == crate::session_notifications::HELP_MARKER),
             preference: has("swarm preference set mobile_delivery"),
             attachment_read: has("attachment <session> --request ID --index N"),
             file_read: has("file-read <session> --json"),
@@ -293,6 +298,7 @@ impl Flags {
         remove(self.hook_health, &["hooks_status"]);
         remove(self.recovery, &["recovery_action"]);
         remove(self.read, &["mark_read"]);
+        remove(self.session_notifications, &["session_notifications"]);
         remove(self.attachment_read, &["attachment_read"]);
         remove(self.file_read, &["file_read"]);
         remove(self.preference && fleet, &["set_mobile_delivery"]);

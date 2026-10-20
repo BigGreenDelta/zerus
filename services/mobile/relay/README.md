@@ -221,8 +221,27 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   UUID was never observed on the route) for display only: availability counts a
   peer route's time only while it stores a snapshot accepted since it was last
   marked online, and gateway heartbeats never refresh it.
+- Shared session notification revisions belong to the physical computer, provider
+  and conversation, independently of gateway routes. The additive
+  `computer_notification_preferences` table retains complete confirmed preferences
+  with no expiry or LRU eviction. A computer may retain at most 4,096 scopes and
+  1 MiB of canonical JSON (also bounded to 32 levels and 50,000 JSON values).
+  Its exact encoded bytes and workspace/computer key bytes count toward the
+  configured workspace and sharded global retained-payload quotas. Capacity or a
+  conflicting/older revision rolls back the heartbeat and ledger together; it
+  never removes an older highwater to make room. Unexposed computer identity
+  consolidation merges the maps and returns the retired row's quota charge.
+  Catalogs, command route selection and alert evaluation overlay these preferences
+  on the selected route's same-provider/conversation rows. Native state, run IDs,
+  read marks and route freshness remain the selected route's evidence. Projected
+  snapshot and catalog bytes are checked before returning; one computer ledger
+  is loaded at a time. A new higher revision does not require the old route to
+  remain online or registered. This new table records observations accepted by
+  this implementation; it cannot recover a preference never received by it.
 - `store/snapshots.rs` separates liveness and event-free snapshot changes from
-  shared payload accounting. Event publication and wake jobs have transactional
+  shared payload accounting when no shared preference is present. Preference-bearing
+  snapshots use global event locks when needed, then the payload shard, sorted
+  workspaces, credential and route. Event publication and wake jobs have transactional
   caps. Lock order is global event accounting, payload shard when needed,
   workspace, credential, then route/request; multi-workspace locks are sorted.
   Heartbeats may carry `presence` beside the snapshot. The relay remembers each

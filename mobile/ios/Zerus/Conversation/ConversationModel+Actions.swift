@@ -39,6 +39,10 @@ extension ConversationModel {
             app.machineOperations[target.machineKey]?.contains(operation) != true { return "This gateway or computer does not support this action." }
         if !target.archiveId.isEmpty && !["restore", "forget", "rename", "fork"].contains(operation) { return "This archived conversation is read-only." }
         if target.archiveId.isEmpty && operation == "restore" { return "Select an archived version first." }
+        if operation == SessionNotificationPreferences.operation {
+            let reason = SessionNotificationPreferences.reason(target,raw)
+            if !reason.isEmpty { return reason }
+        }
         if SessionActionPolicies.lifecycle.contains(operation) && !raw.strings("allowed_actions").contains(operation) {
             let reason = raw.object("action_reasons")?.string(operation) ?? ""
             return reason.isEmpty ? "Native session controls are unavailable for this action." : reason
@@ -93,7 +97,7 @@ extension ConversationModel {
 
     /// A Sessions action opens its exact session; the conversation then confirms it against fresh native details.
     func openWithSessionAction(_ session: Session, _ operation: String) {
-        guard operation == "terminal" || SessionActionPolicies.lifecycle.contains(operation) else { return }
+        guard operation == "terminal" || operation == SessionNotificationPreferences.operation || SessionActionPolicies.lifecycle.contains(operation) else { return }
         open(session, preserveProject: true)
         sessionMenuRequest = (session.target, operation, navigationId)
     }
@@ -178,9 +182,12 @@ extension ConversationModel {
                     throw ZerusError.invalid("The native action target or catalog changed before delivery.")
                 }
                 var payload = arguments
-                payload["request_id"] = .string(action.requestId)
-                payload["expected_run_id"] = .string(target.run)
-                payload["expected_conversation_id"] = .string(target.conversation)
+                if operation == SessionNotificationPreferences.operation { payload = SessionNotificationPreferences.payload(target,arguments) }
+                else {
+                    payload["request_id"] = .string(action.requestId)
+                    payload["expected_run_id"] = .string(target.run)
+                    payload["expected_conversation_id"] = .string(target.conversation)
+                }
                 if !target.archiveId.isEmpty { payload["archive_id"] = .string(target.archiveId) }
                 attempted = true
                 let initial: JSONObject
@@ -248,8 +255,14 @@ extension ConversationModel {
             })
         } catch {
             app.error = "Could not save the action result. Its original request remains recoverable."
+            if action.operation == SessionNotificationPreferences.operation { return }
         }
         if ["archive", "terminate", "restore", "forget", "rename"].contains(action.operation) { app.archive.refresh() }
+        if action.operation == SessionNotificationPreferences.operation {
+            if result.status == "completed" { await app.confirmNotificationPreference(result) }
+            app.refresh(explicit:true)
+            await app.notifications.syncAll(forceCatalog:true)
+        }
     }
 
     func pendingActionResult(_ target: Target) -> SessionAction? {

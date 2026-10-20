@@ -36,7 +36,8 @@ data class NotificationEvent(val id: Long, val computer: String, val session: St
 /** optional: sorted IDs of pending optional questions in the session's conversation. */
 data class NotificationCurrent(val slot: NotificationSlot, val target: String, val title: String,
     val machine: String, val kind: SessionAlertKind?, val identity: String, val idle: Boolean,
-    val online: Boolean = true, val live: Boolean = true, val conversation: String = "", val optional: List<String> = emptyList())
+    val online: Boolean = true, val live: Boolean = true, val conversation: String = "", val optional: List<String> = emptyList(), val suppressed: Boolean = false,
+    val notificationPreference:SessionNotificationPreference?=null)
 data class NotificationRecord(val slot: NotificationSlot, val target: String, val observedAt: Double,
     val observedFingerprint: String = "", val postedFingerprint: String = "",
     val postedKind: SessionAlertKind? = null, val postedTarget: String = "", val eventId: Long = 0, val eventAt: Double = 0.0,
@@ -102,7 +103,7 @@ object NotificationPolicy {
         preferences: NotificationPreferences, now: Double, active: Set<String> = emptySet(), alertsOnly: Boolean = false): NotificationPlan {
         val old = state.records.associateBy { it.slot.key }
         // With presence alerts only relay alert rows announce; other rows refresh state.
-        val announcing = events.filter { (_, event) -> if (alertsOnly) event.isAlert else event.kind != "alert" }
+        val announcing = events.filter { (_, event) -> event.kind != "notification_preferences" && (if (alertsOnly) event.isAlert else event.kind != "alert") }
         val candidates = announcing.groupBy { it.first.key }
         // Relay and phone order input and error differently, so either need alert announces either card.
         val needs = setOf("attention", "error")
@@ -117,6 +118,12 @@ object NotificationPolicy {
         val recoverable = mutableSetOf<String>()
         for (session in current.distinctBy { it.slot.key }) {
             val previous = old[session.slot.key]
+            if(session.suppressed) {
+                records += NotificationRecord(session.slot,session.target,now,
+                    observedFingerprint=session.kind?.let { fingerprint(JSONArray(listOf(session.target,it.name,session.identity)).toString()) }.orEmpty(),
+                    optionalSeen=(previous?.optionalSeen.orEmpty()+session.optional).distinct().takeLast(maxOptionalSeen))
+                continue
+            }
             if (!session.live) {
                 // A stopped session keeps only the optional questions it announced; resuming
                 // the same conversation does not announce them again.

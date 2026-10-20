@@ -14,7 +14,7 @@ import functools
 import uuid
 
 from .attachments import MAX_QUEUE_BYTES
-from . import speech, speech_config, voice
+from . import speech, speech_config, voice, session_notifications, notification_highwater
 from .context import CLEAR_CONTEXT_DISMISS_FEATURE
 from .context import CAPABILITY_OPERATIONS, ATTACHMENT_READ_GRACE, ATTACHMENT_RESULT_TTL, READ_OPERATIONS, READ_CLASS_SQL, READ_SQL, inspect_features, supports
 from .projects import is_archived
@@ -158,6 +158,8 @@ class Store:
                 if column not in existing:
                     self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
         self.db.executescript(ROUTE_SCHEMA)
+        with self.db:
+            self.db.execute("UPDATE workspace_usage SET payload_bytes=(SELECT COALESCE(sum(body_bytes+result_bytes+reserved_bytes),0) FROM requests WHERE workspace_id=workspace_usage.workspace_id)+(SELECT COALESCE(sum(payload_bytes),0) FROM computer_notification_preferences WHERE workspace_id=workspace_usage.workspace_id)")
         self.registry = Registry()
 
 
@@ -371,9 +373,11 @@ class Store:
         return 200
 
     @serialized
-    def event(self, node, session: str, kind: str):
+    def event(self, node, session: str, kind: str, wake=True):
         now = time.time()
         cur = self.db.execute("INSERT INTO events(workspace_id,node_id,session,kind,created) VALUES(?,?,?,?,?)", (node["workspace_id"], node["id"], session, kind, now))
+        if not wake:
+            return
         payload = canonical({"event_id": cur.lastrowid, "kind": "wake"})
         self.db.execute("INSERT INTO push_jobs(device_id,event_id,payload,next_at,created) SELECT p.device_id,?,?,?,? FROM pushes p JOIN devices d ON d.id=p.device_id WHERE d.workspace_id=? AND d.revoked=0 AND NOT EXISTS(SELECT 1 FROM push_jobs j WHERE j.device_id=p.device_id) LIMIT max(0,10000-(SELECT push_count FROM relay_usage WHERE id=1))", (cur.lastrowid, payload, now, now, node["workspace_id"]))
 
@@ -396,13 +400,16 @@ class Store:
         with self.db:
             row = self.db.execute("SELECT n.snapshot_hash,c.revoked AS computer_revoked FROM nodes n JOIN computers c ON c.id=n.computer_id WHERE n.id=? AND n.revoked=0", (node["id"],)).fetchone()
             if row is None: return False
-            if row['computer_revoked'] or row[0]==snapshot_hash:
+            if row['computer_revoked'] or (row[0]==snapshot_hash and not any(notification_highwater.preference(s) is not None for s in snapshot.get('sessions', []))):
                 self.db.execute("UPDATE nodes SET last_seen=? WHERE id=?",(now,node["id"]))
                 return False
             computer=self.db.execute('SELECT computer_id FROM nodes WHERE id=?',(node['id'],)).fetchone()[0]
             event_node={'id':computer,'workspace_id':node['workspace_id']}
+            drive_sync(self.db, notification_highwater.accept(node['workspace_id'],computer,snapshot))
             previous = self.db.execute("SELECT snapshot FROM nodes WHERE id=?",(node["id"],)).fetchone()[0]
             if previous is not None:
+                if not session_notifications.revisions_current(json.loads(previous), snapshot):
+                    raise RouteError(409, "stale shared notification revision")
                 old = {s["name"]: s for s in json.loads(previous).get("sessions", []) if isinstance(s, dict) and isinstance(s.get("name"), str) and not is_archived(s)}
                 for session in snapshot.get("sessions", []):
                     if not isinstance(session, dict) or not isinstance(session.get("name"), str) or len(session["name"])>1024 or any(ord(c)<32 for c in session["name"]) or is_archived(session):
@@ -412,15 +419,19 @@ class Store:
                         before = {}
                     identity = lambda s: (s.get("run_id"), s.get("conversation_id"))
                     question = lambda s: canonical([s.get("attention_id"), s.get("question_request", s.get("question_requests", None))])
+                    if session.get("notification_preferences") != before.get("notification_preferences"):
+                        self.event(event_node, session["name"], "notification_preferences")
+                    preference = session.get("notification_preferences", {})
+                    muted = isinstance(preference, dict) and preference.get("conversation_id") == session.get("conversation_id") and preference.get("muted") is True
                     phase = session.get("phase")
                     pending = lambda s: {canonical(q) for q in s.get("mobile_attention", []) if isinstance(q, dict)} if isinstance(s.get("mobile_attention", []), list) else set()
                     new_async_question = bool(pending(session) - pending(before)) or (bool(pending(session)) and identity(before) != identity(session))
                     if new_async_question or (phase in ("approval", "input") and (before.get("phase") != phase or identity(before) != identity(session) or question(before) != question(session))):
-                        self.event(event_node, session["name"], "attention")
+                        self.event(event_node, session["name"], "attention", wake=not muted)
                     elif phase == "error" and (before.get("phase") != "error" or identity(before) != identity(session) or question(before) != question(session)):
-                        self.event(event_node, session["name"], "error")
+                        self.event(event_node, session["name"], "error", wake=not muted)
                     elif session.get("activity") == "idle" and before.get("activity") == "busy" and identity(before) == identity(session):
-                        self.event(event_node, session["name"], "completed")
+                        self.event(event_node, session["name"], "completed", wake=not muted)
             self.db.execute("UPDATE nodes SET last_seen=?,snapshot=?,snapshot_hash=? WHERE id=?", (now, encoded,snapshot_hash,node["id"]))
             # Bound event and push storage even for a noisy computer.
             excess=self.db.execute("SELECT max(0,event_count-100000) FROM relay_usage WHERE id=1").fetchone()[0]
@@ -484,6 +495,8 @@ class Store:
                 if isinstance(s.get("mobile_attention", []), list)
                 else set()
             )
+            if session.get("notification_preferences") != before.get("notification_preferences"):
+                events.append((session["name"], "notification_preferences"))
             phase = session.get("phase")
             if (
                 bool(pending(session) - pending(before))
@@ -524,9 +537,15 @@ class Store:
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
             result=drive_sync(self.db, self.registry.peer_heartbeat(node, route_id, machine_id, encoded))
+            drive_sync(self.db, notification_highwater.accept(node['workspace_id'],result['id'],snapshot))
+            if result["previous"] is not None and not session_notifications.revisions_current(json.loads(result["previous"]), snapshot):
+                raise RouteError(409, "stale shared notification revision")
             for name,kind in self._event_changes(result['previous'],snapshot):
                 if len(name)<=1024 and not any(ord(c)<32 for c in name):
-                    self.event({'id':result['id'],'workspace_id':node['workspace_id']},name,kind)
+                    row = next((s for s in snapshot.get('sessions', []) if isinstance(s, dict) and s.get('name') == name), {})
+                    preference = row.get('notification_preferences', {})
+                    muted = isinstance(preference, dict) and preference.get('conversation_id') == row.get('conversation_id') and preference.get('muted') is True
+                    self.event({'id':result['id'],'workspace_id':node['workspace_id']},name,kind,wake=kind == 'notification_preferences' or not muted)
             excess=self.db.execute('SELECT max(0,event_count-100000) FROM relay_usage WHERE id=1').fetchone()[0]
             if excess:self.db.execute('DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT ?)',(min(excess,5000),))
             return result
