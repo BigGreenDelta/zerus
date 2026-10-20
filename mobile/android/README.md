@@ -282,6 +282,24 @@ while hgs cannot read its question index), the chip counts the connector's
 optional attention items once per question. It is hidden for saved, archived,
 exited and offline sessions; open the session to answer or skip the questions.
 
+Visible live-parent cards also show read-only Git publication marks when both
+the gateway and that exact computer advertise `git_status`: changed/new files,
+outgoing/incoming commits, unknown publication, or verified clean/synced. Counts
+above 99 display `99+`; accessibility keeps the full counts and verification
+description. Ordinary non-Git folders and archives have no Git marks. Reading
+status never initializes a repository, fetches, pushes or changes the checkout.
+
+Git reads run only for cards intersecting the Sessions list viewport while the
+list is resumed and focused, with no action or machine dialog. They stop on
+navigation, backgrounding and loss of focus. Each exact computer/original folder
+gets at most one read per 15 seconds, with at most two calls outstanding, 64
+visible registrations and a 128-entry process-local cache. Connection, native
+computer, route, checkout or capability changes invalidate current proof. Local
+status expires 30 seconds after the original request starts; remote verification
+also needs the computer's reported remote age plus that elapsed time below 60
+seconds. Offline, expired or unverified results stay muted, never synced. No Git
+status is restored from disk, and Windows gateways do not advertise this read.
+
 Long-pressing a session card, or using its accessibility long-press action,
 opens its actions in the desktop context menu order: Open terminal, Mark as read
 or Review later, Pause, Resume or Restore, Rename, Fork, Move to archive for

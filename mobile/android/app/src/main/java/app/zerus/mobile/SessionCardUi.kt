@@ -29,16 +29,51 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 /** The desktop card's checkout line: folder / branch with a Git branch mark, or an ordinary folder's name. */
-@Composable internal fun SessionCheckoutLine(session: Session) {
+@Composable internal fun SessionCheckoutLine(session: Session, gitBadge: GitStatusBadge? = null) {
     val line = SessionCardPresentation.line(session.raw)
-    if (line.isEmpty()) return
+    if (line.isEmpty() && gitBadge == null) return
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
-    Row(Modifier.fillMaxWidth().clearAndSetSemantics {
-        contentDescription = SessionCardPresentation.checkoutDescription(session.raw)
-    }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        val icon = if (SessionCardPresentation.branch(session.raw).isEmpty()) DesktopIcons.Folder else DesktopIcons.GitBranch
-        Icon(icon, null, Modifier.size(14.dp), tint = muted)
-        Text(line, maxLines = 1, overflow = TextOverflow.MiddleEllipsis, color = muted, style = MaterialTheme.typography.bodySmall)
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        if (line.isNotEmpty()) Row(Modifier.fillMaxWidth().clearAndSetSemantics {
+            contentDescription = SessionCardPresentation.checkoutDescription(session.raw)
+        }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            val icon = if (SessionCardPresentation.branch(session.raw).isEmpty()) DesktopIcons.Folder else DesktopIcons.GitBranch
+            Icon(icon, null, Modifier.size(14.dp), tint = muted)
+            Text(line, maxLines = 1, overflow = TextOverflow.MiddleEllipsis, color = muted, style = MaterialTheme.typography.bodySmall)
+        }
+        gitBadge?.let { SessionGitStatusBadge(it) }
+    }
+}
+
+/** Read-only desktop Git marks. Full counts and verification state stay available to TalkBack. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable internal fun SessionGitStatusBadge(badge: GitStatusBadge) {
+    val dark = MaterialTheme.colorScheme.surface.luminance() < .5f
+    FlowRow(Modifier.fillMaxWidth().clearAndSetSemantics { contentDescription = badge.description },
+        horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        badge.marks.forEach { mark ->
+            val ink = when (mark.tone) {
+                GitStatusTone.Attention -> Color(if (dark) 0xFFF0C77B else 0xFF885400)
+                GitStatusTone.Incoming -> Color(if (dark) 0xFF92BDF1 else 0xFF356697)
+                GitStatusTone.Synced -> Color(if (dark) 0xFF8BDFC0 else 0xFF187454)
+                GitStatusTone.Conflict -> Color(if (dark) 0xFFF1A0A2 else 0xFFA7313A)
+                GitStatusTone.Muted -> Color(if (dark) 0xFF8794A3 else 0xFF647386)
+            }
+            val icon = when (mark.kind) {
+                GitStatusKind.Changed -> DesktopIcons.GitDiff
+                GitStatusKind.Ahead -> DesktopIcons.GitPush
+                GitStatusKind.Behind -> DesktopIcons.GitPull
+                GitStatusKind.Unknown -> DesktopIcons.GitUnknown
+                GitStatusKind.Synced -> DesktopIcons.GitSynced
+            }
+            Surface(color = ink.copy(alpha = if (dark) .095f else .07f), shape = RoundedCornerShape(4.dp)) {
+                Row(Modifier.padding(horizontal = 4.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Icon(icon, null, Modifier.size(16.dp), tint = ink)
+                    if (mark.count.isNotEmpty()) Text(mark.count, color = ink, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
     }
 }
 

@@ -31,6 +31,17 @@ import org.json.JSONObject
 class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val store = PrivateStore(application)
     private val api = RelayApi()
+    private val gitStatusRelay = GitStatusRelay(api)
+    private fun gitStatusCatalog() = GitStatusCatalog(connections, machines, relayOperations, machineOperations, demo, storageReady)
+    private fun gitStatusAccess(key: MachineKey) = gitStatusCatalog().access(key)
+    private fun gitStatusConnection(request: GitStatusRequest): Connection {
+        val access = gitStatusAccess(request.key.machine)
+        check(access?.available == true) { "Git status is no longer available on this computer." }
+        return (access.epoch as GitStatusEpoch).connection
+    }
+    internal val gitStatus by lazy { GitStatusController(viewModelScope, android.os.SystemClock::elapsedRealtimeNanos,
+        ::gitStatusAccess, start = { gitStatusRelay.start(gitStatusConnection(it), it) },
+        receipt = { gitStatusRelay.receipt(gitStatusConnection(it), it) }) }
     internal val privateAnalytics by lazy { PrivateAnalyticsController(this, viewModelScope, api) }
     internal fun privateAnalyticsRoutes(): List<AnalyticsRoute> = machines.mapNotNull { machine ->
         val connection = connections.find { it.id == machine.connectionId } ?: return@mapNotNull null
@@ -701,6 +712,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var pushStatuses by mutableStateOf<Map<String, String>>(emptyMap()); private set
     private var pendingNotification: Triple<String, String, String>? = null
     init {
+        viewModelScope.launch {
+            snapshotFlow { gitStatusCatalog() }
+                .collectLatest { gitStatus.refresh() }
+        }
         viewModelScope.launch {
             snapshotFlow { SessionCatalogProjection(catalogSessions,archive.rows,machineOperations,relayOperations) }
                 .collectLatest { input ->
