@@ -15,7 +15,7 @@ data class SessionAction(val requestId: String, val target: Target, val operatio
 
 object SessionActionPolicies {
     val lifecycle = setOf("pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget")
-    val operations = lifecycle + setOf("send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create", "directory_create", "recovery_action", SessionNotificationPreferences.operation)
+    val operations = lifecycle + setOf("send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create", "directory_create", "recovery_action", SessionNotificationPreferences.operation, SessionProjectProtocol.assign)
     val terminalKeys=setOf("Enter","Escape","Tab","BTab","BSpace","Up","Down","Left","Right","Home","End","PPage","NPage","DC","C-c","C-d","C-l","C-a","C-e","C-u","C-w")
     /** Effort names every relay accepts in `settings`. */
     val relayEfforts = setOf("", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on")
@@ -34,6 +34,7 @@ object SessionActionPolicies {
     fun arguments(operation: String, raw: JSONObject, nativeEfforts: Boolean = false): JSONObject {
         if(operation == SessionNotificationPreferences.operation) return SessionNotificationPreferences.arguments(raw)
         require(operation in operations) { "Unsupported session action." }
+        if(operation==SessionProjectProtocol.assign) return SessionProjectProtocol.arguments(raw)
         val allowed = when(operation) { "rename" -> setOf("new_name"); "fork" -> setOf("tag"); "send_now" -> setOf("queue_id")
             "launch" -> setOf("agent","directory","tag","account_id","model","effort","swarm_id","project_id","project_folder_id","add_folder","worktree_folder_id","worktree_common_dir")
             "worktree_create" -> setOf("path","common_dir","destination","branch","base")
@@ -152,6 +153,7 @@ object SessionActionPolicies {
     }
     fun result(action: SessionAction, receipt: JSONObject): SessionAction {
         if(receipt.string("request_id") != action.requestId) return action.copy(status="uncertain",error="The receipt belongs to another request.")
+        if(action.operation==SessionProjectProtocol.assign) return SessionProjectProtocol.result(action,receipt)
         if(receipt.string("state") == "failed") return action.copy(status="failed",error=receipt.string("error").ifBlank { "The computer rejected this action." })
         if(action.operation == SessionNotificationPreferences.operation) return SessionNotificationPreferences.result(action,receipt)
         if(action.operation == MobileDelivery.OPERATION) return MobileDelivery.result(action,receipt)
