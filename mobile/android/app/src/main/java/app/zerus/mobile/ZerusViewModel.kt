@@ -16,6 +16,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
@@ -902,13 +903,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             if (activityVerified) openPendingAgent()
         }
     }
-    private suspend fun inspectOnce(connection: Connection, target: Target): Deferred<Frame> {
-        while (inspections.size >= 4 && inspections[target.key] == null) {
-            runCatching { inspections.values.first().second.await() }
-            kotlinx.coroutines.currentCoroutineContext().ensureActive()
-            inspections.entries.removeAll { it.value.second.isCompleted }
-        }
-        inspections[target.key]?.let { return it.second }
+    private suspend fun inspectOnce(connection: Connection, target: Target, fresh: Boolean = false,
+        current: () -> Boolean = { true }): Deferred<Frame> {
+        InspectionFlights.existing(inspections,target.key,fresh,current)?.let { return it }
         val observedAt = System.currentTimeMillis()
         val task = viewModelScope.async {
             val settingsInspectionStartNanos=android.os.SystemClock.elapsedRealtimeNanos()
@@ -952,7 +949,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             finalFrame
         }
         inspections[target.key] = target to task
-        task.invokeOnCompletion { viewModelScope.launch { if (inspections[target.key]?.second === task) inspections.remove(target.key) } }
+        task.invokeOnCompletion { viewModelScope.launch { InspectionFlights.retire(inspections,target.key,task) } }
         return task
     }
     private fun authorizedSettingsReason(target:Target,args:JSONObject,authorized:SessionAction,frame:Frame?,retry:ScheduledSettingsRetry.Grant?=null):String {
@@ -1406,13 +1403,44 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private var terminalVerified=false
     private var terminalReceivedAt=0L
     private var terminalJob:Job?=null
+    private var terminalAvailabilityJob:Job?=null
+    private var terminalAvailabilitySequence=0L
+    private var terminalAvailabilityTarget by mutableStateOf<Target?>(null)
     private val emptyTerminalBuffers=mutableMapOf<String,TerminalBuffer>()
+    fun terminalAvailabilityChecking(target:Target)=terminalAvailabilityTarget==target
+    /** Explicit opening checks discovery again, even when a previous catalog cached a refusal. */
+    fun prepareTerminal(target:Target) {
+        if(selected?.target!=target || target.agentId.isNotBlank() || target.archiveId.isNotBlank() || demo || updateInstallPreparing) return
+        cancelTerminalAvailability()
+        val sequence=++terminalAvailabilitySequence
+        val navigation=navigationId
+        terminalAvailabilityTarget=target
+        terminalAvailabilityJob=viewModelScope.launch {
+            fun current()=terminalAvailabilitySequence==sequence && terminalAvailabilityTarget==target && navigationId==navigation && selected?.target==target
+            try {
+                TerminalAvailabilityRefresh.run(current=::current,
+                    catalogIdle={ snapshotFlow { catalogBusy }.first { !it } },refreshCatalog={ refresh(explicit=true) },
+                    detailIdle={ snapshotFlow { detailBusy }.first { !it } },
+                    refreshDetail={ refreshActivity(explicit=true,freshInspection=true,ownerCurrent=::current) })
+            } finally {
+                if(terminalAvailabilitySequence==sequence) terminalAvailabilityTarget=null
+            }
+        }
+    }
+    fun cancelTerminalAvailability() {
+        terminalAvailabilitySequence++
+        terminalAvailabilityJob?.cancel();terminalAvailabilityJob=null;terminalAvailabilityTarget=null
+    }
     fun terminalOpenReason(target:Target):String {
         if(selected?.target != target || target.agentId.isNotBlank() || target.archiveId.isNotBlank()) return "Terminal is available only for the live parent session."
-        val row=activity?.takeIf { it.string("run_id")==target.run && it.string("conversation_id")==target.conversation } ?: sessions.find { it.target==target }?.raw
-        val nativeReason=SessionActionsMenu.nativeTerminalReason(target,row);if(nativeReason.isNotBlank()) return nativeReason
-        if("terminal_snapshot" !in relayOperations[target.connectionId].orEmpty() || "terminal_snapshot" !in machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()) return "This native adapter does not provide remote Terminal."
-        return ""
+        if(demo) return "Unavailable in preview."
+        if(terminalAvailabilityChecking(target)) return TerminalAvailability.checking
+        val row=activity?.takeIf { activityVerified && it.string("run_id")==target.run && it.string("conversation_id")==target.conversation &&
+            it.string("archive_id").isBlank() && it.string("agent_id").isBlank() && it.string("state")!="archived" &&
+            (it.string("name").isBlank() || it.string("name")==target.session) } ?: sessions.find { it.target==target }?.raw
+        val machine=machines.find { it.connectionId==target.connectionId && it.id==target.computerId }
+        return TerminalAvailability.reason(target,row,machine?.let { it.online && !it.lastKnown }==true,
+            relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)])
     }
     private fun terminalCurrent(target:Target,binding:String):Boolean {
         val raw=terminalState ?: return false
@@ -1560,7 +1588,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return SessionActionsMenu.items(SessionMenuFacts(target,session.raw,SessionFilters.state(session),SessionFilters.archived(session),online,
             relayOperations[target.connectionId].orEmpty() intersect machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty(),
             blocked,if(busy) "Resolve the pending delivery or action first." else "",SessionFilters.needsAttention(session,online),read,
-            reference.uri,session.raw.string("cwd"),reference.reason))
+            reference.uri,session.raw.string("cwd"),reference.reason,
+            TerminalAvailability.reason(target,session.raw,online,relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)])))
     }
     var sessionMenuRequest by mutableStateOf<SessionMenuRequest?>(null); private set
     /** A Sessions action opens its exact session; the conversation header then confirms it against fresh native details. */
@@ -1994,12 +2023,17 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 try {
                     if (explicit || connection.id !in relayOperations) {
                         try {
-                            val capabilities = api.call(connection.url, connection.token, "/v1/capabilities")
-                            val operations = capabilities.optJSONArray("operations")
+                            val capabilities = api.capabilities(connection)
+                            val operations = OperationCapabilities.parse(capabilities,requireVersion=false)
+                            if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
                             relayFeatures=relayFeatures + (connection.id to capabilities.optJSONArray("features")?.let { value -> (0 until value.length()).map { value.optString(it) }.toSet() }.orEmpty())
-                            relayOperations = relayOperations + (connection.id to operations?.let { value -> (0 until value.length()).map { value.optString(it) }.toSet() }.orEmpty())
+                            relayOperations = OperationCapabilities.replace(relayOperations,connection.id,operations)
                         } catch (e: CancellationException) { throw e }
-                        catch (_: Exception) { /* Session discovery remains available if optional capability discovery fails. */ }
+                        catch (_: Exception) {
+                            // Session discovery remains available; failed discovery is unknown, not an adapter refusal.
+                            if (catalogGate.owns(operation.id) && connections == originalConnections)
+                                relayOperations = relayOperations - connection.id
+                        }
                     }
                     val computers = api.computers(connection)
                     val retained=catalogSessions;val actions=messageState.sessionActions
@@ -2152,6 +2186,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         pendingNotification = Triple(connection, computer, session); refresh()
     }
     private fun cancelDetail() {
+        cancelTerminalAvailability()
         if(detailReadErrorOwner!=null) error=""
         detailGate.cancel(); detailJob?.cancel(); detailTimer?.cancel()
         detailBusy = false; detailProgress = false
@@ -2168,6 +2203,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         else selectedProject = null
     }
     fun refreshActivity(explicit: Boolean = false) {
+        refreshActivity(explicit,freshInspection=false)
+    }
+    private fun refreshActivity(explicit: Boolean, freshInspection: Boolean, ownerCurrent: () -> Boolean = { true }) {
         if (demo || terminalVisible) return
         val original = selected ?: return
         pendingActionResult(original.target)?.let { action -> openSessionActionResult(action);return }
@@ -2185,8 +2223,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }
         detailJob = viewModelScope.launch {
         try {
-            val frame = inspectOnce(connection, original.target).await()
-            if (detailGate.owns(operation.id) && navigationId == navigation && selected?.target == original.target) {
+            val frame = inspectOnce(connection, original.target,fresh=freshInspection,current={
+                !freshInspection || ownerCurrent() && detailGate.owns(operation.id) && navigationId==navigation && selected?.target==original.target
+            }).await()
+            if (detailGate.owns(operation.id) && navigationId == navigation && selected?.target == original.target && (!freshInspection || ownerCurrent())) {
                 if(detailReadErrorOwner==(original.target to navigation)) error=""
                 val clear = clearExpectation?.takeIf { it.navigation == navigation && ContextPolicies.sameSessionRun(it.target, frame.target) }
                 if (clear != null && frame.target.conversation != clear.target.conversation && !clear.confirmed) {

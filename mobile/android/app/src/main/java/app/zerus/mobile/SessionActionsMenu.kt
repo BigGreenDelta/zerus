@@ -39,7 +39,8 @@ data class SessionMenuRead(val unavailable: String = "", val canMark: Boolean = 
 /** Exact row facts captured by the view model. [supported] is the gateway and computer operation intersection. */
 data class SessionMenuFacts(val target: Target, val row: JSONObject, val state: String, val archived: Boolean, val online: Boolean,
     val supported: Set<String>, val blocked: String = "", val busy: String = "", val needsAttention: Boolean = false,
-    val read: SessionMenuRead = SessionMenuRead(), val reference: String? = null, val folder: String = "", val referenceReason: String = "")
+    val read: SessionMenuRead = SessionMenuRead(), val reference: String? = null, val folder: String = "", val referenceReason: String = "",
+    val terminalAccessReason: String? = null)
 /** A native action chosen in Sessions, consumed once by the conversation header it opened. */
 data class SessionMenuRequest(val target: Target, val operation: String, val navigation: Long)
 
@@ -87,17 +88,12 @@ object SessionActionsMenu {
             else -> SessionMenuItem("mark_read",label,"Questions, approvals and errors clear when you open the session. Mark as read covers replies only.")
         }
     }
-    fun nativeTerminalReason(target:Target,row:JSONObject?):String = when {
-        row?.has("terminal_supported")==true && !row.optBoolean("terminal_supported") ->
-            row.string("terminal_reason").ifBlank { "This native adapter does not provide remote Terminal." }
-        row?.opt("terminal_supported")==true -> ""
-        target.session.substringBefore('/')=="opencode" -> "OpenCode runs through its native server. Use the conversation instead of Terminal."
-        else -> ""
-    }
+    fun nativeTerminalReason(target:Target,row:JSONObject?):String = TerminalAvailability.nativeReason(target,row)
     fun terminalReason(facts: SessionMenuFacts): String = when {
         facts.blocked.isNotBlank() -> facts.blocked
         facts.target.agentId.isNotBlank() || facts.archived || facts.target.archiveId.isNotBlank() -> "Terminal is available only for the live parent session."
         !facts.online -> "The machine is offline."
+        facts.terminalAccessReason != null -> facts.terminalAccessReason
         "terminal_snapshot" !in facts.supported -> "This native adapter does not provide remote Terminal."
         nativeTerminalReason(facts.target,facts.row).isNotBlank() -> nativeTerminalReason(facts.target,facts.row)
         else -> ""

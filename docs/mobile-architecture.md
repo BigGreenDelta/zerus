@@ -660,6 +660,14 @@ The relay allows each credential
 keeps its invitation limits; global and per-address limits belong to the reverse
 proxy (see [Mobile deployment](mobile-deployment.md)). Terminal remains capability-gated for
 unsupported native adapters, archived sessions and child activity views.
+Android opening or explicitly refreshing Terminal rechecks gateway capabilities,
+the computer catalog and the exact session before requesting a screen. An existing
+shared inspection settles first and cannot supply this fresh check. Missing,
+malformed or failed operation discovery remains unavailable metadata; an actual
+empty operation list is a reported lack of support. The explanation distinguishes
+gateway support, computer support and the native session's explicit refusal.
+Refreshing availability only reads metadata and session inspection; input still
+requires the separately verified fresh native Terminal binding.
 
 ### Conversation history and composition
 

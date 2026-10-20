@@ -78,9 +78,11 @@ import org.json.JSONObject
     val canReadAll = target.archiveId.isBlank() && !model.demo && model.canReadAll(target)
     val sessionReference = remember(target,model.machines) { SessionReference.resolve(target,model.machines) }
     val notificationPreference = SessionNotificationPreferences.parse(model.activity ?: session.raw,target)
+    fun openTerminal() { model.prepareTerminal(target);terminal = true }
+    fun closeTerminal() { model.cancelTerminalAvailability();terminal = false }
     // A Sessions long-press action opened this session; confirm it here against fresh native details.
     LaunchedEffect(model.sessionMenuRequest,target.key) {
-        model.takeSessionMenuRequest(target)?.let { operation -> if(operation == "terminal") terminal = true else request = operation }
+        model.takeSessionMenuRequest(target)?.let { operation -> if(operation == "terminal") openTerminal() else request = operation }
     }
     if(details || settingsOpen || menu || request != null || terminal || search) ObscureConversation()
     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -107,7 +109,7 @@ import org.json.JSONObject
                 else "Read all unavailable. This conversation needs verified history or loaded replies on this phone"
         }) { Icon(Icons.Default.DoneAll,null,Modifier.size(20.dp)) }
         if(notificationPreference?.muted == true) Icon(Icons.Default.NotificationsOff,"Notifications muted on all devices",Modifier.size(18.dp))
-        IconButton(onClick = { terminal = true }) { Icon(Icons.Default.Terminal, "Terminal",Modifier.size(20.dp)) }
+        IconButton(onClick = { openTerminal() }) { Icon(Icons.Default.Terminal, "Terminal",Modifier.size(20.dp)) }
         Box {
             IconButton(onClick = { readEvidence = if(target.agentId.isBlank()) model.captureReadAttention(target) else null;menu = true }) { Icon(Icons.Default.MoreVert, "Session actions",Modifier.size(20.dp)) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false },modifier = Modifier.heightIn(max = 480.dp)) {
@@ -166,9 +168,11 @@ import org.json.JSONObject
     if(search) ConversationSearchDialog(model,session,onJump) { search = false }
     if(terminal) {
         val reason = model.terminalOpenReason(target)
-        if(reason.isBlank()) TerminalDialog(model,session) { terminal = false }
-        else ZerusAlertDialog(onDismissRequest = { terminal = false },title = { Text("Terminal unavailable") },text = { Text(reason) },
-            confirmButton = { TextButton(onClick = { terminal = false }) { Text("Close") } })
+        if(reason.isBlank()) TerminalDialog(model,session) { closeTerminal() }
+        else ZerusAlertDialog(onDismissRequest = { closeTerminal() },
+            title = { Text(if(model.terminalAvailabilityChecking(target)) "Checking Terminal availability" else "Terminal unavailable") },text = { Text(reason) },
+            confirmButton = { if(!model.terminalAvailabilityChecking(target)) TextButton(onClick = { model.prepareTerminal(target) }) { Text("Refresh") } },
+            dismissButton = { TextButton(onClick = { closeTerminal() }) { Text("Close") } })
     }
     if (details) SessionDetailsSheet(model,session) { details = false }
     if (settingsOpen) NativeSettingsDialog(model,session) { settingsOpen = false }
