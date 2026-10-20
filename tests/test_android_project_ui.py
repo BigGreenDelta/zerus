@@ -171,22 +171,34 @@ class InputAdmissionTests(unittest.TestCase):
 
 
 class HostedJavaAdmissionTests(unittest.TestCase):
+    def test_actual_full_hosted_release_and_wrong_patch_or_build(self):
+        raw = (ROOT / "tests/fixtures/android-project-ui-java-release.txt").read_text()
+        identity = UI.java_release(raw)
+        self.assertEqual(identity["JAVA_VERSION"], "17.0.20.1")
+        self.assertEqual(identity["IMPLEMENTOR_VERSION"], "Temurin-17.0.20.1+1")
+        for field in ("JAVA_RUNTIME_VERSION", "FULL_VERSION", "SEMANTIC_VERSION", "JVM_VERSION"):
+            self.assertEqual(identity[field], "17.0.20.1+1")
+        for altered in (raw.replace("17.0.20.1", "17.0.20"), raw.replace("17.0.20.1", "17.0.20.2"), raw.replace("+1", "+2"),
+                        raw.replace('FULL_VERSION="17.0.20.1+1"', 'FULL_VERSION="17.0.20.1+2"')):
+            with self.subTest(altered=altered[:150]), self.assertRaises(AssertionError):
+                UI.java_release(altered)
+
     def test_published_base_build_and_recognized_lts_spelling(self):
-        for fields in ({"JAVA_VERSION": "17.0.20", "JAVA_RUNTIME_VERSION": "17.0.20+1"},
-                       {"JAVA_VERSION": "17.0.20", "JAVA_RUNTIME_VERSION": "17.0.20+1-LTS", "IMPLEMENTOR_VERSION": "Temurin-17.0.20+1"},
-                       {"JAVA_VERSION": "17.0.20", "IMPLEMENTOR_VERSION": "Temurin-17.0.20+1-LTS"},
-                       {"JAVA_VERSION": "17.0.20+1-LTS"}):
+        for fields in ({"JAVA_VERSION": "17.0.20.1", "JAVA_RUNTIME_VERSION": "17.0.20.1+1"},
+                       {"JAVA_VERSION": "17.0.20.1", "JAVA_RUNTIME_VERSION": "17.0.20.1+1-LTS", "IMPLEMENTOR_VERSION": "Temurin-17.0.20.1+1"},
+                       {"JAVA_VERSION": "17.0.20.1", "IMPLEMENTOR_VERSION": "Temurin-17.0.20.1+1-LTS"},
+                       {"JAVA_VERSION": "17.0.20.1+1-LTS"}):
             with self.subTest(fields=fields):
                 text = "".join(f'{key}="{value}"\n' for key, value in fields.items())
                 self.assertEqual(UI.java_release(text), fields)
 
     def test_wrong_or_unknown_build_fields_never_fall_back(self):
         for text in ('JAVA_VERSION="17.0.21"\nJAVA_RUNTIME_VERSION="17.0.21+1"\n',
-                     'JAVA_VERSION="17.0.20"\nJAVA_RUNTIME_VERSION="17.0.20+2"\n',
-                     'JAVA_VERSION="17.0.20"\nJAVA_RUNTIME_VERSION="17.0.20+1-unknown"\n',
-                     'JAVA_VERSION="17.0.20"\nJAVA_RUNTIME_VERSION="17.0.20+1"\nIMPLEMENTOR_VERSION="Temurin-17.0.20+2"\n',
-                     'JAVA_VERSION="17.0.20"\n', 'JAVA_VERSION="17.0.20+1"\nJAVA_VERSION="17.0.20+2"\n',
-                     'JAVA_VERSION="17.0.20+1"\nINVALID\n', 'x' * 65537):
+                     'JAVA_VERSION="17.0.20.1"\nJAVA_RUNTIME_VERSION="17.0.20.1+2"\n',
+                     'JAVA_VERSION="17.0.20.1"\nJAVA_RUNTIME_VERSION="17.0.20.1+1-unknown"\n',
+                     'JAVA_VERSION="17.0.20.1"\nJAVA_RUNTIME_VERSION="17.0.20.1+1"\nIMPLEMENTOR_VERSION="Temurin-17.0.20.1+2"\n',
+                     'JAVA_VERSION="17.0.20.1"\n', 'JAVA_VERSION="17.0.20.1+1"\nJAVA_VERSION="17.0.20.1+2"\n',
+                     'JAVA_VERSION="17.0.20.1+1"\nINVALID\n', 'x' * 65537):
             with self.subTest(text=text[:200]), self.assertRaises(AssertionError):
                 UI.java_release(text)
 
@@ -208,7 +220,7 @@ class HostedJavaAdmissionTests(unittest.TestCase):
                 root = Path(directory)
                 java = root / "jdk"
                 java.mkdir()
-                raw = b'JAVA_VERSION="17.0.20"\nJAVA_RUNTIME_VERSION="17.0.20+1-LTS"\n'
+                raw = b'JAVA_VERSION="17.0.20.1"\nJAVA_RUNTIME_VERSION="17.0.20.1+1-LTS"\n'
                 if refused == "java_base_build":
                     raw = raw.replace(b"+1", b"+2")
                 (java / "release").write_bytes(raw)
@@ -237,8 +249,10 @@ class WorkflowBoundaryTests(unittest.TestCase):
         self.assertEqual(ast.literal_eval(assignment.value.args[0]), UI.HOSTED_IMAGES)
         pins = json.loads((ROOT / "scripts/ci/android-project-ui-pins.json").read_text())
         self.assertEqual({image["version"] for image in pins["hosted_images"]}, UI.HOSTED_IMAGES)
+        self.assertEqual(pins["jdk_release"]["version"], "17.0.20.1+1")
+        self.assertEqual((pins["jdk_release"]["patch"], pins["jdk_release"]["build"]), (1, 1))
         for image in pins["hosted_images"]:
-            self.assertEqual(image["jdk"], "17.0.20+1")
+            self.assertEqual(image["jdk"], "17.0.20.1+1")
             self.assertEqual(image["sdk"], {"command_line_tools": "12.0", "platform_tools": "37.0.1", "build_tools": "36.0.0", "platform": "android-36"})
         for unknown in ("20261019.340.1", "20261018.339.2", "ubuntu-latest", "", None):
             with self.subTest(image=unknown):

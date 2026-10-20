@@ -7,6 +7,7 @@ on:
       - '.github/workflows/android-project-ui.yml'
       - 'scripts/ci/android-project-ui*'
       - 'tests/test_android_project_ui.py'
+      - 'tests/fixtures/android-project-ui-java-release.txt'
       - 'mobile/android/**'
       - 'src/state/project*'
       - 'src/state/swarm*'
@@ -63,7 +64,7 @@ jobs:
               'allowed_images': sorted(HOSTED_IMAGES),
               'environment': os.environ.get('RUNNER_ENVIRONMENT'),
               'source': os.environ.get('EXPECTED_SOURCE'),
-              'expected_java': '17.0.20+1',
+              'expected_java': '17.0.20.1+1',
               'checks': {},
               'scope': 'Admission metadata only; not an SDK or UI result.'
           }
@@ -89,17 +90,17 @@ jobs:
                   match = re.fullmatch(r'([A-Z][A-Z0-9_]*)="([^"\r\n]*)"', line)
                   assert match and match[1] not in fields, "java_release_fields"
                   fields[match[1]] = match[2]
-              full = r"17\.0\.20\+1(?:-LTS)?"
-              assert fields.get("JAVA_VERSION") == "17.0.20" or re.fullmatch(full, fields.get("JAVA_VERSION", "")), "JAVA_VERSION"
+              full = r"17\.0\.20\.1\+1(?:-LTS)?"
+              assert fields.get("JAVA_VERSION") == "17.0.20.1" or re.fullmatch(full, fields.get("JAVA_VERSION", "")), "JAVA_VERSION"
               proof = bool(re.fullmatch(full, fields["JAVA_VERSION"]))
-              for name in ("JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION"):
+              for name in ("JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION", "FULL_VERSION", "SEMANTIC_VERSION", "JVM_VERSION"):
                   if name not in fields:
                       continue
                   pattern = (r"(?:Temurin-)?" if name == "IMPLEMENTOR_VERSION" else "") + full
                   assert re.fullmatch(pattern, fields[name]), name
                   proof = True
               assert proof, "java_build_unknown"
-              return {name: fields[name] for name in ("JAVA_VERSION", "JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION", "IMPLEMENTOR") if name in fields}
+              return {name: fields[name] for name in ("JAVA_VERSION", "JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION", "FULL_VERSION", "SEMANTIC_VERSION", "JVM_VERSION", "IMPLEMENTOR") if name in fields}
           require('source_sha', re.fullmatch('[0-9a-f]{40}', os.environ.get('EXPECTED_SOURCE', '')))
           require('emulator_revision', os.environ.get('REQUESTED_EMULATOR_REVISION') == os.environ.get('EXPECTED_EMULATOR_REVISION') == '37.2.12')
           require('system_image_revision', os.environ.get('REQUESTED_SYSTEM_IMAGE_REVISION') == os.environ.get('EXPECTED_SYSTEM_IMAGE_REVISION') == '9.0.0')

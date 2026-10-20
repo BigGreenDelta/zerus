@@ -138,10 +138,13 @@ refused pending review. Manual package inputs must equal the checked-in pins;
 there is no latest-version fallback.
 
 Admission retains the bounded actual JDK `release` file and names the failing
-guard before checkout. The published Java 17.0.20 build 1 must be proved by the
+guard before checkout. The exact Temurin Java 17.0.20.1 build 1 must be proved by the
 version fields; only the explicit `-LTS` spelling is normalized. Missing build
 proof, conflicting fields and unknown suffixes remain refusals. The helper uses
 the same checked validation as the pre-checkout admission step.
+The runner summary table abbreviates this as 17.0.20+1; the retained actual
+release and official Adoptium Linux build metadata both include patch component
+1. That component is required, not discarded during normalization.
 
 The stable package selection in `scripts/ci/android-project-ui-pins.json` is
 Emulator 37.2.12 and API 35 Google APIs x86_64 revision 9. Google repository XML

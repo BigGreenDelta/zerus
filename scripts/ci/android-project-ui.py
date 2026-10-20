@@ -33,17 +33,17 @@ def java_release(text):
         match = re.fullmatch(r'([A-Z][A-Z0-9_]*)="([^"\r\n]*)"', line)
         assert match and match[1] not in fields, "java_release_fields"
         fields[match[1]] = match[2]
-    full = r"17\.0\.20\+1(?:-LTS)?"
-    assert fields.get("JAVA_VERSION") == "17.0.20" or re.fullmatch(full, fields.get("JAVA_VERSION", "")), "JAVA_VERSION"
+    full = r"17\.0\.20\.1\+1(?:-LTS)?"
+    assert fields.get("JAVA_VERSION") == "17.0.20.1" or re.fullmatch(full, fields.get("JAVA_VERSION", "")), "JAVA_VERSION"
     proof = bool(re.fullmatch(full, fields["JAVA_VERSION"]))
-    for name in ("JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION"):
+    for name in ("JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION", "FULL_VERSION", "SEMANTIC_VERSION", "JVM_VERSION"):
         if name not in fields:
             continue
         pattern = (r"(?:Temurin-)?" if name == "IMPLEMENTOR_VERSION" else "") + full
         assert re.fullmatch(pattern, fields[name]), name
         proof = True
     assert proof, "java_build_unknown"
-    return {name: fields[name] for name in ("JAVA_VERSION", "JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION", "IMPLEMENTOR") if name in fields}
+    return {name: fields[name] for name in ("JAVA_VERSION", "JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION", "FULL_VERSION", "SEMANTIC_VERSION", "JVM_VERSION", "IMPLEMENTOR") if name in fields}
 
 
 def validate_inputs(environment, pins):
