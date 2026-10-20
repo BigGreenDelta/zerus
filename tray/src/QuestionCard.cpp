@@ -774,7 +774,7 @@ void QuestionCard::updateControls()
         setFocus(Qt::OtherFocusReason);
     bool complete = false; answers(&complete);
     const bool supported = m_question.value("can_answer").toBool();
-    static const QSet<QString> terminalOnly{"claude_tool_approval", "claude_terminal_choice", "claude_native_question", "claude_terminal_safety", "claude_usage_limit", "startup_terminal_choice"};
+    static const QSet<QString> terminalOnly{"claude_tool_approval", "kimi_tool_approval", "claude_terminal_choice", "claude_native_question", "claude_terminal_safety", "claude_usage_limit", "startup_terminal_choice"};
     const bool readOnly = !supported && terminalOnly.contains(m_question.value("source").toString());
     for (const auto &form : m_forms) {
         for (auto *button : form.options) button->setEnabled(!locked && !readOnly);

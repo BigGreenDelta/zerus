@@ -192,7 +192,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             node("Confirm this option?"); node("Exact command for this session only"); check(count() == 1)
             tap("Cancel"); await("cancelled confirmation") { visible("Confirm this option?") == null }; check(count() == 1)
             cases += "broader_cancel"
-            tap("Send answer"); node("Confirm this option?"); expect("2"); tap("Confirm")
+            reviewed(); tap("Send answer"); node("Confirm this option?"); expect("2"); tap("Confirm")
             await("broader receipt") { count() == 2 }; cases += "broader_confirm"
 
             open("replacement")
