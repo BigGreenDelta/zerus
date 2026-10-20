@@ -165,6 +165,7 @@ public enum HistoryProjection {
         var dropped = false
         for entry in entries {
             precondition(entry.resolved)
+            if entry.generation <= window.projectionApplied { continue } // A newer page already covers this correction.
             let old = rows.first { $0.id == "history:\(entry.id)" && $0.historyId == entry.id && $0.historyEpoch == epoch }
             if entry.change == "retired" {
                 if let old, old.role == "You", old.requestId.isEmpty, old.outgoingId.isEmpty, old.voice == nil,

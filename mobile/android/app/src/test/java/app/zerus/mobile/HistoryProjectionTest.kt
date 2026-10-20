@@ -42,6 +42,15 @@ class HistoryProjectionTest {
             assertEquals(1,page.prefix.size)
         }
     }
+    @Test fun olderAnswersNeverReplaceCorrectionsCoveredByANewerPage() {
+        for(change in listOf("retired","refreshed")) {
+            val stale=entry(1,a,change,if(change=="refreshed") row(a,"stale") else null)
+            val page=parse(response(listOf(stale,entry(3,b,"refreshed",row(b,"new b")))))
+            val fixed=apply(window(event(a,"newer a"),event(b),marker=2),page,start=0)
+            assertEquals(listOf("newer a","new b"),fixed.events.map { it.text })
+            assertEquals(3L,fixed.projectionApplied)
+        }
+    }
     @Test fun malformedShapeAnywhereRejectsTheWholeResponse() {
         val bad=listOf(entry(2,b,"refreshed"),entry(2,b,"retired",row(b)),entry(2,b,"refreshed",row(b),false),
             entry(2,b).put("reason","oversize"),entry(2,b).put("generation",1),entry(2,b).put("generation",2.0),

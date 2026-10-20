@@ -138,6 +138,7 @@ object HistoryProjection {
         var rows=window.events;var dropped=false
         for(entry in entries) {
             require(entry.resolved)
+            if(entry.generation<=window.projectionApplied) continue // A newer page already covers this correction.
             val old=rows.firstOrNull { it.id=="history:${entry.id}" && it.historyId==entry.id && it.historyEpoch==epoch }
             if(entry.change=="retired") {
                 if(old!=null && old.role=="You" && old.requestId.isBlank() && old.outgoingId.isBlank() && old.voice==null && old.source !in setOf("hgs_delivery","mobile_outbox","hgs_voice")) rows=rows.filterNot { it.id==old.id }

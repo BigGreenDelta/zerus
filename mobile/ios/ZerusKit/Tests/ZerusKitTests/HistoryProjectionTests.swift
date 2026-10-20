@@ -51,6 +51,15 @@ final class HistoryProjectionTests: XCTestCase {
             XCTAssertEqual(page.prefix.count, 1)
         }
     }
+    func testOlderAnswersNeverReplaceCorrectionsCoveredByANewerPage() throws {
+        for change in ["retired", "refreshed"] {
+            let stale = entry(1, a, change: change, successor: change == "refreshed" ? row(a, text: "stale") : nil)
+            let page = try parse(response([stale, entry(3, b, change: "refreshed", successor: row(b, text: "new b"))]))
+            let fixed = apply(window([event(a, text: "newer a"), event(b)], marker: 2), page, start: 0)
+            XCTAssertEqual(fixed.events.map(\.text), ["newer a", "new b"])
+            XCTAssertEqual(fixed.projectionApplied, 3)
+        }
+    }
     func testMalformedEntryAnywhereRejectsTheWholeEnvelope() {
         var reason = entry(2, b); reason["reason"] = "oversize"
         var float = entry(2, b); float["generation"] = .double(2)
