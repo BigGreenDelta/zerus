@@ -57,6 +57,27 @@ def child_environment(root,home,platform):
  """test_kimi_native's private allowlist for the Kimi child: only PATH comes from here."""
  return guard.private_environment(dict(PATH=os.environ['PATH']),root,home,platform)
 
+def question_composer(screen,text=''):
+ """The complete short draft in Kimi's one boxed composer, with no extra line."""
+ if 'Trust this folder?' in screen or 'esc cancel' in screen:return False
+ rows=[row.strip() for row in screen.splitlines()]
+ prompts=[i for i,row in enumerate(rows) if row.startswith('│ >')]
+ if len(prompts)!=1:return False
+ i=prompts[0];row=rows[i]
+ if not row.endswith('│') or row[1:-1].strip()!=('> '+text).rstrip():return False
+ if i==0 or not rows[i-1].startswith('╭') or not rows[i-1].endswith('╮'):return False
+ for row in rows[i+1:]:
+  if row.startswith('╰') and row.endswith('╯'):return True
+  if not row.startswith('│') or not row.endswith('│') or row[1:-1].strip():return False
+ return False
+
+def question_start_ready(screen,completed,tmux_present=False):
+ """A written platform banner response and an empty canonical composer.
+ The env-i direct pane has no TMUX, so Kimi never asks for its tmux warning.
+ """
+ return (any(row.get('name')=='client_banner' for row in completed) and
+         (not tmux_present or guard.TMUX_KEYS in screen) and question_composer(screen))
+
 class Model(guard.Model):
  """Kimi's platform gets test_kimi_native's written 404; the model asks one
  AskUserQuestion until a tool result arrives, then completes the turn."""
@@ -333,6 +354,37 @@ display_name = "Fixture"
   return cards[0]
 
 class NativeKimiQuestions(NativeKimi):
+ def startup_snapshot(self,stage):
+  if not EVIDENCE:return
+  snapshot=dict(stage=stage,monotonic=time.monotonic(),screen=self.screen(),
+                styled=self.tmux('capture-pane','-p','-e','-t',self.pane,check=False),
+                cursor=self.tmux('display-message','-p','-t',self.pane,'#{cursor_x}:#{cursor_y}',check=False).strip(),
+                platform_completed=list(self.server.platform_completed),model_requests=len(self.native_requests))
+  (self.evidence()/('startup-'+stage+'.json')).write_text(json.dumps(snapshot,indent=1))
+ def first_prompt(self):
+  self.assertFalse(getattr(self,'initial_prompt_attempted',False),'the initial prompt must never be retried')
+  self.initial_prompt_attempted=True
+  # One existing startup allowance, shared by readiness and the draft proof.
+  end=time.monotonic()+30
+  try:
+   self.wait_for(lambda:question_start_ready(self.screen(),self.server.platform_completed,
+                                           bool(self.child_env.get('TMUX'))),max(0,end-time.monotonic()))
+   self.startup_snapshot('before-prompt')
+   text='Ask me with the question tool.';buffer='native-question-prompt'
+   self.assertLess(time.monotonic(),end,'initial prompt readiness expired; no text was staged')
+   loaded=subprocess.run([str(self.bin/'tmux'),'load-buffer','-b',buffer,'-'],env=self.env,
+                         input=text,text=True,capture_output=True,timeout=5)
+   self.assertEqual(loaded.returncode,0,loaded.stderr)
+   self.assertLess(time.monotonic(),end,'initial prompt readiness expired; nothing was pasted')
+   # Product-equivalent bracketed paste resets Kimi's plain-key paste burst.
+   self.tmux('paste-buffer','-p','-r','-d','-b',buffer,'-t',self.pane)
+   self.wait_for(lambda:question_composer(self.screen(),text),max(0,end-time.monotonic()))
+   self.startup_snapshot('after-paste')
+   self.assertLess(time.monotonic(),end,'initial prompt readiness expired; no Enter was sent')
+   self.tmux('send-keys','-t',self.pane,'Enter')
+  except BaseException:
+   self.startup_snapshot('failure')
+   raise
  def setUp(self):
   self.items=SHORT if '_short_' in self._testMethodName else TALL
   self.launch('kimi/question-native')
@@ -340,13 +392,15 @@ class NativeKimiQuestions(NativeKimi):
    screen=self.screen()
    return screen if 'Trust this folder?' in screen or '│ >' in screen else None
   if 'Trust this folder?' in self.wait_for(started):self.tmux('send-keys','-t',self.pane,'Enter')
-  self.wait_for(lambda:'│ >' in self.screen())
-  self.tmux('send-keys','-t',self.pane,'-l','Ask me with the question tool.');time.sleep(.3)
-  self.tmux('send-keys','-t',self.pane,'Enter')
+  self.first_prompt()
   def asked():
    for wire in self.kimi_home.glob('sessions/*/*/agents/main/wire.jsonl'):
     if '"interaction.request"' in wire.read_text() and 'esc cancel' in self.screen():return wire
-  wire=self.wait_for(asked);self.conversation_id=wire.parent.parent.parent.name
+  try:wire=self.wait_for(asked)
+  except BaseException:
+   self.startup_snapshot('failure')
+   raise
+  self.conversation_id=wire.parent.parent.parent.name
   self.record=dict(version=1,name=self.name,agent='kimi',run_id=self.run_id,conversation_id=self.conversation_id,
                    agent_home=str(self.kimi_home),pane=self.pane,pid=self.pid,process_start=self.start,activity='busy',phase='input',
                    active_tools={'call_fixture':{'name':'AskUserQuestion'}},subagents={},last_event_at=time.time(),created=time.time())
@@ -447,6 +501,55 @@ class QuestionFixtureControls(unittest.TestCase):
  """The fixture's own guards without a native Kimi: its loopback routes, the
  child's environment, launch refusals, the tmux parent binding and custody."""
  def case(self):return NativeKimi('launch')
+ def test_first_prompt_waits_for_ready_and_the_exact_bracketed_draft_then_sends_enter_once(self):
+  empty=' ╭────────╮\n │ >      │\n │        │\n ╰────────╯'
+  draft=empty.replace('>      ','> Ask me with the question tool. ')
+  complete=[dict(name='client_banner')]
+  self.assertFalse(question_start_ready(empty,[]),'a drawn composer is not a written banner response')
+  for refused in ('Trust this folder?\n'+empty,empty.replace('>      ','> unsent '),empty+'\nesc cancel',
+                  empty.replace('│        │','│ extra  │'),empty+empty,empty.replace('╰────────╯','')):
+   self.assertFalse(question_start_ready(refused,complete),refused)
+  self.assertTrue(question_start_ready(empty,complete))
+  self.assertFalse(question_start_ready(empty,complete,True))
+  self.assertTrue(question_start_ready(guard.TMUX_KEYS+'\n'+empty,complete,True))
+  self.assertTrue(question_composer(draft,'Ask me with the question tool.'))
+  self.assertFalse(question_composer(draft.replace('tool.','tool. extra'),'Ask me with the question tool.'))
+  for fault in (None,'not-ready','load','late-load','draft'):
+   case=NativeKimiQuestions('first_prompt');case.bin=Path('/fixture/bin');case.pane='%1';case.env={};case.child_env={}
+   case.server=mock.Mock(platform_completed=[]);case.startup_snapshot=mock.Mock()
+   state=dict(screen=empty);case.screen=lambda:state['screen'];commands=[];waits=[]
+   def tmux(*args):
+    commands.append(args)
+    if args[0]=='paste-buffer':state['screen']=draft if fault!='draft' else empty
+    return ''
+   case.tmux=tmux
+   def wait(callback,seconds):
+    waits.append(seconds)
+    if len(waits)==1:
+     self.assertFalse(callback());self.assertEqual(commands,[])
+     case.server.platform_completed=complete
+    if fault=='not-ready' or not callback():case.fail('not ready')
+    return True
+   case.wait_for=wait
+   with self.subTest(fault=fault),mock.patch.object(subprocess,'run',return_value=mock.Mock(
+        returncode=1 if fault=='load' else 0,stderr='load refused')) as load,mock.patch.object(time,'monotonic',
+        side_effect=lambda:131 if fault=='late-load' and load.called else 100):
+    if fault:
+     with self.assertRaises(AssertionError):case.first_prompt()
+    else:case.first_prompt()
+    self.assertEqual(load.call_count,0 if fault=='not-ready' else 1)
+    if load.called:
+     self.assertEqual(load.call_args.args[0],['/fixture/bin/tmux','load-buffer','-b','native-question-prompt','-'])
+     self.assertEqual(load.call_args.kwargs['input'],'Ask me with the question tool.')
+    expected=[] if fault in ('not-ready','load','late-load') else [('paste-buffer','-p','-r','-d','-b','native-question-prompt','-t','%1')]
+    if fault is None:expected.append(('send-keys','-t','%1','Enter'))
+    self.assertEqual(commands,expected)
+    self.assertTrue(all(seconds<=30 for seconds in waits))
+    stages=[call.args[0] for call in case.startup_snapshot.call_args_list]
+    self.assertEqual(stages,(['failure'] if fault=='not-ready' else ['before-prompt','failure'] if fault in ('load','late-load') else
+                             ['before-prompt','failure'] if fault=='draft' else ['before-prompt','after-paste']))
+    with self.assertRaisesRegex(AssertionError,'never be retried'):case.first_prompt()
+    self.assertEqual(commands,expected)
  def test_kimis_platform_gets_a_written_404_and_never_reaches_the_model(self):
   fixture=mock.Mock(native_requests=[],items=SHORT)
   server=serve(fixture);self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
