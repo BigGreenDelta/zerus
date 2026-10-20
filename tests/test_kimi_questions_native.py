@@ -553,23 +553,42 @@ class QuestionFixtureControls(unittest.TestCase):
  def test_kimis_platform_gets_a_written_404_and_never_reaches_the_model(self):
   fixture=mock.Mock(native_requests=[],items=SHORT)
   server=serve(fixture);self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+  post_written,release_post,get_completed=threading.Event(),threading.Event(),threading.Event()
+  completion_errors=[]
+  class HeldPostCompletion(list):
+   def append(self,row):
+    # The POST response is already written/flushed. Its handler may be
+    # descheduled here while the next request finishes on another thread.
+    if row['method']=='POST':
+     post_written.set()
+     if not release_post.wait(5):completion_errors.append('POST completion was not released')
+    super().append(row)
+    if row['method']=='GET':get_completed.set()
+  server.platform_completed=HeldPostCompletion()
+  self.addCleanup(release_post.set)
   opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
   def call(method,path,body=None):
    request=urllib.request.Request('http://127.0.0.1:%d%s'%(server.server_port,path),method=method,
                                   data=None if body is None else json.dumps(body).encode())
    try:
     with opener.open(request,timeout=10) as response:return response.status,response.read()
-   except urllib.error.HTTPError as error:return error.code,b''
+   except urllib.error.HTTPError as error:
+    with error:return error.code,error.read()
   self.assertEqual(call('POST',guard.PLATFORM+'/resource_configs',dict(name='client_banner'))[0],404)
+  self.assertTrue(post_written.wait(3),'The POST response was not written')
   self.assertEqual(call('GET',guard.PLATFORM+'/client_config')[0],404)
+  self.assertTrue(get_completed.wait(3),'The GET response was not completed')
+  self.assertEqual(server.platform_completed,[dict(method='GET',path='/client_config',name=None)])
+  release_post.set()
   self.assertEqual(call('GET','/v1/models')[0],501)
   status,stream=call('POST','/v1/chat/completions',dict(tools=[dict(function=dict(name='AskUserQuestion'))],messages=[]))
   self.assertEqual(status,200);self.assertIn(b'"AskUserQuestion"',stream);self.assertTrue(stream.endswith(b'data: [DONE]\n\n'))
   platform=[dict(method='POST',path='/resource_configs',name='client_banner'),dict(method='GET',path='/client_config',name=None)]
   self.assertEqual(server.platform,platform)
   deadline=time.monotonic()+5
-  while server.platform_completed!=platform and time.monotonic()<deadline:time.sleep(.02)
-  self.assertEqual(server.platform_completed,platform)
+  while len(server.platform_completed)<len(platform) and time.monotonic()<deadline:time.sleep(.02)
+  self.assertEqual(completion_errors,[])
+  self.assertCountEqual(server.platform_completed,platform)
   self.assertEqual(len(fixture.native_requests),1)
  def test_the_child_gets_only_the_private_environment(self):
   root=Path(tempfile.mkdtemp(prefix='hgs-kimi-control-')).resolve();self.addCleanup(shutil.rmtree,root)
