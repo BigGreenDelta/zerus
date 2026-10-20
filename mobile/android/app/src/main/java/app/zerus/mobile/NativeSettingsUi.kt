@@ -84,9 +84,6 @@ import kotlinx.coroutines.flow.first
             val models=settings.models.map { option -> OpenCodeModel(option.id,option.label,option.provider,option.providerLabel,
                 option.free,option.favorite,option.isDefault,option.efforts.map { NativeEffort(it,option.effortLabels[it]) }) }
             OpenCodeModelList(models,selectedModel,onModelChange,Modifier.fillMaxWidth().weight(1f,fill=false))
-            OpenCodeCatalog.truncationMessage(settings.modelsTruncated,false).takeIf(String::isNotBlank)?.let {
-                Text(it,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-            }
         } else LazyColumn(Modifier.fillMaxWidth().weight(1f,fill = false).clip(RoundedCornerShape(16.dp)).selectableGroup(),
             state = currentScroll,verticalArrangement = Arrangement.spacedBy(2.dp)) {
             if(effortPage) itemsIndexed(efforts) { _,effort ->
@@ -94,6 +91,9 @@ import kotlinx.coroutines.flow.first
             } else itemsIndexed(settings.models) { _,option ->
                 NativeSettingsRow(option.label,"Model, ${option.label}",selectedModel == option.id) { onModelChange(option.id) }
             }
+        }
+        if(!effortPage) OpenCodeCatalog.truncationMessage(settings.modelsTruncated,false).takeIf(String::isNotBlank)?.let {
+            Text(it,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if(!effortPage) Surface(onClick = { effortPage = true },enabled = efforts.size > 1 || selectedEffort.isNotBlank(),
             shape = RoundedCornerShape(16.dp),color = MaterialTheme.colorScheme.surfaceContainer,
