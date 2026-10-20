@@ -239,7 +239,13 @@ pub fn validate_history_projection(payload: &Value, request_id: &str) -> Result<
     identity_fields(
         payload,
         request_id,
-        &["archive_id", "agent_id", "history_epoch", "projection_after", "projection_until"],
+        &[
+            "archive_id",
+            "agent_id",
+            "history_epoch",
+            "projection_after",
+            "projection_until",
+        ],
         "invalid history projection request",
     )?;
     zerus_relay::protocol::history_projection(payload)

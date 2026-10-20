@@ -260,7 +260,9 @@ impl<N: Native + 'static> Connector<N> {
                 .map_err(Failure::Connector)?;
             // Refuse this new ABI before even an archive lookup on retained hgs.
             if validated.operation == "history_projection" && !self.flags.get().history_projection {
-                return Err(Failure::text("native history projection ABI is unavailable"));
+                return Err(Failure::text(
+                    "native history projection ABI is unavailable",
+                ));
             }
             if self.flags.get().windows_gateway
                 && !validated.session.is_empty()
@@ -1017,7 +1019,9 @@ fn same(value: Option<&Value>, expected: Option<&Value>) -> bool {
 }
 
 fn projection_integer(value: Option<&Value>) -> Option<i64> {
-    int_literal(value?).and_then(|digits| digits.parse::<i64>().ok()).filter(|v| *v >= 0)
+    int_literal(value?)
+        .and_then(|digits| digits.parse::<i64>().ok())
+        .filter(|v| *v >= 0)
 }
 
 fn projection_text(value: Option<&Value>, maximum: usize) -> bool {
@@ -1028,7 +1032,10 @@ fn projection_text(value: Option<&Value>, maximum: usize) -> bool {
 
 fn projection_id(value: Option<&Value>) -> bool {
     value.and_then(Value::as_str).is_some_and(|id| {
-        id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        id.len() == 64
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
 }
 
@@ -1040,26 +1047,48 @@ fn projection_row(row: &Value, payload: &Value) -> bool {
     };
     if !projection_id(row.get("history_id"))
         || !projection_text(row.get("history_cursor"), 8192)
-        || !row.get("history_stream").and_then(Value::as_str).is_some_and(|stream| {
-            ["journal", "provider", "attachment", "voice"].contains(&stream)
-        })
+        || !row
+            .get("history_stream")
+            .and_then(Value::as_str)
+            .is_some_and(|stream| ["journal", "provider", "attachment", "voice"].contains(&stream))
         || !row.get("type").and_then(Value::as_str).is_some_and(|kind| {
-            ["UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted",
-                "QuestionAnswered", "AgentMessage", "Stop"].contains(&kind)
+            [
+                "UserPromptSubmit",
+                "UserPromptQueued",
+                "UserMessage",
+                "TurnStarted",
+                "QuestionAnswered",
+                "AgentMessage",
+                "Stop",
+            ]
+            .contains(&kind)
         })
         || row.contains_key("native_match_hash")
-        || !row.get("original_ids").and_then(Value::as_array).is_some_and(|ids| {
-            ids.len() <= 8 && ids.iter().all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
-        })
+        || !row
+            .get("original_ids")
+            .and_then(Value::as_array)
+            .is_some_and(|ids| {
+                ids.len() <= 8
+                    && ids
+                        .iter()
+                        .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
+            })
     {
         return false;
     }
-    let agent = payload.get("agent_id").and_then(Value::as_str).unwrap_or("main");
+    let agent = payload
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .unwrap_or("main");
     if row.get("agent_id").is_some_and(|value| {
-        !value.is_null() && !value.as_str().is_some_and(|value| value.is_empty() || value == agent)
-    }) || row.get("incoming_seq").is_some_and(|value| {
-        !value.is_null() && projection_integer(Some(value)).is_none()
-    }) {
+        !value.is_null()
+            && !value
+                .as_str()
+                .is_some_and(|value| value.is_empty() || value == agent)
+    }) || row
+        .get("incoming_seq")
+        .is_some_and(|value| !value.is_null() && projection_integer(Some(value)).is_none())
+    {
         return false;
     }
     let attachments = match row.get("attachments") {
@@ -1067,7 +1096,9 @@ fn projection_row(row: &Value, payload: &Value) -> bool {
         Some(Value::Array(items)) if items.iter().all(Value::is_object) => !items.is_empty(),
         Some(_) => return false,
     };
-    row.get("detail").and_then(Value::as_str).is_some_and(|detail| !detail.trim().is_empty())
+    row.get("detail")
+        .and_then(Value::as_str)
+        .is_some_and(|detail| !detail.trim().is_empty())
         || attachments
 }
 
@@ -1082,8 +1113,13 @@ fn projection_result(result: &Value, payload: &Value, session: &str, request_id:
     };
     let empty = json!("");
     let child = payload.get("agent_id").and_then(Value::as_str);
-    let conversation = payload["expected_conversation_id"].as_str().unwrap_or_default();
-    let expected = child.map_or_else(|| conversation.to_owned(), |id| format!("{conversation}/{id}"));
+    let conversation = payload["expected_conversation_id"]
+        .as_str()
+        .unwrap_or_default();
+    let expected = child.map_or_else(
+        || conversation.to_owned(),
+        |id| format!("{conversation}/{id}"),
+    );
     let until = projection_integer(payload.get("projection_until")).expect("validated");
     let mut previous = projection_integer(payload.get("projection_after")).expect("validated");
     if !is_str(result.get("request_id"), request_id)
@@ -1092,27 +1128,46 @@ fn projection_result(result: &Value, payload: &Value, session: &str, request_id:
         || result.get("archive_id").unwrap_or(&empty) != payload.get("archive_id").unwrap_or(&empty)
         || result.get("agent_id").unwrap_or(&empty) != payload.get("agent_id").unwrap_or(&empty)
         || !is_str(result.get("conversation_id"), &expected)
-        || !is_str(Some(result.get("parent_conversation_id").unwrap_or(&empty)), child.map_or("", |_| conversation))
+        || !is_str(
+            Some(result.get("parent_conversation_id").unwrap_or(&empty)),
+            child.map_or("", |_| conversation),
+        )
         || !same(result.get("history_epoch"), payload.get("history_epoch"))
-        || projection_integer(result.get("projection_generation")).is_none_or(|generation| generation < until)
+        || projection_integer(result.get("projection_generation"))
+            .is_none_or(|generation| generation < until)
         || !result.get("complete").is_some_and(Value::is_boolean)
     {
         return false;
     }
-    let Some(entries) = result.get("projection_changes").and_then(Value::as_array).filter(|v| v.len() <= 256) else {
+    let Some(entries) = result
+        .get("projection_changes")
+        .and_then(Value::as_array)
+        .filter(|v| v.len() <= 256)
+    else {
         return false;
     };
     for entry in entries {
         let Some(entry) = entry.as_object() else {
             return false;
         };
-        let fields = ["generation", "history_id", "change", "resolution", "successor"];
+        let fields = [
+            "generation",
+            "history_id",
+            "change",
+            "resolution",
+            "successor",
+        ];
         let Some(generation) = projection_integer(entry.get("generation")) else {
             return false;
         };
-        let change = entry.get("change").and_then(Value::as_str).unwrap_or_default();
+        let change = entry
+            .get("change")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if !fields.iter().all(|key| entry.contains_key(*key))
-            || !entry.keys().all(|key| fields.contains(&key.as_str()) || key == "reason")
+            || !entry
+                .keys()
+                .all(|key| fields.contains(&key.as_str()) || key == "reason")
             || !(previous < generation && generation <= until)
             || !projection_id(entry.get("history_id"))
             || !["retired", "refreshed"].contains(&change)
@@ -1122,11 +1177,20 @@ fn projection_result(result: &Value, payload: &Value, session: &str, request_id:
         previous = generation;
         let successor = &entry["successor"];
         let valid = match entry.get("resolution").and_then(Value::as_str) {
-            Some("unresolved") => successor.is_null() && entry.get("reason").is_none_or(|reason| {
-                reason.as_str().is_some_and(|reason| ["no_successor", "unexpected_successor", "oversize"].contains(&reason))
-            }),
+            Some("unresolved") => {
+                successor.is_null()
+                    && entry.get("reason").is_none_or(|reason| {
+                        reason.as_str().is_some_and(|reason| {
+                            ["no_successor", "unexpected_successor", "oversize"].contains(&reason)
+                        })
+                    })
+            }
             Some("resolved") if !entry.contains_key("reason") => {
-                if change == "retired" { successor.is_null() } else { projection_row(successor, payload) }
+                if change == "retired" {
+                    successor.is_null()
+                } else {
+                    projection_row(successor, payload)
+                }
             }
             _ => false,
         };

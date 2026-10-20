@@ -71,13 +71,20 @@ class HistoryProjectionTest {
     @Test fun asciiEnvelopeBudgetIncludesUnicodeAndIdentityOverhead() {
         val fixture=javaClass.classLoader!!.getResourceAsStream("history-projection-wire.json")!!.bufferedReader().use { JSONObject(it.readText()) }
         fixture.getJSONArray("cases").objects().forEach { case -> assertEquals(case.getLong("bytes"),HistoryProjection.asciiBytes(case.get("value"))) }
-        val value=response(listOf(entry(1,a,"refreshed",row(a,"я".repeat(150_000)))))
+        val value=response(listOf(entry(1,a,"refreshed",row(a,"я".repeat(151_000)))))
         assertTrue(value.toString().toByteArray().size<HistoryProjection.maxBytes)
         assertThrows(IllegalArgumentException::class.java) { parse(value) }
         val unresolved=parse(response(listOf(entry(1,a,"refreshed",resolved=false).put("reason","oversize"))))
         assertEquals(0L,unresolved.applied(0))
         val boundary=response(listOf(entry(1,a,"refreshed",row(a,"x".repeat(HistoryProjection.maxBytes)))))
         assertThrows(IllegalArgumentException::class.java) { parse(boundary) }
+        val exact=response(listOf(entry(1))).put("padding","")
+        val base=HistoryProjection.asciiBytes(exact)
+        exact.put("padding","x".repeat((HistoryProjection.maxBytes-base).toInt()))
+        assertEquals(HistoryProjection.maxBytes.toLong(),HistoryProjection.asciiBytes(exact))
+        assertTrue(parse(exact).complete)
+        exact.put("padding",exact.getString("padding")+"x")
+        assertThrows(IllegalArgumentException::class.java) { parse(exact) }
     }
     @Test fun aliasesReplaceInPlaceAndAnUnseenRangeIsNeverImported() {
         val receipt=event(c,"receipt body").copy(requestId="receipt",source="hgs_delivery",submittedText="send",attachments=listOf(DisplayedAttachment("photo","image/png",7)))
@@ -140,7 +147,7 @@ class HistoryProjectionTest {
             val child=target.copy(agentId="worker",parentConversation="conversation",conversation="conversation/worker",archiveId="10000000-0000-4000-8000-000000000001")
             server.dispatcher=object:okhttp3.mockwebserver.Dispatcher() {
                 override fun dispatch(request:okhttp3.mockwebserver.RecordedRequest):okhttp3.mockwebserver.MockResponse {
-                    val body=JSONObject(request.body.readUtf8());val id=body.getString("request_id")
+                    val body=JSONObject(request.body.clone().readUtf8());val id=body.getString("request_id")
                     val raw=response(listOf(entry(1))).put("request_id",id).put("conversation_id",child.conversation)
                         .put("agent_id",child.agentId).put("parent_conversation_id",child.parentConversation).put("archive_id",child.archiveId)
                     return okhttp3.mockwebserver.MockResponse().setBody(JSONObject().put("request_id",id).put("state","completed").put("result",raw).toString())

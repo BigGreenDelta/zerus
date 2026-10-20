@@ -88,13 +88,20 @@ final class HistoryProjectionTests: XCTestCase {
         for test in fixture.objects("cases") {
             XCTAssertEqual(try HistoryProjection.asciiBytes(test["value"]!), Int(test.int64("bytes")))
         }
-        let unicode = response([entry(1, a, change: "refreshed", successor: row(a, text: String(repeating: "я", count: 150_000)))])
+        let unicode = response([entry(1, a, change: "refreshed", successor: row(a, text: String(repeating: "я", count: 151_000)))])
         XCTAssertLessThan(JSON.object(unicode).compact.utf8.count, HistoryProjection.maxBytes)
         XCTAssertThrowsError(try parse(unicode))
         let large = response([entry(1, a, change: "refreshed", successor: row(a, text: String(repeating: "x", count: HistoryProjection.maxBytes)))])
         XCTAssertThrowsError(try parse(large))
         var unresolved = entry(1, a, change: "refreshed", resolved: false); unresolved["reason"] = "oversize"
         XCTAssertEqual(try parse(response([unresolved])).applied(after: 0), 0)
+        var exact = response([entry(1, a)]); exact["padding"] = ""
+        let base = try HistoryProjection.asciiBytes(.object(exact))
+        exact["padding"] = .string(String(repeating: "x", count: HistoryProjection.maxBytes - base))
+        XCTAssertEqual(try HistoryProjection.asciiBytes(.object(exact)), HistoryProjection.maxBytes)
+        XCTAssertTrue(try parse(exact).complete)
+        exact["padding"] = .string(exact.string("padding") + "x")
+        XCTAssertThrowsError(try parse(exact))
     }
     func testAliasesPreserveReceiptBodyAndNeverImportUnseenRanges() throws {
         var receipt = event(c, text: "receipt body"); receipt.requestId = "receipt"; receipt.source = "hgs_delivery"

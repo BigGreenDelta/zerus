@@ -550,7 +550,13 @@ pub fn request(v: &Value) -> Result<()> {
             "settings" => &["model", "effort", "expected_pending_id"],
             "process_output" => &["process_id", "generation", "archive_id"],
             "process_stop" => &["process_id", "generation"],
-            "history_projection" => &["archive_id", "agent_id", "history_epoch", "projection_after", "projection_until"],
+            "history_projection" => &[
+                "archive_id",
+                "agent_id",
+                "history_epoch",
+                "projection_after",
+                "projection_until",
+            ],
             "history" => &[
                 "archive_id",
                 "agent_id",
@@ -787,12 +793,21 @@ fn tag(v: &Value, launch: bool) -> Result<()> {
 pub fn history_projection(p: &Value) -> Result<()> {
     fields(
         p,
-        &["request_id", "expected_run_id", "expected_conversation_id", "history_epoch", "projection_after", "projection_until"],
+        &[
+            "request_id",
+            "expected_run_id",
+            "expected_conversation_id",
+            "history_epoch",
+            "projection_after",
+            "projection_until",
+        ],
         &["archive_id", "agent_id"],
     )?;
     uuid(&p["request_id"], true)?;
     let native_text = |value: &Value, maximum: usize| {
-        value.as_str().is_some_and(|s| !s.is_empty() && s.len() <= maximum && !s.chars().any(char::is_control))
+        value.as_str().is_some_and(|s| {
+            !s.is_empty() && s.len() <= maximum && !s.chars().any(char::is_control)
+        })
     };
     if !native_text(&p["expected_run_id"], 128)
         || !native_text(&p["expected_conversation_id"], 256)
