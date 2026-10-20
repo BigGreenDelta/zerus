@@ -32,8 +32,9 @@ schema touches one place in the source tree.
 
 - Moving the swarm catalog to Loro. It keeps its own CRDT until a separate plan
   migrates it with its existing data and mixed-version members.
-- iOS. The crate is built so that the same API can be generated for Swift;
-  doing it is a later plan.
+- iOS here. The crate is built so that the same API can be generated for
+  Swift; `2026-10-20-task-tracker-ios-design.md` does it (owner decision,
+  2026-10-20).
 - Automatic dispatch and any coordination that would prevent two computers
   from sending the same task before their copies meet; both sends run (see
   Sending).
