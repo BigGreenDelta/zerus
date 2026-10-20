@@ -88,6 +88,9 @@ previously present old or successor row, through the ordinary pure display alias
 merge. A retirement removes only an unprotected canonical outgoing row. New
 ranges are never imported by this feed. Drafts, outbox, receipt UUIDs, voice state,
 read marks, divider identity and delivery settlement are outside this path.
+An entry covered by the latest window's marker is skipped even if it belongs to
+an older in-flight run. Visible-row preparation rechecks the captured presentation
+revision, outgoing messages and questions after background work before publishing.
 
 The Windows gateway keeps this operation outside its advertised/dispatch allowlist
 until a separate native Windows existing-index, private lock, epoch and projection

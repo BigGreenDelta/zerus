@@ -66,8 +66,9 @@ NULL, id TEXT NOT NULL, change TEXT NOT NULL CHECK(change IN
 
 ### Successor resolution
 
-For an entry's `id` the computer resolves the current canonical row, after this
-call's reconciliation, exactly:
+For an entry's `id` the computer resolves the current canonical row from an
+already settled index, exactly. The projection reader does not index or reconcile
+sources; an absent, legacy or unsettled index is refused without migration:
 
 1. a row whose ID is `id`;
 2. otherwise the row owning the alias `history:<id>` (merges re-point this alias
@@ -175,7 +176,11 @@ current maximum generation of this epoch (0 when none).
   becomes the larger of its marker and the run's last applied generation;
   otherwise an intervening merge brought in rows with less coverage, the delta is
   still applied and the marker keeps the latest window's lower value. A target or
-  epoch change in between discards the delta.
+  epoch change in between discards the delta. Entries already covered by the
+  latest window's marker are skipped, so an older response cannot overwrite a
+  newer ordinary page's corrections. Asynchronous display preparation also
+  rechecks the current frame, presentation revision, outgoing messages and
+  questions before publishing; new UI state is never overwritten by older work.
 
 ### Applying an entry (review D2)
 
