@@ -641,7 +641,10 @@ class OpenCodeNative(unittest.TestCase):
         cleared = self.wait(name, lambda v: not any(e.get('delivery_state') for e in v['events']))
         self.assertNotIn('remove_queued', cleared['allowed_actions'])
         refused = self.action(b, 'remove_queued', status='failed', message_id=message_id)
-        self.assertIn('unavailable', refused['error'])
+        self.assertEqual(refused['error_source'], 'opencode')
+        self.assertEqual(refused['error'],
+                         'OpenCode could not complete this action; inspect the session on its computer')
+        self.assert_private(refused)
         # A confirmed removal is the request's definite non-delivery.
         removed = json.loads(self.receipt_path(request).read_text())
         self.assertEqual((removed['status'], removed['reason']), ('refused', REMOVED))
