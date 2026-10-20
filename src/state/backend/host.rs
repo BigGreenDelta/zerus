@@ -88,8 +88,8 @@ use crate::{
         client::AttachStream,
         protocol::{
             self, Attach, Attached, Captured, CreateSession, Created, Done, EnvValue, ErrorBody,
-            ErrorCode, HostStatus, InputReady, LaunchState, Listed, Op, PaneDetails, Resolved,
-            Signal, Size, RUN_MARKER,
+            ErrorCode, Grown, HostStatus, InputReady, LaunchState, Listed, Op, PaneDetails,
+            Resolved, Signal, Size, RUN_MARKER,
         },
         spawn::{self, Environment},
     },
@@ -788,6 +788,18 @@ impl<C: Connector> TerminalBackend for HostBackend<C> {
         Ok(details.tty == tty
             && details.pane_pid != 0
             && self.connector.parent(pid) == Some(details.pane_pid))
+    }
+    /// A host older than `grow_unviewed` answers `unsupported`: its panes keep
+    /// their size, so a clipped panel stays in Terminal.
+    fn grow_unviewed(&self, pane: &str, rows: u16) -> Result<bool> {
+        match self.call::<Grown>(Op::GrowUnviewed {
+            target: protocol::Target::Pane(pane.into()),
+            rows,
+        }) {
+            Ok(grown) => Ok(grown.grown),
+            Err(Failure::Host(error)) if error.code == ErrorCode::Unsupported => Ok(false),
+            Err(failure) => Err(failure.message()),
+        }
     }
     fn capture(&self, pane: &str, mode: super::Capture) -> Result<Vec<u8>> {
         let captured: Captured = self
@@ -1691,6 +1703,39 @@ mod tests {
             "session x has no supervisor connected to the session host"
         );
         assert_eq!(calls(&untracked).len(), 1);
+    }
+
+    #[test]
+    fn unviewed_panes_grow_through_a_host_that_knows_how() {
+        let backend = HostBackend::new(Fake::new(|op| match op {
+            Op::GrowUnviewed { rows: 48, .. } => Ok(json!({"grown": true})),
+            Op::GrowUnviewed { .. } => Ok(json!({"grown": false})),
+            op => panic!("unexpected {op:?}"),
+        }));
+        assert!(backend.grow_unviewed("%4", 48).unwrap());
+        assert!(!backend.grow_unviewed("%4", 96).unwrap());
+        assert_eq!(
+            requests(&backend)[0],
+            (
+                false,
+                Op::GrowUnviewed {
+                    target: protocol::Target::Pane("%4".into()),
+                    rows: 48
+                }
+            )
+        );
+        // A host of an earlier version keeps the size; other failures stay errors.
+        let older = HostBackend::new(Fake::new(|_| {
+            Err(host_error(ErrorCode::Unsupported, "unsupported"))
+        }));
+        assert!(!older.grow_unviewed("%4", 48).unwrap());
+        let gone = HostBackend::new(Fake::new(|_| {
+            Err(host_error(ErrorCode::NotFound, "pane %4 has exited"))
+        }));
+        assert_eq!(
+            gone.grow_unviewed("%4", 48).unwrap_err(),
+            "pane %4 has exited"
+        );
     }
 
     #[test]
