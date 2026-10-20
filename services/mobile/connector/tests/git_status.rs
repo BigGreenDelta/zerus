@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Synthetic checkout reads: native projection, exact argv and durable read identity.
 mod common;
 

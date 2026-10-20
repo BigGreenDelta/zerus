@@ -140,6 +140,8 @@ pub struct Journal {
     // Declared first, so the connection closes before the lock is released.
     db: Connection,
     _lock: File,
+    #[cfg(windows)]
+    _directory: zerus_windows_private::DirectoryGuard,
 }
 
 impl Journal {
@@ -148,6 +150,9 @@ impl Journal {
     pub fn open(directory: &Path, binding: &str, now: f64) -> Result<Self> {
         fsguard::create_directory(directory).map_err(JournalError::Io)?;
         fsguard::check_private_directory(directory)?;
+        #[cfg(windows)]
+        let directory_guard =
+            zerus_windows_private::directory(directory, false).map_err(JournalError::Io)?;
         let lock = fsguard::private_file(&directory.join(LOCK), true)?
             .ok_or_else(|| refused(UNSAFE_FILE))?;
         fsguard::lock_exclusive(&lock)?;
@@ -233,7 +238,12 @@ impl Journal {
         for (_, ddl) in INDEXES {
             db.execute_batch(ddl)?;
         }
-        let journal = Journal { db, _lock: lock };
+        let journal = Journal {
+            db,
+            _lock: lock,
+            #[cfg(windows)]
+            _directory: directory_guard,
+        };
         journal.prune(now)?;
         Ok(journal)
     }

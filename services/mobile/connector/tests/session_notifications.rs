@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Exact shared-Mute mutation and durable receipts, with no real native process.
 mod common;
 use common::{Scratch, EPOCH};

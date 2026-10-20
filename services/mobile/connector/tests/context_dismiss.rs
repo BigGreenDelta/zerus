@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Optional prompt dismissal preserves ordinary clear bytes and durable no-replay identities.
 mod common;
 

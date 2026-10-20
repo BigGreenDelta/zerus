@@ -11,9 +11,17 @@ hgs.exe session-host install. This stages the hgs CLI in
 local sessions again. Claude Code, Codex and Kimi Code then run here once
 installed; DeepSeek and OpenCode do not. Install agent... in Accounts installs
 Codex with npm (Node.js required) and Claude Code and Kimi Code with their
-vendors' PowerShell installers. Voice messages to sessions on this
-computer, the DeepSeek Native UI and the mobile gateway are not available on
-Windows.
+vendors' PowerShell installers.
+
+Mobile connection in Settings configures this PC's bundled Rust outbound
+connector. Supply the computer credential issued by your relay, save, and
+choose Start connector. Refresh Phones to pair a phone by QR code. No Linux
+or macOS gateway is needed. Start it again after each Windows login; closing
+Zerus leaves the connector and native sessions running. Stop connector drains
+its current request and preserves native agents and durable request receipts.
+This first Windows gateway controls existing local Codex, Claude and Kimi
+sessions. Mobile session creation, folder/worktree/Git/file operations, peer
+routing, voice/speech, DeepSeek and OpenCode are unavailable.
 Documentation: https://github.com/ufna/zerus/blob/main/docs/installation.md#windows
 
 Requirements

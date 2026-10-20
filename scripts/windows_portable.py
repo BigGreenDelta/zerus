@@ -135,6 +135,10 @@ def inspect(path, required=REQUIRED):
     require(manifest.get("product") == "Zerus" and manifest.get("platform") == "Windows" and
             manifest.get("architecture") == "x86_64" and manifest.get("native_agents_bundled") is False,
             "Unexpected Windows portable product/platform.")
+    if "mobile_connector_bundled" in manifest:
+        require(manifest["mobile_connector_bundled"] is True and
+                f"{TOP}/zerus-mobile-connector.exe" in names,
+                "Windows portable mobile connector declaration requires its executable.")
     for key in ("version", "cli_version", "qt_version"):
         require(isinstance(manifest.get(key), str) and VERSION.fullmatch(manifest[key]),
                 f"Invalid Windows portable {key}.")

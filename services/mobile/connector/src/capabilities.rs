@@ -16,6 +16,38 @@ use zerus_relay::protocol::OPERATIONS;
 pub const REPROBE_SECONDS: f64 = 300.0;
 /// `hgs --help` budget (seconds).
 pub const PROBE_TIMEOUT: f64 = 3.0;
+/// Windows v1 deliberately excludes POSIX paths, one-hop routing, native
+/// providers absent from the host, speech and voice. Same table drives
+/// advertisement and dispatch refusal, after durable duplicate handling.
+pub const WINDOWS_HELP_MARKER: &str = "Mobile gateway ABI: windows-local-v1";
+pub const WINDOWS_OPERATIONS: &[&str] = &[
+    "inspect",
+    "history",
+    "archive_list",
+    "send",
+    "answer",
+    "interrupt",
+    "send_now",
+    "settings",
+    "clear_context",
+    "compact_context",
+    "mark_read",
+    "session_notifications",
+    "terminal_snapshot",
+    "terminal_input",
+    "hooks_status",
+    "process_output",
+    "process_stop",
+    "archive",
+    "forget",
+    "fork",
+    "pause",
+    "remove_queued",
+    "rename",
+    "restore",
+    "resume",
+    "terminate",
+];
 pub const CLEAR_CONTEXT_DISMISS_HELP_MARKER: &str = "Mobile clear-context ABI: dismiss-prompt-v1";
 
 /// Operations this connector executes, with the session mutations of
@@ -200,6 +232,7 @@ pub const SPEECH_CONFIG: &[&str] = &[
 /// What the native CLI offers, from its help text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Flags {
+    pub windows_gateway: bool,
     pub analytics: bool,
     pub archive: bool,
     pub lifecycle: bool,
@@ -230,7 +263,8 @@ impl Flags {
     /// The frozen help markers (`operations.json` `capabilities.markers`).
     pub fn from_help(help: &str) -> Flags {
         let has = |marker: &str| help.contains(marker);
-        Flags {
+        let flags = Flags {
+            windows_gateway: help.lines().any(|line| line.trim() == WINDOWS_HELP_MARKER),
             analytics: has("hgs [@host] analytics --json"),
             archive: has("archives --json"),
             lifecycle: help
@@ -262,7 +296,36 @@ impl Flags {
             voice_video: has("voice-video-v1"),
             speech_config: has("Speech profile management v1"),
             peers: has("mobile-peers --json") && has("mobile-peer --json"),
+        };
+        if flags.windows_gateway {
+            return flags.windows_local();
         }
+        flags
+    }
+
+    pub fn for_native_platform(self) -> Self {
+        if cfg!(windows) {
+            self.windows_local()
+        } else {
+            self
+        }
+    }
+    pub fn windows_local(mut self) -> Self {
+        self.windows_gateway = true;
+        self.peers = false;
+        self.voice = false;
+        self.voice_video = false;
+        self.speech = false;
+        self.speech_config = false;
+        self.launch = false;
+        self.project_launch = false;
+        self.worktree = false;
+        self.directory_create = false;
+        self.file_read = false;
+        self.attachment_read = false;
+        self.git_status = false;
+        self.analytics = false;
+        self
     }
 
     /// Python's advertised operations, before this build's own filter.
@@ -312,6 +375,7 @@ impl Flags {
             .iter()
             .copied()
             .filter(|operation| !removed.contains(operation))
+            .filter(|operation| !self.windows_gateway || WINDOWS_OPERATIONS.contains(operation))
             .collect()
     }
 
@@ -382,9 +446,21 @@ impl Flags {
         let mut features = features;
         // Connector-only: the Python connector never advertises it, so apps
         // do not send an OpenCode effort to it.
-        if operations.contains(&"launch") {
+        if operations.contains(&"launch") && !self.windows_gateway {
             features.push("opencode_launch_effort");
             features.sort_unstable();
+        }
+        if self.windows_gateway {
+            features.retain(|feature| {
+                ![
+                    "send_agent",
+                    "gateway_one_hop",
+                    "launch_project",
+                    "inspect_agent",
+                ]
+                .contains(feature)
+            });
+            reasons.insert("windows_scope".into(), json!("Existing local Codex, Claude and Kimi sessions; mobile creation, Windows paths, peers, DeepSeek/OpenCode and voice/speech are unavailable"));
         }
         json!({"protocol_version": 1, "operations": operations, "features": features,
                "reasons": reasons})

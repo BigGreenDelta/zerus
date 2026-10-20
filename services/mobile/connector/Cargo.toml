@@ -21,7 +21,7 @@ zerus-relay = { path = "../relay", default-features = false }
 # The journal stays the SQLite file the Python connector writes; bundled like hgs.
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Effective uid, flock(2) and O_NOFOLLOW through safe calls (no libc on Linux).
-rustix = { version = "1", features = ["fs", "process"] }
+
 # request_hash needs exact number spelling; the codec sorts keys itself.
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 # File ranges, recordings and sealed credentials, read as Python's strict
@@ -45,6 +45,12 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 rustls-native-certs = "0.8"
 # SHA-1 for the uuid5 route identities only; ring already backs rustls.
 ring = { version = "0.17", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+zerus-windows-private = { path = "../windows-private" }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "test-util"] }

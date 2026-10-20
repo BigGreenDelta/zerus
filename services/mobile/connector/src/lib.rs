@@ -3,8 +3,6 @@
 //! mutation never executes twice. This library holds the parts the binary and
 //! its tests share; `services/mobile/connector/README.md` records where the
 //! Rust connector deliberately differs from the Python one.
-#[cfg(not(unix))]
-compile_error!("the mobile connector supports only Unix gateways (Linux and macOS)");
 
 pub mod accounts;
 pub mod archives;
@@ -38,6 +36,8 @@ pub mod session_notifications;
 pub mod speech;
 pub mod url;
 pub mod validate;
+#[cfg(windows)]
+pub mod windows_management;
 
 pub use error::ConnectorError;
 
@@ -58,6 +58,8 @@ pub struct Started {
     pub journal: journal::Journal,
     /// Findings that do not stop it, logged as warnings.
     pub warnings: Vec<&'static str>,
+    #[cfg(windows)]
+    generation: String,
 }
 
 /// What `main()` does before the runtime: read and validate the
@@ -68,6 +70,9 @@ pub fn start(
     environment: &config::Environment,
     now: f64,
 ) -> Result<Started, ConnectorError> {
+    #[cfg(windows)]
+    let _guard =
+        windows_management::guard(path, false).map_err(|_| ConnectorError::new(STARTUP_FAILURE))?;
     let (text, findings) = config::read_file(path, fsguard::euid())?;
     if let Some(refusal) = findings.iter().find(|finding| finding.refusal) {
         return Err(ConnectorError::new(refusal.message));
@@ -76,9 +81,14 @@ pub fn start(
     let config = config::validate(&value, allow_insecure_localhost, environment)?;
     let journal = journal::Journal::open(&config.state_dir, &config.binding, now)
         .map_err(|error| ConnectorError::new(error.message()))?;
+    #[cfg(windows)]
+    let generation = windows_management::prepare_running(&config.state_dir)
+        .map_err(|_| ConnectorError::new(STARTUP_FAILURE))?;
     Ok(Started {
         config,
         journal,
+        #[cfg(windows)]
+        generation,
         warnings: findings.iter().map(|finding| finding.message).collect(),
     })
 }
@@ -116,7 +126,11 @@ pub fn clock_scale() -> f64 {
 /// signal exits at once (divergence h).
 pub fn run(started: Started) -> u8 {
     let Started {
-        config, journal, ..
+        config,
+        journal,
+        #[cfg(windows)]
+        generation,
+        ..
     } = started;
     let roots = if config.transport.secure {
         let roots = http::system_roots();
@@ -143,6 +157,8 @@ pub fn run(started: Started) -> u8 {
         default_timeout: native_timeout(),
         clock_scale: clock_scale(),
     };
+    #[cfg(windows)]
+    let stop_state = config.state_dir.clone();
     let local = tokio::task::LocalSet::new();
     let code = local.block_on(&tokio, async move {
         let relay = http::Relay::new(&config.transport, &config.token, roots);
@@ -153,7 +169,16 @@ pub fn run(started: Started) -> u8 {
             settings,
             Box::new(now),
         ));
-        match serve(&connector, &relay).await {
+        #[cfg(unix)]
+        let result = serve(&connector, &relay, signals(&connector.stopping)).await;
+        #[cfg(windows)]
+        let result = serve(
+            &connector,
+            &relay,
+            windows_management::signals(&connector.stopping, stop_state, generation),
+        )
+        .await;
+        match result {
             Ok(()) => 0,
             Err(_) => {
                 runtime::log("ERROR", JOURNAL_FAILURE);
@@ -176,6 +201,7 @@ pub fn run(started: Started) -> u8 {
 async fn serve(
     connector: &Rc<runtime::Connector<native::Process>>,
     relay: &http::Relay,
+    signals: impl std::future::Future<Output = ()>,
 ) -> Result<(), execute::Fatal> {
     use futures_util::future::{self, Either};
     let heartbeat = runtime::until_stopped(
@@ -189,7 +215,6 @@ async fn serve(
         result
     };
     let work = future::join(heartbeat, requests);
-    let signals = signals(&connector.stopping);
     match future::select(std::pin::pin!(work), std::pin::pin!(signals)).await {
         Either::Left(((_, requests), _)) => requests,
         Either::Right(((), _)) => Ok(()),
@@ -198,6 +223,7 @@ async fn serve(
 
 /// SIGTERM or SIGINT stops claiming; a second signal exits at once without
 /// touching any child, leaving a running request for restart recovery.
+#[cfg(unix)]
 async fn signals(stopping: &runtime::Event) {
     use tokio::signal::unix::{signal, SignalKind};
     let (Ok(mut terminate), Ok(mut interrupt)) = (

@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! The runtime against the golden vectors: `validation/*.jsonl`, the
 //! `Connector.execute` runs, the heartbeat snapshot and the pure projections
 //! of `projections.jsonl`, the bounded inspections and receipt limits of

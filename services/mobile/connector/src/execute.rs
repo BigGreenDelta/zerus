@@ -235,6 +235,18 @@ impl<N: Native + 'static> Connector<N> {
 
     /// `_execute_claimed`: the receipt of a claimed request.
     async fn execute_claimed(&self, request: &Map<String, Value>, request_id: &str) -> Value {
+        if self.flags.get().windows_gateway
+            && !request
+                .get("operation")
+                .and_then(Value::as_str)
+                .is_some_and(|op| crate::capabilities::WINDOWS_OPERATIONS.contains(&op))
+        {
+            return receipt(
+                "failed",
+                Value::Null,
+                Some("operation is unavailable on a Windows local gateway"),
+            );
+        }
         if crate::media::claims(request) {
             return self.media(request, request_id).await;
         }
@@ -441,6 +453,11 @@ impl<N: Native + 'static> Connector<N> {
 
     /// The capability checks of `_execute_claimed`, in Python's order.
     fn gate(&self, operation: &str, payload: Option<&Value>, flags: Flags) -> Result<(), Failure> {
+        if flags.windows_gateway && !crate::capabilities::WINDOWS_OPERATIONS.contains(&operation) {
+            return Err(Failure::text(
+                "operation is unavailable on a Windows local gateway",
+            ));
+        }
         if operation == "clear_context"
             && payload.is_some_and(|payload| payload.get("dismiss_prompt").is_some())
             && !flags.clear_context_dismiss

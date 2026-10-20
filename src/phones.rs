@@ -145,7 +145,11 @@ struct Connection {
 
 fn connection(config: &Config) -> Result<Option<Connection>> {
     let path = config.dir.join("mobile/connector.json");
-    let file = match std::fs::File::open(&path) {
+    #[cfg(unix)]
+    let opened = std::fs::File::open(&path);
+    #[cfg(windows)]
+    let opened = crate::platform::refuse_link(std::fs::OpenOptions::new().read(true)).open(&path);
+    let file = match opened {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => {
@@ -155,6 +159,10 @@ fn connection(config: &Config) -> Result<Option<Connection>> {
             ))
         }
     };
+    #[cfg(windows)]
+    if !crate::platform::verify_private_file(&file).unwrap_or(false) {
+        return Err(Error::new(1, "The mobile connection configuration must be private to this Windows user"));
+    }
     let mut bytes = Vec::new();
     file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
     let settings: Value = serde_json::from_slice(&bytes)

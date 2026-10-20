@@ -212,7 +212,14 @@ HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
   python -X utf8 scripts/ci/agent-compatibility.py </dev/null
 export QT_ROOT_DIR="$(cygpath -w ~/Qt/6.10.3/msvc2022_64)"
 bash scripts/ci/gui.sh </dev/null
+cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --test windows_gateway
+cargo +1.99.1 build --release --locked --manifest-path services/mobile/connector/Cargo.toml
+HGS_TEST_CONNECTOR="$(cygpath -w "$PWD/services/mobile/connector/target/release/zerus-mobile-connector.exe")" \
+HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
+HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" \
+  python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
 python scripts/package-windows.py --cli target/release/hgs.exe \
+    --connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
     --gui .ci-build/gui/hgs-tray.exe --conpty target/conpty \
     --output artifacts/zerus-windows-x86_64.zip
 python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest
@@ -262,3 +269,15 @@ rewrites arguments that look like POSIX paths when it starts a Windows program: 
 [the real-peer smoke](docs/ci-and-aur.md#real-peer-smoke-on-a-windows-pc).
 `tray/tools/export-windows-icon.py` (Pillow) regenerates the checked-in Windows icon
 after artwork changes.
+
+`test_windows_mobile_gateway.py` needs Git for Windows' `openssl` on PATH and
+runs outside a job that forbids breakaway, as do the other session-host suites.
+It creates only a throwaway profile, tracked fake Codex session, copied gateway
+bundle and HTTPS loopback protocol fixture. It checks actual connector Start,
+duplicate Start, published capabilities, Terminal snapshot/input and duplicate
+receipts, phone-list/invitation APIs, graceful Stop and the same surviving native
+host/session. Failure cleanup verifies the unique copied process image and holds
+its Windows process handle before terminating that fixture. It does not install
+into an owner profile, contact a production relay or pair a real phone. Run the
+production relay's existing contract suites separately. A skipped or unavailable
+Windows suite is not evidence of supported runtime behavior.

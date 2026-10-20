@@ -195,7 +195,7 @@ impl<N: Native + 'static> Connector<N> {
             native,
             journal: Rc::new(journal),
             settings,
-            flags: Cell::new(Flags::default()),
+            flags: Cell::new(Flags::default().for_native_platform()),
             state: RefCell::new(State::fresh()),
             snapshot_ready: Event::default(),
             probed: Event::default(),
@@ -323,7 +323,8 @@ impl<N: Native + 'static> Connector<N> {
             .native(Call::new(["--help"]).timeout(PROBE_TIMEOUT).text())
             .await
         {
-            self.flags.set(Flags::from_help(&help));
+            self.flags
+                .set(Flags::from_help(&help).for_native_platform());
         }
         self.probed.set();
     }
@@ -358,6 +359,9 @@ impl<N: Native + 'static> Connector<N> {
             let state = self.state.borrow();
             sessions.extend(state.archive_preview.iter().cloned());
             snapshot.insert("mobile_archive".into(), state.archive_preview_meta.clone());
+        }
+        if self.flags.get().windows_gateway {
+            sessions.retain(|row| matches!(row["cmd"].as_str(), Some("codex" | "claude" | "kimi")));
         }
         // Native SSH aliases and the peer-of-peer inventory stay local.
         snapshot.remove("peers");

@@ -185,7 +185,7 @@ fn mobile_peers(config: &Config, args: &[String]) -> Result<i32> {
 fn mobile_peers(_: &Config, _: &[String]) -> Result<i32> {
     Err(Error::new(
         2,
-        "Mobile peers are not supported on Windows yet; use a Linux or macOS machine as the mobile gateway.",
+        "One-hop mobile peer routing is unavailable on a Windows gateway; local Windows sessions are supported.",
     ))
 }
 fn state_command(verb: &str, args: &[String]) -> Result<i32> {
@@ -454,7 +454,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             }
             print!("{}", usage_text(cfg!(unix)));
             #[cfg(windows)]
-            print!("{}", crate::host::admin::HELP);
+            print!("{}\nMobile gateway ABI: windows-local-v1\n", crate::host::admin::HELP);
             return Ok(0);
         }
         "--version" | "version" => return crate::status::version(&config, &target, args),

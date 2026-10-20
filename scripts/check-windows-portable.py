@@ -95,6 +95,13 @@ def main():
             for program, expected in ((hgs, f"hgs {cli_version}"), (tray, f"Zerus {version}")):
                 reported = run(program, ["--version"], environment, base)
                 require(reported == expected, f"{program.name} --version: {reported!r}, expected {expected!r}.")
+            if manifest.get("mobile_connector_bundled"):
+                connector_version = run(bundle / "zerus-mobile-connector.exe", ["--version"], environment, base)
+                require(connector_version.startswith("zerus-mobile-connector "), "Bundled connector does not start.")
+                status = json.loads(run(bundle / "zerus-mobile-connector.exe", ["--manage", "status", "--config",
+                                       str(base / "config/mobile/connector.json")], environment, base))
+                require(status.get("configured") is False and status.get("running") is False,
+                        "Fresh portable connector status is not isolated/unconfigured.")
             print(f"hgs.exe {cli_version} and hgs-tray.exe {version} start from the extracted bundle.")
             if args.selftest:
                 box = json.loads(run(hgs, ["ls", "--json", "--local"], environment, base))

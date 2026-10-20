@@ -2817,7 +2817,13 @@ it is listed at most once every 15 seconds. With local sessions enabled, New
 session and Accounts offer this computer without DeepSeek and OpenCode, the shell
 entry is **Run PowerShell**, voice messages to its sessions are disabled with the
 reason as the tooltip, and it is listed at most once every 5 seconds. In both modes,
-Settings → Mobile connection is hidden and no desktop presence is recorded.
+Settings → Mobile connection configures the bundled outbound Rust connector on
+Windows, including before local sessions are enabled. Start and Stop are explicit;
+closing the GUI preserves the connector, session host and native agents. The
+first Windows transport controls existing local Codex/Claude/Kimi sessions and
+refuses mobile creation, path/worktree/Git/file operations, peers and voice/speech.
+Windows desktop presence is not recorded, so desktop activity does not delay
+phone alerts. See [Windows gateway setup](mobile-deployment.md#windows-gateway).
 Attention notices are tray notifications with the Zerus icon and a taskbar
 badge. A start without options opens the workspace, because Windows 11 first
 hides a new notification
