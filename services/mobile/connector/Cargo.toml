@@ -53,6 +53,7 @@ rustix = { version = "1", features = ["fs", "process"] }
 zerus-windows-private = { path = "../windows-private" }
 
 [dev-dependencies]
+tempfile = "=3.27.0"
 tokio = { version = "1", default-features = false, features = ["macros", "test-util"] }
 
 [profile.release]

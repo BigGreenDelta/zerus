@@ -6,25 +6,33 @@ use std::path::PathBuf;
 use zerus_mobile_connector::{
     config::Environment, journal::Journal, start, windows_management::manage,
 };
-struct Scratch(PathBuf);
+struct Scratch(PathBuf, tempfile::TempDir);
 impl Scratch {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "zerus-mobile-windows-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        Self::with_prefix("zerus-mobile-windows-")
+    }
+    fn with_prefix(prefix: &str) -> Self {
+        let owner = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+        let path = owner.path().join("private");
         zerus_windows_private::directory(&path, true).unwrap();
-        Self(path)
+        Self(path, owner)
     }
 }
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+#[test]
+fn equal_scratch_prefixes_keep_independent_owned_roots() {
+    let first = Scratch::with_prefix("zerus-mobile-same-prefix-");
+    let second = Scratch::with_prefix("zerus-mobile-same-prefix-");
+    let first_root = first.1.path().to_owned();
+    let second_root = second.1.path().to_owned();
+    assert_ne!(first_root, second_root);
+    let sentinel = second.0.join("sentinel");
+    std::fs::write(&sentinel, b"second-owner").unwrap();
+    drop(first);
+    assert!(!first_root.exists());
+    assert!(second_root.exists());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"second-owner");
+    drop(second);
+    assert!(!second_root.exists());
 }
 #[test]
 fn private_files_reject_hardlinks_and_world_readable_credentials() {
@@ -155,7 +163,17 @@ fn configuration_is_redacted_revision_guarded_and_stop_is_generation_bound() {
     let environment = Environment::current().unwrap();
     let running = start(&path, false, &environment, 1.0).unwrap();
     let status = manage("status", &path, &json!({})).unwrap();
-    assert_eq!(status["running"], true);
+    assert_eq!(
+        status["running"],
+        true,
+        "redacted status={status}; Started state={:?}; config={path:?} present={}; lock={:?} present={}; post-failure probe={:?}; state path matches={}",
+        running.config.state_dir,
+        path.exists(),
+        running.config.state_dir.join("connector.lock"),
+        running.config.state_dir.join("connector.lock").exists(),
+        zerus_mobile_connector::fsguard::probe_lock(&running.config.state_dir.join("connector.lock")),
+        status["state_dir"].as_str().map(PathBuf::from).as_ref() == Some(&running.config.state_dir),
+    );
     assert_eq!(
         manage("start", &path, &json!({"revision":status["revision"]})).unwrap(),
         status
