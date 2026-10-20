@@ -4,7 +4,7 @@
 //! session's computer, over the relay exchange. See "The replica crate" in
 //! docs/superpowers/specs/2026-10-18-task-replication-loro-design.md.
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zerus_replica as replica;
 
@@ -501,6 +501,29 @@ impl TaskStore {
         })
     }
 
+    /// The digest of the project document and every task here that is not
+    /// Done, as a computer's heartbeat names its own.
+    pub fn live_digest(&self) -> Result<String> {
+        Ok(self.store()?.live_inventory()?.0.digest())
+    }
+
+    /// A new exchange of this project's tasks with one computer.
+    pub fn exchange(self: Arc<Self>) -> Arc<TaskExchange> {
+        Arc::new(TaskExchange {
+            store: self,
+            state: Mutex::new(replica::phone::Exchange::new()),
+        })
+    }
+
+    /// The computer's side of one request, as hgs answers it: tests play a
+    /// computer with it.
+    pub fn answer_exchange(&self, request: String) -> Result<String> {
+        let request: replica::phone::Request = serde_json::from_str(&request)
+            .map_err(|e| ReplicaError::Refused(format!("invalid exchange request: {e}")))?;
+        let answer = replica::phone::answer(&self.store()?, request)?;
+        serde_json::to_string(&answer).map_err(|e| ReplicaError::Failed(e.to_string()))
+    }
+
     pub fn import_updates(&self, updates: Vec<DocumentUpdate>) -> Result<ImportResult> {
         let imported = self
             .store()?
@@ -508,6 +531,69 @@ impl TaskStore {
         Ok(ImportResult {
             changed: u32::try_from(imported.changed).unwrap_or(u32::MAX),
             refused: imported.refused.into_iter().map(Into::into).collect(),
+        })
+    }
+}
+
+/// What one answer did on the phone.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ExchangeProgress {
+    /// Documents the computer's updates changed here.
+    pub changed: u32,
+    /// The computer's updates this replica refused.
+    pub refused_here: Vec<DamagedTask>,
+    /// This replica's updates the computer refused; they are not sent again.
+    pub refused_there: Vec<DamagedTask>,
+    /// This replica's documents too large for a request ("project" or a task UUID).
+    pub unsent: Vec<String>,
+    /// The exchange has nothing left to do.
+    pub finished: bool,
+}
+
+/// The phone's exchange of one project's tasks with one computer, through
+/// `task_exchange` requests the app carries to the relay: `next_request`
+/// gives each payload, and `accept` takes the receipt's `result`. Each call
+/// opens the project as the other methods do.
+#[derive(uniffi::Object)]
+pub struct TaskExchange {
+    store: Arc<TaskStore>,
+    state: Mutex<replica::phone::Exchange>,
+}
+
+impl TaskExchange {
+    fn state(&self) -> std::sync::MutexGuard<'_, replica::phone::Exchange> {
+        // A panic while held leaves nothing half-written on disk: go on.
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[uniffi::export]
+impl TaskExchange {
+    /// The next `task_exchange` payload, as JSON, or none once it is done.
+    pub fn next_request(&self) -> Result<Option<String>> {
+        let store = self.store.store()?;
+        let Some(request) = self.state().next_request(&store)? else {
+            return Ok(None);
+        };
+        serde_json::to_string(&request)
+            .map(Some)
+            .map_err(|e| ReplicaError::Failed(e.to_string()))
+    }
+
+    /// The computer's answer to the last request: the receipt's `result`, as JSON.
+    pub fn accept(&self, answer: String) -> Result<ExchangeProgress> {
+        let answer: replica::phone::Answer = serde_json::from_str(&answer)
+            .map_err(|e| ReplicaError::Refused(format!("invalid exchange answer: {e}")))?;
+        let store = self.store.store()?;
+        let progress = self.state().accept(&store, answer)?;
+        Ok(ExchangeProgress {
+            changed: u32::try_from(progress.changed).unwrap_or(u32::MAX),
+            refused_here: progress.refused_here.into_iter().map(Into::into).collect(),
+            refused_there: progress.refused_there.into_iter().map(Into::into).collect(),
+            unsent: progress.unsent,
+            finished: progress.finished,
         })
     }
 }

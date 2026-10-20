@@ -164,3 +164,43 @@ fn a_held_project_answers_busy_instead_of_waiting() {
     drop(held);
     assert_eq!(store.list().unwrap().tasks.len(), 1);
 }
+
+#[test]
+fn two_stores_exchange_through_json() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (computer, phone) = (store(&a), store(&b));
+    for text in ["Add rate limiting", "Measure first"] {
+        computer
+            .add(
+                text.into(),
+                TaskStage::Todo,
+                TaskTarget::AnySession,
+                TaskPosition::End,
+            )
+            .unwrap();
+    }
+    assert_ne!(
+        computer.live_digest().unwrap(),
+        phone.live_digest().unwrap()
+    );
+    let exchange = phone.clone().exchange();
+    let mut last = None;
+    while let Some(request) = exchange.next_request().unwrap() {
+        let answer = computer.answer_exchange(request).unwrap();
+        last = Some(exchange.accept(answer).unwrap());
+    }
+    let last = last.unwrap();
+    assert!(last.finished);
+    assert_eq!(
+        computer.live_digest().unwrap(),
+        phone.live_digest().unwrap()
+    );
+    assert_eq!(phone.list().unwrap().tasks.len(), 2);
+    // An answer that is not JSON is refused with its reason.
+    let again = phone.clone().exchange();
+    again.next_request().unwrap().unwrap();
+    assert!(matches!(
+        again.accept("not json".into()),
+        Err(ReplicaError::Refused(message)) if message.contains("invalid exchange answer")
+    ));
+}

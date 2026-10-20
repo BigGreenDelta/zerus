@@ -59,4 +59,20 @@ class TaskStoreBindingTest {
         assertEquals("Add rate limiting", b.list().tasks.single().text)
         assertEquals(a.inventory(), b.inventory())
     }
+
+    @Test
+    fun aPhoneExchangesWithAComputerThroughJson() {
+        val (computer, phone) = store() to store()
+        computer.add("Add rate limiting", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End)
+        phone.exchange().use { exchange ->
+            var progress: ExchangeProgress? = null
+            while (true) {
+                val request = exchange.nextRequest() ?: break
+                progress = exchange.accept(computer.answerExchange(request))
+            }
+            assertTrue(progress!!.finished)
+        }
+        assertEquals(computer.liveDigest(), phone.liveDigest())
+        assertEquals("Add rate limiting", phone.list().tasks.single().text)
+    }
 }
