@@ -88,6 +88,15 @@ struct RootView: View {
             }
         }
         .task(id: scenePhase) {
+            // While visible, the projects' task replicas sync every 15 seconds, as on Android.
+            guard scenePhase == .active else { return }
+            try? await Task.sleep(for: .seconds(6))
+            while !Task.isCancelled {
+                if model.storageReady && !model.demo { model.tasks.syncTasks() }
+                try? await Task.sleep(for: .seconds(15))
+            }
+        }
+        .task(id: scenePhase) {
             // Apply confirmed "next idle" settings intents, as Android checks every ten seconds.
             guard scenePhase == .active else { return }
             while !Task.isCancelled {
