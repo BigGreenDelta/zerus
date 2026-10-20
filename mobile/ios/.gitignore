@@ -8,3 +8,5 @@ xcuserdata/
 
 # Private signing configuration (team ID); see Config/Local.xcconfig.example
 Config/Local.xcconfig
+# The task replica library and its bindings (scripts/build-replica.sh).
+ZerusKit/Replica/

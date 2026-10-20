@@ -3,3 +3,7 @@ package_name = "app.zerus.mobile.replica"
 cdylib_name = "zerus_replica_ffi"
 # Android bindings: the cleaner and other choices fit the app's minimum API level.
 android = true
+
+[bindings.swift]
+# iOS bindings: ZerusKit links them as the module ZerusReplica (mobile/ios/scripts/build-replica.sh).
+module_name = "ZerusReplica"
