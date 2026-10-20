@@ -217,12 +217,18 @@ exchange is safe and needs no durable request identity (owner decision,
   computer-scoped mutations of mobile API v1 with the relay's durable request
   identity: the connector runs each identity once (`hgs task mobile-send` and
   `mobile-cancel`), a refusal before anything happened is a failed receipt with
-  hgs's reason, and an outcome that cannot be confirmed is uncertain.
+  hgs's reason, and an outcome that cannot be confirmed is uncertain. While the
+  session's computer is out of reach, a Cancel goes to another online computer
+  of the project, which cancels it there without the cancel message (see
+  "Actions with side effects"); the cancel dialog says so. A Send now that may
+  have happened keeps Send now off for that task until an exchange with its
+  computer completes.
 - **Done on the phone.** As on the desktop: the last 7 days, then "Show older
   (N)", in pages of 50 that the computer derives from its documents
   (`task_done`, a short read, `hgs task mobile-done`), newest first (owner
-  decision, 2026-10-20). Opening a Done task fetches its document through the
-  exchange, which then keeps the copy the phone holds.
+  decision, 2026-10-20). With Only this session the computer lists and counts
+  only the tasks sent to that session. Opening a Done task fetches its document
+  through the exchange, which then keeps the copy the phone holds.
 
 ### Done tasks
 

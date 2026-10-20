@@ -311,11 +311,15 @@ exchanged with the project's computers at once. Send now first exchanges the
 project with the session's computer, then asks it for `task_send`, then
 exchanges again; a failed first exchange sends nothing. A task pinned to a
 session goes to the computer that runs it, an Any session task to the session
-chosen in the chips. A receipt the computer cannot confirm says the task may
-have been sent, and Send now for it waits until the next sync. Cancel goes to
-the session's computer, or to another online computer of the project, which
-cancels it there as `hgs task cancel` does. Done comes from a computer in
-pages of 50 through `task_done`: the last 7 days, then "Show older (N)";
+chosen in the chips. A receipt the computer cannot confirm, or a lost answer
+from the relay, says the task may have been sent, and Send now for it waits
+until an exchange with that computer completes. Cancel goes to
+the session's computer, or, while it is out of reach, to another online
+computer of the project, which cancels it there without the cancel message;
+the dialog says which. A session whose computer does not report its native ID
+takes no tasks: the input says why. Done comes from a computer in
+pages of 50 through `task_done`: the last 7 days, then "Show older (N)",
+and with Only this session only the tasks sent to that session;
 opening a Done task fetches it into the replica, where it stays. Tasks sends
 no notifications. See "Phone" in
 `docs/superpowers/specs/2026-10-18-task-replication-loro-design.md` and
