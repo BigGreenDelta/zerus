@@ -54,6 +54,8 @@ private slots:
     void sharedOptionalBaselineDoesNotEvictNewObservedQuestions();
     void sharedPreferencesDoNotCrossProviders();
     void sharedTimestampSuppressionRequiresKnownCurrentTime();
+    void backToBackIdentityLessRequestsEachAnnounce();
+    void nativeRequestIdentityIgnoresMetadataTimeChanges();
 };
 
 void TestAttention::muteWithdrawsOnlyMatchingOfflineBannersWithoutReplay()
@@ -981,6 +983,50 @@ void TestAttention::scheduledTicksStayUnreadUntilTheScheduleEnds()
     QVERIFY(restarted.observe({},fleet.local()).raised.isEmpty());
     box.sessions[0].activity="idle"; box.sessions[0].phase="idle"; fleet.setLocal(box,6);
     QCOMPARE(restarted.observe({},fleet.local()).raised.size(),1);
+}
+
+void TestAttention::backToBackIdentityLessRequestsEachAnnounce()
+{
+    // Permission prompts without a tool call share an empty attention ID; only
+    // their start time tells them apart.
+    SessionInfo s; s.name="claude/project/session"; s.runId="run"; s.phase="approval"; s.activity="busy";
+    s.attentionStarted=10.5;
+    BoxState box; box.ok=true; box.host="mac"; box.sessions={s}; AttentionTracker tracker;
+    const auto first=tracker.observe("mac",box,1000,false);
+    QCOMPARE(first.raised.size(),1);
+    QVERIFY(tracker.observe("mac",box,1001,false).raised.isEmpty());
+    // The next prompt arrives before any poll sees the session working.
+    box.sessions[0].attentionStarted=20.5;
+    auto changes=tracker.observe("mac",box,1002,false);
+    QCOMPARE(changes.raised.size(),1); QCOMPARE(changes.cleared,QStringList{first.raised[0].token});
+    // Also after an acknowledged request: its silent entry does not hide the next one.
+    box.sessions[0].attentionAcknowledged=true;
+    QCOMPARE(tracker.observe("mac",box,1003,false).cleared.size(),1);
+    box.sessions[0].attentionAcknowledged=false; box.sessions[0].attentionStarted=30.5;
+    QCOMPARE(tracker.observe("mac",box,1004,false).raised.size(),1);
+    // State saved before start times were kept does not announce its request
+    // again after an update; the next request still notifies.
+    auto legacy=tracker.state(); auto entries=legacy.value("mac").toObject();
+    for (auto it=entries.begin(); it!=entries.end(); ++it) { auto entry=it.value().toObject(); entry.remove("started"); it.value()=entry; }
+    legacy["mac"]=entries;
+    AttentionTracker updated(legacy);
+    QVERIFY(updated.observe("mac",box,1005,false).raised.isEmpty());
+    box.sessions[0].attentionStarted=40.5;
+    QCOMPARE(updated.observe("mac",box,1006,false).raised.size(),1);
+}
+
+void TestAttention::nativeRequestIdentityIgnoresMetadataTimeChanges()
+{
+    SessionInfo s; s.name="claude/project/session"; s.runId="run"; s.phase="approval"; s.activity="busy";
+    s.attentionId="call-1"; s.attentionStarted=10.5;
+    BoxState box; box.ok=true; box.host="mac"; box.sessions={s}; AttentionTracker tracker;
+    QCOMPARE(tracker.observe("mac",box,1000,false).raised.size(),1);
+    // A unique native request ID remains the identity even if an older host
+    // refreshes the metadata time; the next request still announces normally.
+    box.sessions[0].attentionStarted=20.5;
+    QVERIFY(tracker.observe("mac",box,1001,false).raised.isEmpty());
+    box.sessions[0].attentionId="call-2";
+    QCOMPARE(tracker.observe("mac",box,1002,false).raised.size(),1);
 }
 
 QTEST_APPLESS_MAIN(TestAttention)

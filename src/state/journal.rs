@@ -1,5 +1,6 @@
 use super::*;
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::Digest;
 use std::fs::OpenOptions;
 use std::sync::OnceLock;
 
@@ -1187,13 +1188,32 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
     // A request without a native identity (a permission prompt without a tool
     // call, a tool keyed by its name) is identified by when it started. Repeated
     // prompt notifications keep it; every new prompt or question tool starts one.
+    // The end of a compaction restores the waiting request, and a prompt repeated
+    // with the same native tool IDs, tool and input is that request again.
     let phase = string(record, "phase");
-    if ["approval", "input"].contains(&phase)
-        && (phase != previous_phase
-            || (kind == "PermissionRequest" && phase == "approval")
-            || (kind == "PreToolUse" && phase == "input"))
-    {
-        record["attention_started"] = json!(timestamp);
+    if ["approval", "input"].contains(&phase) {
+        let native = !tools.is_empty() && tools.iter().all(|(key, tool)| key != string(tool, "name"));
+        let request = if native {
+            let mut ids: Vec<&String> = tools.keys().collect();
+            ids.sort();
+            let input = format!("{:x}", sha2::Sha256::digest(event["tool_input"].to_string().as_bytes()));
+            json!([ids, string(event, "tool_name"), input])
+        } else {
+            Value::Null
+        };
+        let repeated = (kind == "PostCompact" && record.get("attention_started").is_some())
+            || (kind == "PermissionRequest"
+                && previous_phase == "approval"
+                && !request.is_null()
+                && record["attention_request"] == request);
+        if !repeated
+            && (phase != previous_phase
+                || (kind == "PermissionRequest" && phase == "approval")
+                || (kind == "PreToolUse" && phase == "input"))
+        {
+            record["attention_started"] = json!(timestamp);
+            record["attention_request"] = request;
+        }
     }
     record["active_tools"] = json!(tools);
 }
@@ -1800,6 +1820,31 @@ mod attention_regressions {
         update_activity(&mut claude, &json!({"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion"}));
         update_activity(&mut claude, &json!({"hook_event_name":"Notification","notification_type":"permission_prompt"}));
         assert_eq!((claude["phase"].clone(), start(&claude)), (json!("input"), asked));
+    }
+    #[test]
+    fn compaction_and_identical_prompt_repeats_keep_a_native_request_start() {
+        let start = |record: &Value| record["attention_started"].as_f64().unwrap_or(0.0);
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(2));
+        let mut record = json!({"agent":"claude","activity":"busy","phase":"working","active_tools":{},"subagents":{}});
+        // Two parallel tool calls with native IDs; each asks for permission in turn.
+        for (id, command) in [("call-1", "make"), ("call-2", "make install")] {
+            update_activity(&mut record, &json!({"hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":id,"tool_input":{"command":command}}));
+        }
+        let prompt = |command: &str| json!({"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":command}});
+        update_activity(&mut record, &prompt("make"));
+        assert_eq!(record["phase"], "approval");
+        let first = start(&record);
+        pause();
+        // The very same prompt again, and a compaction while it waits, keep the request.
+        update_activity(&mut record, &prompt("make"));
+        assert_eq!(start(&record), first);
+        update_activity(&mut record, &json!({"hook_event_name":"PreCompact"}));
+        pause();
+        update_activity(&mut record, &json!({"hook_event_name":"PostCompact"}));
+        assert_eq!((record["phase"].clone(), start(&record)), (json!("approval"), first));
+        // The other call's prompt is a new request, although the same IDs are in flight.
+        update_activity(&mut record, &prompt("make install"));
+        assert!(start(&record) > first);
     }
     #[test]
     fn real_children_and_approval_survive_repair() {

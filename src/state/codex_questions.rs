@@ -219,13 +219,12 @@ fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result
             break;
         }
         if !line.ends_with('\n') {
-            if count > 1024 * 1024 {
-                reader.skip_until(b'\n').map_err(|e| e.to_string())?;
-                cache["offset"] = json!(reader.stream_position().map_err(|e| e.to_string())?);
-                continue;
+            if count <= 1024 * 1024 {
+                cache["offset"] = json!(before);
+                break;
             }
-            cache["offset"] = json!(before);
-            break;
+            // An oversized line is skipped unparsed; it still counts against the deadline.
+            reader.skip_until(b'\n').map_err(|e| e.to_string())?;
         }
         cache["offset"] = json!(reader.stream_position().map_err(|e| e.to_string())?);
         if count <= 1024 * 1024
@@ -789,6 +788,36 @@ mod tests {
         // A cache held by another process past the deadline is unknown, not empty.
         let _held = lock(Some(&cache.with_extension("lock"))).unwrap();
         assert_eq!(index(&record, &cache, Some(Instant::now() + Duration::from_millis(30))).unwrap(), None);
+    }
+    #[test]
+    fn an_expired_deadline_stops_after_each_oversized_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let transcript = dir.path().join(format!("rollout-{id}.jsonl"));
+        // Lines over 1 MiB are skipped unparsed, but each still counts against the deadline.
+        let oversized = json!({"type":"event_msg","payload":{"type":"agent_message","message":"x".repeat(1024 * 1024)}});
+        let accepted = json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"call_one","output":"{\"accepted\":true}"}});
+        let mut lines = vec![json!({"type":"session_meta","payload":{"id":id}})];
+        lines.extend(std::iter::repeat_n(oversized, 3));
+        lines.extend([request(), accepted]);
+        fs::write(&transcript, lines.iter().map(|line| line.to_string() + "\n").collect::<String>()).unwrap();
+        let record = json!({"agent":"codex","run_id":"run","conversation_id":id,"transcript":transcript});
+        let cache = dir.path().join("cache.json");
+        let source = crate::platform::file_identity(&transcript).unwrap();
+        fs::write(&cache, json!({"items":{},"offset":0,"inode":[source.device,source.inode],"scan_version":2,
+            "initialized":true,"submission_scan_run":"run"}).to_string()).unwrap();
+        let expired = Instant::now();
+        let mut calls = 0;
+        let complete = loop {
+            calls += 1;
+            assert!(calls <= lines.len(), "indexing made no progress");
+            if let Some(cache) = index(&record, &cache, Some(expired)).unwrap() {
+                break cache;
+            }
+        };
+        // Every line but the last one ended a call, each oversized line included.
+        assert_eq!(calls, lines.len());
+        assert_eq!(pending(&record, &complete).len(), 2);
     }
     #[test]
     fn only_complete_native_question_panels_accept_input() {
