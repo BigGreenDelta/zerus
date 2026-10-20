@@ -25,6 +25,8 @@ def generate(root, output):
                "mobile/ios/Zerus/Common/MarkdownView.swift", "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift"]
     # No copy, source rewriting, conditional product hook, live AppModel or app entry point.
     identities = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sources}
+    header = "mobile/ios/ApprovalUIFixture/ApprovalUIFixture-Bridging-Header.h"
+    identities[header] = hashlib.sha256((root / header).read_bytes()).hexdigest()
     package = root / "mobile/ios/ZerusKit"
     identities.update({path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
                        for path in [package / "Package.swift", *sorted((package / "Sources/ZerusKit").glob("*.swift"))]})
@@ -51,6 +53,7 @@ def generate(root, output):
     object_("A00000000000000000000015", f"isa = PBXContainerItemProxy; containerPortal = {project_id}; proxyType = 1; remoteGlobalIDString = {app}; remoteInfo = ApprovalUIFixture;")
     object_("A00000000000000000000016", f"isa = PBXTargetDependency; target = {app}; targetProxy = A00000000000000000000015;")
     settings = 'CODE_SIGNING_ALLOWED = NO; CODE_SIGNING_REQUIRED = NO; CODE_SIGN_IDENTITY = ""; SDKROOT = iphonesimulator; SUPPORTED_PLATFORMS = iphonesimulator; ONLY_ACTIVE_ARCH = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; SWIFT_VERSION = 6.0; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; GENERATE_INFOPLIST_FILE = YES; TARGETED_DEVICE_FAMILY = "1,2";'
+    settings += f' SWIFT_OBJC_BRIDGING_HEADER = {quoted(root / header)};'
     object_("A00000000000000000000017", f'isa = XCBuildConfiguration; name = Debug; buildSettings = {{ {settings} PRODUCT_NAME = ApprovalUIFixture; PRODUCT_BUNDLE_IDENTIFIER = test.example.zerus.approval-fixture; INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; INFOPLIST_KEY_UILaunchScreen_Generation = YES; }};')
     object_("A00000000000000000000018", f'isa = XCBuildConfiguration; name = Debug; buildSettings = {{ {settings} PRODUCT_NAME = ApprovalUIFixtureTests; PRODUCT_BUNDLE_IDENTIFIER = test.example.zerus.approval-fixture-tests; TEST_TARGET_NAME = ApprovalUIFixture; }};')
     object_("A00000000000000000000019", "isa = XCBuildConfiguration; name = Debug; buildSettings = { CLANG_ENABLE_MODULES = YES; }; ")

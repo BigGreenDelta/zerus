@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """SDK-free admission/result/project controls; never count these as native UI results."""
 import importlib.util
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -91,6 +93,27 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertNotIn("RelayClient(", app)
         self.assertNotIn("KeychainConnectionStore(", app)
         self.assertNotIn("URLSession(", app)
+
+    def test_notification_header_is_fixed_fixture_only_and_bound_in_both_unsigned_targets(self):
+        ios = module("ios_approval_ui_project", "scripts/ci/ios-approval-ui-project.py")
+        header = "mobile/ios/ApprovalUIFixture/ApprovalUIFixture-Bridging-Header.h"
+        raw = (ROOT / header).read_bytes()
+        self.assertEqual(raw.decode().splitlines(), [
+            "// Public Apple notification declarations for the disposable fixture and its UI tests only.",
+            "#include <notify.h>"])
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "new"
+            project = ios.generate(ROOT, output)
+            body = (project / "project.pbxproj").read_text()
+            declaration = 'SWIFT_OBJC_BRIDGING_HEADER = ' + json.dumps(str(ROOT / header)) + ';'
+            self.assertEqual(body.count(declaration), 2)
+            for config in ("A00000000000000000000017", "A00000000000000000000018"):
+                settings = body.split(config + " = { isa = XCBuildConfiguration;", 1)[1].split("\n", 1)[0]
+                self.assertIn(declaration, settings)
+                self.assertIn("CODE_SIGNING_ALLOWED = NO", settings)
+            identities = json.loads((output / "source-identities.json").read_text())["sources"]
+            self.assertEqual(identities[header], hashlib.sha256(raw).hexdigest())
+            self.assertNotIn("@_silgen_name", body)
 
     def test_ios_result_requires_each_original_native_method_once(self):
         ios = module("ios_approval_ui", "scripts/ci/ios-approval-ui.py")

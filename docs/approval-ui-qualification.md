@@ -112,6 +112,10 @@ feedback keyboard, actual background/foreground, and hidden/read-only cards. Req
 failures or skips; inspect the raw XCTest results and callback assertions, rather than accepting exit zero alone.
 Keyboard and dialog behavior must be observed, not inferred from the existing SwiftPM policy tests.
 
+Both disposable targets import the public Apple `<notify.h>` declarations through the same fixed fixture-only bridging
+header. Its bytes join the exact project source identities. The production application does not reference this header;
+no handwritten C ABI, SDK-header replacement, or new runtime dependency is introduced.
+
 The two fixture-only control modes use Darwin notifications through `notify_register_dispatch`, `notify_post`, and
 `notify_cancel` ([Apple API header](https://raw.githubusercontent.com/apple-oss-distributions/Libnotify/main/notify.h),
 [notification semantics](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/notify.3.html)).
