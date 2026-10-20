@@ -626,3 +626,32 @@ fn an_answer_that_promises_more_and_brings_nothing_ends_the_exchange() {
     assert!(error.contains("brought nothing"), "{error}");
     assert!(exchange.finished());
 }
+
+#[test]
+fn a_done_task_the_phone_asks_for_arrives_and_stays() {
+    let (_a, _b, phone, computer) = pair();
+    add(&computer, "Add rate limiting");
+    let mut done = add(&computer, "Document the limits");
+    accept(&computer, &mut done);
+    settled(run(&phone, &computer, Budget::default()));
+    assert!(phone.load(done.uuid()).is_err());
+    // Opening it on the phone fetches it whole; later exchanges keep it.
+    let mut exchange = Exchange::with_budget(Budget::default());
+    exchange.fetch([done.uuid().to_owned()]);
+    let mut fetched = Run::default();
+    while step(&mut exchange, &phone, &computer, &mut fetched) {}
+    settled(fetched);
+    assert_eq!(
+        phone.load(done.uuid()).unwrap().stage().unwrap(),
+        Stage::Done
+    );
+    comment(&computer, done.uuid(), "Later on the computer");
+    settled(run(&phone, &computer, Budget::default()));
+    assert_eq!(comments(&phone, done.uuid()), 1);
+    // A task the computer does not have ends the exchange all the same.
+    let mut unknown = Exchange::new();
+    unknown.fetch(["00000000-0000-4000-8000-000000000009".to_owned()]);
+    let mut nothing = Run::default();
+    while step(&mut unknown, &phone, &computer, &mut nothing) {}
+    settled(nothing);
+}

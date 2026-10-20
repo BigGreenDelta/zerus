@@ -349,6 +349,9 @@ pub struct Exchange {
     skip: BTreeSet<String>,
     unsent: BTreeSet<String>,
     refused_here: BTreeSet<String>,
+    /// Tasks the phone asks for although it does not hold them, such as a
+    /// Done task the person opens; they arrive whole and are then held.
+    wanted: BTreeSet<String>,
     requests: usize,
 }
 
@@ -381,8 +384,16 @@ impl Exchange {
             skip: BTreeSet::new(),
             unsent: BTreeSet::new(),
             refused_here: BTreeSet::new(),
+            wanted: BTreeSet::new(),
             requests: 0,
         }
+    }
+
+    /// Asks for these tasks too, whatever their stage: each comes whole and
+    /// stays with the phone, so later exchanges keep it.
+    pub fn fetch(&mut self, uuids: impl IntoIterator<Item = String>) {
+        self.wanted
+            .extend(uuids.into_iter().filter(|uuid| ids::is_uuid(uuid)));
     }
 
     pub fn finished(&self) -> bool {
@@ -417,10 +428,16 @@ impl Exchange {
         };
         self.requests += 1;
         let range = self.ranges[0].clone();
+        // A task asked for and not held goes with an empty version: the
+        // computer sends all of it.
+        let mut asked = inventory;
+        for uuid in self.wanted.iter().filter(|uuid| range.contains(uuid)) {
+            asked.tasks.entry(uuid.clone()).or_default();
+        }
         Ok(Some(Request {
             schema: 1,
             project: store.project_id().to_owned(),
-            inventory,
+            inventory: asked,
             range: (range != Range::default()).then_some(range),
             updates,
             resume: self.part.as_ref().map(|part| Resume {

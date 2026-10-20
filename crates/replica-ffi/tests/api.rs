@@ -197,6 +197,26 @@ fn two_stores_exchange_through_json() {
         phone.live_digest().unwrap()
     );
     assert_eq!(phone.list().unwrap().tasks.len(), 2);
+    // A task the phone does not hold, such as a Done task opened on it, comes
+    // when the exchange asks for it.
+    let done = computer
+        .add(
+            "Document the limits".into(),
+            TaskStage::Todo,
+            TaskTarget::AnySession,
+            TaskPosition::End,
+        )
+        .unwrap();
+    let fetching = phone.clone().exchange_fetching(vec![done.uuid.clone()]);
+    while let Some(request) = fetching.next_request().unwrap() {
+        fetching
+            .accept(computer.answer_exchange(request).unwrap())
+            .unwrap();
+    }
+    assert_eq!(
+        phone.get(done.uuid.clone()).unwrap().text,
+        "Document the limits"
+    );
     // An answer that is not JSON is refused with its reason.
     let again = phone.clone().exchange();
     again.next_request().unwrap().unwrap();
