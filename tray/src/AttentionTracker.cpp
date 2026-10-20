@@ -7,6 +7,8 @@
 #include <QJsonDocument>
 #include <QUuid>
 
+#include <optional>
+
 namespace {
 QString identity(const SessionInfo &s)
 {
@@ -84,19 +86,27 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
             baselines.insert(&s, s.notificationPreferences.value("suppressed").toObject());
     QJsonObject current;
     const auto notice = [&](const SessionInfo &s, const QString &key, const QString &phase,
-                            const QString &request, const QString &reason, bool reply = false, bool silent = false) {
+                            const QString &request, const QString &reason, bool reply = false, bool silent = false,
+                            std::optional<double> started = std::nullopt) {
         const auto old = previous.value(key).toObject();
+        QJsonObject entry{{"phase", phase}, {"request", request}};
+        if (started) entry["started"] = *started;
+        // An identity-less main request is distinguished by its start time.
+        // Entries from before this field was kept match their request once.
+        const bool same = old.value("phase").toString() == phase && old.value("request").toString() == request
+            && (!started || !old.contains("started") || old.value("started").toDouble() == *started);
         if (silent || s.muted) {
             // Withdraw the banner but remember the request without a token: if an
             // acknowledgement lapses (an older host, a recovery-only identity) or a
             // schedule ends, the same request must not be announced again.
-            current[key] = QJsonObject{{"phase", phase}, {"request", request}};
+            current[key] = entry;
             return;
         }
         const auto retry = old.value("retry_at").toInteger();
-        if (old.value("phase").toString() == phase && old.value("request").toString() == request
-            && (!retry || retry > now)) {
-            current[key] = old;
+        if (same && (!retry || retry > now)) {
+            auto kept = old;
+            if (started) kept["started"] = *started;
+            current[key] = kept;
             return;
         }
         QJsonObject target{{"host", host}, {"name", s.name}, {"run", s.runId},
@@ -104,7 +114,8 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
         if (reply) { target["reply"] = s.replyId; target["conversation"] = s.conversationId; target["agent"] = s.cmd; }
         const QString token = QString::fromLatin1(QJsonDocument(target).toJson(QJsonDocument::Compact)
             .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
-        current[key] = QJsonObject{{"phase", phase}, {"request", request}, {"token", token}};
+        entry["token"] = token;
+        current[key] = entry;
         const QString body = concise(s.name, 120) + " / " + concise(host.isEmpty() ? box.host : host, 40)
             + '\n' + reason;
         // Consume foreground edges without changing unread/action state. They
@@ -121,7 +132,8 @@ AttentionChanges AttentionTracker::observe(const QString &host, const BoxState &
                 : !s.recovery.value("reason").toString().isEmpty() ? concise(s.recovery.value("reason").toString(), 240)
                 : !s.activityDetail.isEmpty() ? concise(s.activityDetail, 240) : QObject::tr("Agent needs attention");
             notice(s, identity(s), s.phase, baselines.contains(&s) ? notificationRequest(s.attentionId, s.attentionStarted) : s.attentionId,
-                reason, false, s.attentionAcknowledged || suppressedMain(s, baseline));
+                reason, false, s.attentionAcknowledged || suppressedMain(s, baseline),
+                s.attentionId.isEmpty() ? std::optional<double>(s.attentionStarted) : std::nullopt);
         }
         // Read state comes from FleetState, not the raw CLI snapshot. Replies
         // belong to conversations so a rename/resume does not repeat a banner.

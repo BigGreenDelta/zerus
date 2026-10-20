@@ -136,6 +136,16 @@ class DeepSeekScopedActions(unittest.TestCase):
         self.assertEqual(result["result_target"]["conversation_id"], "session-synthetic")
         self.assertFalse(self.binding.exists())
 
+    def test_rename_keeps_the_shared_read_marks_of_the_session(self):
+        # DeepSeek sessions own their marks by name; a rename must carry them over.
+        marks = self.root / "state/read-marks.json"
+        mark = {"conversation_id": "session-synthetic", "reply_id": "3:30.0", "attention_signature": None, "at": 1.0}
+        other = {"dsh/example/other": {"session-other": dict(mark, conversation_id="session-other")}}
+        marks.write_text(json.dumps({"version": 1, "sessions": {self.name: {"session-synthetic": mark}, **other}}))
+        _, result = self.run_action("rename", new_name="dsh/example/new")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(json.loads(marks.read_text()), {"version": 1, "sessions": {"dsh/example/new": {"session-synthetic": mark}, **other}})
+
     def test_context_reset_keeps_the_explicit_fallback_without_native_effects(self):
         # The reviewed native release has no context reset; a clear must never reach the host.
         state = sorted(path.relative_to(self.root) for path in (self.root / "state").rglob("*"))

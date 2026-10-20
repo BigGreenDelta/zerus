@@ -257,18 +257,26 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
 - `store/candidates.rs` holds at most one alert candidate per computer, session
   and kind (1,000 per workspace, 24-hour expiry). Ordinary events refresh phone
   state only. Changed snapshots and new presence evaluate candidates on the
-  worker that received the heartbeat. An elected maintenance pass evaluates the
-  due candidates of at most 32 workspaces, most overdue first, and drops the
-  oldest expired candidates of any workspace. Waiting candidates are rechecked
+  worker that received the heartbeat. Candidates resolve against the snapshot
+  of the route the catalog shows for their computer (available before stale,
+  local before a gateway); a snapshot from another, possibly lagging, route of
+  that computer never resolves or keeps them. The maintenance pass first drops
+  the oldest expired candidates of any workspace in its own elected transaction,
+  so no failing plan or delivery stops the storage bound. It then evaluates the
+  due candidates of at most 32 workspaces, most overdue first, each in a short
+  transaction elected for that workspace; one workspace's failure leaves the
+  others' turns intact. A plan without deliveries takes no event locks. Plans
+  that deliver run after the others, one workspace per transaction, so the
+  global event row is held for at most one workspace's candidates. Waiting
+  candidates are rechecked
   within 15 seconds while at most 32 × 15 / `maintenance_interval` workspaces
   wait (480 at the 1-second default); beyond that, rechecks slow down
   proportionally, still most overdue first. Plans come from unlocked reads, so
   several workers may evaluate the same candidate. Deleting the candidate row
   in the transaction that appends the `alert` event and coalesces device wakes
   is the cross-worker single-delivery claim. Candidate rows are locked last,
-  after any event, credential and route/node locks, in ascending id;
-  maintenance visits workspaces in sorted order and folds expired rows into
-  that order.
+  after any event, credential and route/node locks, in ascending id; expiry
+  locks only candidate rows, in ascending id.
 - `store/background.rs` owns bounded indexed maintenance batches and durable
   poll/push leases. PostgreSQL advisory locks elect maintenance transactions;
   PostgreSQL startup never retires another worker's claims. A failing alert

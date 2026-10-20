@@ -285,7 +285,8 @@ fn order(r: &Value) -> (bool, bool, &str, &str) {
         s(r, "route_id"),
     )
 }
-async fn snapshot(t: &mut Tx, r: &Value) -> Result<Value> {
+/// The stored snapshot text of one route row.
+pub async fn snapshot(t: &mut Tx, r: &Value) -> Result<Value> {
     t.one("SELECT CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END AS snapshot FROM computer_routes r JOIN nodes n ON n.id=r.gateway_id WHERE r.gateway_id=? AND r.route_id=?",args![&r["gateway_id"],&r["route_id"]]).await?.map(|r|r["snapshot"].clone()).ok_or(Error::CONFLICT)
 }
 pub async fn select(t: &mut Tx, w: &str, a: &str) -> Result<Option<Value>> {
@@ -308,6 +309,14 @@ pub async fn select(t: &mut Tx, w: &str, a: &str) -> Result<Option<Value>> {
         r["snapshot"] = stored;
     }
     Ok(Some(r))
+}
+/// The route the catalog shows for one computer: available before stale,
+/// local before a gateway, then a stable order. `None` without an active route.
+pub async fn shown(t: &mut Tx, w: &str, computer: &str) -> Result<Option<Value>> {
+    Ok(candidates(t, w, Some(computer))
+        .await?
+        .into_iter()
+        .min_by(|a, b| order(a).cmp(&order(b))))
 }
 pub async fn frozen(t: &mut Tx, r: &Value, allow: bool) -> Result<bool> {
     if !r["target_machine_id"].is_null() && !allow {

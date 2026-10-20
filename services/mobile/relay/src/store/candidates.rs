@@ -6,8 +6,9 @@ use super::*;
 use crate::{
     alerts::{self, Candidate, Decision, Delivery, Presence},
     db::{f, Arg, Tx},
+    registry,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 enum Action {
     Drop,
@@ -25,6 +26,14 @@ impl AlertPlan {
             .filter(|(_, a)| matches!(a, Action::Deliver))
             .count()
     }
+}
+/// A snapshot just committed for one computer through one route, keyed as in
+/// `computer_routes`.
+pub(super) struct Accepted<'a> {
+    pub computer: &'a str,
+    pub gateway: &'a str,
+    pub route: &'a str,
+    pub snapshot: &'a Value,
 }
 fn text(v: &Option<String>) -> Arg<'_> {
     v.as_deref().map_or(Arg::Null, Arg::Text)
@@ -60,9 +69,16 @@ impl Store {
         }
         Ok(())
     }
-    /// `None` for a revoked or unknown computer; `Some(Null)` when no route
-    /// stores a readable snapshot, which is missing data.
-    async fn computer_snapshot(&self, t: &mut Tx, computer: &str) -> Result<Option<Value>> {
+    /// The snapshot of the route the catalog shows: a computer reachable
+    /// directly and through a gateway can lag on one route. `None` for a
+    /// revoked or unknown computer; `Some(Null)` when that route stores no
+    /// readable snapshot, which is missing data.
+    async fn computer_snapshot(
+        &self,
+        t: &mut Tx,
+        w: &str,
+        computer: &str,
+    ) -> Result<Option<Value>> {
         if t.one(
             "SELECT id FROM computers WHERE id=? AND revoked=0",
             args![computer],
@@ -72,9 +88,13 @@ impl Store {
         {
             return Ok(None);
         }
-        let latest=t.one("SELECT CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END AS snapshot FROM computer_routes r JOIN nodes n ON n.id=r.gateway_id WHERE r.computer_id=? AND r.active=1 AND n.revoked=0 AND (CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END) IS NOT NULL ORDER BY COALESCE(CASE WHEN r.local=1 THEN n.last_seen ELSE r.last_seen END,0) DESC,r.gateway_id,r.route_id LIMIT 1",args![computer]).await?;
-        let mut snapshot = latest
-            .and_then(|r| crate::json::parse(s(&r, "snapshot").as_bytes(), 32, 50000).ok())
+        let Some(route) = registry::shown(t, w, computer).await? else {
+            return Ok(Some(Value::Null));
+        };
+        let stored = registry::snapshot(t, &route).await?;
+        let mut snapshot = stored
+            .as_str()
+            .and_then(|v| crate::json::parse(v.as_bytes(), 32, 50000).ok())
             .unwrap_or(Value::Null);
         crate::notification_highwater::overlay(t, computer, &mut snapshot).await?;
         Ok(Some(snapshot))
@@ -85,7 +105,7 @@ impl Store {
         &self,
         t: &mut Tx,
         w: &str,
-        accepted: Option<(&str, &Value)>,
+        accepted: Option<Accepted<'_>>,
         due: Option<f64>,
         at: f64,
     ) -> Result<AlertPlan> {
@@ -105,14 +125,34 @@ impl Store {
         let decision = alerts::decide(delivery, alerts::away_since(&machines), at);
         let mut resolved = vec![false; rows.len()];
         let mut checked = vec![false; rows.len()];
-        if let Some((id, snapshot)) = accepted {
-            let mut snapshot = snapshot.clone();
-            crate::notification_highwater::overlay(t, id, &mut snapshot).await?;
+        if let Some(a) = accepted.filter(|a| rows.iter().any(|r| s(r, "computer_id") == a.computer))
+        {
+            // Only the displayed route supplies native state. A lagging
+            // route still triggers a check of this one physical computer:
+            // its confirmed Mute must withdraw candidates even while the
+            // owner is present and ordinary deliveries are waiting.
+            let shown = registry::shown(t, w, a.computer)
+                .await?
+                .is_some_and(|r| s(&r, "gateway_id") == a.gateway && s(&r, "route_id") == a.route);
+            let snapshot = if shown {
+                let mut snapshot = a.snapshot.clone();
+                crate::notification_highwater::overlay(t, a.computer, &mut snapshot).await?;
+                Some(snapshot)
+            } else {
+                self.computer_snapshot(t, w, a.computer).await?
+            };
             for (k, r) in rows.iter().enumerate() {
-                if s(r, "computer_id") == id {
-                    checked[k] = true;
-                    resolved[k] =
-                        Candidate::from_row(r).resolved(alerts::live(&snapshot, s(r, "session")));
+                if s(r, "computer_id") != a.computer {
+                    continue;
+                }
+                checked[k] = true;
+                match &snapshot {
+                    None => resolved[k] = true,
+                    Some(Value::Null) => {} // Unknown current state never resolves a request.
+                    Some(current) => {
+                        resolved[k] =
+                            Candidate::from_row(r).resolved(alerts::live(current, s(r, "session")))
+                    }
                 }
             }
         }
@@ -125,7 +165,7 @@ impl Store {
                 .map(|(r, _)| s(r, "computer_id"))
                 .collect();
             for computer in computers {
-                let snapshot = self.computer_snapshot(t, computer).await?;
+                let snapshot = self.computer_snapshot(t, w, computer).await?;
                 for (k, r) in rows.iter().enumerate() {
                     if checked[k] || s(r, "computer_id") != computer {
                         continue;
@@ -185,7 +225,7 @@ impl Store {
                 Action::Deliver => {
                     // Planning preceded the workspace lock. Recheck the current
                     // projected preference after it, before the one delivery claim.
-                    match self.computer_snapshot(t, s(&r, "computer_id")).await? {
+                    match self.computer_snapshot(t, w, s(&r, "computer_id")).await? {
                         Some(Value::Null) => continue, // Missing current data cannot prove an alert is still audible.
                         current => {
                             let resolved = current.as_ref().is_none_or(|snapshot| {
@@ -229,7 +269,7 @@ impl Store {
     pub(super) async fn evaluate_workspace(
         &self,
         w: &str,
-        accepted: Option<(&str, &Value)>,
+        accepted: Option<Accepted<'_>>,
     ) -> Result<()> {
         let at = now();
         let mut t = self.db.begin().await?;
@@ -252,57 +292,94 @@ impl Store {
         }
         Ok(())
     }
-    /// Elected maintenance: expire old candidates and evaluate due ones in one
-    /// transaction, which keeps the election for the whole bounded pass.
-    /// Expired rows join their workspace's plan as drops, so candidate rows are
-    /// locked only after event locks and in ascending id per workspace.
+    /// Maintenance in short transactions, so that no failure or wait stops
+    /// the rest: expiry first, then each due workspace in its own elected
+    /// transaction. A plan without deliveries takes no event locks; plans
+    /// that deliver run last, one workspace per transaction, so the global
+    /// event row is held for at most one workspace's candidates. The first
+    /// failure is reported after every workspace had its turn.
     pub(super) async fn maintain_alerts(&self, at: f64) -> Result<()> {
-        let batch = self.db.cfg.maintenance_batch;
+        let mut failure = self.expire_alerts(at).await.err();
+        // The most overdue workspaces first, so none starves under load.
         let mut t = self.db.begin().await?;
-        if !Self::elected(&mut t, 735628114).await? {
-            return Ok(());
-        }
-        // The most overdue workspaces first, so none starves under load; the
-        // sorted map still applies them in workspace order. Expiry takes the
-        // oldest rows of any workspace, outside this cap.
-        let due = t.all("SELECT workspace_id FROM (SELECT workspace_id,next_at FROM alert_candidates WHERE next_at<=? ORDER BY next_at,id LIMIT ?) due GROUP BY workspace_id ORDER BY MIN(next_at),workspace_id LIMIT 32",args![at,batch]).await?;
-        let mut plans = BTreeMap::new();
-        for r in due {
-            let w = s(&r, "workspace_id").to_owned();
-            let plan = self.alert_plan(&mut t, &w, None, Some(at), at).await?;
-            plans.insert(w, plan);
-        }
-        for r in t.all("SELECT id,workspace_id FROM alert_candidates WHERE created<=? ORDER BY created,id LIMIT ?",args![at-alerts::CANDIDATE_TTL,batch]).await? {
-            let w = s(&r, "workspace_id").to_owned();
-            plans.entry(w).or_default().rows.push((r, Action::Drop));
-        }
-        for plan in plans.values_mut() {
-            // A row both due and expired is planned as a drop and dropped once.
-            plan.rows.sort_by_key(|(r, _)| i(r, "id"));
-            plan.rows
-                .dedup_by(|later, kept| later.0["id"] == kept.0["id"]);
-        }
-        let spaces: Vec<&str> = plans
-            .iter()
-            .filter(|(_, plan)| plan.deliveries() > 0)
-            .map(|(w, _)| w.as_str())
-            .collect();
-        if !spaces.is_empty() {
-            let deliveries = plans.values().map(AlertPlan::deliveries).sum();
-            self.event_locks(&mut t, &spaces, deliveries).await?;
-        }
-        let mut topics = vec![];
-        for (w, plan) in plans {
-            if self.apply_alerts(&mut t, &w, plan).await? {
-                let topic = format!("workspace:{w}");
-                t.notify(&topic).await?;
-                topics.push(topic);
+        let due = t.all("SELECT workspace_id FROM (SELECT workspace_id,next_at FROM alert_candidates WHERE next_at<=? ORDER BY next_at,id LIMIT ?) due GROUP BY workspace_id ORDER BY MIN(next_at),workspace_id LIMIT 32",args![at,self.db.cfg.maintenance_batch]).await?;
+        t.commit().await?;
+        let mut delivering = vec![];
+        for r in &due {
+            match self
+                .maintain_workspace(s(r, "workspace_id"), at, false)
+                .await
+            {
+                Ok(true) => delivering.push(s(r, "workspace_id")),
+                Ok(false) => {}
+                Err(e) => {
+                    failure.get_or_insert(e);
+                }
             }
         }
+        for w in delivering {
+            if let Err(e) = self.maintain_workspace(w, at, true).await {
+                failure.get_or_insert(e);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+    /// Expires the oldest candidates in an elected transaction of its own, so
+    /// a failing plan or delivery never stops the storage bound. Rows are
+    /// deleted in ascending id, the order in which evaluators lock them.
+    async fn expire_alerts(&self, at: f64) -> Result<()> {
+        let mut t = self.db.begin().await?;
+        if !Self::elected(&mut t, 735628115).await? {
+            return Ok(());
+        }
+        let mut rows = t
+            .all(
+                "SELECT id FROM alert_candidates WHERE created<=? ORDER BY created,id LIMIT ?",
+                args![at - alerts::CANDIDATE_TTL, self.db.cfg.maintenance_batch],
+            )
+            .await?;
+        rows.sort_by_key(|r| i(r, "id"));
+        for r in rows {
+            t.exec("DELETE FROM alert_candidates WHERE id=?", args![&r["id"]])
+                .await?;
+        }
+        t.commit().await
+    }
+    /// Plans and applies one workspace's due candidates while elected for that
+    /// workspace. Without `deliver`, a plan that delivers is left unapplied
+    /// and reported, for a later transaction that takes the event locks.
+    /// Each transaction ends explicitly, which releases the election at once.
+    async fn maintain_workspace(&self, w: &str, at: f64, deliver: bool) -> Result<bool> {
+        let mut t = self.db.begin().await?;
+        if t.postgres
+            && !t
+                .one(
+                    "SELECT pg_try_advisory_xact_lock(735628114,hashtext(?)) AS acquired",
+                    args![w],
+                )
+                .await?
+                .is_some_and(|r| r["acquired"] == true)
+        {
+            return Ok(false);
+        }
+        let plan = self.alert_plan(&mut t, w, None, Some(at), at).await?;
+        let deliveries = plan.deliveries();
+        if plan.rows.is_empty() || deliveries > 0 && !deliver {
+            t.commit().await?;
+            return Ok(deliveries > 0);
+        }
+        if deliveries > 0 {
+            self.event_locks(&mut t, &[w], deliveries).await?;
+        }
+        let topic = format!("workspace:{w}");
+        let published = self.apply_alerts(&mut t, w, plan).await?;
+        if published {
+            t.notify(&topic).await?;
+        }
         t.commit().await?;
-        for topic in topics {
+        if published {
             self.db.signal(topic);
         }
-        Ok(())
+        Ok(false)
     }
 }
