@@ -6,6 +6,7 @@
 #include "IdentityBadge.h"
 #include "LocalSessionHost.h"
 #include "MachinePlatform.h"
+#include "OpenCodeModels.h"
 #include "WorkspaceIcons.h"
 #include "WorkspacePageHeader.h"
 #include "WorkspaceList.h"
@@ -15,6 +16,7 @@
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QJsonDocument>
@@ -31,6 +33,7 @@
 #include <QSignalBlocker>
 #include <QStyledItemDelegate>
 #include <QStackedLayout>
+#include <QTreeWidget>
 #include <QUuid>
 #include <QVBoxLayout>
 namespace {
@@ -241,6 +244,16 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     m_startOpenCode->setToolTip(tr("Start the shared OpenCode service on this machine. Zerus never stops it.")); m_startOpenCode->hide();
     m_copy = new QPushButton(tr("Add to machine…"), this); m_copy->setObjectName("copyAccount"); m_copy->hide();
     actions->addStretch();machineLayout->addLayout(actions);
+    // OpenCode's connected providers: plain, read-only text from that machine's
+    // catalog. Showing them never starts the service or changes a provider.
+    m_openCodeProviders = new QTreeWidget; m_openCodeProviders->setObjectName("openCodeProviders"); m_openCodeProviders->setAccessibleName(tr("OpenCode providers"));
+    m_openCodeProviders->setColumnCount(3); m_openCodeProviders->setHeaderHidden(true); m_openCodeProviders->setRootIsDecorated(false); m_openCodeProviders->setItemsExpandable(false);
+    m_openCodeProviders->setEditTriggers(QAbstractItemView::NoEditTriggers); m_openCodeProviders->setSelectionMode(QAbstractItemView::NoSelection); m_openCodeProviders->setFocusPolicy(Qt::NoFocus);
+    m_openCodeProviders->setUniformRowHeights(true); m_openCodeProviders->setSizeAdjustPolicy(QAbstractScrollArea::AdjustToContents); m_openCodeProviders->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    m_openCodeProviders->header()->setStretchLastSection(false); m_openCodeProviders->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_openCodeProviders->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents); m_openCodeProviders->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_openCodeProviders->setStyleSheet("QTreeWidget#openCodeProviders { background:transparent; border:0; }"); m_openCodeProviders->hide(); machineLayout->addWidget(m_openCodeProviders);
+    m_openCodeProvidersNote = label(); m_openCodeProvidersNote->setObjectName("openCodeProvidersNote"); m_openCodeProvidersNote->hide(); machineLayout->addWidget(m_openCodeProvidersNote);
     auto *permissionRow = new QHBoxLayout; permissionRow->setSpacing(12);
     m_permissionState = label(); m_permissionState->setObjectName("accountPermissionState");m_permissionState->setWordWrap(false);
     m_permissions = new QPushButton(tr("Change…")); m_permissions->setObjectName("accountPermissions");
@@ -557,6 +570,7 @@ void AccountsPage::selectionChanged()
     updateRefreshState();
     m_install->setVisible(has && !p["installed"].toBool()); m_install->setEnabled(has && idle && online(p["host"].toString()) && !nativeConfig);
     m_startOpenCode->setVisible(false);
+    if(!nativeConfig){m_openCodeProviders->hide();m_openCodeProvidersNote->hide();}
     m_remove->setText(has ? tr("Remove from %1…").arg(p["machine"].toString()) : tr("Remove…"));
     m_login->setText(tr("Sign in…")); m_login->setToolTip({});
     renderMachines();
@@ -603,6 +617,29 @@ void AccountsPage::selectionChanged()
         const bool stopped=p["installed"].toBool()&&state=="not_running";
         m_startOpenCode->setText(tr("Start OpenCode on %1").arg(machine));
         m_startOpenCode->setVisible(stopped);m_startOpenCode->setEnabled(stopped&&idle&&online(p["host"].toString()));
+        // Connected providers as plain text: label, connection and model count, never the home or a URL.
+        QList<QStringList> rows;
+        for(const auto &provider:OpenCodeModels::providers(p["providers"].toArray())) {
+            auto connection=OpenCodeModels::kindText(provider.kind);
+            if(!provider.activeLabel.isEmpty())connection+=QStringLiteral(" · ")+provider.activeLabel;
+            else if(provider.credentials>1)connection+=QStringLiteral(" · ")+tr("%1 accounts").arg(provider.credentials);
+            rows<<QStringList{provider.label,connection,provider.models<0?QString():provider.models==1?tr("1 model"):tr("%1 models").arg(provider.models)};
+        }
+        // Rebuilt only when a row changes, so polling keeps the list in place.
+        bool same=m_openCodeProviders->topLevelItemCount()==rows.size();
+        for(int i=0;same&&i<rows.size();++i)for(int c=0;same&&c<3;++c)same=m_openCodeProviders->topLevelItem(i)->text(c)==rows.at(i).at(c);
+        if(!same){
+            m_openCodeProviders->clear();
+            for(const auto &row:rows)(new QTreeWidgetItem(m_openCodeProviders,row))->setFlags(Qt::ItemIsEnabled);
+        }
+        m_openCodeProviders->setVisible(!rows.isEmpty());
+        QStringList notes;
+        if(p["providers_truncated"].toBool())notes<<tr("Showing the first %1 providers.").arg(int(rows.size()));
+        // hgs reports float seconds or null; anything else, or beyond year 9999, is no date.
+        const auto at=p["catalog_at"].toDouble(-1);
+        if(state!="ready"&&p["catalog_at"].isDouble()&&at>0&&at<253402300800.0)
+            notes<<tr("Last known catalog from %1.").arg(QLocale().toString(QDateTime::fromSecsSinceEpoch(qint64(at)),QLocale::ShortFormat));
+        m_openCodeProvidersNote->setText(notes.join('\n'));m_openCodeProvidersNote->setVisible(!notes.isEmpty());
     }
     m_detail->setToolTip(p["home"].toString());
     if(isVisible())inspectSelected();

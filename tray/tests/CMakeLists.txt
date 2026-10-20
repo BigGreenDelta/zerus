@@ -464,7 +464,8 @@ set_tests_properties(activityview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscr
 add_executable(test_messagecomposer test_messagecomposer.cpp)
 target_include_directories(test_messagecomposer PRIVATE ../src)
 target_link_libraries(test_messagecomposer PRIVATE Qt6::Test Qt6::Widgets hgs-external-file hgs-tray-ui)
-target_compile_definitions(test_messagecomposer PRIVATE ZERUS_OPENCODE_EFFORT_IDS="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-effort-ids.json")
+target_compile_definitions(test_messagecomposer PRIVATE ZERUS_OPENCODE_EFFORT_IDS="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-effort-ids.json"
+    ZERUS_OPENCODE_PROVIDER_CATALOG="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-provider-catalog.json")
 zerus_add_test(messagecomposer test_messagecomposer)
 set_tests_properties(messagecomposer PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
@@ -561,6 +562,13 @@ target_link_libraries(test_newsessiondialog PRIVATE Qt6::Test hgs-tray-views)
 target_compile_definitions(test_newsessiondialog PRIVATE ZERUS_OPENCODE_EFFORT_IDS="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-effort-ids.json")
 zerus_add_test(newsessiondialog test_newsessiondialog)
 set_tests_properties(newsessiondialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_opencodemodelpicker test_opencodemodelpicker.cpp)
+target_include_directories(test_opencodemodelpicker PRIVATE ../src)
+target_link_libraries(test_opencodemodelpicker PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+target_compile_definitions(test_opencodemodelpicker PRIVATE ZERUS_OPENCODE_PROVIDER_CATALOG="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-provider-catalog.json")
+zerus_add_test(opencodemodelpicker test_opencodemodelpicker)
+set_tests_properties(opencodemodelpicker PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_attachmentviewer test_attachmentviewer.cpp)
 target_include_directories(test_attachmentviewer PRIVATE ../src)

@@ -22,6 +22,7 @@ class QUrl;
 class QVBoxLayout;
 class QHBoxLayout;
 class QFrame;
+class OpenCodeModelPicker;
 
 // Drafts belong to a selected session, never to the visible row position.
 // A failed or uncertain delivery keeps text and attachments for recovery.
@@ -57,6 +58,21 @@ public:
     void setModelSettings(const QString &model, const QString &effort, const QJsonArray &options,
                           bool enabled, const QString &reason, const QString &pendingModel = {},
                           const QString &pendingEffort = {}, const QString &applyWhen = {}, bool modelDefaultEffort = false);
+    // OpenCode only. `supported`: the session's hgs has `account models` and `account favorite`
+    // (its details report `model_options_truncated`); `online`: its computer answers.
+    // `host` and `folder` are where the session's catalog is read: with the session they are
+    // the picker's context. Given before setModelSettings, a new context starts afresh first.
+    void setOpenCodeContext(bool supported, bool truncated, bool online, const QString &computer,
+                            const QString &host = {}, const QString &folder = {});
+    // Changes with every new picker context and every change of session, to none included,
+    // so also on return to the same session and folder: an answer to a request made in
+    // another context is not shown.
+    quint64 openCodeGeneration() const { return m_openCodeGeneration; }
+    // Answers for the shown session; any other session's answer is ignored.
+    void setOpenCodeCatalog(const QString &sessionKey, const QJsonObject &catalog);
+    void setOpenCodeCatalogFailed(const QString &sessionKey, const QString &reason);
+    // A confirmed favorite change, or with `error` the state kept after a failed one.
+    void setOpenCodeFavorite(const QString &sessionKey, const QString &value, bool favorite, const QString &error);
     // The provider's own warning about applying a change, shown before Apply.
     void setSettingsNotice(const QString &notice);
     void setSettingsTerminalAvailable(bool available);
@@ -110,6 +126,8 @@ signals:
     void interruptRequested(const QString &sessionKey);
     void settingsTerminalRequested(const QString &sessionKey);
     void settingsRequested(const QString &sessionKey, const QString &model, const QString &effort);
+    void openCodeCatalogRequested(const QString &sessionKey);
+    void openCodeFavoriteRequested(const QString &sessionKey, const QString &value, bool favorite);
     void sendRequested(const QString &sessionKey, const QString &text, const QList<MessageAttachment> &attachments);
     // Right before sendRequested of a message sent with push, with its text.
     void pushRequested(const QString &sessionKey, const QString &text);
@@ -186,6 +204,27 @@ private:
     bool m_modelDefaultEffort = false;
     QString m_model, m_effort, m_pendingModel, m_pendingEffort, m_settingsReason, m_applyWhen, m_popupKey, m_settingsNotice;
     bool m_settingsEnabled = false;
+    // OpenCode's grouped picker in the settings popup; m_models stays the selected value.
+    bool enterOpenCodeContext();
+    void resetOpenCodeModels();
+    void chooseOpenCodeModel(const QString &value);
+    QJsonArray withConfirmedFavorites(QJsonArray entries) const;
+    QJsonObject withConfirmedFavorites(QJsonObject catalog) const;
+    OpenCodeModelPicker *m_openCodeModels;
+    QStringList m_openCodeContext;                    // the session, computer and folder the picker shows
+    QString m_openCodeHost, m_openCodeFolder;         // the shown session's, as last given
+    quint64 m_openCodeGeneration = 0;                 // counts the picker's contexts
+    QJsonArray m_openCodeShort;                       // that session's own list, as last given
+    // Picker choices per session (at most 32 sessions, 16 choices each) with the computer
+    // and folder they were made for, merged into the model options on every setModelSettings.
+    struct OpenCodeChosen { QString host, folder; QJsonArray entries; };
+    QHash<QString, OpenCodeChosen> m_openCodeChosen;
+    QStringList m_openCodeChosenOrder;
+    // Favorite changes confirmed for the shown session (at most 64), applied to its
+    // lists and catalogs until the context changes, so an older list cannot undo them.
+    QHash<QString, bool> m_openCodeFavorites;
+    QString m_openCodeComputer, m_openCodeError, m_openCodeAvailability;
+    bool m_openCodeSupported = false, m_openCodeTruncated = false, m_openCodeOnline = false;
     QPushButton *m_attach, *m_reference, *m_send, *m_retry;
     QMenu *m_fileMenu;
     QAction *m_attachFileAction, *m_referenceFileAction;

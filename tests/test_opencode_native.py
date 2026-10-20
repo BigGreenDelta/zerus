@@ -43,6 +43,15 @@ FIXTURE_KEY = 'fixture-key-never-shown'
 NOT_RUNNING = 'OpenCode is not running'
 OPENCODE1 = 'This conversation belongs to OpenCode 1, which Zerus no longer supports'
 REMOVED = 'Removed from the OpenCode queue before delivery'
+# A configured model whose own ID contains `/`; every reader splits a value at its first `/`.
+SLASH = 'fixture/vendor/slash'
+# The only keys a provider row and a short-list or catalog entry may carry.
+PROVIDER_KEYS = {'id', 'label', 'kind', 'credential_count', 'model_count', 'active_label', 'folder'}
+ENTRY_KEYS = {'id', 'value', 'label', 'provider', 'provider_label', 'free', 'effort_options', 'effort_labels',
+              'favorite', 'default'}
+# The catalog reads hgs makes; it never asks OpenCode for credentials.
+CATALOG_ROUTES = {'/api/info', '/openapi.json', '/api/provider', '/api/model', '/api/model/default', '/api/integration'}
+FAVORITE_CONFLICT = 'This request identity belongs to another favorite change'
 
 
 def free_port():
@@ -206,7 +215,7 @@ class OpenCodeNative(unittest.TestCase):
         cls.fake_registrations = set()
         cls.workspace = root / 'workspace'
         cls.state = root / 'hgs-state'
-        for path in ['home', 'xdg-config/opencode', 'xdg-data', 'xdg-cache', 'xdg-state', 'workspace',
+        for path in ['home', 'xdg-config/opencode', 'xdg-data', 'xdg-cache', 'xdg-state', 'workspace', 'project',
                      'hgs-config', 'hgs-state']:
             (root / path).mkdir(parents=True)
         # hgs lists tmux sessions too; an existing private TMUX_TMPDIR keeps it off the
@@ -239,8 +248,18 @@ class OpenCodeNative(unittest.TestCase):
                                                        'apiKey': FIXTURE_KEY},
                                            'models': {'local': {'name': 'Native fixture', 'limit': {'context': 32768, 'output': 2048}},
                                                       'alternate': {'name': 'Alternate fixture',
-                                                                    'limit': {'context': 32768, 'output': 2048}}}}}}
+                                                                    'limit': {'context': 32768, 'output': 2048}},
+                                                      'vendor/slash': {'name': 'Slash fixture',
+                                                                       'limit': {'context': 32768, 'output': 2048}}}}}}
         (root / 'xdg-config/opencode/opencode.json').write_text(json.dumps(config))
+        # A provider only the project folder configures, with the same canary key.
+        folder = {'$schema': 'https://opencode.ai/config.json',
+                  'provider': {'folderonly': {'npm': '@ai-sdk/openai-compatible', 'name': 'Folder-only fixture',
+                                              'options': {'baseURL': f'http://127.0.0.1:{cls.model.server_port}/v1',
+                                                          'apiKey': FIXTURE_KEY},
+                                              'models': {'proj': {'name': 'Project model', 'limit': {'context': 32768, 'output': 2048}}}}}}
+        (root / 'project/opencode.json').write_text(json.dumps(folder))
+        cls.project = root / 'project'
         # A private service port before anything can start the service.
         cls.port = free_port()
         while cls.port == DEFAULT_PORT:
@@ -440,6 +459,42 @@ class OpenCodeNative(unittest.TestCase):
     def account(self):
         profiles = self.hgs(['account', 'ls'])['profiles']
         return next(profile for profile in profiles if profile['id'] == 'native-opencode')
+
+    def ready_account(self):
+        """Start the private service explicitly and wait until its catalog is ready."""
+        self.stop_service()
+        self.hgs(['account', 'start', 'native-opencode'])
+        until = time.monotonic() + 30
+        account = self.account()
+        while account['catalog_state'] == 'loading' and time.monotonic() < until:
+            time.sleep(.5)
+            account = self.account()
+        self.assertEqual(account['catalog_state'], 'ready', account)
+        return account
+
+    def catalog(self, location=None, success=True):
+        """`hgs account models` for the home folder, or for `location`."""
+        where = [] if location is None else ['--location', str(location)]
+        return self.hgs(['account', 'models', 'native-opencode', *where, '--json'], success=success)
+
+    def favorite(self, model, on, request=None, success=True):
+        return self.hgs(['account', 'favorite', 'native-opencode', '--model', model, '--favorite', 'on' if on else 'off',
+                         '--request-id', request or str(uuid.uuid4()), '--json'], success=success)
+
+    def opencode_files(self, *bases):
+        """sha256 of every file under the private folders `bases`, by path below the private root."""
+        found = {}
+        for base in bases:
+            for path in sorted((self.root / base).rglob('*')):
+                if path.is_file() and not path.is_symlink():
+                    found[str(path.relative_to(self.root))] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return found
+
+    def assert_folder_free(self, answer):
+        """Neither the folder-only provider nor its model is in `answer`."""
+        self.assertNotIn('folderonly', [p['id'] for p in answer['providers']], answer['providers'])
+        values = [m['value'] for m in answer['model_options']] + [m['value'] for m in answer.get('models', [])]
+        self.assertNotIn('folderonly/proj', values)
 
     def assert_private(self, *values):
         text = json.dumps(values)
@@ -969,6 +1024,234 @@ class OpenCodeNative(unittest.TestCase):
         self.assertLess(status, 300)
         view = self.wait(name, lambda v: v['phase'] == 'idle' and any(e.get('detail') == 'Typed in OpenCode' for e in v['events']))
         self.assertEqual([e.get('request_id') for e in view['events'] if e.get('detail') == 'Typed in OpenCode'], [None])
+
+    def test_20_slash_model_ids_first_then_short_list_and_providers(self):
+        account = self.ready_account()
+        options = [row['value'] for row in account['model_options']]
+        # The slash ID first, through keys and commands older than the provider catalog. The
+        # configured siblings are listed, so a missing slash ID fails only this invariant.
+        self.assertLessEqual({'fixture/local', 'fixture/alternate'}, set(options), options)
+        self.assertIn(SLASH, options, 'SLASH-ID: the configured %s is missing from the short list' % SLASH)
+        tag = uuid.uuid4().hex[:10]
+        self.launch(tag, '--model', SLASH)
+        inspected = self.hgs(['inspect', f'opencode/workspace/{tag}'])
+        self.assertEqual(inspected['settings_model'], SLASH)
+        # OpenCode stores the model split at the first `/`.
+        model = self.session(inspected['conversation_id'])['model']
+        self.assertEqual((model['providerID'], model['id']), ('fixture', 'vendor/slash'))
+        # Session details pin the session's model with the short list's efforts.
+        listed = next(row for row in account['model_options'] if row['value'] == SLASH)
+        pinned = next(row for row in inspected['model_options'] if row['value'] == SLASH)
+        self.assertEqual(pinned['effort_options'], listed['effort_options'])
+        self.assertIn('model_options_truncated', inspected)
+        # Only the exact ID is offered: its first two segments name no model.
+        refused = self.launch(uuid.uuid4().hex[:10], '--model', 'fixture/vendor', success=False)
+        self.assertIn('not offered', refused.stderr)
+        # A session changes to the slash ID, and its next turn reaches the model under it.
+        b = self.create()
+        changed = self.hgs(['settings', b['name'], '--json'], self.payload(b, model=SLASH, effort=''))
+        self.assertEqual((changed['status'], changed['model']), ('applied', SLASH))
+        model = self.session(b['conversation_id'])['model']
+        self.assertEqual((model['providerID'], model['id']), ('fixture', 'vendor/slash'))
+        self.hgs(['send', b['name'], '--json'], self.payload(b, text='Slash ID turn'))
+        self.wait(b['name'], lambda v: v['phase'] == 'idle' and v.get('reply_id'))
+        self.assertEqual({r['model'] for r in self.model.requests if r['tools'] and 'Slash ID turn' in r['last_user']},
+                         {'vendor/slash'})
+        self.assert_private(inspected, changed)
+        # Then the provider catalog's own keys and commands: the default first, keyless free
+        # models, provider kinds, and only allowlisted keys whatever OpenCode itself answered.
+        self.assertEqual(options[0], 'fixture/local')
+        self.assertIs(account['model_options'][0].get('default'), True)
+        free = [row for row in account['model_options'] if row['provider'] == 'opencode']
+        self.assertTrue(free and all(row['free'] for row in free), account['model_options'])
+        kinds = {p['id']: p['kind'] for p in account['providers']}
+        self.assertEqual((kinds.get('fixture'), kinds.get('opencode')), ('config', 'free'), account['providers'])
+        for provider in account['providers']:
+            self.assertLessEqual(set(provider), PROVIDER_KEYS, provider)
+        for row in account['model_options']:
+            self.assertLessEqual(set(row), ENTRY_KEYS, row)
+            self.assertEqual(row['id'], row['value'])
+        self.assertIs(account['providers_truncated'], False)
+        self.assertLessEqual(len(json.dumps(account, ensure_ascii=True)), 32 * 1024)
+        catalog = self.catalog()
+        entries = {row['value']: row for row in catalog['models']}
+        self.assertEqual(entries[SLASH]['effort_options'], pinned['effort_options'])
+        self.assertIs(entries['fixture/local'].get('default'), True)
+        self.assertIs(catalog['models_truncated'], False)
+        # The full catalog stays within 10,000 models and 4 MiB.
+        self.assertLessEqual(len(catalog['models']), 10000)
+        self.assertLessEqual(len(json.dumps(catalog).encode()), 4 * 1024 * 1024)
+        for row in catalog['models']:
+            self.assertLessEqual(set(row), ENTRY_KEYS, row)
+        self.assert_private(account, catalog)
+        for text in (json.dumps(account), json.dumps(catalog)):
+            self.assertNotIn(f'127.0.0.1:{self.model.server_port}', text)
+        # The connector gives `hgs account ls` 3 seconds.
+        started = time.monotonic()
+        self.account()
+        self.assertLess(time.monotonic() - started, 3.0)
+
+    def test_21_folder_specific_provider_only_in_its_folder(self):
+        self.ready_account()
+        self.assert_folder_free(self.catalog())
+        folder = self.catalog(self.project)
+        provider = next(p for p in folder['providers'] if p['id'] == 'folderonly')
+        self.assertEqual((provider.get('folder'), provider['kind']), (True, 'config'))
+        self.assertNotIn('folder', next(p for p in folder['providers'] if p['id'] == 'fixture'))
+        self.assertIn('folderonly/proj', [m['value'] for m in folder['model_options']])
+        self.assertIn('folderonly/proj', [m['value'] for m in folder['models']])
+        # The folder's own key and base URL stay in OpenCode too.
+        self.assert_private(folder)
+        self.assertNotIn(f'127.0.0.1:{self.model.server_port}', json.dumps(folder))
+        refused = self.catalog(self.root / 'missing', success=False)
+        self.assertIn('Choose an existing folder on this computer', refused.stderr)
+        tag = uuid.uuid4().hex[:10]
+        self.hgs(['opencode', str(self.project), '--new', '-n', tag, '-d', '--launch-id', str(uuid.uuid4()),
+                  '--account', 'native-opencode', '--model', 'folderonly/proj'])
+        self.assertEqual(self.hgs(['inspect', f'opencode/project/{tag}'])['settings_model'], 'folderonly/proj')
+        # After the same running service read the folder and launched there, the folder's
+        # provider still stays out of the home catalog, the account row, its cache and the
+        # other folders, and the folder's model is not offered elsewhere.
+        row = self.account()
+        self.assertEqual(row['catalog_state'], 'ready', row)
+        for answer in (self.catalog(), row, self.catalog(self.workspace)):
+            self.assert_folder_free(answer)
+        self.assertNotIn('folderonly', (self.state / 'opencode/catalog.json').read_text())
+        elsewhere = self.launch(uuid.uuid4().hex[:10], '--model', 'folderonly/proj', success=False)
+        self.assertIn('not offered', elsewhere.stderr)
+
+    def test_22_not_running_keeps_the_last_catalog_and_never_starts(self):
+        (self.root / 'hgs-config/opencode-favorites.json').unlink(missing_ok=True)
+        ready = self.ready_account()
+        self.stop_service()
+        self.assertFalse(self.native_processes())
+        account = self.account()
+        self.assertEqual(account['catalog_state'], 'not_running')
+        self.assertEqual([r['value'] for r in account['model_options']], [r['value'] for r in ready['model_options']])
+        self.assertEqual(account['providers'], ready['providers'])
+        # The stopped row is the last live catalog, read back from hgs's private cache.
+        self.assertEqual(account['catalog_at'], ready['catalog_at'])
+        self.assertIn(SLASH, [r['value'] for r in account['model_options']])
+        self.assert_folder_free(account)
+        catalog = self.catalog()
+        self.assertEqual((catalog['catalog_state'], catalog['models']), ('not_running', []))
+        self.assertEqual(catalog['model_catalog_source'], 'cache')
+        self.assertEqual([r['value'] for r in catalog['model_options']], [r['value'] for r in ready['model_options']])
+        folder = self.catalog(self.project)
+        self.assertEqual((folder['model_options'], folder['providers']), ([], []))
+        # A favorite is hgs's own: no OpenCode file in the private homes or the project changes.
+        before = self.opencode_files('home', 'xdg-config', 'xdg-data', 'xdg-state', 'project')
+        self.favorite('fixture/alternate', True)
+        self.assertEqual(self.opencode_files('home', 'xdg-config', 'xdg-data', 'xdg-state', 'project'), before)
+        options = self.account()['model_options']
+        self.assertEqual((options[1]['value'], options[1].get('favorite')), ('fixture/alternate', True))
+        self.assertFalse(self.native_processes(), 'an inspection or favorite started OpenCode')
+        self.assertFalse(self.registration_path().exists())
+
+    def test_23_favorites_reorder_the_short_list_with_request_identity(self):
+        favorites = self.root / 'hgs-config/opencode-favorites.json'
+        favorites.unlink(missing_ok=True)
+        account = self.ready_account()
+        configs = [self.root / 'xdg-config/opencode/opencode.json', self.project / 'opencode.json']
+        before = [path.read_bytes() for path in configs]
+        free = next(r['value'] for r in account['model_options'] if r['provider'] == 'opencode')
+        first = str(uuid.uuid4())
+        receipt = self.favorite(free, True, first)
+        self.assertEqual((receipt['status'], receipt['favorite']), ('applied', True))
+        options = self.account()['model_options']
+        self.assertEqual((options[1]['value'], options[1].get('favorite')), (free, True))
+        # The identity is bound to its change: another model or the other flag under it is
+        # refused and changes nothing, neither the stored list nor the first receipt.
+        stored = favorites.read_bytes()
+        record = self.state / 'opencode/favorite-requests' / (first + '.json')
+        kept = record.read_bytes()
+        for model, on in (('fixture/alternate', True), (free, False)):
+            refused = self.favorite(model, on, first, success=False)
+            self.assertIn(FAVORITE_CONFLICT, refused.stderr)
+        self.assertEqual((favorites.read_bytes(), record.read_bytes()), (stored, kept))
+        self.assertEqual([r['value'] for r in self.account()['model_options']], [r['value'] for r in options])
+        # After on and off, the first identity replays its receipt without applying again.
+        self.favorite(free, False)
+        replay = self.favorite(free, True, first)
+        self.assertEqual(replay['status'], 'applied')
+        self.assertNotIn(free, replay['favorites'])
+        self.assertFalse(any(r.get('favorite') for r in self.account()['model_options']))
+        self.favorite('gone/missing', True)
+        catalog = self.catalog()
+        self.assertIn({'value': 'gone/missing', 'available': False}, catalog['favorites'])
+        self.assertNotIn('gone/missing', [r['value'] for r in self.account()['model_options']])
+        # Favorites live beside the hgs account catalog, never in OpenCode's configuration.
+        self.assertEqual(json.loads(favorites.read_text()), {'version': 1, 'models': ['gone/missing']})
+        self.assertEqual([path.read_bytes() for path in configs], before)
+
+    def test_25_catalog_reads_never_ask_for_credentials(self):
+        # hgs reads the registration from XDG_STATE_HOME. This test's hgs commands read a
+        # copy that names a recording loopback proxy in front of the real private service;
+        # the service and its own registration stay untouched.
+        (self.root / 'hgs-config/opencode-favorites.json').unlink(missing_ok=True)
+        self.ready_account()
+        b = self.create()
+        registration = self.registration()
+        upstream = registration['url'].rstrip('/')
+        seen, answers = [], []
+        # The proxy forwards straight to the private service, never through a proxy of its own.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        class Proxy(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def forward(self):
+                seen.append((self.command, self.path))
+                length = int(self.headers.get('Content-Length') or 0)
+                headers = {k: v for k, v in self.headers.items() if k.lower() in ('authorization', 'content-type')}
+                request = urllib.request.Request(upstream + self.path, method=self.command, headers=headers,
+                                                 data=self.rfile.read(length) if length else None)
+                try:
+                    with opener.open(request, timeout=30) as response:
+                        status, kind, raw = response.status, response.headers.get('Content-Type'), response.read()
+                except urllib.error.HTTPError as error:
+                    with error:
+                        status, kind, raw = error.code, error.headers.get('Content-Type'), error.read()
+                answers.append(raw)
+                self.send_response(status)
+                self.send_header('Content-Type', kind or 'application/json')
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            do_GET = do_POST = do_PATCH = do_PUT = do_DELETE = forward
+
+        proxy = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Proxy)
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        self.addCleanup(proxy.server_close)
+        self.addCleanup(proxy.shutdown)
+        state = self.root / 'proxy-state'
+        (state / 'opencode').mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(state / 'opencode/service.json', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, 'w') as file:
+            json.dump({**registration, 'url': f'http://127.0.0.1:{proxy.server_port}'}, file)
+        # An instance attribute: stop_service and every other test keep the class environment.
+        self.env = {**self.env, 'XDG_STATE_HOME': str(state)}
+        outputs = [self.account(), self.catalog(), self.catalog(self.project)]
+        catalog_reads = list(seen)
+        outputs.append(self.hgs(['inspect', b['name']]))
+        reads = len(seen)
+        # Favorites, including a refused reuse of an identity, never talk to OpenCode.
+        reused = str(uuid.uuid4())
+        outputs += [self.favorite('fixture/alternate', True, reused), self.favorite('fixture/alternate', False)]
+        self.assertIn(FAVORITE_CONFLICT, self.favorite('fixture/local', True, reused, success=False).stderr)
+        self.assertEqual(len(seen), reads, 'a favorite talked to OpenCode')
+        routes = {path.split('?')[0] for _, path in catalog_reads}
+        # The reads did go through the proxy.
+        self.assertTrue({'/api/provider', '/api/model', '/api/model/default', '/api/integration'} <= routes, seen)
+        self.assertEqual({method for method, _ in seen}, {'GET'}, seen)
+        self.assertEqual([path for _, path in seen if path.startswith('/api/credential')], [], seen)
+        self.assertLessEqual(routes, CATALOG_ROUTES, catalog_reads)
+        self.assert_private(*outputs)
+        self.assertNotIn(f'127.0.0.1:{self.model.server_port}', json.dumps(outputs))
+        # The canary and the base URL did reach hgs: OpenCode answered with them and hgs dropped them.
+        self.assertTrue(any(FIXTURE_KEY.encode() in raw for raw in answers), 'the canary never reached hgs')
+        self.assertTrue(any(f'127.0.0.1:{self.model.server_port}'.encode() in raw for raw in answers))
 
 if __name__ == '__main__':
     unittest.main()

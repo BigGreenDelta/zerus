@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Native account isolation/transport integration checks. Uses only temporary credentials."""
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,16 +22,26 @@ class Accounts(unittest.TestCase):
         self.config = self.home / '.config/hgs'; self.config.mkdir(parents=True)
         self.env = {k:v for k,v in os.environ.items() if not k.startswith('HGS_') and k not in ('CODEX_HOME','CLAUDE_CONFIG_DIR','KIMI_CODE_HOME','TMUX','TMUX_PANE')}
         self.env.update(HOME=str(self.home), HGS_CONFIG_DIR=str(self.config), HGS_STATE_DIR=str(self.root/'state'), HGS_SELF='test', HGS_PEERS='', HGS_TAB='0')
+        # Private XDG directories: nothing reaches the real OpenCode state or config.
+        for name,folder in (('XDG_STATE_HOME','xdg-state'),('XDG_CONFIG_HOME','xdg-config'),('XDG_DATA_HOME','xdg-data'),('XDG_CACHE_HOME','xdg-cache')):
+            (self.root/folder).mkdir(); self.env[name]=str(self.root/folder)
         # HGS prepends HOME/.local/bin, /opt/homebrew/bin and /usr/local/bin.
         # Put mocks in the first of those, so Homebrew can never win on macOS.
         self.bin = self.home/'.local/bin'; self.bin.mkdir(parents=True)
-        for executable in ('codex','claude','kimi','dsh','ssh','security','tmux'):
+        self.opencode_calls = self.root/'opencode-calls.log'
+        for executable in ('codex','claude','kimi','dsh','ssh','security','tmux','opencode'):
             script = self.bin/executable
-            script.write_text('#!/bin/sh\nexit '+('1' if executable == 'tmux' else '99')+'\n')
+            if executable == 'opencode':
+                # Logs every argument list and answers only `--version`, so a service
+                # start or any other command shows. A test that needs more installs its own fake.
+                script.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "'+str(self.opencode_calls)+'"\n'
+                                  '[ "$#" -eq 1 ] && [ "$1" = --version ] && echo v2.0.32 && exit 0\nexit 9\n')
+            else:
+                script.write_text('#!/bin/sh\nexit '+('1' if executable == 'tmux' else '99')+'\n')
             script.chmod(0o755)
         self.env['PATH'] = str(self.bin) + os.pathsep + self.env['PATH']
         prepared_path = os.pathsep.join((str(self.home/'.local/bin'), '/opt/homebrew/bin', '/usr/local/bin', self.env['PATH']))
-        for executable in ('codex','claude','kimi','dsh','ssh','security','tmux'):
+        for executable in ('codex','claude','kimi','dsh','ssh','security','tmux','opencode'):
             resolved = shutil.which(executable, path=prepared_path)
             self.assertIsNotNone(resolved)
             self.assertEqual(Path(resolved).resolve(), (self.bin/executable).resolve(),
@@ -45,6 +56,50 @@ class Accounts(unittest.TestCase):
         return json.loads(self.run_hgs('account','add',id,'--provider',provider,'--label','Work').stdout)
     def fake_auth(self):
         d=self.home/'.codex'; d.mkdir(); (d/'auth.json').write_text(json.dumps({'OPENAI_API_KEY':'TEMPORARY-TEST-KEY'})); return d
+    def assert_opencode_only_asked_its_version(self):
+        """Nothing so far ran OpenCode except `--version`. `account ls` then asks for
+        the version, which proves the logging fake is the `opencode` hgs runs."""
+        calls=self.opencode_calls.read_text().splitlines() if self.opencode_calls.exists() else []
+        self.assertEqual([c for c in calls if c!='--version'],[],'OpenCode was asked more than its version')
+        self.ls()
+        self.assertIn('--version',self.opencode_calls.read_text().splitlines())
+        self.assertFalse((self.root/'xdg-state/opencode').exists(),'a service registration appeared')
+    def test_opencode_full_catalog_never_starts_and_checks_its_folder(self):
+        catalog=json.loads(self.run_hgs('account','models','native-opencode','--json').stdout)
+        self.assertEqual((catalog['catalog_state'],catalog['models'],catalog['model_options']),('not_running',[],[]))
+        self.assertEqual(catalog['location'],os.path.realpath(self.home))
+        folder=self.root/'project';folder.mkdir()
+        located=json.loads(self.run_hgs('account','models','native-opencode','--location',str(folder),'--json').stdout)
+        self.assertEqual((located['location'],located['providers']),(os.path.realpath(folder),[]))
+        for location in (('relative/folder',),(str(self.root/'missing'),),()):
+            # A --location without a folder is refused, never read as the home folder.
+            refused=self.run_hgs('account','models','native-opencode','--location',*location,ok=False)
+            self.assertIn(b'Choose an existing folder on this computer',refused.stderr)
+        refused=self.run_hgs('account','models','native-codex',ok=False)
+        self.assertIn(b'Only the native OpenCode account lists OpenCode models',refused.stderr)
+        self.assert_opencode_only_asked_its_version()
+    def test_stopped_opencode_session_details_carry_the_cached_short_list(self):
+        name='opencode/workspace/stopped'
+        record={'backend':'opencode','agent':'opencode','name':name,'cwd':str(self.home),'run_id':'7b0c6f1e-2d4a-4c8e-9f10-1a2b3c4d5e6f',
+                'conversation_id':'ses_'+'A'*26,'created':1792267200.0,'launch_id':None,'service':'opencode2'}
+        binding=self.root/'state/opencode/bindings'/(hashlib.sha256(name.encode()).hexdigest()+'.json')
+        binding.parent.mkdir(parents=True);binding.write_text(json.dumps(record))
+        candidates=[{'value':'fixture/local','provider':'fixture','label':'Native fixture','provider_label':'Private keyless fixture',
+                     'free':False,'effort_options':['low','high'],'configured':True},
+                    {'value':'opencode/big-pickle','provider':'opencode','label':'Big Pickle','provider_label':'OpenCode',
+                     'free':True,'effort_options':[],'configured':False}]
+        cache={'version':2,'location':str(self.home),'model_options':[],'candidates':candidates,'models_truncated':False,
+               'providers':[],'providers_truncated':False,'settings_model':'fixture/local','catalog_at':1792267200.5}
+        (self.root/'state/opencode/catalog.json').write_text(json.dumps(cache))
+        details=json.loads(self.run_hgs('inspect',name).stdout)
+        self.assertEqual((details['name'],details['inspection_unavailable']),(name,True))
+        self.assertIn('OpenCode is not running',details['inspection_reason'])
+        # Clients take details without model_options_truncated for an older hgs.
+        self.assertIs(details['model_options_truncated'],False)
+        options=details['model_options']
+        self.assertEqual([o['value'] for o in options],['fixture/local','opencode/big-pickle'])
+        self.assertEqual([o.get('default') for o in options],[True,None])
+        self.assert_opencode_only_asked_its_version()
     def test_native_opencode_login_dry_run_never_invokes_auth(self):
         fake=self.bin
         binary=fake/"opencode";marker=self.root/"opencode-auth-marker"
@@ -68,6 +123,8 @@ class Accounts(unittest.TestCase):
             self.assertTrue(row['installed'])
             self.assertEqual(row['catalog_state'],'not_running')
             self.assertEqual(row['model_options'],[])
+            self.assertEqual((row['providers'],row['model_options_truncated'],row['providers_truncated']),([],False,False))
+            self.assertLessEqual(len(json.dumps(row,ensure_ascii=True)),32*1024)
             binary.write_text("#!/bin/sh\n[ \"$1\" = --version ] && echo 1.4.0 || exit 9\n")
             row=[p for p in self.ls()['profiles'] if p['id']=='native-opencode'][0]
             self.assertFalse(row['installed'])
@@ -75,6 +132,66 @@ class Accounts(unittest.TestCase):
             refused=self.run_hgs('account','start','native-codex',ok=False)
             self.assertIn(b'Only the native OpenCode account has a service to start',refused.stderr)
         finally:self.env["PATH"]=previous
+
+    def test_a_damaged_opencode_catalog_cache_keeps_the_stopped_row_small_and_allowlisted(self):
+        # Private OpenCode state: an inherited XDG_STATE_HOME must never reach a real service.
+        self.env.update(XDG_STATE_HOME=str(self.root/'xdg-state'),XDG_CONFIG_HOME=str(self.root/'xdg-config'))
+        binary=self.bin/"opencode";binary.write_text("#!/bin/sh\n[ \"$1\" = --version ] && echo v2.0.32 || exit 9\n");binary.chmod(0o700)
+        canary='canary-secret-7f3a';huge='"\\'*1000
+        default={'id':'fixture/local','value':'fixture/local','label':huge,'provider':'fixture','provider_label':huge,'free':huge,
+                 'effort_options':['e%d'%i for i in range(400)],'effort_labels':[huge]*10,'default':True,'configured':True,'settings':{'apiKey':canary}}
+        entries=[default]+[{'id':huge,'value':huge,'label':huge,'provider':huge}]*15+[
+            {'value':'keyed/m%03d'%i,'provider':'keyed','label':huge[:300],'provider_label':huge[:300],'free':True,'baseURL':canary} for i in range(250)]
+        providers=[{'id':'p%03d'%i,'label':huge,'kind':'key','credential_count':1,'model_count':1,'active_label':huge,'headers':canary} for i in range(15)]
+        record={'version':2,'location':str(self.home),'model_options':entries[:3],'candidates':entries,'providers':providers,
+                'providers_truncated':{'x':huge},'settings_model':'fixture/local','catalog_at':{'x':huge}}
+        cache=self.root/'state/opencode/catalog.json';cache.parent.mkdir(parents=True);cache.write_text(json.dumps(record))
+        self.assertTrue(700_000<cache.stat().st_size<1_048_576,cache.stat().st_size)
+        row=[p for p in self.ls()['profiles'] if p['id']=='native-opencode'][0]
+        self.assertEqual(row['catalog_state'],'not_running')
+        self.assertLessEqual(len(json.dumps(row,ensure_ascii=True)),32*1024)
+        self.assertFalse(canary in json.dumps(row),'a dropped cache field reached the row')
+        self.assertEqual((row['catalog_at'],row['settings_model']),(None,'fixture/local'))
+        self.assertEqual((row['model_options_truncated'],row['providers_truncated']),(True,False))
+        first=row['model_options'][0]
+        self.assertEqual((first['value'],first['default'],first['label'],first['provider_label'],first['free']),('fixture/local',True,'local','fixture',False))
+        self.assertEqual(first['effort_options'],['e%d'%i for i in range(16)])
+        entry_keys={'id','value','label','provider','provider_label','free','effort_options','effort_labels','favorite','default'}
+        for option in row['model_options']:
+            self.assertLessEqual(set(option),entry_keys)
+            self.assertEqual(option['id'],option['value'])
+        self.assertEqual([p['label'] for p in row['providers']],['p%03d'%i for i in range(15)])
+        for provider in row['providers']:
+            self.assertLessEqual(set(provider),{'id','label','kind','credential_count','model_count','active_label'})
+            self.assertNotIn('active_label',provider)
+
+    def test_opencode_favorites_are_stored_beside_the_catalog_with_request_identity(self):
+        # Private OpenCode state: an inherited XDG_STATE_HOME must never reach a real service.
+        self.env.update(XDG_STATE_HOME=str(self.root/'xdg-state'),XDG_CONFIG_HOME=str(self.root/'xdg-config'))
+        catalog=self.config/'accounts.json'
+        request='6f1c1a0e-4d8b-4b7e-9a51-3c2d1e0f9a10'
+        def favorite(*args,ok=True):
+            return self.run_hgs('account','favorite','native-opencode',*args,ok=ok)
+        receipt=json.loads(favorite('--model','groq/openai/gpt-oss-20b','--favorite','on','--request-id',request,'--json').stdout)
+        self.assertEqual((receipt['status'],receipt['favorite'],receipt['favorites']),('applied',True,['groq/openai/gpt-oss-20b']))
+        stored=json.loads((self.config/'opencode-favorites.json').read_text())
+        self.assertEqual(stored,{'version':1,'models':['groq/openai/gpt-oss-20b']})
+        self.assertFalse(catalog.exists(),'favorites never rewrite accounts.json')
+        self.assertEqual(json.loads(favorite('--model','groq/openai/gpt-oss-20b','--favorite','on','--request-id',request).stdout),receipt)
+        for args,message in [(('--model','groq/x','--favorite','maybe','--request-id',request),b'Choose --favorite on or off'),
+                             (('--model','groq/x','--favorite','on'),b'A favorite change needs --request-id UUID'),
+                             (('--favorite','on','--request-id',request),b'Choose --model PROVIDER/MODEL')]:
+            self.assertIn(message,favorite(*args,ok=False).stderr)
+        refused=self.run_hgs('account','favorite','native-codex','--model','a/b','--favorite','on','--request-id',request,ok=False)
+        self.assertIn(b'Only the native OpenCode account has favorite models',refused.stderr)
+        planned=json.loads(favorite('--model','fixture/local','--favorite','on','--request-id','6f1c1a0e-4d8b-4b7e-9a51-3c2d1e0f9a11','--dry-run').stdout)
+        self.assertEqual(planned,{'dry_run':True,'model':'fixture/local','favorite':True})
+        for model,req in (('nonsense','6f1c1a0e-4d8b-4b7e-9a51-3c2d1e0f9a12'),('fixture/local','not-a-uuid')):
+            self.assertNotEqual(favorite('--model',model,'--favorite','on','--request-id',req,'--dry-run',ok=False).returncode,0)
+        self.assertNotEqual(self.run_hgs('account','favorite','native-codex','--model','a/b','--favorite','on','--request-id',request,'--dry-run',ok=False).returncode,0)
+        self.assertEqual(json.loads((self.config/'opencode-favorites.json').read_text())['models'],['groq/openai/gpt-oss-20b'])
+        self.assertFalse(catalog.exists(),'favorites never rewrite accounts.json')
+        self.assert_opencode_only_asked_its_version()
 
     def test_defaults_do_not_touch_agent_homes(self):
         data=self.ls(); self.assertEqual({p['provider'] for p in data['profiles'] if p['provider'] not in {'dsh','opencode'}}, {'codex','claude','kimi'})

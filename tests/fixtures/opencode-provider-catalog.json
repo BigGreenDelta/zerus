@@ -1,0 +1,2785 @@
+{
+  "version": 1,
+  "description": "OpenCode providers phase 1 contract shared by hgs, the Rust connector, the desktop, Android and iOS; regenerate with tests/fixtures/opencode-provider-catalog.py. service holds raw OpenCode 2.0.32-shaped responses that deliberately carry secrets; favorites is the stored favorites list; row is what hgs adds to the native-opencode account row for the home location; hgs_account is that complete row as the connector reads it; heartbeat_account and launch_account are the connector projections of hgs_account; stopped_account is a truncated row of a stopped service; ascii_lengths pins len(json.dumps(value, ensure_ascii=True)), the measure of the 32 KiB row budget and the 128 KiB projection.",
+  "service": {
+    "location": "/home/example",
+    "provider": {
+      "location": {
+        "directory": "/home/example"
+      },
+      "data": [
+        {
+          "id": "opencode",
+          "integrationID": "opencode",
+          "name": "OpenCode",
+          "activation": "enabled",
+          "package": "@opencode/ai/providers/openai-compatible",
+          "settings": {
+            "apiKey": "public",
+            "baseURL": "https://opencode.example.invalid/zen/v1"
+          }
+        },
+        {
+          "id": "groq",
+          "integrationID": "groq",
+          "name": "Groq",
+          "activation": "auto",
+          "package": "@opencode/ai/providers/groq"
+        },
+        {
+          "id": "fixture",
+          "name": "Private keyless fixture",
+          "activation": "enabled",
+          "package": "@opencode/ai/providers/openai-compatible",
+          "settings": {
+            "apiKey": "fixture-secret-key",
+            "baseURL": "http://127.0.0.1:9/v1"
+          },
+          "headers": {
+            "Authorization": "Bearer fixture-secret-key"
+          },
+          "body": {
+            "token": "fixture-secret-key"
+          }
+        },
+        {
+          "id": "ollama",
+          "name": "Ollama",
+          "activation": "enabled",
+          "package": "@opencode/ai/providers/openai-compatible",
+          "settings": {
+            "baseURL": "http://127.0.0.1:11434/v1",
+            "provider": "ollama"
+          }
+        },
+        {
+          "id": "keyed",
+          "integrationID": "keyed",
+          "name": "Keyed fixture",
+          "activation": "enabled",
+          "package": "@opencode/ai/providers/openai-compatible"
+        },
+        {
+          "id": "solo",
+          "integrationID": "solo",
+          "name": "Solo fixture",
+          "activation": "enabled",
+          "package": "@opencode/ai/providers/openai-compatible"
+        }
+      ]
+    },
+    "model": {
+      "location": {
+        "directory": "/home/example"
+      },
+      "data": [
+        {
+          "id": "glm-5.3-flash-free",
+          "modelID": "glm-5.3-flash-free",
+          "providerID": "opencode",
+          "name": "GLM-5.3-Flash Free",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": [
+            {
+              "id": "low",
+              "settings": {
+                "reasoningEffort": "low"
+              }
+            },
+            {
+              "id": "high",
+              "settings": {
+                "reasoningEffort": "high"
+              }
+            },
+            {
+              "id": "max",
+              "settings": {
+                "reasoningEffort": "max"
+              }
+            }
+          ],
+          "time": {
+            "released": 1790000000000
+          },
+          "cost": [
+            {
+              "input": 0,
+              "output": 0,
+              "cache": {
+                "read": 0,
+                "write": 0
+              }
+            }
+          ],
+          "status": "active",
+          "enabled": true,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          }
+        },
+        {
+          "id": "big-pickle",
+          "modelID": "big-pickle",
+          "providerID": "opencode",
+          "name": "Big Pickle",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": [],
+          "time": {
+            "released": 1790000000000
+          },
+          "cost": [
+            {
+              "input": 0,
+              "output": 0,
+              "cache": {
+                "read": 0,
+                "write": 0
+              }
+            }
+          ],
+          "status": "active",
+          "enabled": true,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          }
+        },
+        {
+          "id": "openai/gpt-oss-20b",
+          "modelID": "openai/gpt-oss-20b",
+          "providerID": "groq",
+          "name": "GPT OSS 20B",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": [
+            {
+              "id": "low",
+              "settings": {
+                "reasoningEffort": "low"
+              }
+            },
+            {
+              "id": "medium",
+              "settings": {
+                "reasoningEffort": "medium"
+              }
+            },
+            {
+              "id": "high",
+              "settings": {
+                "reasoningEffort": "high"
+              }
+            }
+          ],
+          "time": {
+            "released": 1790000000000
+          },
+          "cost": [
+            {
+              "input": 0.075,
+              "output": 0.3,
+              "cache": {
+                "read": 0,
+                "write": 0
+              }
+            }
+          ],
+          "status": "active",
+          "enabled": true,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          }
+        },
+        {
+          "id": "groq/compound",
+          "modelID": "groq/compound",
+          "providerID": "groq",
+          "name": "Compound",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": [],
+          "time": {
+            "released": 1790000000000
+          },
+          "cost": [
+            {
+              "input": 0,
+              "output": 0,
+              "cache": {
+                "read": 0,
+                "write": 0
+              }
+            }
+          ],
+          "status": "active",
+          "enabled": true,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          }
+        },
+        {
+          "id": "local",
+          "modelID": "local",
+          "providerID": "fixture",
+          "name": "Native fixture",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": [
+            {
+              "id": "low",
+              "settings": {
+                "reasoningEffort": "low"
+              }
+            },
+            {
+              "id": "medium",
+              "settings": {
+                "reasoningEffort": "medium"
+              }
+            },
+            {
+              "id": "high",
+              "settings": {
+                "reasoningEffort": "high"
+              }
+            }
+          ],
+          "time": {
+            "released": 1790000000000
+          },
+          "cost": [],
+          "status": "active",
+          "enabled": true,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          },
+          "settings": {
+            "apiKey": "fixture-secret-key",
+            "baseURL": "http://127.0.0.1:9/v1"
+          },
+          "headers": {
+            "Authorization": "Bearer fixture-secret-key"
+          },
+          "body": {
+            "token": "fixture-secret-key"
+          }
+        },
+        {
+          "id": "alternate",
+          "modelID": "alternate",
+          "providerID": "fixture",
+          "name": "Alternate fixture",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": [],
+          "time": {
+            "released": 1790000000000
+          },
+          "cost": [],
+          "status": "active",
+          "enabled": true,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          },
+          "settings": {
+            "apiKey": "fixture-secret-key",
+            "baseURL": "http://127.0.0.1:9/v1"
+          },
+          "headers": {
+            "Authorization": "Bearer fixture-secret-key"
+          },
+          "body": {
+            "token": "fixture-secret-key"
+          }
+        },
+        {
+          "id": "qwen3-coder:30b",
+          "modelID": "qwen3-coder:30b",
+          "providerID": "ollama",
+          "name": "qwen3-coder:30b",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": [],
+          "time": {
+            "released": 1790000000000
+          },
+          "cost": [],
+          "status": "active",
+          "enabled": true,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          }
+        },
+        {
+          "id": "paid-model",
+          "modelID": "paid-model",
+          "providerID": "keyed",
+          "name": "Paid model",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": [],
+          "time": {
+            "released": 1790000000000
+          },
+          "cost": [
+            {
+              "input": 3,
+              "output": 15,
+              "cache": {
+                "read": 0,
+                "write": 0
+              }
+            }
+          ],
+          "status": "active",
+          "enabled": true,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          }
+        },
+        {
+          "id": "off",
+          "modelID": "off",
+          "providerID": "keyed",
+          "name": "Disabled model",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": [],
+          "time": {
+            "released": 1790000000000
+          },
+          "cost": [
+            {
+              "input": 1,
+              "output": 1,
+              "cache": {
+                "read": 0,
+                "write": 0
+              }
+            }
+          ],
+          "status": "active",
+          "enabled": false,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          }
+        },
+        {
+          "id": "solo-model",
+          "modelID": "solo-model",
+          "providerID": "solo",
+          "name": "Solo model",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": [],
+          "time": {
+            "released": 1790000000000
+          },
+          "cost": [
+            {
+              "input": 1,
+              "output": 2,
+              "cache": {
+                "read": 0,
+                "write": 0
+              }
+            }
+          ],
+          "status": "active",
+          "enabled": true,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          }
+        }
+      ]
+    },
+    "default": {
+      "location": {
+        "directory": "/home/example"
+      },
+      "data": {
+        "id": "local",
+        "modelID": "local",
+        "providerID": "fixture",
+        "name": "Native fixture",
+        "capabilities": {
+          "tools": true,
+          "input": [
+            "text"
+          ],
+          "output": [
+            "text"
+          ]
+        },
+        "variants": [
+          {
+            "id": "low",
+            "settings": {
+              "reasoningEffort": "low"
+            }
+          },
+          {
+            "id": "medium",
+            "settings": {
+              "reasoningEffort": "medium"
+            }
+          },
+          {
+            "id": "high",
+            "settings": {
+              "reasoningEffort": "high"
+            }
+          }
+        ],
+        "time": {
+          "released": 1790000000000
+        },
+        "cost": [],
+        "status": "active",
+        "enabled": true,
+        "limit": {
+          "context": 131072,
+          "output": 8192
+        },
+        "settings": {
+          "apiKey": "fixture-secret-key",
+          "baseURL": "http://127.0.0.1:9/v1"
+        },
+        "headers": {
+          "Authorization": "Bearer fixture-secret-key"
+        },
+        "body": {
+          "token": "fixture-secret-key"
+        }
+      }
+    },
+    "integration": {
+      "location": {
+        "directory": "/home/example"
+      },
+      "data": [
+        {
+          "id": "anthropic",
+          "name": "Anthropic",
+          "methods": [
+            {
+              "type": "key"
+            },
+            {
+              "type": "env",
+              "names": [
+                "ANTHROPIC_API_KEY"
+              ]
+            }
+          ],
+          "connections": []
+        },
+        {
+          "id": "opencode",
+          "name": "OpenCode Console",
+          "methods": [
+            {
+              "type": "key",
+              "label": "API key (service account)"
+            }
+          ],
+          "connections": []
+        },
+        {
+          "id": "groq",
+          "name": "Groq",
+          "methods": [
+            {
+              "type": "key"
+            },
+            {
+              "type": "env",
+              "names": [
+                "GROQ_API_KEY"
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "type": "env",
+              "name": "GROQ_API_KEY"
+            }
+          ]
+        },
+        {
+          "id": "fixture",
+          "name": "Private keyless fixture",
+          "methods": [
+            {
+              "type": "key",
+              "label": "Manually enter API Key"
+            }
+          ],
+          "connections": []
+        },
+        {
+          "id": "keyed",
+          "name": "Keyed fixture",
+          "methods": [
+            {
+              "type": "key"
+            }
+          ],
+          "connections": [
+            {
+              "type": "credential",
+              "id": "cred_fixture_team",
+              "label": "Team",
+              "method": "key"
+            },
+            {
+              "type": "credential",
+              "id": "cred_fixture_personal",
+              "label": "Personal",
+              "method": "key"
+            }
+          ]
+        },
+        {
+          "id": "solo",
+          "name": "Solo fixture",
+          "methods": [
+            {
+              "id": "device",
+              "type": "oauth",
+              "label": "Sign in"
+            }
+          ],
+          "connections": [
+            {
+              "type": "credential",
+              "id": "cred_fixture_work",
+              "label": "Work",
+              "method": "oauth",
+              "status": {
+                "status": "needs_auth",
+                "message": "Sign in again with fixture-secret-key",
+                "url": "https://auth.example.invalid/device?code=fixture-secret-key"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "favorites": [
+    "keyed/paid-model",
+    "groq/openai/gpt-oss-20b",
+    "gone/missing"
+  ],
+  "row": {
+    "settings_model": "fixture/local",
+    "model_options": [
+      {
+        "id": "fixture/local",
+        "value": "fixture/local",
+        "label": "Native fixture",
+        "provider": "fixture",
+        "provider_label": "Private keyless fixture",
+        "free": false,
+        "effort_options": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "effort_labels": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "default": true
+      },
+      {
+        "id": "keyed/paid-model",
+        "value": "keyed/paid-model",
+        "label": "Paid model",
+        "provider": "keyed",
+        "provider_label": "Keyed fixture",
+        "free": false,
+        "effort_options": [],
+        "effort_labels": [],
+        "favorite": true
+      },
+      {
+        "id": "groq/openai/gpt-oss-20b",
+        "value": "groq/openai/gpt-oss-20b",
+        "label": "GPT OSS 20B",
+        "provider": "groq",
+        "provider_label": "Groq",
+        "free": false,
+        "effort_options": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "effort_labels": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "favorite": true
+      },
+      {
+        "id": "fixture/alternate",
+        "value": "fixture/alternate",
+        "label": "Alternate fixture",
+        "provider": "fixture",
+        "provider_label": "Private keyless fixture",
+        "free": false,
+        "effort_options": [],
+        "effort_labels": []
+      },
+      {
+        "id": "ollama/qwen3-coder:30b",
+        "value": "ollama/qwen3-coder:30b",
+        "label": "qwen3-coder:30b",
+        "provider": "ollama",
+        "provider_label": "Ollama",
+        "free": false,
+        "effort_options": [],
+        "effort_labels": []
+      },
+      {
+        "id": "opencode/glm-5.3-flash-free",
+        "value": "opencode/glm-5.3-flash-free",
+        "label": "GLM-5.3-Flash Free",
+        "provider": "opencode",
+        "provider_label": "OpenCode",
+        "free": true,
+        "effort_options": [
+          "low",
+          "high",
+          "max"
+        ],
+        "effort_labels": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "opencode/big-pickle",
+        "value": "opencode/big-pickle",
+        "label": "Big Pickle",
+        "provider": "opencode",
+        "provider_label": "OpenCode",
+        "free": true,
+        "effort_options": [],
+        "effort_labels": []
+      },
+      {
+        "id": "groq/groq/compound",
+        "value": "groq/groq/compound",
+        "label": "Compound",
+        "provider": "groq",
+        "provider_label": "Groq",
+        "free": true,
+        "effort_options": [],
+        "effort_labels": []
+      }
+    ],
+    "providers": [
+      {
+        "id": "opencode",
+        "label": "OpenCode",
+        "kind": "free",
+        "credential_count": 0,
+        "model_count": 2
+      },
+      {
+        "id": "groq",
+        "label": "Groq",
+        "kind": "env",
+        "credential_count": 0,
+        "model_count": 2
+      },
+      {
+        "id": "fixture",
+        "label": "Private keyless fixture",
+        "kind": "config",
+        "credential_count": 0,
+        "model_count": 2
+      },
+      {
+        "id": "ollama",
+        "label": "Ollama",
+        "kind": "local",
+        "credential_count": 0,
+        "model_count": 1
+      },
+      {
+        "id": "keyed",
+        "label": "Keyed fixture",
+        "kind": "key",
+        "credential_count": 2,
+        "model_count": 1
+      },
+      {
+        "id": "solo",
+        "label": "Solo fixture",
+        "kind": "oauth",
+        "credential_count": 1,
+        "model_count": 1,
+        "active_label": "Work"
+      }
+    ],
+    "model_options_truncated": false,
+    "providers_truncated": false
+  },
+  "hgs_account": {
+    "id": "native-opencode",
+    "provider": "opencode",
+    "label": "Native OpenCode configuration",
+    "native": true,
+    "installed": true,
+    "is_default": true,
+    "catalog_state": "ready",
+    "catalog_reason": "",
+    "catalog_at": 1792267200.5,
+    "settings_model": "fixture/local",
+    "model_options": [
+      {
+        "id": "fixture/local",
+        "value": "fixture/local",
+        "label": "Native fixture",
+        "provider": "fixture",
+        "provider_label": "Private keyless fixture",
+        "free": false,
+        "effort_options": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "effort_labels": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "default": true
+      },
+      {
+        "id": "keyed/paid-model",
+        "value": "keyed/paid-model",
+        "label": "Paid model",
+        "provider": "keyed",
+        "provider_label": "Keyed fixture",
+        "free": false,
+        "effort_options": [],
+        "effort_labels": [],
+        "favorite": true
+      },
+      {
+        "id": "groq/openai/gpt-oss-20b",
+        "value": "groq/openai/gpt-oss-20b",
+        "label": "GPT OSS 20B",
+        "provider": "groq",
+        "provider_label": "Groq",
+        "free": false,
+        "effort_options": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "effort_labels": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "favorite": true
+      },
+      {
+        "id": "fixture/alternate",
+        "value": "fixture/alternate",
+        "label": "Alternate fixture",
+        "provider": "fixture",
+        "provider_label": "Private keyless fixture",
+        "free": false,
+        "effort_options": [],
+        "effort_labels": []
+      },
+      {
+        "id": "ollama/qwen3-coder:30b",
+        "value": "ollama/qwen3-coder:30b",
+        "label": "qwen3-coder:30b",
+        "provider": "ollama",
+        "provider_label": "Ollama",
+        "free": false,
+        "effort_options": [],
+        "effort_labels": []
+      },
+      {
+        "id": "opencode/glm-5.3-flash-free",
+        "value": "opencode/glm-5.3-flash-free",
+        "label": "GLM-5.3-Flash Free",
+        "provider": "opencode",
+        "provider_label": "OpenCode",
+        "free": true,
+        "effort_options": [
+          "low",
+          "high",
+          "max"
+        ],
+        "effort_labels": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "id": "opencode/big-pickle",
+        "value": "opencode/big-pickle",
+        "label": "Big Pickle",
+        "provider": "opencode",
+        "provider_label": "OpenCode",
+        "free": true,
+        "effort_options": [],
+        "effort_labels": []
+      },
+      {
+        "id": "groq/groq/compound",
+        "value": "groq/groq/compound",
+        "label": "Compound",
+        "provider": "groq",
+        "provider_label": "Groq",
+        "free": true,
+        "effort_options": [],
+        "effort_labels": []
+      }
+    ],
+    "providers": [
+      {
+        "id": "opencode",
+        "label": "OpenCode",
+        "kind": "free",
+        "credential_count": 0,
+        "model_count": 2
+      },
+      {
+        "id": "groq",
+        "label": "Groq",
+        "kind": "env",
+        "credential_count": 0,
+        "model_count": 2
+      },
+      {
+        "id": "fixture",
+        "label": "Private keyless fixture",
+        "kind": "config",
+        "credential_count": 0,
+        "model_count": 2
+      },
+      {
+        "id": "ollama",
+        "label": "Ollama",
+        "kind": "local",
+        "credential_count": 0,
+        "model_count": 1
+      },
+      {
+        "id": "keyed",
+        "label": "Keyed fixture",
+        "kind": "key",
+        "credential_count": 2,
+        "model_count": 1
+      },
+      {
+        "id": "solo",
+        "label": "Solo fixture",
+        "kind": "oauth",
+        "credential_count": 1,
+        "model_count": 1,
+        "active_label": "Work"
+      }
+    ],
+    "model_options_truncated": false,
+    "providers_truncated": false
+  },
+  "heartbeat_account": {
+    "id": "native-opencode",
+    "provider": "opencode",
+    "label": "Native OpenCode configuration",
+    "native": true,
+    "installed": true,
+    "is_default": true,
+    "model_options": [
+      {
+        "value": "fixture/local",
+        "label": "Native fixture",
+        "provider": "fixture",
+        "provider_label": "Private keyless fixture",
+        "free": false,
+        "default": true,
+        "effort_options": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "effort_labels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      {
+        "value": "keyed/paid-model",
+        "label": "Paid model",
+        "provider": "keyed",
+        "provider_label": "Keyed fixture",
+        "free": false,
+        "favorite": true
+      },
+      {
+        "value": "groq/openai/gpt-oss-20b",
+        "label": "GPT OSS 20B",
+        "provider": "groq",
+        "provider_label": "Groq",
+        "free": false,
+        "favorite": true,
+        "effort_options": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "effort_labels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      {
+        "value": "fixture/alternate",
+        "label": "Alternate fixture",
+        "provider": "fixture",
+        "provider_label": "Private keyless fixture",
+        "free": false
+      },
+      {
+        "value": "ollama/qwen3-coder:30b",
+        "label": "qwen3-coder:30b",
+        "provider": "ollama",
+        "provider_label": "Ollama",
+        "free": false
+      },
+      {
+        "value": "opencode/glm-5.3-flash-free",
+        "label": "GLM-5.3-Flash Free",
+        "provider": "opencode",
+        "provider_label": "OpenCode",
+        "free": true,
+        "effort_options": [
+          "low",
+          "high",
+          "max"
+        ],
+        "effort_labels": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "value": "opencode/big-pickle",
+        "label": "Big Pickle",
+        "provider": "opencode",
+        "provider_label": "OpenCode",
+        "free": true
+      },
+      {
+        "value": "groq/groq/compound",
+        "label": "Compound",
+        "provider": "groq",
+        "provider_label": "Groq",
+        "free": true
+      }
+    ],
+    "catalog_state": "ready",
+    "catalog_at": 1792267200.5,
+    "model_options_truncated": false,
+    "providers": [
+      {
+        "id": "opencode",
+        "label": "OpenCode",
+        "kind": "free",
+        "credential_count": 0,
+        "model_count": 2
+      },
+      {
+        "id": "groq",
+        "label": "Groq",
+        "kind": "env",
+        "credential_count": 0,
+        "model_count": 2
+      },
+      {
+        "id": "fixture",
+        "label": "Private keyless fixture",
+        "kind": "config",
+        "credential_count": 0,
+        "model_count": 2
+      },
+      {
+        "id": "ollama",
+        "label": "Ollama",
+        "kind": "local",
+        "credential_count": 0,
+        "model_count": 1
+      },
+      {
+        "id": "keyed",
+        "label": "Keyed fixture",
+        "kind": "key",
+        "credential_count": 2,
+        "model_count": 1
+      },
+      {
+        "id": "solo",
+        "label": "Solo fixture",
+        "kind": "oauth",
+        "credential_count": 1,
+        "model_count": 1,
+        "active_label": "Work"
+      }
+    ],
+    "providers_truncated": false,
+    "usage": {
+      "status": "unavailable",
+      "identity": {},
+      "windows": [],
+      "refreshing": false,
+      "refresh_error": false,
+      "stale": true
+    }
+  },
+  "launch_account": {
+    "id": "native-opencode",
+    "provider": "opencode",
+    "label": "Native OpenCode configuration",
+    "native": true,
+    "is_default": true,
+    "installed": true,
+    "auth_status": "unknown",
+    "model_options": [
+      {
+        "value": "fixture/local",
+        "label": "Native fixture",
+        "provider": "fixture",
+        "provider_label": "Private keyless fixture",
+        "free": false,
+        "default": true,
+        "effort_options": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "effort_labels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      {
+        "value": "keyed/paid-model",
+        "label": "Paid model",
+        "provider": "keyed",
+        "provider_label": "Keyed fixture",
+        "free": false,
+        "favorite": true
+      },
+      {
+        "value": "groq/openai/gpt-oss-20b",
+        "label": "GPT OSS 20B",
+        "provider": "groq",
+        "provider_label": "Groq",
+        "free": false,
+        "favorite": true,
+        "effort_options": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "effort_labels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      {
+        "value": "fixture/alternate",
+        "label": "Alternate fixture",
+        "provider": "fixture",
+        "provider_label": "Private keyless fixture",
+        "free": false
+      },
+      {
+        "value": "ollama/qwen3-coder:30b",
+        "label": "qwen3-coder:30b",
+        "provider": "ollama",
+        "provider_label": "Ollama",
+        "free": false
+      },
+      {
+        "value": "opencode/glm-5.3-flash-free",
+        "label": "GLM-5.3-Flash Free",
+        "provider": "opencode",
+        "provider_label": "OpenCode",
+        "free": true,
+        "effort_options": [
+          "low",
+          "high",
+          "max"
+        ],
+        "effort_labels": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      {
+        "value": "opencode/big-pickle",
+        "label": "Big Pickle",
+        "provider": "opencode",
+        "provider_label": "OpenCode",
+        "free": true
+      },
+      {
+        "value": "groq/groq/compound",
+        "label": "Compound",
+        "provider": "groq",
+        "provider_label": "Groq",
+        "free": true
+      }
+    ],
+    "catalog_state": "ready",
+    "catalog_at": 1792267200.5,
+    "model_options_truncated": false
+  },
+  "stopped_account": {
+    "id": "native-opencode",
+    "provider": "opencode",
+    "label": "Native OpenCode configuration",
+    "native": true,
+    "installed": true,
+    "is_default": true,
+    "model_options": [
+      {
+        "value": "fixture/local",
+        "label": "Native fixture",
+        "provider": "fixture",
+        "provider_label": "Private keyless fixture",
+        "free": false,
+        "default": true,
+        "effort_options": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "effort_labels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "catalog_state": "not_running",
+    "catalog_reason": "OpenCode is not running on fixture",
+    "catalog_at": 1792267200.5,
+    "model_options_truncated": true,
+    "providers": [
+      {
+        "id": "opencode",
+        "label": "OpenCode",
+        "kind": "free",
+        "credential_count": 0,
+        "model_count": 2
+      },
+      {
+        "id": "groq",
+        "label": "Groq",
+        "kind": "env",
+        "credential_count": 0,
+        "model_count": 2
+      }
+    ],
+    "providers_truncated": true,
+    "usage": {
+      "status": "unavailable",
+      "identity": {},
+      "windows": [],
+      "refreshing": false,
+      "refresh_error": false,
+      "stale": true
+    }
+  },
+  "ascii_lengths": [
+    {
+      "value": {
+        "a": "x"
+      },
+      "length": 10
+    },
+    {
+      "value": [
+        "caf\u00e9",
+        "\ud83d\ude00",
+        "\u0000\u001f",
+        "\"\\",
+        "\u007f",
+        "\n\t\r\b\f",
+        1,
+        1.5,
+        true,
+        null,
+        [],
+        {}
+      ],
+      "length": 105
+    },
+    {
+      "value": {
+        "label": "\u754c\u754c\u754c",
+        "nested": {
+          "k": [
+            0,
+            -2,
+            1792267200.5
+          ]
+        }
+      },
+      "length": 71
+    },
+    {
+      "value": {
+        "id": "native-opencode",
+        "provider": "opencode",
+        "label": "Native OpenCode configuration",
+        "native": true,
+        "installed": true,
+        "is_default": true,
+        "catalog_state": "ready",
+        "catalog_reason": "",
+        "catalog_at": 1792267200.5,
+        "settings_model": "fixture/local",
+        "model_options": [
+          {
+            "id": "fixture/local",
+            "value": "fixture/local",
+            "label": "Native fixture",
+            "provider": "fixture",
+            "provider_label": "Private keyless fixture",
+            "free": false,
+            "effort_options": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "effort_labels": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "default": true
+          },
+          {
+            "id": "keyed/paid-model",
+            "value": "keyed/paid-model",
+            "label": "Paid model",
+            "provider": "keyed",
+            "provider_label": "Keyed fixture",
+            "free": false,
+            "effort_options": [],
+            "effort_labels": [],
+            "favorite": true
+          },
+          {
+            "id": "groq/openai/gpt-oss-20b",
+            "value": "groq/openai/gpt-oss-20b",
+            "label": "GPT OSS 20B",
+            "provider": "groq",
+            "provider_label": "Groq",
+            "free": false,
+            "effort_options": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "effort_labels": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "favorite": true
+          },
+          {
+            "id": "fixture/alternate",
+            "value": "fixture/alternate",
+            "label": "Alternate fixture",
+            "provider": "fixture",
+            "provider_label": "Private keyless fixture",
+            "free": false,
+            "effort_options": [],
+            "effort_labels": []
+          },
+          {
+            "id": "ollama/qwen3-coder:30b",
+            "value": "ollama/qwen3-coder:30b",
+            "label": "qwen3-coder:30b",
+            "provider": "ollama",
+            "provider_label": "Ollama",
+            "free": false,
+            "effort_options": [],
+            "effort_labels": []
+          },
+          {
+            "id": "opencode/glm-5.3-flash-free",
+            "value": "opencode/glm-5.3-flash-free",
+            "label": "GLM-5.3-Flash Free",
+            "provider": "opencode",
+            "provider_label": "OpenCode",
+            "free": true,
+            "effort_options": [
+              "low",
+              "high",
+              "max"
+            ],
+            "effort_labels": [
+              "low",
+              "high",
+              "max"
+            ]
+          },
+          {
+            "id": "opencode/big-pickle",
+            "value": "opencode/big-pickle",
+            "label": "Big Pickle",
+            "provider": "opencode",
+            "provider_label": "OpenCode",
+            "free": true,
+            "effort_options": [],
+            "effort_labels": []
+          },
+          {
+            "id": "groq/groq/compound",
+            "value": "groq/groq/compound",
+            "label": "Compound",
+            "provider": "groq",
+            "provider_label": "Groq",
+            "free": true,
+            "effort_options": [],
+            "effort_labels": []
+          }
+        ],
+        "providers": [
+          {
+            "id": "opencode",
+            "label": "OpenCode",
+            "kind": "free",
+            "credential_count": 0,
+            "model_count": 2
+          },
+          {
+            "id": "groq",
+            "label": "Groq",
+            "kind": "env",
+            "credential_count": 0,
+            "model_count": 2
+          },
+          {
+            "id": "fixture",
+            "label": "Private keyless fixture",
+            "kind": "config",
+            "credential_count": 0,
+            "model_count": 2
+          },
+          {
+            "id": "ollama",
+            "label": "Ollama",
+            "kind": "local",
+            "credential_count": 0,
+            "model_count": 1
+          },
+          {
+            "id": "keyed",
+            "label": "Keyed fixture",
+            "kind": "key",
+            "credential_count": 2,
+            "model_count": 1
+          },
+          {
+            "id": "solo",
+            "label": "Solo fixture",
+            "kind": "oauth",
+            "credential_count": 1,
+            "model_count": 1,
+            "active_label": "Work"
+          }
+        ],
+        "model_options_truncated": false,
+        "providers_truncated": false
+      },
+      "length": 2778
+    },
+    {
+      "value": {
+        "id": "native-opencode",
+        "provider": "opencode",
+        "label": "Native OpenCode configuration",
+        "native": true,
+        "installed": true,
+        "is_default": true,
+        "model_options": [
+          {
+            "value": "fixture/local",
+            "label": "Native fixture",
+            "provider": "fixture",
+            "provider_label": "Private keyless fixture",
+            "free": false,
+            "default": true,
+            "effort_options": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "effort_labels": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          {
+            "value": "keyed/paid-model",
+            "label": "Paid model",
+            "provider": "keyed",
+            "provider_label": "Keyed fixture",
+            "free": false,
+            "favorite": true
+          },
+          {
+            "value": "groq/openai/gpt-oss-20b",
+            "label": "GPT OSS 20B",
+            "provider": "groq",
+            "provider_label": "Groq",
+            "free": false,
+            "favorite": true,
+            "effort_options": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "effort_labels": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          {
+            "value": "fixture/alternate",
+            "label": "Alternate fixture",
+            "provider": "fixture",
+            "provider_label": "Private keyless fixture",
+            "free": false
+          },
+          {
+            "value": "ollama/qwen3-coder:30b",
+            "label": "qwen3-coder:30b",
+            "provider": "ollama",
+            "provider_label": "Ollama",
+            "free": false
+          },
+          {
+            "value": "opencode/glm-5.3-flash-free",
+            "label": "GLM-5.3-Flash Free",
+            "provider": "opencode",
+            "provider_label": "OpenCode",
+            "free": true,
+            "effort_options": [
+              "low",
+              "high",
+              "max"
+            ],
+            "effort_labels": [
+              "low",
+              "high",
+              "max"
+            ]
+          },
+          {
+            "value": "opencode/big-pickle",
+            "label": "Big Pickle",
+            "provider": "opencode",
+            "provider_label": "OpenCode",
+            "free": true
+          },
+          {
+            "value": "groq/groq/compound",
+            "label": "Compound",
+            "provider": "groq",
+            "provider_label": "Groq",
+            "free": true
+          }
+        ],
+        "catalog_state": "ready",
+        "catalog_at": 1792267200.5,
+        "model_options_truncated": false,
+        "providers": [
+          {
+            "id": "opencode",
+            "label": "OpenCode",
+            "kind": "free",
+            "credential_count": 0,
+            "model_count": 2
+          },
+          {
+            "id": "groq",
+            "label": "Groq",
+            "kind": "env",
+            "credential_count": 0,
+            "model_count": 2
+          },
+          {
+            "id": "fixture",
+            "label": "Private keyless fixture",
+            "kind": "config",
+            "credential_count": 0,
+            "model_count": 2
+          },
+          {
+            "id": "ollama",
+            "label": "Ollama",
+            "kind": "local",
+            "credential_count": 0,
+            "model_count": 1
+          },
+          {
+            "id": "keyed",
+            "label": "Keyed fixture",
+            "kind": "key",
+            "credential_count": 2,
+            "model_count": 1
+          },
+          {
+            "id": "solo",
+            "label": "Solo fixture",
+            "kind": "oauth",
+            "credential_count": 1,
+            "model_count": 1,
+            "active_label": "Work"
+          }
+        ],
+        "providers_truncated": false,
+        "usage": {
+          "status": "unavailable",
+          "identity": {},
+          "windows": [],
+          "refreshing": false,
+          "refresh_error": false,
+          "stale": true
+        }
+      },
+      "length": 2398
+    }
+  ],
+  "stopped_hgs_account": {
+    "id": "native-opencode",
+    "provider": "opencode",
+    "label": "Native OpenCode configuration",
+    "native": true,
+    "installed": true,
+    "is_default": true,
+    "catalog_state": "not_running",
+    "catalog_reason": "OpenCode is not running on fixture",
+    "catalog_at": 1792267200.5,
+    "settings_model": "fixture/local",
+    "model_options": [
+      {
+        "id": "fixture/local",
+        "value": "fixture/local",
+        "label": "Native fixture",
+        "provider": "fixture",
+        "provider_label": "Private keyless fixture",
+        "free": false,
+        "effort_options": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "effort_labels": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "default": true
+      }
+    ],
+    "providers": [
+      {
+        "id": "opencode",
+        "label": "OpenCode",
+        "kind": "free",
+        "credential_count": 0,
+        "model_count": 2
+      },
+      {
+        "id": "groq",
+        "label": "Groq",
+        "kind": "env",
+        "credential_count": 0,
+        "model_count": 2
+      }
+    ],
+    "model_options_truncated": true,
+    "providers_truncated": true
+  },
+  "account_models": {
+    "description": "hgs account models for a project folder. service holds the raw answers for that location (the home answers are the top-level service: workspace is listed only here); answer is the complete hgs output with catalog_at fixed.",
+    "location": "/home/example/project",
+    "service": {
+      "location": "/home/example/project",
+      "provider": {
+        "location": {
+          "directory": "/home/example/project"
+        },
+        "data": [
+          {
+            "id": "opencode",
+            "integrationID": "opencode",
+            "name": "OpenCode",
+            "activation": "enabled",
+            "package": "@opencode/ai/providers/openai-compatible",
+            "settings": {
+              "apiKey": "public",
+              "baseURL": "https://opencode.example.invalid/zen/v1"
+            }
+          },
+          {
+            "id": "groq",
+            "integrationID": "groq",
+            "name": "Groq",
+            "activation": "auto",
+            "package": "@opencode/ai/providers/groq"
+          },
+          {
+            "id": "fixture",
+            "name": "Private keyless fixture",
+            "activation": "enabled",
+            "package": "@opencode/ai/providers/openai-compatible",
+            "settings": {
+              "apiKey": "fixture-secret-key",
+              "baseURL": "http://127.0.0.1:9/v1"
+            },
+            "headers": {
+              "Authorization": "Bearer fixture-secret-key"
+            },
+            "body": {
+              "token": "fixture-secret-key"
+            }
+          },
+          {
+            "id": "ollama",
+            "name": "Ollama",
+            "activation": "enabled",
+            "package": "@opencode/ai/providers/openai-compatible",
+            "settings": {
+              "baseURL": "http://127.0.0.1:11434/v1",
+              "provider": "ollama"
+            }
+          },
+          {
+            "id": "keyed",
+            "integrationID": "keyed",
+            "name": "Keyed fixture",
+            "activation": "enabled",
+            "package": "@opencode/ai/providers/openai-compatible"
+          },
+          {
+            "id": "solo",
+            "integrationID": "solo",
+            "name": "Solo fixture",
+            "activation": "enabled",
+            "package": "@opencode/ai/providers/openai-compatible"
+          },
+          {
+            "id": "workspace",
+            "name": "Workspace models",
+            "activation": "enabled",
+            "package": "@opencode/ai/providers/openai-compatible",
+            "settings": {
+              "apiKey": "fixture-secret-key",
+              "baseURL": "http://127.0.0.1:9/v1"
+            },
+            "headers": {
+              "Authorization": "Bearer fixture-secret-key"
+            },
+            "body": {
+              "token": "fixture-secret-key"
+            }
+          }
+        ]
+      },
+      "model": {
+        "location": {
+          "directory": "/home/example/project"
+        },
+        "data": [
+          {
+            "id": "glm-5.3-flash-free",
+            "modelID": "glm-5.3-flash-free",
+            "providerID": "opencode",
+            "name": "GLM-5.3-Flash Free",
+            "capabilities": {
+              "tools": true,
+              "input": [
+                "text"
+              ],
+              "output": [
+                "text"
+              ]
+            },
+            "variants": [
+              {
+                "id": "low",
+                "settings": {
+                  "reasoningEffort": "low"
+                }
+              },
+              {
+                "id": "high",
+                "settings": {
+                  "reasoningEffort": "high"
+                }
+              },
+              {
+                "id": "max",
+                "settings": {
+                  "reasoningEffort": "max"
+                }
+              }
+            ],
+            "time": {
+              "released": 1790000000000
+            },
+            "cost": [
+              {
+                "input": 0,
+                "output": 0,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              }
+            ],
+            "status": "active",
+            "enabled": true,
+            "limit": {
+              "context": 131072,
+              "output": 8192
+            }
+          },
+          {
+            "id": "big-pickle",
+            "modelID": "big-pickle",
+            "providerID": "opencode",
+            "name": "Big Pickle",
+            "capabilities": {
+              "tools": true,
+              "input": [
+                "text"
+              ],
+              "output": [
+                "text"
+              ]
+            },
+            "variants": [],
+            "time": {
+              "released": 1790000000000
+            },
+            "cost": [
+              {
+                "input": 0,
+                "output": 0,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              }
+            ],
+            "status": "active",
+            "enabled": true,
+            "limit": {
+              "context": 131072,
+              "output": 8192
+            }
+          },
+          {
+            "id": "openai/gpt-oss-20b",
+            "modelID": "openai/gpt-oss-20b",
+            "providerID": "groq",
+            "name": "GPT OSS 20B",
+            "capabilities": {
+              "tools": true,
+              "input": [
+                "text"
+              ],
+              "output": [
+                "text"
+              ]
+            },
+            "variants": [
+              {
+                "id": "low",
+                "settings": {
+                  "reasoningEffort": "low"
+                }
+              },
+              {
+                "id": "medium",
+                "settings": {
+                  "reasoningEffort": "medium"
+                }
+              },
+              {
+                "id": "high",
+                "settings": {
+                  "reasoningEffort": "high"
+                }
+              }
+            ],
+            "time": {
+              "released": 1790000000000
+            },
+            "cost": [
+              {
+                "input": 0.075,
+                "output": 0.3,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              }
+            ],
+            "status": "active",
+            "enabled": true,
+            "limit": {
+              "context": 131072,
+              "output": 8192
+            }
+          },
+          {
+            "id": "groq/compound",
+            "modelID": "groq/compound",
+            "providerID": "groq",
+            "name": "Compound",
+            "capabilities": {
+              "tools": true,
+              "input": [
+                "text"
+              ],
+              "output": [
+                "text"
+              ]
+            },
+            "variants": [],
+            "time": {
+              "released": 1790000000000
+            },
+            "cost": [
+              {
+                "input": 0,
+                "output": 0,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              }
+            ],
+            "status": "active",
+            "enabled": true,
+            "limit": {
+              "context": 131072,
+              "output": 8192
+            }
+          },
+          {
+            "id": "local",
+            "modelID": "local",
+            "providerID": "fixture",
+            "name": "Native fixture",
+            "capabilities": {
+              "tools": true,
+              "input": [
+                "text"
+              ],
+              "output": [
+                "text"
+              ]
+            },
+            "variants": [
+              {
+                "id": "low",
+                "settings": {
+                  "reasoningEffort": "low"
+                }
+              },
+              {
+                "id": "medium",
+                "settings": {
+                  "reasoningEffort": "medium"
+                }
+              },
+              {
+                "id": "high",
+                "settings": {
+                  "reasoningEffort": "high"
+                }
+              }
+            ],
+            "time": {
+              "released": 1790000000000
+            },
+            "cost": [],
+            "status": "active",
+            "enabled": true,
+            "limit": {
+              "context": 131072,
+              "output": 8192
+            },
+            "settings": {
+              "apiKey": "fixture-secret-key",
+              "baseURL": "http://127.0.0.1:9/v1"
+            },
+            "headers": {
+              "Authorization": "Bearer fixture-secret-key"
+            },
+            "body": {
+              "token": "fixture-secret-key"
+            }
+          },
+          {
+            "id": "alternate",
+            "modelID": "alternate",
+            "providerID": "fixture",
+            "name": "Alternate fixture",
+            "capabilities": {
+              "tools": true,
+              "input": [
+                "text"
+              ],
+              "output": [
+                "text"
+              ]
+            },
+            "variants": [],
+            "time": {
+              "released": 1790000000000
+            },
+            "cost": [],
+            "status": "active",
+            "enabled": true,
+            "limit": {
+              "context": 131072,
+              "output": 8192
+            },
+            "settings": {
+              "apiKey": "fixture-secret-key",
+              "baseURL": "http://127.0.0.1:9/v1"
+            },
+            "headers": {
+              "Authorization": "Bearer fixture-secret-key"
+            },
+            "body": {
+              "token": "fixture-secret-key"
+            }
+          },
+          {
+            "id": "qwen3-coder:30b",
+            "modelID": "qwen3-coder:30b",
+            "providerID": "ollama",
+            "name": "qwen3-coder:30b",
+            "capabilities": {
+              "tools": true,
+              "input": [
+                "text"
+              ],
+              "output": [
+                "text"
+              ]
+            },
+            "variants": [],
+            "time": {
+              "released": 1790000000000
+            },
+            "cost": [],
+            "status": "active",
+            "enabled": true,
+            "limit": {
+              "context": 131072,
+              "output": 8192
+            }
+          },
+          {
+            "id": "paid-model",
+            "modelID": "paid-model",
+            "providerID": "keyed",
+            "name": "Paid model",
+            "capabilities": {
+              "tools": true,
+              "input": [
+                "text"
+              ],
+              "output": [
+                "text"
+              ]
+            },
+            "variants": [],
+            "time": {
+              "released": 1790000000000
+            },
+            "cost": [
+              {
+                "input": 3,
+                "output": 15,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              }
+            ],
+            "status": "active",
+            "enabled": true,
+            "limit": {
+              "context": 131072,
+              "output": 8192
+            }
+          },
+          {
+            "id": "off",
+            "modelID": "off",
+            "providerID": "keyed",
+            "name": "Disabled model",
+            "capabilities": {
+              "tools": true,
+              "input": [
+                "text"
+              ],
+              "output": [
+                "text"
+              ]
+            },
+            "variants": [],
+            "time": {
+              "released": 1790000000000
+            },
+            "cost": [
+              {
+                "input": 1,
+                "output": 1,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              }
+            ],
+            "status": "active",
+            "enabled": false,
+            "limit": {
+              "context": 131072,
+              "output": 8192
+            }
+          },
+          {
+            "id": "solo-model",
+            "modelID": "solo-model",
+            "providerID": "solo",
+            "name": "Solo model",
+            "capabilities": {
+              "tools": true,
+              "input": [
+                "text"
+              ],
+              "output": [
+                "text"
+              ]
+            },
+            "variants": [],
+            "time": {
+              "released": 1790000000000
+            },
+            "cost": [
+              {
+                "input": 1,
+                "output": 2,
+                "cache": {
+                  "read": 0,
+                  "write": 0
+                }
+              }
+            ],
+            "status": "active",
+            "enabled": true,
+            "limit": {
+              "context": 131072,
+              "output": 8192
+            }
+          },
+          {
+            "id": "team-coder",
+            "modelID": "team-coder",
+            "providerID": "workspace",
+            "name": "Team coder",
+            "capabilities": {
+              "tools": true,
+              "input": [
+                "text"
+              ],
+              "output": [
+                "text"
+              ]
+            },
+            "variants": [
+              {
+                "id": "low",
+                "settings": {
+                  "reasoningEffort": "low"
+                }
+              },
+              {
+                "id": "high",
+                "settings": {
+                  "reasoningEffort": "high"
+                }
+              }
+            ],
+            "time": {
+              "released": 1790000000000
+            },
+            "cost": [],
+            "status": "active",
+            "enabled": true,
+            "limit": {
+              "context": 131072,
+              "output": 8192
+            },
+            "settings": {
+              "apiKey": "fixture-secret-key",
+              "baseURL": "http://127.0.0.1:9/v1"
+            },
+            "headers": {
+              "Authorization": "Bearer fixture-secret-key"
+            },
+            "body": {
+              "token": "fixture-secret-key"
+            }
+          }
+        ]
+      },
+      "default": {
+        "location": {
+          "directory": "/home/example/project"
+        },
+        "data": {
+          "id": "local",
+          "modelID": "local",
+          "providerID": "fixture",
+          "name": "Native fixture",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": [
+            {
+              "id": "low",
+              "settings": {
+                "reasoningEffort": "low"
+              }
+            },
+            {
+              "id": "medium",
+              "settings": {
+                "reasoningEffort": "medium"
+              }
+            },
+            {
+              "id": "high",
+              "settings": {
+                "reasoningEffort": "high"
+              }
+            }
+          ],
+          "time": {
+            "released": 1790000000000
+          },
+          "cost": [],
+          "status": "active",
+          "enabled": true,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          },
+          "settings": {
+            "apiKey": "fixture-secret-key",
+            "baseURL": "http://127.0.0.1:9/v1"
+          },
+          "headers": {
+            "Authorization": "Bearer fixture-secret-key"
+          },
+          "body": {
+            "token": "fixture-secret-key"
+          }
+        }
+      },
+      "integration": {
+        "location": {
+          "directory": "/home/example/project"
+        },
+        "data": [
+          {
+            "id": "anthropic",
+            "name": "Anthropic",
+            "methods": [
+              {
+                "type": "key"
+              },
+              {
+                "type": "env",
+                "names": [
+                  "ANTHROPIC_API_KEY"
+                ]
+              }
+            ],
+            "connections": []
+          },
+          {
+            "id": "opencode",
+            "name": "OpenCode Console",
+            "methods": [
+              {
+                "type": "key",
+                "label": "API key (service account)"
+              }
+            ],
+            "connections": []
+          },
+          {
+            "id": "groq",
+            "name": "Groq",
+            "methods": [
+              {
+                "type": "key"
+              },
+              {
+                "type": "env",
+                "names": [
+                  "GROQ_API_KEY"
+                ]
+              }
+            ],
+            "connections": [
+              {
+                "type": "env",
+                "name": "GROQ_API_KEY"
+              }
+            ]
+          },
+          {
+            "id": "fixture",
+            "name": "Private keyless fixture",
+            "methods": [
+              {
+                "type": "key",
+                "label": "Manually enter API Key"
+              }
+            ],
+            "connections": []
+          },
+          {
+            "id": "keyed",
+            "name": "Keyed fixture",
+            "methods": [
+              {
+                "type": "key"
+              }
+            ],
+            "connections": [
+              {
+                "type": "credential",
+                "id": "cred_fixture_team",
+                "label": "Team",
+                "method": "key"
+              },
+              {
+                "type": "credential",
+                "id": "cred_fixture_personal",
+                "label": "Personal",
+                "method": "key"
+              }
+            ]
+          },
+          {
+            "id": "solo",
+            "name": "Solo fixture",
+            "methods": [
+              {
+                "id": "device",
+                "type": "oauth",
+                "label": "Sign in"
+              }
+            ],
+            "connections": [
+              {
+                "type": "credential",
+                "id": "cred_fixture_work",
+                "label": "Work",
+                "method": "oauth",
+                "status": {
+                  "status": "needs_auth",
+                  "message": "Sign in again with fixture-secret-key",
+                  "url": "https://auth.example.invalid/device?code=fixture-secret-key"
+                }
+              }
+            ]
+          },
+          {
+            "id": "workspace",
+            "name": "Workspace models",
+            "methods": [
+              {
+                "type": "key",
+                "label": "Manually enter API Key"
+              }
+            ],
+            "connections": []
+          }
+        ]
+      }
+    },
+    "answer": {
+      "model_options": [
+        {
+          "id": "fixture/local",
+          "value": "fixture/local",
+          "label": "Native fixture",
+          "provider": "fixture",
+          "provider_label": "Private keyless fixture",
+          "free": false,
+          "effort_options": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "effort_labels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": true
+        },
+        {
+          "id": "keyed/paid-model",
+          "value": "keyed/paid-model",
+          "label": "Paid model",
+          "provider": "keyed",
+          "provider_label": "Keyed fixture",
+          "free": false,
+          "effort_options": [],
+          "effort_labels": [],
+          "favorite": true
+        },
+        {
+          "id": "groq/openai/gpt-oss-20b",
+          "value": "groq/openai/gpt-oss-20b",
+          "label": "GPT OSS 20B",
+          "provider": "groq",
+          "provider_label": "Groq",
+          "free": false,
+          "effort_options": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "effort_labels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "favorite": true
+        },
+        {
+          "id": "fixture/alternate",
+          "value": "fixture/alternate",
+          "label": "Alternate fixture",
+          "provider": "fixture",
+          "provider_label": "Private keyless fixture",
+          "free": false,
+          "effort_options": [],
+          "effort_labels": []
+        },
+        {
+          "id": "ollama/qwen3-coder:30b",
+          "value": "ollama/qwen3-coder:30b",
+          "label": "qwen3-coder:30b",
+          "provider": "ollama",
+          "provider_label": "Ollama",
+          "free": false,
+          "effort_options": [],
+          "effort_labels": []
+        },
+        {
+          "id": "workspace/team-coder",
+          "value": "workspace/team-coder",
+          "label": "Team coder",
+          "provider": "workspace",
+          "provider_label": "Workspace models",
+          "free": false,
+          "effort_options": [
+            "low",
+            "high"
+          ],
+          "effort_labels": [
+            "low",
+            "high"
+          ]
+        },
+        {
+          "id": "opencode/glm-5.3-flash-free",
+          "value": "opencode/glm-5.3-flash-free",
+          "label": "GLM-5.3-Flash Free",
+          "provider": "opencode",
+          "provider_label": "OpenCode",
+          "free": true,
+          "effort_options": [
+            "low",
+            "high",
+            "max"
+          ],
+          "effort_labels": [
+            "low",
+            "high",
+            "max"
+          ]
+        },
+        {
+          "id": "opencode/big-pickle",
+          "value": "opencode/big-pickle",
+          "label": "Big Pickle",
+          "provider": "opencode",
+          "provider_label": "OpenCode",
+          "free": true,
+          "effort_options": [],
+          "effort_labels": []
+        },
+        {
+          "id": "groq/groq/compound",
+          "value": "groq/groq/compound",
+          "label": "Compound",
+          "provider": "groq",
+          "provider_label": "Groq",
+          "free": true,
+          "effort_options": [],
+          "effort_labels": []
+        }
+      ],
+      "model_options_truncated": false,
+      "providers": [
+        {
+          "id": "opencode",
+          "label": "OpenCode",
+          "kind": "free",
+          "credential_count": 0,
+          "model_count": 2
+        },
+        {
+          "id": "groq",
+          "label": "Groq",
+          "kind": "env",
+          "credential_count": 0,
+          "model_count": 2
+        },
+        {
+          "id": "fixture",
+          "label": "Private keyless fixture",
+          "kind": "config",
+          "credential_count": 0,
+          "model_count": 2
+        },
+        {
+          "id": "ollama",
+          "label": "Ollama",
+          "kind": "local",
+          "credential_count": 0,
+          "model_count": 1
+        },
+        {
+          "id": "keyed",
+          "label": "Keyed fixture",
+          "kind": "key",
+          "credential_count": 2,
+          "model_count": 1
+        },
+        {
+          "id": "solo",
+          "label": "Solo fixture",
+          "kind": "oauth",
+          "credential_count": 1,
+          "model_count": 1,
+          "active_label": "Work"
+        },
+        {
+          "id": "workspace",
+          "label": "Workspace models",
+          "kind": "config",
+          "credential_count": 0,
+          "model_count": 1,
+          "folder": true
+        }
+      ],
+      "providers_truncated": false,
+      "settings_model": "fixture/local",
+      "location": "/home/example/project",
+      "favorites": [
+        {
+          "value": "keyed/paid-model",
+          "available": true
+        },
+        {
+          "value": "groq/openai/gpt-oss-20b",
+          "available": true
+        },
+        {
+          "value": "gone/missing",
+          "available": false
+        }
+      ],
+      "models_truncated": false,
+      "models": [
+        {
+          "id": "opencode/glm-5.3-flash-free",
+          "value": "opencode/glm-5.3-flash-free",
+          "label": "GLM-5.3-Flash Free",
+          "provider": "opencode",
+          "provider_label": "OpenCode",
+          "free": true,
+          "effort_options": [
+            "low",
+            "high",
+            "max"
+          ],
+          "effort_labels": [
+            "low",
+            "high",
+            "max"
+          ]
+        },
+        {
+          "id": "opencode/big-pickle",
+          "value": "opencode/big-pickle",
+          "label": "Big Pickle",
+          "provider": "opencode",
+          "provider_label": "OpenCode",
+          "free": true,
+          "effort_options": [],
+          "effort_labels": []
+        },
+        {
+          "id": "groq/openai/gpt-oss-20b",
+          "value": "groq/openai/gpt-oss-20b",
+          "label": "GPT OSS 20B",
+          "provider": "groq",
+          "provider_label": "Groq",
+          "free": false,
+          "effort_options": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "effort_labels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "favorite": true
+        },
+        {
+          "id": "groq/groq/compound",
+          "value": "groq/groq/compound",
+          "label": "Compound",
+          "provider": "groq",
+          "provider_label": "Groq",
+          "free": true,
+          "effort_options": [],
+          "effort_labels": []
+        },
+        {
+          "id": "fixture/local",
+          "value": "fixture/local",
+          "label": "Native fixture",
+          "provider": "fixture",
+          "provider_label": "Private keyless fixture",
+          "free": false,
+          "effort_options": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "effort_labels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": true
+        },
+        {
+          "id": "fixture/alternate",
+          "value": "fixture/alternate",
+          "label": "Alternate fixture",
+          "provider": "fixture",
+          "provider_label": "Private keyless fixture",
+          "free": false,
+          "effort_options": [],
+          "effort_labels": []
+        },
+        {
+          "id": "ollama/qwen3-coder:30b",
+          "value": "ollama/qwen3-coder:30b",
+          "label": "qwen3-coder:30b",
+          "provider": "ollama",
+          "provider_label": "Ollama",
+          "free": false,
+          "effort_options": [],
+          "effort_labels": []
+        },
+        {
+          "id": "keyed/paid-model",
+          "value": "keyed/paid-model",
+          "label": "Paid model",
+          "provider": "keyed",
+          "provider_label": "Keyed fixture",
+          "free": false,
+          "effort_options": [],
+          "effort_labels": [],
+          "favorite": true
+        },
+        {
+          "id": "solo/solo-model",
+          "value": "solo/solo-model",
+          "label": "Solo model",
+          "provider": "solo",
+          "provider_label": "Solo fixture",
+          "free": false,
+          "effort_options": [],
+          "effort_labels": []
+        },
+        {
+          "id": "workspace/team-coder",
+          "value": "workspace/team-coder",
+          "label": "Team coder",
+          "provider": "workspace",
+          "provider_label": "Workspace models",
+          "free": false,
+          "effort_options": [
+            "low",
+            "high"
+          ],
+          "effort_labels": [
+            "low",
+            "high"
+          ]
+        }
+      ],
+      "model_catalog_source": "opencode_service",
+      "catalog_state": "ready",
+      "catalog_reason": "",
+      "catalog_at": 1792267200.5
+    }
+  }
+}

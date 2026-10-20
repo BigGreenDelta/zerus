@@ -136,9 +136,92 @@ fn strip_model_key(row: &mut Value, key: &str) {
     }
 }
 
-/// The optional OpenCode model details, least valuable first: a projection
-/// over the bound loses these before it is refused.
-const DEGRADE_KEYS: [&str; 2] = ["effort_labels", "effort_options"];
+/// One degradation step over every row: 0 drops `effort_labels`, 1
+/// `effort_options`, 2 OpenCode `providers` (marking `providers_truncated`).
+/// Least valuable first: a projection over the bound loses these in order
+/// before it is refused.
+const DEGRADE_STEPS: usize = 3;
+fn degrade(row: &mut Value, step: usize) {
+    match step {
+        0 => strip_model_key(row, "effort_labels"),
+        1 => strip_model_key(row, "effort_options"),
+        _ => {
+            if let Some(object) = row.as_object_mut() {
+                if object.remove("providers").is_some() {
+                    object.insert("providers_truncated".into(), json!(true));
+                }
+            }
+        }
+    }
+}
+
+const KINDS: [&str; 8] = [
+    "free", "key", "oauth", "env", "config", "command", "external", "local",
+];
+const MAX_PROVIDERS: usize = 64;
+
+/// The provider part of an OpenCode model value and an OpenCode provider ID.
+fn provider_identity(provider: &str) -> bool {
+    provider
+        .bytes()
+        .next()
+        .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && provider.len() <= 80
+        && provider
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+}
+
+fn count(value: Option<&Value>, maximum: u64) -> Option<u64> {
+    value.and_then(Value::as_u64).filter(|n| *n <= maximum)
+}
+
+/// OpenCode providers for Accounts: identity, kind and counts only. Heartbeat
+/// only; the launch catalog never carries them.
+pub fn opencode_providers(profile: &Map<String, Value>, public: &mut Map<String, Value>) {
+    let Some(Value::Array(rows)) = profile.get("providers") else {
+        return;
+    };
+    let mut listed = Vec::new();
+    let mut truncated = matches!(profile.get("providers_truncated"), Some(Value::Bool(true)));
+    for row in rows.iter().take(1024) {
+        let Some(row) = row.as_object() else {
+            continue;
+        };
+        let Some(id) = row
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| provider_identity(id))
+        else {
+            continue;
+        };
+        if listed.len() == MAX_PROVIDERS {
+            truncated = true;
+            break;
+        }
+        let mut entry = Map::new();
+        entry.insert("id".into(), json!(id));
+        let label = text(row.get("label"), 160)
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| id.into());
+        entry.insert("label".into(), json!(label));
+        if let Some(kind) = member(row.get("kind"), &KINDS) {
+            entry.insert("kind".into(), json!(kind));
+        }
+        if let Some(n) = count(row.get("credential_count"), 64) {
+            entry.insert("credential_count".into(), json!(n));
+        }
+        if let Some(n) = count(row.get("model_count"), 10_000) {
+            entry.insert("model_count".into(), json!(n));
+        }
+        if let Some(label) = text(row.get("active_label"), 80).filter(|label| !label.is_empty()) {
+            entry.insert("active_label".into(), json!(label));
+        }
+        listed.push(Value::Object(entry));
+    }
+    public.insert("providers".into(), Value::Array(listed));
+    public.insert("providers_truncated".into(), json!(truncated));
+}
 
 /// Drops the optional model details, one kind at a time, until the document
 /// built from `rows` fits the bound. Returns whether it fits.
@@ -149,9 +232,9 @@ fn fit_rows(rows: &mut [Value], document: impl Fn(&[Value]) -> Value) -> bool {
     if fits(rows) {
         return true;
     }
-    for key in DEGRADE_KEYS {
+    for step in 0..DEGRADE_STEPS {
         for row in rows.iter_mut() {
-            strip_model_key(row, key);
+            degrade(row, step);
         }
         if fits(rows) {
             return true;
@@ -208,6 +291,15 @@ fn opencode_status(profile: &Map<String, Value>, public: &mut Map<String, Value>
             public.insert(key.into(), json!(reason));
         }
     }
+    if let Some(at) = profile
+        .get("catalog_at")
+        .filter(|value| bounded_number(value))
+    {
+        public.insert("catalog_at".into(), at.clone());
+    }
+    if let Some(Value::Bool(truncated)) = profile.get("model_options_truncated") {
+        public.insert("model_options_truncated".into(), json!(truncated));
+    }
 }
 
 /// `accounts.model_options(profile)`: configured IDs and labels only.
@@ -235,15 +327,10 @@ pub fn model_options(profile: &Map<String, Value>) -> Value {
         let Some((provider, model)) = value.split_once('/') else {
             continue;
         };
-        let provider_valid = provider
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
-            && provider.len() <= 80
-            && provider
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b));
-        if model.is_empty() || !provider_valid || seen.iter().any(|known| known == value) {
+        if model.is_empty()
+            || !provider_identity(provider)
+            || seen.iter().any(|known| known == value)
+        {
             continue;
         }
         seen.push(value.into());
@@ -260,6 +347,11 @@ pub fn model_options(profile: &Map<String, Value>) -> Value {
         }
         if let Some(Value::Bool(free)) = row.get("free") {
             option.insert("free".into(), json!(free));
+        }
+        for mark in ["favorite", "default"] {
+            if let Some(Value::Bool(true)) = row.get(mark) {
+                option.insert(mark.into(), json!(true));
+            }
         }
         if let Some((efforts, labels)) = effort_options(row) {
             option.insert("effort_options".into(), efforts);
@@ -460,6 +552,7 @@ pub fn catalog(raw: &Value) -> PyResult<Vec<(String, Entry)>> {
         if provider == "opencode" {
             public.insert("model_options".into(), model_options(profile));
             opencode_status(profile, &mut public);
+            opencode_providers(profile, &mut public);
         }
         let seed = usage(profile.get("account_status").unwrap_or(&Value::Null));
         let auth_revision = match profile.get("auth_revision") {
@@ -509,10 +602,10 @@ pub fn catalog(raw: &Value) -> PyResult<Vec<(String, Entry)>> {
     };
     let mut rows = projected(&entries);
     if size(&rows) > MAX_CATALOG_BYTES {
-        for key in DEGRADE_KEYS {
+        for step in 0..DEGRADE_STEPS {
             for (_, entry) in &mut entries {
                 let mut model_options = Value::Object(std::mem::take(&mut entry.public));
-                strip_model_key(&mut model_options, key);
+                degrade(&mut model_options, step);
                 if let Value::Object(public) = model_options {
                     entry.public = public;
                 }

@@ -33,6 +33,7 @@
 #include "NativeBrowserPlugin.h"
 #include "NativeUiView.h"
 #include "MessageComposer.h"
+#include "OpenCodeModels.h"
 #include "speech/SpeechComposer.h"
 #include "QuestionCard.h"
 #include "RecoveryWidgets.h"
@@ -1246,6 +1247,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession();
     });
     connect(m_composer, &MessageComposer::settingsRequested, this, &SessionsWindow::changeModelSettings);
+    connectOpenCodeModels();
     connect(&m_client, &HgsClient::settingsFinished, this, [this](quint64 request, bool ok, const QJsonObject &receipt, const QString &error) {
         if (request != m_settingsRequest) return;
         m_settingsRequest = 0;
@@ -3679,6 +3681,8 @@ void SessionsWindow::renderDetails()
         !m_details.value("interrupt_supported").toBool()?tr("Interrupt is unavailable. Open Terminal to stop this turn."):QString());
     const QString settingsProblem = modelSettingsBlockReason(*entry);
     m_composer->setSettingsTerminalAvailable(s.cmd == "claude" && entry->online && s.state == "running");
+    m_composer->setOpenCodeContext(OpenCodeModels::catalogSupported(m_details), m_details.value("model_options_truncated").toBool(), entry->online, entry->machine,
+        entry->host, m_details.value("cwd").toString(entry->session.cwd));
     m_composer->setModelSettings(m_details.value("settings_model").toString(s.model), s.effort, m_details.value("model_options").toArray(), settingsProblem.isEmpty(),
         settingsProblem.isEmpty() ? m_details.value("settings_change_reason").toString() : settingsProblem,
         m_details.value("pending_model").toString(), m_details.value("pending_effort").toString(),
@@ -3893,6 +3897,70 @@ void SessionsWindow::changeModelSettings(const QString &key, const QString &mode
     m_settingsHost = entry->host; m_settingsName = entry->session.name; m_settingsAutomatic = false;
     m_settingsRequest = m_client.requestSettings(entry->host, entry->session.name, model, effort, m_settingsRun, m_settingsConversation, {}, entry->session.cmd == "opencode");
     renderDetails();
+}
+
+// OpenCode's grouped model picker in the composer. All models reads the session's own
+// folder catalog on its computer; a star changes one favorite there, confirmed by hgs.
+void SessionsWindow::connectOpenCodeModels()
+{
+    connect(m_composer, &MessageComposer::openCodeCatalogRequested, this, [this](const QString &key) {
+        const auto *entry = selected();
+        if (!entry || entry->key != key || entry->session.cmd != "opencode") return;
+        if (!entry->online) { m_composer->setOpenCodeCatalogFailed(key, tr("%1 is offline.").arg(entry->machine)); return; }
+        const auto cwd = m_details.value("cwd").toString(entry->session.cwd);
+        const auto request = m_client.requestOpenCodeModels(entry->host, cwd);
+        m_openCodeCatalogRequests.insert(request, {key, entry->host, cwd, m_composer->openCodeGeneration()}); m_openCodeCatalogLatest.insert(key, request);
+    });
+    connect(&m_client, &HgsClient::openCodeModelsReady, this, [this](quint64 request, const QString &host, const QString &location, const QJsonObject &catalog) {
+        const auto key = openCodeCatalogSession(request, host, location);
+        if (!key.isEmpty()) m_composer->setOpenCodeCatalog(key, catalog);
+    });
+    connect(&m_client, &HgsClient::openCodeModelsFailed, this, [this](quint64 request, const QString &host, const QString &location, const QString &error) {
+        const auto key = openCodeCatalogSession(request, host, location);
+        if (const auto *entry = selected(); !key.isEmpty() && entry) m_composer->setOpenCodeCatalogFailed(key, OpenCodeModels::errorText(error, entry->machine));
+    });
+    connect(m_composer, &MessageComposer::openCodeFavoriteRequested, this, [this](const QString &key, const QString &value, bool favorite) {
+        const auto *entry = selected();
+        if (!entry || entry->key != key || entry->session.cmd != "opencode") return;
+        if (!entry->online) { m_composer->setOpenCodeFavorite(key, value, !favorite, tr("%1 is offline.").arg(entry->machine)); return; }
+        m_openCodeFavoriteRequests.insert(m_client.requestOpenCodeFavorite(entry->host, value, favorite),
+                                          {key, entry->host, value, favorite, m_composer->openCodeGeneration()});
+    });
+    connect(&m_client, &HgsClient::openCodeFavoriteReady, this, [this](quint64 request, const QString &, const QJsonObject &) {
+        if (!m_openCodeFavoriteRequests.contains(request)) return;
+        const auto change = m_openCodeFavoriteRequests.take(request);
+        // A star from a picker context left since is neither shown nor read again.
+        if (change.context != m_composer->openCodeGeneration()) return;
+        // The composer ignores it unless that session is still shown; that session reads its details again.
+        m_composer->setOpenCodeFavorite(change.key, change.value, change.favorite, {});
+        if (const auto *entry = selected(); entry && entry->key == change.key && entry->host == change.host) inspect();
+    });
+    connect(&m_client, &HgsClient::openCodeFavoriteFailed, this, [this](quint64 request, const QString &, const QString &error) {
+        if (!m_openCodeFavoriteRequests.contains(request)) return;
+        const auto change = m_openCodeFavoriteRequests.take(request);
+        if (change.context != m_composer->openCodeGeneration()) return;
+        const auto *entry = selected();
+        const auto machine = entry && entry->host == change.host ? entry->machine : change.host;
+        m_composer->setOpenCodeFavorite(change.key, change.value, !change.favorite, OpenCodeModels::errorText(error, machine));
+    });
+}
+
+// The session an `account models` answer may be shown for, or empty. Only the newest
+// request issued for a session answers it, and only while that session is selected
+// with the computer and folder the request was made for, in the same picker context.
+QString SessionsWindow::openCodeCatalogSession(quint64 id, const QString &host, const QString &location)
+{
+    if (!m_openCodeCatalogRequests.contains(id)) return {};
+    const auto request = m_openCodeCatalogRequests.take(id);
+    const bool newest = m_openCodeCatalogLatest.value(request.key) == id;
+    // With nothing of that session pending, no older answer can come any more.
+    if (std::none_of(m_openCodeCatalogRequests.cbegin(), m_openCodeCatalogRequests.cend(),
+                     [&](const OpenCodeCatalogRequest &pending) { return pending.key == request.key; }))
+        m_openCodeCatalogLatest.remove(request.key);
+    const auto *entry = selected();
+    if (!newest || request.context != m_composer->openCodeGeneration() || host != request.host || location != request.cwd || !entry || entry->key != request.key
+        || entry->host != request.host || m_details.value("cwd").toString(entry->session.cwd) != request.cwd) return {};
+    return request.key;
 }
 
 QByteArray SessionsWindow::settingsIdentity(const QString &key, const PendingSettings &pending)

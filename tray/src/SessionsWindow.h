@@ -293,6 +293,9 @@ private:
     QString messageBlockReason(const Entry &entry) const;
     QString modelSettingsBlockReason(const Entry &entry) const;
     void changeModelSettings(const QString &key, const QString &model, const QString &effort);
+    // OpenCode's grouped model picker in the composer: catalog and favorite requests.
+    void connectOpenCodeModels();
+    QString openCodeCatalogSession(quint64 request, const QString &host, const QString &location);
     void applyPendingModelSettings();
     void applyQueuedModelSettings();
     void sendMessage(const QString &key, const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId = {}, const QString &compactionId = {}, bool contextChosen = false);
@@ -375,6 +378,14 @@ private:
     qint64 m_cursor = 0;
     QString m_inspectError, m_connectionError, m_childrenHtml;
     quint64 m_settingsRequest = 0;
+    // `account models` requests by the session, computer and folder they were made for,
+    // and the newest one issued per session; favorite changes by their session. Both keep
+    // the composer's picker context (openCodeGeneration) they were made in.
+    struct OpenCodeCatalogRequest { QString key, host, cwd; quint64 context = 0; };
+    QHash<quint64, OpenCodeCatalogRequest> m_openCodeCatalogRequests;
+    QHash<QString, quint64> m_openCodeCatalogLatest;
+    struct OpenCodeFavoriteRequest { QString key, host, value; bool favorite = false; quint64 context = 0; };
+    QHash<quint64, OpenCodeFavoriteRequest> m_openCodeFavoriteRequests;
     QString m_settingsKey, m_settingsRun, m_settingsConversation;
     QString m_settingsHost, m_settingsName;
     bool m_settingsAutomatic = false;

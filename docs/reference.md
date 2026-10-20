@@ -2220,6 +2220,10 @@ running, and `hgs [@host] account start native-opencode` starts it explicitly
 official user install, `~/.opencode/bin`, is discoverable from GUI, service and
 SSH launches; an `opencode` found earlier on PATH keeps precedence.
 
+`hgs [@host] account favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID` stars a model on that computer (at most 64; stored in `opencode-favorites.json` beside the account catalog). A retried request identity returns its first change, with today's favorites list.
+
+`hgs [@host] account models native-opencode [--location DIR] --json` lists every available model of that computer and folder (connected providers only, at most 10,000 models and 4 MiB; `models_truncated` reports a cut). It never starts OpenCode; with the service stopped it reports `not_running` and, for the home folder, the last known short list.
+
 <a id="deepseek"></a>
 
 ## Official DeepSeek Harness

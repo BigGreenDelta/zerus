@@ -73,6 +73,8 @@
 #include "DirectoryDialog.h"
 #include "ProjectsDialog.h"
 #include "MessageComposer.h"
+#include "OpenCodeModelPicker.h"
+#include "OpenCodeModels.h"
 #include "NativeBrowser.h"
 #include "NativeBrowserPlugin.h"
 #include "MessageBoxIcons.h"
@@ -413,6 +415,10 @@ private slots:
     void launchNameFollowsRenameRules();
     void openCodeModelLaunchUsesNativeAccountAndActivity();
     void openCodeCapabilitiesPreserveDraftWithoutTerminal();
+    void openCodeAllModelsReadsTheSessionFolderCatalog();
+    void openCodeAnotherFolderStartsThePickerAfresh();
+    void openCodeAnswersFromBeforeLeavingASessionStayThere();
+    void openCodeAnswersFromBeforeTheSessionVanishedStayThere();
     void openCodeRemovesUndeliveredMessageOnlyAfterConfirmation();
     void openCodeForgetsOnlyItsBindingWhileRunning();
     void openCodeForgetWithoutRunIdentityUsesKill();
@@ -9293,18 +9299,22 @@ void TestSessionsWindow::openCodeModelLaunchUsesNativeAccountAndActivity()
     NewSessionDialog dialog(FakeCli::program(fake),state,{},"opencode");dialog.selectPath("/fixture/project",false);dialog.show();
     auto *start=dialog.findChild<QPushButton *>("primary"),*none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
     auto *account=dialog.findChild<QListWidget *>("launchAccount");auto *models=dialog.findChild<QComboBox *>("launchModel");
-    QVERIFY(account);QVERIFY(models);QVERIFY(!dialog.findChild<QComboBox *>("launchAgent"));
+    auto *modelButton=dialog.findChild<QPushButton *>("launchModelButton");
+    auto *picker=dialog.findChild<OpenCodeModelPicker *>("launchModelPicker");
+    QVERIFY(account);QVERIFY(models);QVERIFY(modelButton);QVERIFY(picker);QVERIFY(!dialog.findChild<QComboBox *>("launchAgent"));
     auto *terminal=dialog.findChild<QCheckBox *>("launchOpenTerminal");
     QTRY_VERIFY(start->isEnabled());QTRY_COMPARE(models->count(),6);
-    QCOMPARE(account->currentItem()->data(Qt::UserRole).toString(),QString("native-opencode"));QVERIFY(models->isVisible());QVERIFY(!terminal->isEnabled());
+    QCOMPARE(account->currentItem()->data(Qt::UserRole).toString(),QString("native-opencode"));QVERIFY(modelButton->isVisible());QVERIFY(modelButton->isEnabled());QVERIFY(!models->isVisible());QVERIFY(!terminal->isEnabled());
     QVERIFY(terminal->toolTip().contains("Activity"));QVERIFY(none->isChecked());
-    QCOMPARE(models->currentData().toString(),QString());models->setCurrentIndex(models->findData("ollama/qwen3:8b"));
+    QCOMPARE(models->currentData().toString(),QString());modelButton->click();QTRY_VERIFY(picker->isVisible());
+    picker->select("ollama/qwen3:8b");QTRY_VERIFY(!picker->isVisible());QCOMPARE(models->currentData().toString(),QString("ollama/qwen3:8b"));
     QVERIFY(models->findData(id121)>=0);QVERIFY(models->findData(longId)>=0);QVERIFY(models->findData(unicodeId)>=0);
     QCOMPARE(models->findData(longId+"x"),-1);QCOMPARE(models->findData("ollama/"+QString(125,QChar(0x00e9))),-1);
     const auto selectAccount=[&](const QString &id){for(int i=0;i<account->count();++i)if(account->item(i)->data(Qt::UserRole).toString()==id){account->setCurrentRow(i);return true;}return false;};
-    QVERIFY(selectAccount("native-codex"));QVERIFY(!models->isVisible());QCOMPARE(models->currentData().toString(),QString());
-    QVERIFY(selectAccount("native-opencode"));QTRY_COMPARE(models->count(),6);models->setCurrentIndex(models->findData("ollama/qwen3:8b"));
-    QVERIFY(models->geometry().right()<dialog.width());QVERIFY(start->geometry().bottom()<dialog.height());
+    QVERIFY(selectAccount("native-codex"));QVERIFY(!modelButton->isVisible());QVERIFY(!models->isVisible());QCOMPARE(models->currentData().toString(),QString());
+    QVERIFY(selectAccount("native-opencode"));QTRY_COMPARE(models->count(),6);QVERIFY(modelButton->isVisible());
+    modelButton->click();QTRY_VERIFY(picker->isVisible());picker->select("ollama/qwen3:8b");QTRY_VERIFY(!picker->isVisible());
+    QVERIFY(modelButton->geometry().right()<dialog.width());QVERIFY(start->geometry().bottom()<dialog.height());
     QSignalSpy launch(&dialog,&NewSessionDialog::launchRequested);start->click();QTRY_COMPARE(launch.size(),1);
     QCOMPARE(launch[0][1].toString(),QString("opencode"));QCOMPARE(launch[0][2].toString(),QString("/fixture/project"));
     QCOMPARE(launch[0][4].toString(),QString("native-opencode"));QVERIFY(!launch[0][6].toBool());QCOMPARE(launch[0][8].toString(),QString("ollama/qwen3:8b"));
@@ -9349,6 +9359,256 @@ void TestSessionsWindow::openCodeCapabilitiesPreserveDraftWithoutTerminal()
     QVERIFY(!composer->findChild<QPushButton *>("attachMessageFile")->isEnabled());
     QVERIFY(!window.findChild<QPushButton *>("clearSessionAction")->isEnabled());QVERIFY(!window.findChild<QAction *>("forgetSessionAction")->isEnabled());
     QCOMPARE(composer->editor()->toPlainText(),QString("Keep my local model draft"));QVERIFY(!composer->editor()->isReadOnly());
+}
+
+// All models reads the selected session's own folder catalog on its computer. Only the
+// newest read of that session, computer and folder is shown: an older answer, or one for
+// a folder the session no longer reports, is dropped. An older hgs offers no All models.
+void TestSessionsWindow::openCodeAllModelsReadsTheSessionFolderCatalog()
+{
+    const QString name="opencode/project/models",run="models-run",conversation="ses_models";
+    const QJsonArray options{QJsonObject{{"id","fixture/local"},{"value","fixture/local"},{"label","Local fixture"},
+        {"provider","fixture"},{"provider_label","fixture"}}};
+    QJsonObject details{{"name",name},{"cmd","opencode"},{"tracked",true},{"state","running"},{"run_id",run},{"conversation_id",conversation},
+        {"phase","idle"},{"activity","idle"},{"process_state","running"},{"runtime_state","live"},{"terminal_supported",false},{"settings_change_supported",true},
+        {"cwd","/workspace/project"},{"settings_model","fixture/local"},{"model_options",options},{"model_options_truncated",false},
+        {"allowed_actions",QJsonArray{"rename"}},{"events",QJsonArray{}},{"cursor",0}};
+    const auto fixture=m_dir->filePath("opencode-folder-models");
+    const auto writeDetails=[&]{QFile file(fixture+".details");return file.open(QIODevice::WriteOnly)&&file.write(QJsonDocument(details).toJson(QJsonDocument::Compact))>0;};
+    QVERIFY(writeDetails());
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray answer="elif c=='account' and a[1:2]==['models']:\n"
+        " import pathlib,time;h=sys.argv[1][1:] if sys.argv[1].startswith('@') else ''\n"
+        " open(__file__+'.model-calls','a').write(json.dumps([h]+a)+'\\n')\n"
+        " held=pathlib.Path(__file__+'.hold').exists()\n"
+        " models=[{'id':'solo/solo-model','value':'solo/solo-model','label':'Solo model','provider':'solo','provider_label':'Solo fixture','free':False}]\n"
+        " if held:models.append({'id':'stale/old','value':'stale/old','label':'Stale model','provider':'stale','provider_label':'Stale fixture','free':False})\n"
+        " out=json.dumps({'catalog_state':'ready','model_options':[],'models':models,'favorites':[]})\n"
+        " if held:pathlib.Path(__file__+'.held').touch()\n"
+        " while held and not pathlib.Path(__file__+'.release').exists():time.sleep(.02)\n"
+        " print(out)\n"
+        "elif c=='inspect':print(open(__file__+'.details').read())\n";
+    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
+    const auto calls=[&]{QFile file(fixture+".model-calls");return file.open(QIODevice::ReadOnly)?QString::fromUtf8(file.readAll()).split('\n',Qt::SkipEmptyParts):QStringList();};
+    const auto mark=[&](const QString &suffix,bool on){QFile file(fixture+suffix);if(on)QVERIFY(file.open(QIODevice::WriteOnly));else file.remove();};
+    auto state=fleet();auto box=state.local();SessionInfo session;session.name=name;session.cmd="opencode";session.runId=run;session.conversationId=conversation;
+    session.tracked=true;session.activity="idle";session.phase="idle";session.processState="running";session.runtimeState="live";session.state="running";
+    session.cwd="/workspace/project";session.terminalSupported=false;session.actionsReported=true;session.allowedActions={"rename"};
+    box.sessions={session};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},name);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
+    settleSelectedInspection(composer,client,{},name,details);
+    QSignalSpy answers(client,&HgsClient::openCodeModelsReady);
+    composer->findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker=composer->findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");QVERIFY(picker);QTRY_VERIFY(picker->isVisible());
+    auto *all=picker->findChild<QPushButton *>("openCodeAllModels");QVERIFY(all->isEnabled());all->click();
+    QTRY_VERIFY(picker->values().contains("solo/solo-model"));QVERIFY(picker->showingAll());
+    QCOMPARE(QJsonDocument::fromJson(calls().value(0).toUtf8()).array(),
+             QJsonArray({"","account","models","native-opencode","--location","/workspace/project","--json"}));
+    // An older read that answers after a newer one is dropped.
+    mark(".hold",true);emit composer->openCodeCatalogRequested(composer->sessionKey());
+    QTRY_VERIFY(QFile::exists(fixture+".held"));mark(".hold",false);
+    emit composer->openCodeCatalogRequested(composer->sessionKey());QTRY_COMPARE(answers.size(),2);
+    mark(".release",true);QTRY_COMPARE(answers.size(),3);QTest::qWait(100);
+    QVERIFY(!picker->values().contains("stale/old"));QVERIFY(picker->values().contains("solo/solo-model"));
+    // So is a read made for the folder the session reported before.
+    mark(".release",false);mark(".held",false);mark(".hold",true);
+    emit composer->openCodeCatalogRequested(composer->sessionKey());
+    QTRY_VERIFY(QFile::exists(fixture+".held"));mark(".hold",false);
+    details["cwd"]="/workspace/moved";QVERIFY(writeDetails());settleSelectedInspection(composer,client,{},name,details);
+    mark(".release",true);QTRY_COMPARE(answers.size(),4);QTest::qWait(100);
+    QVERIFY(!picker->values().contains("stale/old"));QCOMPARE(calls().size(),4);
+    // An hgs without `account models` offers no All models.
+    details.remove("model_options_truncated");QVERIFY(writeDetails());settleSelectedInspection(composer,client,{},name,details);
+    QTRY_VERIFY(!all->isEnabled());QCOMPARE(all->toolTip(),OpenCodeModels::updateText("arch"));
+}
+
+// The session's folder is part of the picker's context: when its details report another
+// one, the picker starts afresh. A model only the earlier folder offered disappears, and a
+// first read pending from there, answered or failed, never owns the new picker. Nothing is
+// read on its own; the next explicit All models reads the new folder, once.
+void TestSessionsWindow::openCodeAnotherFolderStartsThePickerAfresh()
+{
+    const QString name="opencode/project/folders",run="folders-run",conversation="ses_folders";
+    const QJsonArray options{QJsonObject{{"id","fixture/local"},{"value","fixture/local"},{"label","Local fixture"},
+        {"provider","fixture"},{"provider_label","fixture"}}};
+    QJsonObject details{{"name",name},{"cmd","opencode"},{"tracked",true},{"state","running"},{"run_id",run},{"conversation_id",conversation},
+        {"phase","idle"},{"activity","idle"},{"process_state","running"},{"runtime_state","live"},{"terminal_supported",false},{"settings_change_supported",true},
+        {"cwd","/workspace/project"},{"settings_model","fixture/local"},{"model_options",options},{"model_options_truncated",false},
+        {"allowed_actions",QJsonArray{"rename"}},{"events",QJsonArray{}},{"cursor",0}};
+    const auto fixture=m_dir->filePath("opencode-folder-contexts");
+    const auto writeDetails=[&]{QFile file(fixture+".details");return file.open(QIODevice::WriteOnly)&&file.write(QJsonDocument(details).toJson(QJsonDocument::Compact))>0;};
+    QVERIFY(writeDetails());
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    // Each read records its folder and lists one model of that folder; it can be held, then fail.
+    const QByteArray answer="elif c=='account' and a[1:2]==['models']:\n"
+        " import pathlib,time;location=a[a.index('--location')+1]\n"
+        " open(__file__+'.model-folders','a').write(location+'\\n')\n"
+        " held=pathlib.Path(__file__+'.hold').exists()\n"
+        " if held:pathlib.Path(__file__+'.held').touch()\n"
+        " while held and not pathlib.Path(__file__+'.release').exists():time.sleep(.02)\n"
+        " if pathlib.Path(__file__+'.fail').exists():sys.exit('The catalog is unavailable')\n"
+        " folder=location.rsplit('/',1)[-1]\n"
+        " print(json.dumps({'catalog_state':'ready','model_options':[],'models':[{'id':'folder/'+folder,'value':'folder/'+folder,'label':'Folder '+folder,'provider':'folder','provider_label':'Folder fixture','free':False}],'favorites':[]}))\n"
+        "elif c=='inspect':print(open(__file__+'.details').read())\n";
+    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
+    const auto folders=[&]{QFile file(fixture+".model-folders");return file.open(QIODevice::ReadOnly)?QString::fromUtf8(file.readAll()).split('\n',Qt::SkipEmptyParts):QStringList();};
+    const auto mark=[&](const QString &suffix,bool on){QFile file(fixture+suffix);if(on)QVERIFY(file.open(QIODevice::WriteOnly));else file.remove();};
+    auto state=fleet();auto box=state.local();SessionInfo session;session.name=name;session.cmd="opencode";session.runId=run;session.conversationId=conversation;
+    session.tracked=true;session.activity="idle";session.phase="idle";session.processState="running";session.runtimeState="live";session.state="running";
+    session.cwd="/workspace/project";session.terminalSupported=false;session.actionsReported=true;session.allowedActions={"rename"};
+    box.sessions={session};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},name);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
+    settleSelectedInspection(composer,client,{},name,details);
+    QSignalSpy answers(client,&HgsClient::openCodeModelsReady),failures(client,&HgsClient::openCodeModelsFailed);
+    auto *open=composer->findChild<QPushButton *>("sessionModelSettings");
+    auto *picker=composer->findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");QVERIFY(picker);
+    auto *all=picker->findChild<QPushButton *>("openCodeAllModels");auto *notice=picker->findChild<QLabel *>("openCodeModelNotice");
+    const auto moveTo=[&](const QString &folder){details["cwd"]=folder;QVERIFY(writeDetails());settleSelectedInspection(composer,client,{},name,details);};
+    const auto allModels=[&]{open->click();QTRY_VERIFY(picker->isVisible());all->click();};
+    // A first read still pending when the details report another folder never shows there.
+    mark(".hold",true);allModels();QTRY_VERIFY(QFile::exists(fixture+".held"));QCOMPARE(notice->text(),QString("Loading all models…"));
+    moveTo("/workspace/moved");QVERIFY(!picker->showingAll());QVERIFY(notice->text().isEmpty());
+    mark(".hold",false);mark(".release",true);QTRY_COMPARE(answers.size(),1);QTest::qWait(100);
+    QVERIFY(!picker->showingAll());QVERIFY(!picker->values().contains("folder/project"));QVERIFY(notice->text().isEmpty());
+    // The next explicit All models reads the new folder once and shows its catalog.
+    mark(".release",false);mark(".held",false);allModels();QTRY_COMPARE(answers.size(),2);
+    QTRY_VERIFY(picker->values().contains("folder/moved"));QVERIFY(picker->showingAll());
+    QCOMPARE(folders(),QStringList({"/workspace/project","/workspace/moved"}));
+    // A model only the earlier folder offered disappears with it; nothing is read on its own.
+    moveTo("/workspace/third");QVERIFY(!picker->showingAll());QVERIFY(!picker->values().contains("folder/moved"));
+    QTest::qWait(100);QCOMPARE(folders().size(),2);
+    // Nor does the failure of a first read pending from there.
+    mark(".hold",true);mark(".fail",true);allModels();QTRY_VERIFY(QFile::exists(fixture+".held"));
+    moveTo("/workspace/fourth");mark(".hold",false);mark(".release",true);QTRY_COMPARE(failures.size(),1);QTest::qWait(100);
+    QVERIFY(!picker->showingAll());QVERIFY(notice->text().isEmpty());
+    mark(".fail",false);mark(".release",false);mark(".held",false);allModels();QTRY_COMPARE(answers.size(),3);
+    QTRY_VERIFY(picker->values().contains("folder/fourth"));QVERIFY(!picker->values().contains("folder/third"));
+    QCOMPARE(folders(),QStringList({"/workspace/project","/workspace/moved","/workspace/third","/workspace/fourth"}));
+    QCOMPARE(failures.size(),1);
+}
+
+// Answers to a read and a star made before the session was left never show after a return
+// to it, although its computer and folder are the same: the return is a new picker context.
+// Nothing is read or starred again on its own; the next explicit All models reads, once.
+void TestSessionsWindow::openCodeAnswersFromBeforeLeavingASessionStayThere()
+{
+    const QString name="opencode/project/first",second="opencode/project/second";
+    const QJsonArray options{QJsonObject{{"id","fixture/local"},{"value","fixture/local"},{"label","Local fixture"},{"provider","fixture"},{"provider_label","fixture"}},
+        QJsonObject{{"id","fixture/alternate"},{"value","fixture/alternate"},{"label","Alternate fixture"},{"provider","fixture"},{"provider_label","fixture"}}};
+    const QJsonObject details{{"name",name},{"cmd","opencode"},{"tracked",true},{"state","running"},{"run_id","first-run"},{"conversation_id","ses_first"},
+        {"phase","idle"},{"activity","idle"},{"process_state","running"},{"runtime_state","live"},{"terminal_supported",false},{"settings_change_supported",true},
+        {"cwd","/workspace/project"},{"settings_model","fixture/local"},{"model_options",options},{"model_options_truncated",false},
+        {"allowed_actions",QJsonArray{"rename"}},{"events",QJsonArray{}},{"cursor",0}};
+    auto secondDetails=details;secondDetails["name"]=second;secondDetails["run_id"]="second-run";secondDetails["conversation_id"]="ses_second";
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    // Reads and stars record what they are and can be held; a star answers with its exact receipt.
+    const QByteArray answer="elif c=='account' and a[1:2] in (['models'],['favorite']):\n"
+        " import pathlib,time;open(__file__+'.calls','a').write(a[1]+'\\n')\n"
+        " held=pathlib.Path(__file__+'.hold').exists()\n"
+        " while held and not pathlib.Path(__file__+'.release').exists():time.sleep(.02)\n"
+        " if a[1]=='favorite':print(json.dumps({'status':'applied','request_id':a[a.index('--request-id')+1],'model':a[a.index('--model')+1],'favorite':a[a.index('--favorite')+1]=='on'}))\n"
+        " else:print(json.dumps({'catalog_state':'ready','model_options':[],'models':[{'id':'solo/solo-model','value':'solo/solo-model','label':'Solo model','provider':'solo','provider_label':'Solo fixture','free':False}],'favorites':[]}))\n"
+        "elif c=='inspect' and a[1:2]==["+FakeCli::pythonString(name)+"]:print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact)))+")\n"
+        "elif c=='inspect' and a[1:2]==["+FakeCli::pythonString(second)+"]:print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(secondDetails).toJson(QJsonDocument::Compact)))+")\n";
+    const auto fixture=m_dir->filePath("opencode-left-session");
+    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
+    const auto calls=[&]{QFile file(fixture+".calls");auto made=file.open(QIODevice::ReadOnly)?QString::fromUtf8(file.readAll()).split('\n',Qt::SkipEmptyParts):QStringList();made.sort();return made;};
+    const auto mark=[&](const QString &suffix,bool on){QFile file(fixture+suffix);if(on)QVERIFY(file.open(QIODevice::WriteOnly));else file.remove();};
+    auto state=fleet();auto box=state.local();SessionInfo session;session.name=name;session.cmd="opencode";session.runId="first-run";session.conversationId="ses_first";
+    session.tracked=true;session.activity="idle";session.phase="idle";session.processState="running";session.runtimeState="live";session.state="running";
+    session.cwd="/workspace/project";session.terminalSupported=false;session.actionsReported=true;session.allowedActions={"rename"};
+    auto secondSession=session;secondSession.name=second;secondSession.runId="second-run";secondSession.conversationId="ses_second";
+    box.sessions={session,secondSession};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},name);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
+    settleSelectedInspection(composer,client,{},name,details);
+    QSignalSpy answers(client,&HgsClient::openCodeModelsReady),stars(client,&HgsClient::openCodeFavoriteReady);
+    auto *open=composer->findChild<QPushButton *>("sessionModelSettings");
+    auto *picker=composer->findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");QVERIFY(picker);
+    auto *all=picker->findChild<QPushButton *>("openCodeAllModels");
+    mark(".hold",true);open->click();QTRY_VERIFY(picker->isVisible());all->click();emit picker->favoriteRequested("fixture/alternate",true);
+    QTRY_COMPARE(calls(),QStringList({"favorite","models"}));
+    // Leave the session and return to it: the same computer and folder, a new context.
+    window.showSession({},second);QTRY_COMPARE(composer->sessionKey(),"\n"+second);settleSelectedInspection(composer,client,{},second,secondDetails);
+    window.showSession({},name);QTRY_COMPARE(composer->sessionKey(),"\n"+name);settleSelectedInspection(composer,client,{},name,details);
+    mark(".release",true);QTRY_COMPARE(answers.size(),1);QTRY_COMPARE(stars.size(),1);QTest::qWait(100);
+    QVERIFY(!picker->showingAll());QVERIFY(!picker->values().contains("solo/solo-model"));QVERIFY(!picker->model("fixture/alternate")->favorite);
+    QCOMPARE(calls(),QStringList({"favorite","models"}));
+    mark(".hold",false);mark(".release",false);
+    open->click();QTRY_VERIFY(picker->isVisible());all->click();QTRY_COMPARE(answers.size(),2);
+    QTRY_VERIFY(picker->values().contains("solo/solo-model"));QVERIFY(picker->showingAll());
+    QCOMPARE(calls(),QStringList({"favorite","models","models"}));
+}
+
+// A selected session that vanishes from the fleet leaves the composer without a session.
+// Answers to a read, a star and a failing read made before never show after it returns
+// and is selected again with the same computer and folder, and the star's answer reads no
+// details. Nothing is read, starred or applied on its own; the next explicit All models
+// reads once.
+void TestSessionsWindow::openCodeAnswersFromBeforeTheSessionVanishedStayThere()
+{
+    const QString name="opencode/project/vanishing";
+    const QJsonArray options{QJsonObject{{"id","fixture/local"},{"value","fixture/local"},{"label","Local fixture"},{"provider","fixture"},{"provider_label","fixture"}},
+        QJsonObject{{"id","fixture/alternate"},{"value","fixture/alternate"},{"label","Alternate fixture"},{"provider","fixture"},{"provider_label","fixture"}}};
+    const QJsonObject details{{"name",name},{"cmd","opencode"},{"tracked",true},{"state","running"},{"run_id","vanishing-run"},{"conversation_id","ses_vanishing"},
+        {"phase","idle"},{"activity","idle"},{"process_state","running"},{"runtime_state","live"},{"terminal_supported",false},{"settings_change_supported",true},
+        {"cwd","/workspace/project"},{"settings_model","fixture/local"},{"model_options",options},{"model_options_truncated",false},
+        {"allowed_actions",QJsonArray{"rename"}},{"events",QJsonArray{}},{"cursor",0}};
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    // Reads and stars record what they are and can be held; a read can fail.
+    const QByteArray answer="elif c=='account' and a[1:2] in (['models'],['favorite']):\n"
+        " import pathlib,time;open(__file__+'.calls','a').write(a[1]+'\\n')\n"
+        " held=pathlib.Path(__file__+'.hold').exists()\n"
+        " while held and not pathlib.Path(__file__+'.release').exists():time.sleep(.02)\n"
+        " if a[1]=='favorite':print(json.dumps({'status':'applied','request_id':a[a.index('--request-id')+1],'model':a[a.index('--model')+1],'favorite':a[a.index('--favorite')+1]=='on'}))\n"
+        " elif pathlib.Path(__file__+'.fail').exists():sys.exit('The catalog is unavailable')\n"
+        " else:print(json.dumps({'catalog_state':'ready','model_options':[],'models':[{'id':'solo/solo-model','value':'solo/solo-model','label':'Solo model','provider':'solo','provider_label':'Solo fixture','free':False}],'favorites':[]}))\n"
+        "elif c=='inspect' and a[1:2]==["+FakeCli::pythonString(name)+"]:print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact)))+")\n";
+    const auto fixture=m_dir->filePath("opencode-vanished-session");
+    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
+    const auto lines=[&](const QString &suffix){QFile file(fixture+suffix);auto found=file.open(QIODevice::ReadOnly)?QString::fromUtf8(file.readAll()).split('\n',Qt::SkipEmptyParts):QStringList();found.sort();return found;};
+    const auto mark=[&](const QString &suffix,bool on){QFile file(fixture+suffix);if(on)QVERIFY(file.open(QIODevice::WriteOnly));else file.remove();};
+    SessionInfo session;session.name=name;session.cmd="opencode";session.runId="vanishing-run";session.conversationId="ses_vanishing";
+    session.tracked=true;session.activity="idle";session.phase="idle";session.processState="running";session.runtimeState="live";session.state="running";
+    session.cwd="/workspace/project";session.terminalSupported=false;session.actionsReported=true;session.allowedActions={"rename"};
+    const auto fleetWith=[&](bool present){auto state=fleet();auto box=state.local();box.sessions=present?QList<SessionInfo>{session}:QList<SessionInfo>{};
+        state.setLocal(box,QDateTime::currentMSecsSinceEpoch());return state;};
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(fleetWith(true));window.show();window.showSession({},name);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
+    settleSelectedInspection(composer,client,{},name,details);
+    QSignalSpy answers(client,&HgsClient::openCodeModelsReady),failures(client,&HgsClient::openCodeModelsFailed),stars(client,&HgsClient::openCodeFavoriteReady);
+    QSignalSpy changes(composer,&MessageComposer::settingsRequested);
+    auto *open=composer->findChild<QPushButton *>("sessionModelSettings");
+    auto *picker=composer->findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");QVERIFY(picker);
+    auto *all=picker->findChild<QPushButton *>("openCodeAllModels");auto *notice=picker->findChild<QLabel *>("openCodeModelNotice");
+    // The session vanishes, so nothing is selected; it returns and is selected again, its computer and folder unchanged.
+    const auto vanishAndReturn=[&]{
+        window.setFleet(fleetWith(false));QTRY_VERIFY(composer->sessionKey().isEmpty());
+        window.setFleet(fleetWith(true));window.showSession({},name);QTRY_COMPARE(composer->sessionKey(),"\n"+name);
+        settleSelectedInspection(composer,client,{},name,details);
+    };
+    mark(".hold",true);open->click();QTRY_VERIFY(picker->isVisible());all->click();emit picker->favoriteRequested("fixture/alternate",true);
+    QTRY_COMPARE(lines(".calls"),QStringList({"favorite","models"}));
+    vanishAndReturn();QTest::qWait(100);QTRY_VERIFY(!client->inspectionInFlight({},name));
+    QSignalSpy inspections(client,&HgsClient::inspectionLoadingChanged);
+    mark(".release",true);QTRY_COMPARE(answers.size(),1);QTRY_COMPARE(stars.size(),1);QTest::qWait(200);
+    QVERIFY(!picker->showingAll());QVERIFY(!picker->values().contains("solo/solo-model"));QVERIFY(!picker->model("fixture/alternate")->favorite);
+    // The star's answer read no details.
+    for(const auto &row:inspections)QVERIFY(!(row[1].toString()==name&&row[4].toBool()));
+    // A failing read held across the same vanish and return shows no failure either.
+    mark(".release",false);mark(".fail",true);
+    open->click();QTRY_VERIFY(picker->isVisible());all->click();QTRY_COMPARE(lines(".calls"),QStringList({"favorite","models","models"}));
+    vanishAndReturn();mark(".release",true);QTRY_COMPARE(failures.size(),1);QTest::qWait(100);
+    QVERIFY(!picker->showingAll());QVERIFY(notice->text().isEmpty());
+    // Nothing was read, starred or applied on its own; the next explicit All models reads once.
+    QCOMPARE(lines(".calls"),QStringList({"favorite","models","models"}));
+    mark(".hold",false);mark(".release",false);mark(".fail",false);
+    open->click();QTRY_VERIFY(picker->isVisible());all->click();QTRY_COMPARE(answers.size(),2);
+    QTRY_VERIFY(picker->values().contains("solo/solo-model"));QVERIFY(picker->showingAll());
+    QCOMPARE(lines(".calls"),QStringList({"favorite","models","models","models"}));
+    QCOMPARE(failures.size(),1);QCOMPARE(stars.size(),1);QCOMPARE(changes.size(),0);
 }
 
 void TestSessionsWindow::openCodeRemovesUndeliveredMessageOnlyAfterConfirmation()
