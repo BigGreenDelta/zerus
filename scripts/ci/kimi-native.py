@@ -166,6 +166,20 @@ def source_map():
     return {name: digest(ROOT / name) for name in names if name}
 
 
+def hosted_paths(args, env):
+    """Accidental owner-machine invocation refuses before allocation or chmod."""
+    if env.get('GITHUB_ACTIONS') != 'true' or env.get('RUNNER_ENVIRONMENT') != 'github-hosted':
+        raise ValueError('this campaign requires a disposable GitHub-hosted runner')
+    temporary = Path(env['RUNNER_TEMP']).resolve()
+    workspace = Path(env['GITHUB_WORKSPACE']).resolve()
+    if workspace != ROOT:
+        raise ValueError('the checkout is not the declared workspace')
+    if any(not path.resolve().is_relative_to(temporary) for path in (args.hgs, args.tmux)):
+        raise ValueError('hgs and tmux must be private runner-temporary builds')
+    if not args.output.resolve().is_relative_to(workspace / 'artifacts' / 'test-results'):
+        raise ValueError('results must stay in the checkout artifact directory')
+
+
 def environment(runtime, helpers, hgs):
     # No parent credentials, provider variables, proxies or native run bindings.
     env = dict(PATH=str(helpers) + ':/usr/bin:/bin', LANG='C.UTF-8', PYTHONUTF8='1',
@@ -334,6 +348,7 @@ def main():
     parser.add_argument('--tmux', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
+    hosted_paths(args, os.environ)
     os.umask(0o077)
     if not re.fullmatch('[0-9a-f]{40}', args.source_sha):
         raise ValueError('an exact source SHA is required')

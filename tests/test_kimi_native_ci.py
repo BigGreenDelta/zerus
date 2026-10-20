@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import tarfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 import urllib.request
@@ -157,6 +158,22 @@ class KimiNativeCI(unittest.TestCase):
         self.assertFalse(set(env) & {'OPENAI_API_KEY', 'GITHUB_TOKEN', 'KIMI_CODE_BASE_URL', 'HGS_SESSION'})
         self.assertEqual(env['PATH'], str(root / 'helpers') + ':/usr/bin:/bin')
         self.assertTrue(all(Path(env[key]).is_dir() for key in ('HOME', 'TMPDIR', 'XDG_STATE_HOME')))
+
+    def test_owner_machine_and_nonprivate_build_paths_refuse_before_allocation(self):
+        temporary = self.root()
+        args = SimpleNamespace(hgs=temporary / 'hgs', tmux=temporary / 'tmux',
+                               output=ci.ROOT / 'artifacts/test-results/kimi-native')
+        env = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted',
+                   RUNNER_TEMP=str(temporary), GITHUB_WORKSPACE=str(ci.ROOT))
+        ci.hosted_paths(args, env)
+        for changes in (dict(GITHUB_ACTIONS=''), dict(RUNNER_ENVIRONMENT='self-hosted'),
+                        dict(GITHUB_WORKSPACE=str(temporary))):
+            with self.assertRaises(ValueError):
+                ci.hosted_paths(args, dict(env, **changes))
+        args.hgs = Path('/usr/bin/hgs')
+        with self.assertRaisesRegex(ValueError, 'private'):
+            ci.hosted_paths(args, env)
+        self.assertFalse(args.output.exists())
 
     def test_timeout_stops_only_the_owned_child_and_reports_unknown(self):
         log = self.root() / 'log'
