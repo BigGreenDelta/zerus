@@ -161,7 +161,10 @@ fn connection(config: &Config) -> Result<Option<Connection>> {
     };
     #[cfg(windows)]
     if !crate::platform::verify_private_file(&file).unwrap_or(false) {
-        return Err(Error::new(1, "The mobile connection configuration must be private to this Windows user"));
+        return Err(Error::new(
+            1,
+            "The mobile connection configuration must be private to this Windows user",
+        ));
     }
     let mut bytes = Vec::new();
     file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
@@ -401,7 +404,10 @@ mod tests {
             assert_eq!(&args[..before.len()], before.as_slice());
             assert_eq!(args.len(), before.len() + 2);
             assert_eq!(args[before.len()].as_os_str(), "--cacert");
-            assert_eq!(args[before.len() + 1].as_os_str(), std::ffi::OsStr::new(path));
+            assert_eq!(
+                args[before.len() + 1].as_os_str(),
+                std::ffi::OsStr::new(path)
+            );
             assert!(!args.iter().any(|arg| {
                 ["--insecure", "-k", "--ssl-no-revoke"]
                     .iter()
