@@ -149,6 +149,14 @@ elif [ "$simulator" = 0 ]; then
     signing=(CODE_SIGNING_ALLOWED=NO)
 fi
 
+# ZerusKit links the project task replica, which Xcode needs before it resolves the package.
+replica_log="$cache/last-replica-build.log"
+if ! "$root/scripts/build-replica.sh" > "$replica_log" 2>&1; then
+    tail -n 20 "$replica_log" >&2
+    echo "The task replica did not build; full log: $replica_log" >&2
+    exit 1
+fi
+
 log="$cache/last-build.log"
 echo "Building Zerus $version ($configuration, $platform, $revision)…"
 if ! xcodebuild -project "$root/Zerus.xcodeproj" -scheme Zerus -configuration "$configuration" \

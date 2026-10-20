@@ -143,6 +143,10 @@ cat > "$work/ExportOptions.plist" <<PLIST
 </plist>
 PLIST
 
+# ZerusKit links the project task replica (mobile/ios/scripts/build-replica.sh).
+# The workflow builds it in a step of its own, before any signing secret is in
+# the environment, so no dependency's build script runs beside them.
+
 echo "Archiving Zerus $version ($CHANNEL, build $BUILD_NUMBER, ${SOURCE_COMMIT:0:12})…"
 xcodebuild -project "$root/Zerus.xcodeproj" -scheme Zerus -configuration Release -destination generic/platform=iOS \
     -archivePath "$work/Zerus.xcarchive" -derivedDataPath "$work/DerivedData" "${auth[@]}" \

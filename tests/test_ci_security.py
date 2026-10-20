@@ -664,6 +664,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", ios), ["actions/checkout"])
         self.assertIn("persist-credentials: false", ios)
         self.assertIn("swift test", ios)
+        # ZerusKit links the project task replica, built before its tests.
+        self.assertLess(ios.index("bash mobile/ios/scripts/build-replica.sh"), ios.index("swift test"))
         self.assertIn("CODE_SIGNING_ALLOWED=NO", ios)
         self.assertIn("'ios': json.loads(os.environ['RUN_MACOS']),", job(checks, "gate"))
         gate = job(checks, "gate")
@@ -1290,6 +1292,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn('test "$WORKFLOW_REPOSITORY" = ufna/zerus', upload)
         self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", upload), ["actions/checkout"])
         self.assertIn("persist-credentials: false", upload)
+        # The task replica's Rust build, whose dependencies run build scripts, ends before any secret is in the environment.
+        self.assertLess(upload.index("bash mobile/ios/scripts/build-replica.sh"), upload.index("secrets."))
         self.assertIn('if: always()\n        run: |\n          security delete-keychain '
                       '"$RUNNER_TEMP/app-store-connect/signing.keychain-db" 2> /dev/null || true\n'
                       '          rm -rf "$RUNNER_TEMP/app-store-connect"', upload)

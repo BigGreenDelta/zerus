@@ -402,6 +402,10 @@ jobs:
           persist-credentials: false
       - name: Select Xcode 26 or later
         run: bash mobile/ios/scripts/select-xcode.sh
+      - name: Rust for the project task replica
+        run: rustup toolchain install 1.99.1 --profile minimal --target aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Project task replica library
+        run: RUSTUP_TOOLCHAIN=1.99.1 bash mobile/ios/scripts/build-replica.sh
       - name: ZerusKit tests
         working-directory: mobile/ios/ZerusKit
         run: swift test
