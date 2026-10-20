@@ -1519,7 +1519,9 @@ fn deliver(
         Ok(answer) if (400..500).contains(&answer.status) => {
             let reason = refusal_reason(&answer);
             receipt["status"] = json!("refused");
-            receipt["reason"] = json!(reason);
+            // Keep the detailed first refusal local; a durable delivery
+            // record needs only the confirmed HTTP status, not provider text.
+            receipt["reason"] = json!(format!("HTTP {}", answer.status));
             atomic(path, &receipt.to_string())?;
             return Err(refused(&reason));
         }
@@ -2527,10 +2529,35 @@ mod tests {
         let saved: Value = serde_json::from_slice(&fs::read(&native.path).unwrap()).unwrap();
         assert_eq!(saved["status"], "refused");
         let retry = live(dir.path(), vec![]);
-        assert_eq!(run(&retry, "d").unwrap_err(), error);
+        assert_eq!(run(&retry, "d").unwrap_err(), "OpenCode refused this message: HTTP 400");
         assert!(retry.posted.borrow().is_empty());
         let other = live(dir.path(), vec![]);
         assert!(run(&other, "e").unwrap_err().contains("already used"));
+    }
+    #[test]
+    fn a_local_refusal_retains_detail_without_copying_it_into_delivery_audit() {
+        let secret = "https://provider.example.invalid/v1?key=fixture-YO85-SEND\u{1b}[31m";
+        let record = session_record();
+        let native = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/x".into(), 403, json!({"message":secret}),
+        )]));
+        let detail = get(&native, "/api/x").unwrap_err();
+        let local = unavailable(&record, detail);
+        assert!(string(&local, "inspection_reason").contains("fixture-YO85-SEND"));
+        assert_eq!(local["inspection_reason"], local["activity_detail"]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut steps = preflight();
+        steps.push(("POST /api/session/ses_A/prompt", status(403, json!({"message":secret}))));
+        let native = live(dir.path(), steps);
+        assert!(run(&native, "d").unwrap_err().contains("fixture-YO85-SEND"));
+        let stored = fs::read_to_string(&native.path).unwrap();
+        assert!(!stored.contains("provider.example.invalid"));
+        assert!(!stored.contains("fixture-YO85-SEND"));
+        assert_eq!(serde_json::from_str::<Value>(&stored).unwrap()["reason"], "HTTP 403");
+        let retry = live(dir.path(), vec![]);
+        assert_eq!(run(&retry, "d").unwrap_err(), "OpenCode refused this message: HTTP 403");
+        assert!(retry.posted.borrow().is_empty());
     }
     #[test]
     fn a_mismatched_acknowledgement_is_uncertain_without_a_repost() {

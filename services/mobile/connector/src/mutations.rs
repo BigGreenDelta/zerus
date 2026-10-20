@@ -982,6 +982,8 @@ impl<N: Native + 'static> Connector<N> {
             }
             result.insert("archive_id".into(), archive.clone());
         }
+        let opencode = self.state.borrow().opencode_sessions.contains(session);
+        crate::opencode_privacy::action(&mut result, opencode);
         let target = get(&result, "result_target");
         if !target.is_null() {
             let valid = target.as_object().is_some_and(|target| {
@@ -1007,6 +1009,10 @@ impl<N: Native + 'static> Connector<N> {
                 let mut state = self.state.borrow_mut();
                 if operation == "rename" && name != session {
                     state.sessions.remove(session);
+                    state.opencode_sessions.remove(session);
+                }
+                if opencode {
+                    state.opencode_sessions.insert(name.clone());
                 }
                 state.sessions.insert(name);
             }

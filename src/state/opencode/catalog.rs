@@ -485,8 +485,8 @@ pub(super) fn row_from(snapshot: &Snapshot, favorites: &[String], pinned: &[&str
         "settings_model": snapshot.default})
 }
 
-/// The catalog answer. Its reason can carry server text to phones, so it is
-/// presented as session rows present OpenCode's messages (`server_reason`).
+/// The catalog answer. Callers supply fixed status-only reasons; clipping is
+/// only a presentation bound, not permission to forward provider diagnostics.
 fn answer(row: &Value, source: &str, state: &str, reason: &str, at: Value) -> Value {
     let mut answer = row.clone();
     answer["model_catalog_source"] = json!(source);

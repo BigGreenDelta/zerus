@@ -43,6 +43,15 @@ You can also start it yourself with `opencode service start`.
 Connect providers in a terminal on that computer with `opencode auth login`.
 `hgs account login native-opencode` does not run it; it prints that instruction.
 
+OpenCode service refusals can contain private provider diagnostics. Local
+inspection keeps the bounded detail for troubleshooting on the session's
+computer. Phone listings and inspections show a fixed explanation instead;
+ordinary conversation text and questions are unchanged. Failed or uncertain
+session actions use the same fixed error in their durable receipt and every
+retry. Delivery refusal records retain only the HTTP status; the first local
+CLI rejection may show the service's bounded detail on stderr. Historical
+receipts already recorded by an older installation are not rewritten.
+
 ## Models
 
 Zerus lists the models the service reports (`/api/model`), through an allowlist:
