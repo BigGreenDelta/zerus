@@ -1,8 +1,10 @@
 """Memory/source controls; none starts a process, native agent or OS service."""
 import ast
 import ctypes
+import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -51,9 +53,20 @@ class ApprovalGateControls(unittest.TestCase):
         self.assertEqual([pins[v]['win32-x64']['size'] for v in gate.VERSIONS], [159601440, 160725792])
         self.assertEqual(pins['2.2.0']['win32-x64']['sha256'],
                          '5120f69812bc6437354d7d99e801c1b38fee1eeefdc858e2ad726356f1a245b0')
+        original_read = Path.read_bytes
+        manifest = ROOT / 'scripts/ci/kimi-native-manifests/2.1.1.json'
+        changed = original_read(manifest).replace(b'\n', b'\r\n')
+        def read(path):
+            return changed if path == manifest else original_read(path)
+        with mock.patch.object(Path, 'read_bytes', read), self.assertRaises(ValueError) as refused:
+            gate.retained.checked_pins('win32-x64')
+        diagnostic = json.loads(str(refused.exception).split(': ', 1)[1])
+        self.assertEqual(diagnostic, dict(version='2.1.1', expected_sha256=pins['2.1.1']['manifest_sha256'],
+                         observed_sha256=hashlib.sha256(changed).hexdigest(), size=len(changed),
+                         crlf=changed.count(b'\r\n'), lf=changed.count(b'\n'), cr=changed.count(b'\r')))
 
     def test_windows_layout_proof_precedes_every_native_download_and_launch(self):
-        tree = ast.parse((ROOT / 'scripts/ci/kimi-approvals.py').read_text())
+        tree = ast.parse((ROOT / 'scripts/ci/kimi-approvals.py').read_text(encoding='utf-8'))
         main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
         calls = [(node.lineno, ast.unparse(node.func), ast.unparse(node)) for node in ast.walk(main)
                  if isinstance(node, ast.Call)]
@@ -64,14 +77,28 @@ class ApprovalGateControls(unittest.TestCase):
         self.assertTrue(launches and all(download < line for line in launches))
 
     def test_mac_uses_the_existing_oracle_without_an_alternative_predicate(self):
-        source = (ROOT / 'tests/test_kimi_approvals_native.py').read_text()
+        source = (ROOT / 'tests/test_kimi_approvals_native.py').read_text(encoding='utf-8')
         self.assertIn('guard.shim_source(self.captures, self.image)', source)
         self.assertIn('guard.NativeKimi.assert_process(self, self.name, stage)', source)
         for name in ('process_sample', 'environment', 'launched_environment'):
             self.assertIn(name + ' = guard.NativeKimi.' + name, source)
+        import test_kimi_approvals_native as native
+        case = native.NativeKimiApprovals('test_approve_once_runs_the_command')
+        case.project = mock.Mock()
+        case.project.resolve.return_value = Path('/canonical/project with spaces')
+        case.command = 'printf approved'
+        item = dict(question='Run this command?', header='Bash',
+                    body='cwd: ' + str(case.project.resolve()) + '\n$ printf approved',
+                    options=[dict(label=label) for label in ('Approve once', 'Approve for this session', 'Reject')])
+        card = dict(can_answer=True, answer_unavailable_reason='', answer_transport='kimi_tui', questions=[item])
+        case.card = lambda: card
+        self.assertIs(case.answerable(), card)
+        item['body'] = 'cwd: /different/project with spaces\n$ printf approved'
+        with self.assertRaises(AssertionError):
+            case.answerable()
 
     def test_workflow_uses_exact_pr_head_or_manual_standard_hosted_without_write_permissions(self):
-        source = (ROOT / '.github/workflows/kimi-approvals.yml').read_text()
+        source = (ROOT / '.github/workflows/kimi-approvals.yml').read_text(encoding='utf-8')
         self.assertIn('workflow_dispatch:', source)
         self.assertIn('pull_request:\n    branches: [main]\n    paths:', source)
         self.assertEqual(source.count('${{ github.event.pull_request.head.sha || github.sha }}'), 2)
@@ -83,6 +110,7 @@ class ApprovalGateControls(unittest.TestCase):
         self.assertIn('contents: read', source)
         self.assertNotIn('contents: write', source)
         self.assertIn('cache-mode: none', source)
+        self.assertIn("env:\n  PYTHONUTF8: '1'\n", source)
         self.assertIn('cargo +1.99.1 build --locked --bin hgs -j 2', source)
 
 
@@ -103,7 +131,8 @@ class WindowsEnvironmentControls(unittest.TestCase):
 
     def test_changed_process_or_environment_refuses_before_returning_values(self):
         fake = object.__new__(process.Process)
-        snapshot = dict(pid=7, image=str(ROOT), parent=8, parameters=100, environment=200)
+        snapshot = dict(pid=7, image=os.path.normcase(os.path.realpath(ROOT)), parent=8,
+                        parameters=100, environment=200)
         fake.snapshot = mock.Mock(side_effect=[snapshot, dict(snapshot, parent=9)])
         fake.block = mock.Mock(return_value='HOME=a\0\0'.encode('utf-16-le'))
         with self.assertRaisesRegex(OSError, 'changed'):
@@ -115,7 +144,7 @@ class WindowsEnvironmentControls(unittest.TestCase):
 
     def test_unknown_image_or_parent_never_reads_remote_environment(self):
         fake = object.__new__(process.Process)
-        fake.snapshot = lambda: dict(image=str(ROOT), parent=8)
+        fake.snapshot = lambda: dict(image=os.path.normcase(os.path.realpath(ROOT)), parent=8)
         fake.block = mock.Mock(side_effect=AssertionError('must not read'))
         with self.assertRaisesRegex(OSError, 'image/parent'):
             fake.environment(ROOT, 9)

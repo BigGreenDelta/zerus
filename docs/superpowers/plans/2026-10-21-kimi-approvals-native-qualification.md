@@ -105,3 +105,27 @@ outer fallback, and no unknown cleanup becomes a native pass.
 Successful source and native qualification can close only this platform child.
 Actual desktop second Confirm, Android/iOS native UI, owner profiles and public
 or installed delivery remain distinct acceptance boundaries.
+
+## First hosted attempt and source corrections
+
+The exact `5f565f1e` attempt failed on both dedicated platforms. Windows stopped
+in source/memory controls before compiler, layout preflight, Kimi download or
+native execution: source reads used its default code page, a mocked image path
+lacked the production reader's normalization, and an official manifest hash
+check refused the checkout. That attempt did not retain the observed manifest
+bytes or hash, so CRLF conversion is an unproven cause. The manifest-only Git
+attribute now preserves upstream bytes under every checkout setting; a future
+hash refusal reports observed hash, size and newline counts without changing
+the expected hashes. Gate/source reads explicitly use UTF-8, and the workflow
+selects Python UTF-8 mode. The process proof predicates are unchanged.
+
+macOS reached the first real 2.1.1 danger-warning case. Its initial and approval
+environment/image proofs passed, but the exact cwd disclosure assertion expected
+`/tmp` while Kimi displayed its canonical `/private/tmp` path. That assertion
+failed before an answer; the other six cases and 2.2.0 were not executed. The
+helper now compares the full resolved project path; all seven semantic method
+bodies remain unchanged. Per-case cleanup reported no error; the diagnostic
+post-snapshot found neither declared case root nor image copy, and retained only
+the empty outer runtime. This scoped observation does not establish global
+process quiescence. These source corrections require a new reviewed exact head
+and grant; they do not qualify either platform or replay the spent attempt.

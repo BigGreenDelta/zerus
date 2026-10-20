@@ -46,7 +46,7 @@ def target():
 
 
 def methods(platform_id):
-    source = ast.parse((ROOT / 'tests/test_kimi_approvals_native.py').read_text())
+    source = ast.parse((ROOT / 'tests/test_kimi_approvals_native.py').read_text(encoding='utf-8'))
     common = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == 'ApprovalCases')
     names = tuple(sorted(node.name for node in common.body if isinstance(node, ast.FunctionDef)
                          and node.name.startswith('test_')))

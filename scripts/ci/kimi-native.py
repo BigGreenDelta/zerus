@@ -135,9 +135,15 @@ def checked_pins(platform_id):
         raise ValueError('the fixed reviewed versions changed')
     for version in VERSIONS:
         manifest = Path(__file__).with_name('kimi-native-manifests') / (version + '.json')
-        if digest(manifest) != pins[version]['manifest_sha256']:
-            raise ValueError('retained official manifest changed')
-        document = strict(manifest.read_bytes())
+        observed = manifest.read_bytes()
+        observed_sha256 = hashlib.sha256(observed).hexdigest()
+        if observed_sha256 != pins[version]['manifest_sha256']:
+            raise ValueError('retained official manifest changed: ' + json.dumps(dict(
+                version=version, expected_sha256=pins[version]['manifest_sha256'],
+                observed_sha256=observed_sha256, size=len(observed),
+                crlf=observed.count(b'\r\n'), lf=observed.count(b'\n'), cr=observed.count(b'\r')),
+                sort_keys=True))
+        document = strict(observed)
         entry = document['platforms'][platform_id]
         pin = pins[version][platform_id]
         if (document['version'] != version or document['tag'] != '@moonshot-ai/kimi-code@' + version

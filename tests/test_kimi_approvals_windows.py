@@ -133,7 +133,7 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, unittest.TestCase):
         self.hgs_exe = portable / 'hgs.exe'
         shutil.copyfile(Path(os.environ['HGS_TEST_BIN']).resolve(strict=True), self.hgs_exe)
         self.hgs_sha = approvals.digest(self.hgs_exe)
-        conpty = json.loads((ROOT / 'packaging/windows/conpty.json').read_text())['files']
+        conpty = json.loads((ROOT / 'packaging/windows/conpty.json').read_text(encoding='utf-8'))['files']
         for name, pin in conpty.items():
             path = Path(os.environ['HGS_TEST_CONPTY_DIR']) / name
             self.assertEqual((path.stat().st_size, approvals.digest(path)), (pin['size'], pin['sha256']))
@@ -156,7 +156,7 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, unittest.TestCase):
 
         def asked():
             files = list(self.home.glob('sessions/*/*/agents/main/wire.jsonl'))
-            return files[0] if len(files) == 1 and '"kind":"approval"' in files[0].read_text() \
+            return files[0] if len(files) == 1 and '"kind":"approval"' in files[0].read_text(encoding='utf-8') \
                 and '1. Approve once' in self.screen() else None
         self.wire = self.until(asked)
         self.assert_process('approval')

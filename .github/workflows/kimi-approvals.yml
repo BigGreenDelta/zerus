@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - '.gitattributes'
       - '.github/workflows/kimi-approvals.yml'
       - 'scripts/ci/kimi-approvals.py'
       - 'scripts/ci/kimi-native.py'
@@ -22,6 +23,9 @@ on:
 permissions:
   contents: read
 cache-mode: none
+
+env:
+  PYTHONUTF8: '1'
 
 concurrency:
   group: kimi-approvals-${{ github.ref }}
