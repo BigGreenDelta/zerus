@@ -135,13 +135,20 @@ def checked_pins(platform_id):
         raise ValueError('the fixed reviewed versions changed')
     for version in VERSIONS:
         manifest = Path(__file__).with_name('kimi-native-manifests') / (version + '.json')
-        if digest(manifest) != pins[version]['manifest_sha256']:
-            raise ValueError('retained official manifest changed')
-        document = strict(manifest.read_bytes())
+        observed = manifest.read_bytes()
+        observed_sha256 = hashlib.sha256(observed).hexdigest()
+        if observed_sha256 != pins[version]['manifest_sha256']:
+            raise ValueError('retained official manifest changed: ' + json.dumps(dict(
+                version=version, expected_sha256=pins[version]['manifest_sha256'],
+                observed_sha256=observed_sha256, size=len(observed),
+                crlf=observed.count(b'\r\n'), lf=observed.count(b'\n'), cr=observed.count(b'\r')),
+                sort_keys=True))
+        document = strict(observed)
         entry = document['platforms'][platform_id]
         pin = pins[version][platform_id]
         if (document['version'] != version or document['tag'] != '@moonshot-ai/kimi-code@' + version
-                or entry['filename'] != 'kimi-code-' + platform_id or entry['checksum'] != pin['sha256']
+                or entry['filename'] != 'kimi-code-' + platform_id + ('.exe' if platform_id.startswith('win32-') else '')
+                or entry['checksum'] != pin['sha256']
                 or type(pin['size']) is not int or not 0 < pin['size'] <= IMAGE_LIMIT):
             raise ValueError('official manifest and reviewed image pin disagree')
     return pins

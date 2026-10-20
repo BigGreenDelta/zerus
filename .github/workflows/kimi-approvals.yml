@@ -1,0 +1,120 @@
+name: Pinned Kimi approval contracts
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.gitattributes'
+      - '.github/workflows/kimi-approvals.yml'
+      - 'scripts/ci/kimi-approvals.py'
+      - 'scripts/ci/kimi-native.py'
+      - 'scripts/ci/kimi-native-pins.json'
+      - 'scripts/ci/kimi-native-manifests/**'
+      - 'scripts/ci/outside-job.py'
+      - 'scripts/fetch-conpty.py'
+      - 'scripts/conpty_pair.py'
+      - 'packaging/windows/conpty.json'
+      - 'tests/test_kimi_approvals_native.py'
+      - 'tests/test_kimi_approvals_windows.py'
+      - 'tests/test_kimi_approvals_ci.py'
+      - 'tests/kimi_windows_process.py'
+      - 'tests/test_kimi_native.py'
+      - 'tests/test_outside_job.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+cache-mode: none
+
+env:
+  PYTHONUTF8: '1'
+
+concurrency:
+  group: kimi-approvals-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  approvals:
+    name: Kimi approvals 2.1.1 and 2.2.0 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["macos-15", "windows-2025"]
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      CARGO_BUILD_JOBS: 2
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.8'
+      - name: Finite source and memory controls, with no native cases
+        shell: bash
+        run: python -B -m unittest discover -s tests -p test_kimi_approvals_ci.py -v
+      - name: Keep compiler state in this disposable runner
+        shell: bash
+        run: |
+          {
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/kimi-approvals-target"
+            echo "CARGO_HOME=$RUNNER_TEMP/kimi-approvals-cargo"
+            echo "RUSTUP_HOME=$RUNNER_TEMP/kimi-approvals-rustup"
+          } >> "$GITHUB_ENV"
+      - name: Refuse an unreviewed architecture before builds or downloads
+        shell: bash
+        run: python -c "import runpy; runpy.run_path('scripts/ci/kimi-approvals.py')['target']()"
+      - name: macOS pinned tmux dependencies and private build
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install coreutils libevent ncurses utf8proc jemalloc bison pkg-config
+          PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
+          PKG_CONFIG_PATH="$(brew --prefix libevent)/lib/pkgconfig:$(brew --prefix ncurses)/lib/pkgconfig:$(brew --prefix utf8proc)/lib/pkgconfig:$(brew --prefix jemalloc)/lib/pkgconfig"
+          export PATH PKG_CONFIG_PATH
+          bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/kimi-approvals-tmux"
+      - name: Windows reviewed ConPTY package, data only
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python scripts/fetch-conpty.py --output "$env:RUNNER_TEMP/kimi-approvals-conpty"
+      - name: Build exact CLI with reviewed Rust and at most two jobs
+        shell: bash
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          cargo +1.99.1 build --locked --bin hgs -j 2
+      - name: macOS seven real approval cases on each reviewed version
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          python -s -B scripts/ci/kimi-approvals.py --source-sha "$SOURCE_SHA" \
+            --hgs "$CARGO_TARGET_DIR/debug/hgs" --tmux "$RUNNER_TEMP/kimi-approvals-tmux/bin/tmux" \
+            --output "$GITHUB_WORKSPACE/artifacts/test-results/kimi-approvals" </dev/null
+      - name: Windows layout preflight, then seven real approval cases per version
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -s -B scripts/ci/kimi-approvals.py --source-sha $env:SOURCE_SHA `
+            --hgs "$env:CARGO_TARGET_DIR/debug/hgs.exe" `
+            --conpty "$env:RUNNER_TEMP/kimi-approvals-conpty" `
+            --git-bash 'C:\Program Files\Git\bin\bash.exe' `
+            --output "$env:GITHUB_WORKSPACE/artifacts/test-results/kimi-approvals"
+      - name: Retain exact results and raw logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kimi-approvals-results-${{ matrix.os }}-${{ env.SOURCE_SHA }}
+          path: artifacts/test-results/kimi-approvals/evidence
+          retention-days: 7
+      - name: Retain immutable images on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kimi-approvals-images-${{ matrix.os }}-${{ env.SOURCE_SHA }}
+          path: |
+            artifacts/test-results/kimi-approvals/images
+            artifacts/test-results/kimi-approvals/unknown-runtime.tar.gz
+          retention-days: 3
