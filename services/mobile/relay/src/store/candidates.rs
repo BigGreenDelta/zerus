@@ -125,19 +125,34 @@ impl Store {
         let decision = alerts::decide(delivery, alerts::away_since(&machines), at);
         let mut resolved = vec![false; rows.len()];
         let mut checked = vec![false; rows.len()];
-        if let Some(a) = accepted {
-            // Only the route the catalog shows decides; another route waits for it.
-            let shown = rows.iter().any(|r| s(r, "computer_id") == a.computer)
-                && registry::shown(t, w, a.computer).await?.is_some_and(|r| {
-                    s(&r, "gateway_id") == a.gateway && s(&r, "route_id") == a.route
-                });
-            let mut snapshot = a.snapshot.clone();
-            crate::notification_highwater::overlay(t, a.computer, &mut snapshot).await?;
+        if let Some(a) = accepted.filter(|a| rows.iter().any(|r| s(r, "computer_id") == a.computer))
+        {
+            // Only the displayed route supplies native state. A lagging
+            // route still triggers a check of this one physical computer:
+            // its confirmed Mute must withdraw candidates even while the
+            // owner is present and ordinary deliveries are waiting.
+            let shown = registry::shown(t, w, a.computer)
+                .await?
+                .is_some_and(|r| s(&r, "gateway_id") == a.gateway && s(&r, "route_id") == a.route);
+            let snapshot = if shown {
+                let mut snapshot = a.snapshot.clone();
+                crate::notification_highwater::overlay(t, a.computer, &mut snapshot).await?;
+                Some(snapshot)
+            } else {
+                self.computer_snapshot(t, w, a.computer).await?
+            };
             for (k, r) in rows.iter().enumerate() {
-                if shown && s(r, "computer_id") == a.computer {
-                    checked[k] = true;
-                    resolved[k] =
-                        Candidate::from_row(r).resolved(alerts::live(&snapshot, s(r, "session")));
+                if s(r, "computer_id") != a.computer {
+                    continue;
+                }
+                checked[k] = true;
+                match &snapshot {
+                    None => resolved[k] = true,
+                    Some(Value::Null) => {} // Unknown current state never resolves a request.
+                    Some(current) => {
+                        resolved[k] =
+                            Candidate::from_row(r).resolved(alerts::live(current, s(r, "session")))
+                    }
                 }
             }
         }
