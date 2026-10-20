@@ -70,6 +70,7 @@ class KimiNativeCI(unittest.TestCase):
         configure.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$FIXTURE_ARGUMENTS"\n')
         configure.chmod(0o700)
         scripts = dict(curl='exit 0', sha256sum='cat >/dev/null', make='exit 0',
+                       realpath='printf "%s\\n" "$2"',
                        tar='mkdir tmux-3.7c; cp "$FIXTURE_CONFIGURE" tmux-3.7c/configure')
         for name, body in scripts.items():
             path = tools / name
