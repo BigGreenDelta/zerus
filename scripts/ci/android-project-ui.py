@@ -140,7 +140,7 @@ def defined_classes(apk):
 
 def main():
     assert sys.platform == "linux" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-    assert os.environ.get("ImageVersion") == "20261012.334.1"
+    assert os.environ.get("ImageVersion") == "20261018.339.1"
     pins = json.loads(Path(__file__).with_name("android-project-ui-pins.json").read_text())
     validate_inputs(os.environ, pins)
     source = os.environ["EXPECTED_SOURCE"]
