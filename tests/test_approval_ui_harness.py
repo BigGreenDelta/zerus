@@ -113,6 +113,24 @@ class ApprovalHarnessTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             ios.owned_device({"devices": {"runtime": [row, row]}}, "runtime", "owned", "fixture")
 
+    def test_ios_pr_uses_exact_head_and_fixed_reviewed_inputs_without_manual_fallback(self):
+        workflow = (ROOT / ".github/workflows/ios-approval-ui.yml").read_text()
+        self.assertIn("pull_request:\n    branches: [main]", workflow)
+        self.assertIn("github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha", workflow)
+        self.assertIn("ref: ${{ env.EXPECTED_SOURCE }}", workflow)
+        for value, manual in (("Xcode_26.3.app", "xcode_application"), ("17C529", "xcode_build"),
+                              ("com.apple.CoreSimulator.SimRuntime.iOS-26-2", "runtime_identifier"),
+                              ("com.apple.CoreSimulator.SimDeviceType.iPhone-16", "device_type_identifier")):
+            self.assertIn("github.event_name == 'pull_request' && '" + value + "' || inputs." + manual, workflow)
+        for path in (".github/workflows/ios-approval-ui.yml", "mobile/ios/ApprovalUIFixture/**", "scripts/ci/ios-approval-ui*.py",
+                     "tests/test_approval_ui_harness.py", "mobile/ios/Zerus/Conversation/QuestionCard.swift", "mobile/ios/Zerus/App/Theme.swift",
+                     "mobile/ios/Zerus/Common/MarkdownView.swift", "mobile/ios/ZerusKit/**"):
+            self.assertIn("      - '" + path + "'", workflow)
+        self.assertIn("permissions:\n  contents: read", workflow)
+        self.assertIn("cache-mode: none", workflow)
+        self.assertIn('test "$RUNNER_ENVIRONMENT" = github-hosted', workflow)
+        self.assertNotIn("secrets.", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

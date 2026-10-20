@@ -1,6 +1,17 @@
 name: iOS approval choices UI qualification
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/ios-approval-ui.yml'
+      - 'mobile/ios/ApprovalUIFixture/**'
+      - 'scripts/ci/ios-approval-ui*.py'
+      - 'tests/test_approval_ui_harness.py'
+      - 'mobile/ios/Zerus/Conversation/QuestionCard.swift'
+      - 'mobile/ios/Zerus/App/Theme.swift'
+      - 'mobile/ios/Zerus/Common/MarkdownView.swift'
+      - 'mobile/ios/ZerusKit/**'
   workflow_dispatch:
     inputs:
       source_sha:
@@ -27,20 +38,23 @@ on:
 permissions:
   contents: read
 
+# A fresh hosted VM only; neither PR nor manual qualification consumes or writes caches.
+cache-mode: none
+
 jobs:
   approval-ui:
     runs-on: macos-15
     timeout-minutes: 25
     env:
-      EXPECTED_SOURCE: ${{ inputs.source_sha }}
-      EXPECTED_XCODE_APPLICATION: ${{ inputs.xcode_application }}
-      EXPECTED_XCODE_BUILD: ${{ inputs.xcode_build }}
-      EXPECTED_RUNTIME: ${{ inputs.runtime_identifier }}
-      EXPECTED_DEVICE_TYPE: ${{ inputs.device_type_identifier }}
+      EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha }}
+      EXPECTED_XCODE_APPLICATION: ${{ github.event_name == 'pull_request' && 'Xcode_26.3.app' || inputs.xcode_application }}
+      EXPECTED_XCODE_BUILD: ${{ github.event_name == 'pull_request' && '17C529' || inputs.xcode_build }}
+      EXPECTED_RUNTIME: ${{ github.event_name == 'pull_request' && 'com.apple.CoreSimulator.SimRuntime.iOS-26-2' || inputs.runtime_identifier }}
+      EXPECTED_DEVICE_TYPE: ${{ github.event_name == 'pull_request' && 'com.apple.CoreSimulator.SimDeviceType.iPhone-16' || inputs.device_type_identifier }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ env.EXPECTED_SOURCE }}
           persist-credentials: false
       - name: Validate reviewed input and disposable hosted scope
         shell: bash

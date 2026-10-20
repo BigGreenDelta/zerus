@@ -78,8 +78,11 @@ xcodebuild -project "$gate/project/ApprovalUIFixture.xcodeproj" -scheme Approval
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= test
 ```
 
-The executable gate is `scripts/ci/ios-approval-ui.py` through the manual-only `ios-approval-ui.yml` workflow. Review it
-before dispatch; the shell lines above explain its commands and are not an alternative bypass. The driver requires the
+The executable gate is `scripts/ci/ios-approval-ui.py` through `ios-approval-ui.yml`. A PR touching this gate or its exact
+production source inputs selects the PR head with the reviewed fixed Xcode 26.3/build 17C529, iOS 26.2 and iPhone 16.
+Manual dispatch retains explicit required inputs. Both paths refuse absent or mismatched installed selections without
+fallback, use read-only credentials and no caches, and run only on a disposable hosted VM. Review the workflow before
+publishing its PR; the shell lines above explain its commands and are not an alternative bypass. The driver requires the
 exact selected `DEVELOPER_DIR` and `EXPECTED_XCODE_BUILD`, not the existing product selector's newest-Xcode fallback.
 It imposes one original 900-second budget, reserves 60 seconds for cleanup, bounds boot to 120 seconds and build/test to
 600 seconds or the remaining shared budget, caps raw output at 32 MiB per command, owns the unreaped direct child before
