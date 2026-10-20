@@ -5,7 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -87,7 +87,7 @@ class ApprovalGateControls(unittest.TestCase):
         import test_kimi_approvals_native as native
         case = native.NativeKimiApprovals('test_approve_once_runs_the_command')
         case.project = mock.Mock()
-        case.project.resolve.return_value = Path('/canonical/project with spaces')
+        case.project.resolve.return_value = PurePosixPath('/canonical/project with spaces')
         case.command = 'printf approved'
         item = dict(question='Run this command?', header='Bash',
                     body='cwd: ' + str(case.project.resolve()) + '\n$ printf approved',
@@ -110,6 +110,32 @@ class ApprovalGateControls(unittest.TestCase):
         with mock.patch('builtins.print'), self.assertRaises(AssertionError):
             case.trust()
         case.t.assert_not_called()
+
+    def test_cwd_disclosure_preserves_the_whole_canonical_display_path_and_its_case(self):
+        import test_kimi_approvals_native as native
+        case = native.NativeKimiApprovals('test_approve_once_runs_the_command')
+        case.project, case.command = mock.Mock(), 'printf approved'
+        item = dict(question='Run this command?', header='Bash', options=[dict(label=label)
+                    for label in ('Approve once', 'Approve for this session', 'Reject')])
+        card = dict(can_answer=True, answer_unavailable_reason='', answer_transport='kimi_tui', questions=[item])
+        case.card = lambda: card
+        for folder, display in ((PureWindowsPath('D:/fixture/project with spaces'), 'D:/fixture/project with spaces'),
+                                (PurePosixPath('/fixture/project with spaces'), '/fixture/project with spaces')):
+            with self.subTest(folder=folder):
+                case.project.resolve.return_value = folder
+                self.assertEqual(folder.as_posix(), display)
+                if isinstance(folder, PurePosixPath):
+                    self.assertEqual(str(folder), display, 'Unix display bytes stay unchanged')
+                for body in ('cwd: ' + display + '\n$ printf approved', '$ printf approved\ncwd: ' + display):
+                    item['body'] = body
+                    self.assertIs(case.answerable(), card)
+                wrong = ['different/project', display + '-sibling', display + ' child']
+                if display.startswith('D:'):
+                    wrong.append(display.lower())
+                for other in wrong:
+                    item['body'] = 'cwd: ' + other + '\n$ printf approved'
+                    with self.subTest(other=other), self.assertRaises(AssertionError):
+                        case.answerable()
 
     def test_workflow_uses_exact_pr_head_or_manual_standard_hosted_without_write_permissions(self):
         source = (ROOT / '.github/workflows/kimi-approvals.yml').read_text(encoding='utf-8')

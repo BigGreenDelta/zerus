@@ -596,7 +596,7 @@ class NativeKimiApprovals(ApprovalCases, lifecycle.Harness):
         self.assertEqual(card['answer_transport'], 'kimi_tui')
         item = card['questions'][0]
         self.assertEqual((item['question'], item['header']), ('Run this command?', 'Bash'))
-        self.assertIn('cwd: ' + str(self.project.resolve()), item['body'])
+        self.assertIn('cwd: ' + self.project.resolve().as_posix(), item['body'].split('\n'))
         self.assertIn('$ ' + self.command, item['body'])
         self.assertEqual([option['label'] for option in item['options']],
                          ['Approve once', 'Approve for this session', 'Reject'])

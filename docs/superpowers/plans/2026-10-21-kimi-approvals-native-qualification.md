@@ -192,3 +192,14 @@ explicit trust choice are retained. Bound conversations and run mismatches
 refuse before the answer call. Generic approval payloads and all product
 validation stay unchanged. This source child needs separate root review and
 a fresh hosted grant; the earlier native attempt is not replayed.
+
+On exact `ad24b647`, Windows reached its first real approval card after startup
+trust, with both initial and approval process/environment proofs passing. Its
+helper then refused the full cwd disclosure because Python displayed native
+backslashes while Kimi displayed forward slashes. No approval answer was sent.
+The helper now requires the complete case-preserving resolved path in its
+POSIX display form as a whole `cwd:` line. Unix display bytes stay unchanged.
+A wrong directory, a sibling that merely shares the expected path prefix, a
+trailing child or a different drive-letter case still refuses. This changes
+only fixture display verification; native process/input guards and all seven
+semantic method bodies remain intact.
