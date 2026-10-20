@@ -33,6 +33,10 @@ failure with bounded method/encoded-path metadata only, emits that named diagnos
 response without network forwarding. Every wait and final qualification refuses a retained interceptor failure.
 Missing, late or failed diagnostics remain unknown and cannot replace the primary failure, qualify a missing
 case, relax the strict result parser, or authorize a retry. The instrumentation cap remains 90 seconds.
+The fixture's [native text search](https://developer.android.com/reference/android/view/accessibility/AccessibilityNodeInfo#findAccessibilityNodeInfosByText(java.lang.String))
+returns approximate matches, so candidates must refresh and retain the exact visible text/content-description check.
+The original subtree traversal remains the fallback. Monotonic phase records cover card opening, physical touch and the
+first disabled/zero-answer assertion; they never override the three-second policy or establish UI acceptance alone.
 
 Before dispatch, review this workflow and the SDK-free `tests/test_android_project_ui.py` and
 `tests/test_approval_ui_harness.py` controls. The new app/test are built under a fresh synthetic debug signer; this does

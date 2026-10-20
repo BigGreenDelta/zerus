@@ -234,6 +234,23 @@ class ApprovalHarnessTests(unittest.TestCase):
             "request-scope", "authorization", "request-json", "operation", "answer-admission", "answer-payload",
             "answer-target", "answer-receipt-identity", "answer-question-identity", "answer-list", "answer-body", "receipt"])
 
+    def test_android_native_text_search_keeps_exact_matches_refresh_fallback_and_real_touch(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        self.assertIn("root.findAccessibilityNodeInfosByText(label).orEmpty().firstOrNull { it.refresh() && exactVisible(it, label) }", source)
+        self.assertIn("node.isVisibleToUser &&\n        (node.text?.toString() == label || node.contentDescription?.toString() == label)", source)
+        self.assertIn("return find(root) { exactVisible(it, label) }", source)
+        node = source.split("    private fun node(", 1)[1].split("    private fun button(", 1)[0]
+        self.assertEqual(node.count("visible(label)"), 1)
+        self.assertIn("return checkNotNull(matched)", node)
+        self.assertIn("check(current.refresh())", source)
+        self.assertIn("check(action.isEnabled && action.isClickable)", source)
+        self.assertIn("check(uiAutomation.injectInputEvent(event, true))", source)
+        for phase in ("open-begin:$name", "open-ready:$name", "touch-down:$label", "touch-up:$label",
+                      "disabled-assert-begin:countdown", "disabled-assert-end:countdown"):
+            self.assertIn('phase("' + phase + '")', source)
+        self.assertIn('check(!button("Send answer").isEnabled && count() == 0)', source)
+        self.assertNotIn("setReviewDelayForTests", source)
+
 
 if __name__ == "__main__":
     unittest.main()

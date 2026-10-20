@@ -34,7 +34,10 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     }
     private fun boundary(event: String, name: String) {
         check(event in setOf("begin", "complete") && name in CASES)
-        Log.i("ZerusApprovalUI", "$event $name completed=${cases.size}")
+        Log.i("ZerusApprovalUI", "$event $name completed=${cases.size} elapsedMs=${SystemClock.elapsedRealtime()}")
+    }
+    private fun phase(name: String) {
+        Log.i("ZerusApprovalUI", "phase ${name.take(100)} elapsedMs=${SystemClock.elapsedRealtime()}")
     }
     override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
     override fun onStart() {
@@ -79,11 +82,19 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         for (index in 0 until root.childCount) find(root.getChild(index), predicate)?.let { return it }
         return null
     }
-    private fun visible(label: String) = find(uiAutomation.rootInActiveWindow) { it.isVisibleToUser &&
-        (it.text?.toString() == label || it.contentDescription?.toString() == label) }
+    private fun exactVisible(node: AccessibilityNodeInfo, label: String) = node.isVisibleToUser &&
+        (node.text?.toString() == label || node.contentDescription?.toString() == label)
+    private fun visible(label: String): AccessibilityNodeInfo? {
+        val root = uiAutomation.rootInActiveWindow ?: return null
+        // The native search is containment, not exact equality; validate its refreshed candidates.
+        root.findAccessibilityNodeInfosByText(label).orEmpty().firstOrNull { it.refresh() && exactVisible(it, label) }?.let { return it }
+        // Embedded hierarchies/content descriptions may require the original safe subtree walk.
+        return find(root) { exactVisible(it, label) }
+    }
     private fun node(label: String): AccessibilityNodeInfo {
-        await(label) { visible(label) != null }
-        return checkNotNull(visible(label))
+        var matched: AccessibilityNodeInfo? = null
+        await(label) { matched = visible(label); matched != null }
+        return checkNotNull(matched)
     }
     private fun button(label: String): AccessibilityNodeInfo {
         var current = node(label)
@@ -100,11 +111,13 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         check(!bounds.isEmpty && bounds.left >= 0 && bounds.top >= 0 &&
             bounds.right <= targetContext.resources.displayMetrics.widthPixels && bounds.bottom <= targetContext.resources.displayMetrics.heightPixels)
         val down = SystemClock.uptimeMillis()
+        phase("touch-down:$label")
         for (type in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
             val event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), type, bounds.exactCenterX(), bounds.exactCenterY(), 0)
             event.source = InputDevice.SOURCE_TOUCHSCREEN
             try { check(uiAutomation.injectInputEvent(event, true)) } finally { event.recycle() }
         }
+        phase("touch-up:$label")
     }
     private fun reveal(label: String) {
         await("option $label") {
@@ -187,6 +200,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         val model = main { activity.javaClass.getDeclaredMethod("getModel").apply { isAccessible = true }.invoke(activity) as ZerusViewModel }
         fun count() = synchronized(calls) { calls.size }
         fun open(name: String, source: String = "kimi_tool_approval", answerable: Boolean = true) {
+            phase("open-begin:$name")
             val q = JSONObject().put("question_id", name).put("question_hash", "hash-$name").put("run_id", target.run)
                 .put("conversation_id", target.conversation).put("source", source).put("approval", true).put("approval_choices", true)
                 .put("can_answer", answerable).put("answer_unavailable_reason", "Synthetic read-only approval")
@@ -201,6 +215,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             main { model.refreshActivity() }
             node("Review synthetic $name")
             await("fresh approval $name") { main { model.activityVerified && model.conversationQuestions.singleOrNull()?.id == name } }
+            phase("open-ready:$name")
         }
         fun reviewed() { await("three real visible review seconds") { button("Send answer").isEnabled } }
         fun expect(option: String? = null, text: String = "") {
@@ -220,7 +235,10 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             boundary("begin", "countdown_once")
             open("countdown")
             reveal("Approve once"); tap("Approve once")
-            check(!button("Send answer").isEnabled && count() == 0)
+            phase("disabled-assert-begin:countdown")
+            try {
+                check(!button("Send answer").isEnabled && count() == 0)
+            } finally { phase("disabled-assert-end:countdown") }
             reviewed(); expect("1"); tap("Send answer"); await("once receipt") { count() == 1 }
             cases += "countdown_once"
             boundary("complete", "countdown_once")
