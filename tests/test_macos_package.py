@@ -28,6 +28,7 @@ check = load("check_macos_bundle", "check-macos-bundle.py")
 package = load("package_macos", "package-macos.py")
 sign = load("sign_macos", "sign-macos.py")
 import macos_release  # noqa: E402
+import macos_notices  # noqa: E402
 
 OTOOL = """Zerus.app/Contents/MacOS/hgs-tray:
 Load command 9
@@ -76,6 +77,98 @@ Load command 20
       cmdsize 48
          path /Users/example/qt/lib (offset 12)
 """
+
+
+class QtNoticeChecks(unittest.TestCase):
+    def documents(self, prefix, expression="Libpng AND libpng-2.0"):
+        directory = prefix / "sbom"
+        directory.mkdir(parents=True)
+        for module in macos_notices.QT_NOTICES:
+            (directory / f"{module}-6.11.2.spdx.json").write_text(json.dumps({
+                "packages": [{"name": "BundledLibpng", "versionInfo": "1.6.58",
+                              "licenseConcluded": expression}],
+            }))
+
+    def test_copy_includes_the_full_texts_and_preserves_spdx_and_source_texts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prefix, destination = root / "qt", root / "notices"
+            self.documents(prefix)
+            macos_notices.copy_notices(ROOT, prefix, "6.11.2", destination)
+            self.assertEqual(macos_notices.notice_findings(destination), [])
+            for identifier in ("Libpng", "libpng-2.0", "LGPL-3.0-only", "GPL-3.0-only"):
+                self.assertEqual((destination / f"{identifier}.txt").read_bytes(),
+                                 (ROOT / "packaging/windows/licenses" / f"{identifier}.txt").read_bytes())
+            self.assertEqual((destination / "qtbase.spdx.json").read_bytes(),
+                             (prefix / "sbom/qtbase-6.11.2.spdx.json").read_bytes())
+            self.assertEqual((destination / "LGPL-3.0.txt").read_bytes(),
+                             (ROOT / "packaging/macos/licenses/LGPL-3.0.txt").read_bytes())
+
+    def test_bundle_check_refuses_a_missing_or_empty_libpng_text(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prefix, bundle = root / "qt", root / "Zerus.app"
+            directory = bundle / "Contents/Resources/licenses/qt"
+            self.documents(prefix)
+            macos_notices.copy_notices(ROOT, prefix, "6.11.2", directory)
+            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({}))
+            for absent in (True, False):
+                with self.subTest(absent=absent):
+                    text = directory / "libpng-2.0.txt"
+                    if absent:
+                        text.unlink()
+                    else:
+                        text.write_bytes(b"")
+                    findings = check.bundle_findings(bundle, "0.45.1")
+                    self.assertIn("missing Qt license text: qtbase.spdx.json: libpng-2.0", findings)
+
+    def test_an_unknown_future_identifier_stops_packaging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.documents(root / "qt", "MIT AND Future-License-9.9")
+            with self.assertRaisesRegex(ValueError, "missing Qt license text: .*Future-License-9.9"):
+                macos_notices.copy_notices(ROOT, root / "qt", "6.11.2", root / "notices")
+
+    def test_license_alternatives_exceptions_and_file_fields_are_covered(self):
+        documents = {"qtbase": {"packages": [{"licenseConcluded": "(MIT OR GPL-2.0-only) WITH Linux-syscall-note",
+                                             "licenseDeclared": "NOASSERTION"}],
+                                "files": [{"licenseInfoInFiles": ["Libpng", "libpng-2.0"]}],
+                                "snippets": [{"licenseInfoInSnippets": ["BSD-3-Clause"]}]}}
+        texts = {"MIT", "GPL-2.0-only", "Linux-syscall-note", "Libpng", "libpng-2.0", "BSD-3-Clause"}
+        self.assertEqual(macos_notices.missing_license_texts(documents, texts), [])
+        self.assertEqual(macos_notices.missing_license_texts(documents, texts - {"Linux-syscall-note"}),
+                         ["qtbase: Linux-syscall-note"])
+
+    def test_custom_licenses_need_their_nonempty_local_extracted_text(self):
+        document = {"packages": [{"licenseConcluded": "LicenseRef-Example"}],
+                    "hasExtractedLicensingInfos": [{"licenseId": "LicenseRef-Example", "extractedText": "full text"}]}
+        self.assertEqual(macos_notices.missing_license_texts({"qtbase": document}, set()), [])
+        for definitions in ([], [{"licenseId": "LicenseRef-Example", "extractedText": " \n"}]):
+            with self.subTest(definitions=definitions):
+                self.assertEqual(macos_notices.missing_license_texts(
+                    {"qtbase": {**document, "hasExtractedLicensingInfos": definitions}}, {"LicenseRef-Example"}),
+                    ["qtbase: LicenseRef-Example"])
+
+    def test_external_custom_text_must_belong_to_the_named_document(self):
+        documents = {"qtbase": {"packages": [{"licenseConcluded": "DocumentRef-svg:LicenseRef-Example"}],
+                                "externalDocumentRefs": [{"externalDocumentId": "DocumentRef-svg", "spdxDocument": "urn:svg"}]},
+                     "qtsvg": {"packages": [], "documentNamespace": "urn:svg", "hasExtractedLicensingInfos": [
+                         {"licenseId": "LicenseRef-Example", "extractedText": "full text"}]}}
+        self.assertEqual(macos_notices.missing_license_texts(documents, set()), [])
+        documents["qtbase"]["externalDocumentRefs"][0]["spdxDocument"] = "urn:not-shipped"
+        self.assertEqual(macos_notices.missing_license_texts(documents, set()),
+                         ["qtbase: DocumentRef-svg:LicenseRef-Example"])
+
+    def test_malformed_or_absent_metadata_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.assertEqual(len(macos_notices.notice_findings(directory)), 3)
+            for value in ("{", "[]", '{"packages": [false]}',
+                          '{"packages": [{"licenseConcluded": false}]}'):
+                with self.subTest(value=value):
+                    for module in macos_notices.QT_NOTICES:
+                        (directory / f"{module}.spdx.json").write_text(value)
+                    self.assertTrue(macos_notices.notice_findings(directory))
 
 
 class BundleChecks(unittest.TestCase):
