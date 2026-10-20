@@ -145,6 +145,27 @@ class ApprovalHarnessTests(unittest.TestCase):
             allocate.assert_not_called()
             launch.assert_not_called()
 
+    def test_hosted_apple_environment_preserves_only_valid_required_account_values(self):
+        ios = module("ios_approval_ui", "scripts/ci/ios-approval-ui.py")
+        valid = {"HOME": "/tmp/example-home", "TMPDIR": "/private/tmp/example-hosted/", "USER": "hosted", "LOGNAME": "hosted"}
+        self.assertEqual(ios.hosted_user_environment({**valid, "UNRELATED": "discarded"}), valid)
+        for key in valid:
+            missing = dict(valid); missing.pop(key)
+            with self.subTest(missing=key), self.assertRaises(KeyError):
+                ios.hosted_user_environment(missing)
+            for value in ("", "bad\x00value", "bad\nvalue", "x" * 4097, None):
+                with self.subTest(key=key, value=value), self.assertRaises(AssertionError):
+                    ios.hosted_user_environment({**valid, key: value})
+        for changes in ({"HOME": "relative"}, {"TMPDIR": "relative"}, {"USER": "other"},
+                        {"LOGNAME": "other"}, {"USER": "bad/name", "LOGNAME": "bad/name"}):
+            with self.subTest(changes=changes), self.assertRaises(AssertionError):
+                ios.hosted_user_environment({**valid, **changes})
+        source = (ROOT / "scripts/ci/ios-approval-ui.py").read_text()
+        self.assertIn('run("runtimes", ["/usr/bin/xcrun", "simctl", "list", "runtimes", "--json"], 120)', source)
+        self.assertIn('run("cleanup-identity", ["/usr/bin/xcrun", "simctl", "list", "devices", "--json"], 8, True)', source)
+        self.assertIn("end = time.monotonic() + 900", source)
+        self.assertIn("(0 if cleaning else 60)", source)
+
 
 if __name__ == "__main__":
     unittest.main()

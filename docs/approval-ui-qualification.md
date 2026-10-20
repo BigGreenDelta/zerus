@@ -81,12 +81,17 @@ xcodebuild -project "$gate/project/ApprovalUIFixture.xcodeproj" -scheme Approval
 The executable gate is `scripts/ci/ios-approval-ui.py` through `ios-approval-ui.yml`. A PR touching this gate or its exact
 production source inputs selects the PR head with the reviewed fixed Xcode 26.3/build 17C529, iOS 26.2 and iPhone 16.
 Manual dispatch retains explicit required inputs. Both paths refuse absent or mismatched installed selections without
-fallback, use read-only credentials and no caches, and run only on a disposable hosted VM. Review the workflow before
+fallback, use read-only credentials and no Actions caches, and run only on a disposable hosted VM. Review the workflow before
 publishing its PR; the shell lines above explain its commands and are not an alternative bypass. The driver requires the
 exact selected `DEVELOPER_DIR` and `EXPECTED_XCODE_BUILD`, not the existing product selector's newest-Xcode fallback.
 It refuses a non-arm64 hosted process before allocation, selects the arm64 simulator destination explicitly, and builds
 the separate Debug fixture with `ONLY_ACTIVE_ARCH=YES`, matching the production Debug configuration and local package.
-It imposes one original 900-second budget, reserves 60 seconds for cleanup, bounds boot to 120 seconds and build/test to
+Apple tools retain the VM's validated standard `HOME`, `TMPDIR`, `USER`, and `LOGNAME`; those exact environment values
+are recorded with command timings. Evidence, DerivedData, package outputs and XDG paths remain private. The standard
+hosted Apple account and its caches are in scope; an artificial empty home is not an isolation guarantee. Earlier
+CoreSimulator inventory timeouts remain setup/unknown outcomes, with no proven cause attributed to the home directory.
+The first cold `simctl list runtimes` has a 120-second cap without retry; later inventory and cleanup caps stay unchanged.
+The driver imposes one original 900-second budget, reserves 60 seconds for cleanup, bounds boot to 120 seconds and build/test to
 600 seconds or the remaining shared budget, caps raw output at 32 MiB per command, owns the unreaped direct child before
 later fallible calls, and retains failures without retry. A forced child stop is failed/unknown, never passing cleanup
 evidence. The exact native assertions are the seven

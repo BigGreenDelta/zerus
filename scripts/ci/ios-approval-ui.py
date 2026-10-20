@@ -50,6 +50,18 @@ def digest(path):
     return value.hexdigest()
 
 
+def hosted_user_environment(environment):
+    """Keep the disposable hosted account used by Apple's installed services."""
+    selected = {name: environment[name] for name in ("HOME", "TMPDIR", "USER", "LOGNAME")}
+    for value in selected.values():
+        assert isinstance(value, str) and 0 < len(value) <= 4096
+        assert all(ord(character) >= 32 and ord(character) != 127 for character in value)
+    assert all(Path(selected[name]).is_absolute() for name in ("HOME", "TMPDIR"))
+    assert all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", selected[name]) for name in ("USER", "LOGNAME"))
+    assert selected["USER"] == selected["LOGNAME"]
+    return selected
+
+
 def main():
     assert sys.platform == "darwin" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
     assert os.uname().machine == "arm64", "reviewed hosted process architecture"
@@ -61,6 +73,8 @@ def main():
     assert int(runtime.split(".iOS-", 1)[1].split("-", 1)[0]) >= 18
     assert re.fullmatch(r"com\.apple\.CoreSimulator\.SimDeviceType\.iPhone-[A-Za-z0-9-]+", device)
     assert re.fullmatch(r"[0-9A-Za-z]{3,32}", expected_build)
+    hosted_user = hosted_user_environment(os.environ)
+    assert all(Path(hosted_user[name]).is_dir() for name in ("HOME", "TMPDIR"))
     # The workflow selects this reviewed installed Xcode; this driver never searches for or switches it.
     developer = Path(os.environ["DEVELOPER_DIR"]).resolve(strict=True)
     assert developer.parent.name == "Contents" and developer.parent.parent.parent == Path("/Applications")
@@ -69,8 +83,8 @@ def main():
     root.mkdir(mode=0o700)  # No resume/replay into an existing result root.
     end = time.monotonic() + 900
     project = Path.cwd()
-    environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8", "DEVELOPER_DIR": str(developer)}
-    for name, child in (("HOME", "home"), ("TMPDIR", "tmp"), ("XDG_CACHE_HOME", "cache"), ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data")):
+    environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8", "DEVELOPER_DIR": str(developer), **hosted_user}
+    for name, child in (("XDG_CACHE_HOME", "cache"), ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data")):
         value = root / child; value.mkdir(mode=0o700); environment[name] = str(value)
     commands, cleanup = [], []
     identifier = None
@@ -138,6 +152,8 @@ def main():
         return value.decode("utf-8", errors="strict")
 
     try:
+        save("hosted-environment.json", {"environment": environment,
+                                       "scope": "standard disposable hosted Apple account and caches; private evidence, build, package and XDG paths"})
         assert run("source", ["/usr/bin/git", "rev-parse", "HEAD"]).strip() == source
         assert run("source-clean", ["/usr/bin/git", "status", "--porcelain"]).strip() == ""
         paths = run("source-paths", ["/usr/bin/git", "ls-files", "-z"]).split("\0")
@@ -150,7 +166,7 @@ def main():
         save("tools.json", {"xcode": version, "developer": str(developer), "runtime": runtime, "device_type": device,
                             "sha256": tools_before, "process_architecture": "arm64", "destination_architecture": "arm64",
                             "scope": "selected installed tools on disposable VM; not transitive closure"})
-        runtimes = json.loads(run("runtimes", ["/usr/bin/xcrun", "simctl", "list", "runtimes", "--json"]))["runtimes"]
+        runtimes = json.loads(run("runtimes", ["/usr/bin/xcrun", "simctl", "list", "runtimes", "--json"], 120))["runtimes"]
         assert len([row for row in runtimes if row.get("identifier") == runtime and row.get("isAvailable") is True]) == 1
         types = json.loads(run("device-types", ["/usr/bin/xcrun", "simctl", "list", "devicetypes", "--json"]))["devicetypes"]
         assert len([row for row in types if row.get("identifier") == device]) == 1
