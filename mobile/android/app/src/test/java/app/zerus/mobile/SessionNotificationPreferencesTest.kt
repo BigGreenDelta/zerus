@@ -296,4 +296,66 @@ class SessionNotificationPreferencesTest {
         assertEquals("uncertain",SessionActionPolicies.result(action,receipt).status)
         assertTrue(SessionActionPolicies.result(action,receipt).confirmedNotificationPreference.isEmpty())
     }
+
+    private fun parsedCurrent(value:JSONObject):NotificationCurrent {
+        val connection=Connection(target.connectionId,"Fixture","https://relay.example.test","synthetic")
+        val machine=JSONObject().put("id","22222222-2222-4222-8222-222222222222").put("name","Computer").put("online",true)
+            .put("snapshot",JSONObject().put("sessions",JSONArray(listOf(value))))
+        return NotificationCatalogParser.parse(connection,listOf(machine),emptyList()).sessions.single()
+    }
+    private fun catalogPlan(raw:JSONObject,previous:NotificationState=NotificationState(bootstrap=false,settingsGeneration=0),at:Double=1000.0):NotificationPlan {
+        val current=parsedCurrent(raw)
+        return NotificationPolicy.plan(previous,listOf(current),listOf(current.slot to NotificationEvent(at.toLong(),current.slot.computer,current.slot.session,"attention",at)),
+            NotificationPreferences(finished=true,optional=true),at)
+    }
+
+    @Test fun realCatalogFingerprintAnnouncesEachNewFallbackClockButIgnoresClockForAnOwnedID() {
+        val baseline=baseline().put("main_attention",attention("",started=100).put("run_id",target.run))
+        val old=raw(suppressed=baseline).put("phase","input").put("attention_started",100)
+        val first=catalogPlan(old);assertTrue(first.desired.isEmpty())
+        val next=JSONObject(old.toString()).put("attention_started",101)
+        val second=catalogPlan(next,first.state,1001.0);assertTrue(second.desired.single().fresh)
+        val third=catalogPlan(JSONObject(next.toString()).put("attention_started",102),second.state,1002.0)
+        assertTrue(third.desired.single().fresh)
+        val identified=JSONObject(next.toString()).put("attention_id","new-owned-id")
+        val owned=catalogPlan(identified,third.state,1003.0);assertTrue(owned.desired.single().fresh)
+        val clockOnly=catalogPlan(JSONObject(identified.toString()).put("attention_started",999),owned.state,1004.0)
+        assertFalse(clockOnly.desired.single().fresh)
+    }
+
+    @Test fun realCatalogKeepsCoveredSiblingQuietAfterRemovalsAndAnnouncesNewChildOrOptional() {
+        fun child(id:String)=JSONObject().put("state","approval").put("attention_id",id).put("attention_started",100)
+        fun optional(id:String)=JSONObject().put("source","codex_async").put("optional",true).put("question_id",id).put("question_hash","hash-$id")
+        val suppressed=baseline().put("child_attention",JSONObject().put("a",attention("a",phase="approval")).put("b",attention("b",phase="approval")))
+            .put("optional_question_ids",JSONArray(listOf("optional-old")))
+        val original=raw(suppressed=suppressed).put("subagents",JSONObject().put("a",child("a")).put("b",child("b")))
+            .put("mobile_attention",JSONArray(listOf(optional("optional-old"))))
+        val first=catalogPlan(original);assertTrue(first.desired.isEmpty())
+        val remaining=JSONObject(original.toString()).put("subagents",JSONObject().put("b",child("b"))).put("attention_signature","b".repeat(64))
+        val second=catalogPlan(remaining,first.state,1001.0);assertTrue(second.desired.isEmpty())
+        val removedOptional=JSONObject(remaining.toString()).put("mobile_attention",JSONArray()).put("attention_signature","c".repeat(64))
+        val third=catalogPlan(removedOptional,second.state,1002.0);assertTrue(third.desired.isEmpty())
+        val newChild=JSONObject(removedOptional.toString()).put("subagents",JSONObject().put("b",child("b")).put("new",child("new")))
+        val fourth=catalogPlan(newChild,third.state,1003.0);assertTrue(fourth.desired.single().fresh)
+        val changedChild=JSONObject(newChild.toString());changedChild.getJSONObject("subagents").getJSONObject("new").put("attention_id","new-again")
+        val fifth=catalogPlan(changedChild,fourth.state,1004.0);assertTrue(fifth.desired.single().fresh)
+        val newOptional=JSONObject(removedOptional.toString()).put("mobile_attention",JSONArray(listOf(optional("optional-new"))))
+        val sixth=catalogPlan(newOptional,third.state,1005.0)
+        assertEquals(SessionAlertKind.Optional,sixth.desired.single().kind);assertTrue(sixth.desired.single().fresh)
+        val unknownMain=JSONObject(removedOptional.toString()).put("pending_question_count",1)
+        assertFalse(parsedCurrent(unknownMain).suppressed)
+        assertTrue(catalogPlan(unknownMain,third.state,1006.0).desired.single().fresh)
+    }
+
+    @Test fun pendingOrUncertainMuteBlocksQueuedDeliveryAndKnownNoWriteFailureReleasesIt() {
+        val now=parsedCurrent(raw())
+        val bound=target.copy(computerId=now.slot.computer)
+        val pending=SessionAction("pending",bound,SessionNotificationPreferences.operation,JSONObject().put("muted",true).put("expected_revision",2).toString())
+        assertFalse(SessionNotificationPreferences.deliveryAllowed(now,listOf(pending)))
+        assertFalse(SessionNotificationPreferences.deliveryAllowed(now,listOf(pending.recover())))
+        val refused=SessionActionPolicies.result(pending,JSONObject().put("request_id","pending").put("state","completed").put("result",JSONObject().put("ok",false).put("error","conflict")))
+        assertEquals("failed",refused.status);assertFalse(refused.blocksSending)
+        assertTrue(SessionNotificationPreferences.deliveryAllowed(now,listOf(refused)))
+        assertTrue(SessionNotificationPreferences.known(actions=listOf(pending)).isEmpty())
+    }
 }

@@ -166,6 +166,7 @@ object SessionNotificationPreferences {
     }
     fun deliveryAllowed(current: NotificationCurrent, actions: List<SessionAction>): Boolean {
         val target=Target(current.slot.computer,current.slot.session,"",current.conversation,current.slot.connection)
+        if(actions.any { it.operation==operation && it.blocksSending && sameConversation(it.target,target) }) return false
         val value=known(actions=actions.filter { key(it.target)==key(target) })[key(target)] ?: return true
         val latest=parse(JSONObject().put("notification_preferences",value),target) ?: return true
         return current.notificationPreference?.let { !it.muted && (it.revision>latest.revision || it==latest) } == true
@@ -184,14 +185,28 @@ object SessionNotificationPreferences {
         return result
     }
     fun hasChildAttention(raw: JSONObject) = currentChildren(raw).isNotEmpty()
+    fun attentionIdentity(raw:JSONObject,target:Target):org.json.JSONArray {
+        fun edge(value:NotificationAttention)=org.json.JSONArray(listOf(value.run,value.phase,value.requestId,if(value.requestId.isEmpty()) value.startedAt else null))
+        val children=currentChildren(raw).map { (id,value) -> org.json.JSONArray(listOf(id,edge(value))).toString() }.distinct().sorted()
+        return org.json.JSONArray(listOf(edge(currentMain(raw,target)),org.json.JSONArray(children)))
+    }
     fun attentionSuppressed(raw: JSONObject, target: Target, pref: SessionNotificationPreference): Boolean {
         val main = currentMain(raw,target)
         val children = currentChildren(raw)
         if(children.any { (id,value) -> pref.suppressed.children[id]?.matches(value) != true }) return false
-        if(main.phase in setOf("approval","input","error") || raw.optJSONObject("recovery")?.string("state") in setOf("uncertain","blocked","exhausted"))
-            return pref.suppressed.main?.matches(main) == true
         val signature = raw.opt("attention_signature") as? String
-        return signature != null && signature == pref.suppressed.signature
+        val aggregate=signature != null && signature == pref.suppressed.signature
+        if(main.phase in setOf("approval","input","error")) return pref.suppressed.main?.matches(main) == true
+        if(raw.optJSONObject("recovery")?.string("state") in setOf("uncertain","blocked","exhausted")) return aggregate
+        val questions=raw.optJSONArray("mobile_attention")?.objects().orEmpty().any { !QuestionPolicies.optionalAttention(it) }
+        if(questions || raw.optInt("pending_question_count")>0) return aggregate
+        // Removing a covered sibling or optional question cannot make an old child new again.
+        return children.isNotEmpty() || aggregate
+    }
+    fun alertKind(raw:JSONObject,target:Target,kind:SessionAlertKind?,optional:List<String>):SessionAlertKind? {
+        val pref=parse(raw,target) ?: return kind
+        return if(!pref.muted && kind in setOf(SessionAlertKind.Input,SessionAlertKind.Error) && attentionSuppressed(raw,target,pref) &&
+            optional.any { it !in pref.suppressed.optionalIds }) SessionAlertKind.Optional else kind
     }
     fun suppressed(raw: JSONObject, target: Target, kind: SessionAlertKind?, optional: List<String>): Boolean {
         val pref = parse(raw,target) ?: return false

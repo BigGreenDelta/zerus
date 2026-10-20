@@ -1,4 +1,5 @@
 import XCTest
+import Synchronization
 @testable import ZerusKit
 
 final class SessionNotificationPreferencesTests: XCTestCase {
@@ -278,5 +279,89 @@ final class SessionNotificationPreferencesTests: XCTestCase {
             "run_id":.string(target.run),"conversation_id":.string(target.conversation),"preferences":.object(preference(true,revision:3,suppressed:oversized))]]
         XCTAssertEqual("uncertain",SessionActionPolicies.result(action,receipt).status)
         XCTAssertNil(SessionActionPolicies.result(action,receipt).confirmedNotificationPreference)
+    }
+
+    private func parsedCurrent(_ value: JSONObject) -> NotificationCurrent {
+        let connection = Connection(id:target.connectionId,label:"Fixture",url:"https://relay.example.test",token:"synthetic")
+        let machine: JSONObject = ["id":"22222222-2222-4222-8222-222222222222","name":"Computer","online":true,"snapshot":["sessions":[.object(value)]]]
+        return NotificationCatalogParser.parse(connection,records:[machine],aliases:[]).sessions[0]
+    }
+    private func catalogPlan(_ raw: JSONObject, previous: NotificationState = NotificationState(bootstrap:false,settingsGeneration:0), at: Double = 1000) -> NotificationPlan {
+        let current = parsedCurrent(raw)
+        var preferences = NotificationPreferences(generation:0);preferences.finished = true;preferences.optional = true
+        return NotificationPolicy.plan(previous,current:[current],events:[(current.slot,NotificationEvent(id:Int64(at),computer:current.slot.computer,session:current.slot.session,kind:"attention",at:at))],
+            preferences:preferences,now:at)
+    }
+
+    func testRealCatalogFingerprintAnnouncesNewFallbackClocksButIgnoresClockForOwnedID() {
+        let baseline = changed(baseline(),"main_attention",.object(changed(attention("",started:100),"run_id",.string(target.run))))
+        var old = raw(suppressed:baseline);old["phase"] = "input";old["attention_started"] = 100
+        let first = catalogPlan(old);XCTAssertTrue(first.desired.isEmpty)
+        let next = changed(old,"attention_started",101)
+        let second = catalogPlan(next,previous:first.state,at:1001);XCTAssertEqual(true,second.desired.first?.fresh)
+        let third = catalogPlan(changed(next,"attention_started",102),previous:second.state,at:1002)
+        XCTAssertEqual(true,third.desired.first?.fresh)
+        let identified = changed(next,"attention_id","new-owned-id")
+        let owned = catalogPlan(identified,previous:third.state,at:1003);XCTAssertEqual(true,owned.desired.first?.fresh)
+        let clockOnly = catalogPlan(changed(identified,"attention_started",999),previous:owned.state,at:1004)
+        XCTAssertEqual(false,clockOnly.desired.first?.fresh)
+    }
+
+    func testRealCatalogKeepsCoveredSiblingQuietAfterRemovalsAndAnnouncesNewChildOrOptional() {
+        func child(_ id: String) -> JSONObject { ["state":"approval","attention_id":.string(id),"attention_started":100] }
+        func optional(_ id: String) -> JSONObject { ["source":"codex_async","optional":true,"question_id":.string(id),"question_hash":.string("hash-" + id)] }
+        var suppressed = baseline();suppressed["child_attention"] = ["a":.object(attention("a",phase:"approval")),"b":.object(attention("b",phase:"approval"))]
+        suppressed["optional_question_ids"] = ["optional-old"]
+        var original = raw(suppressed:suppressed);original["subagents"] = ["a":.object(child("a")),"b":.object(child("b"))]
+        original["mobile_attention"] = [.object(optional("optional-old"))]
+        let first = catalogPlan(original);XCTAssertTrue(first.desired.isEmpty)
+        var remaining = original;remaining["subagents"] = ["b":.object(child("b"))];remaining["attention_signature"] = .string(String(repeating:"b",count:64))
+        let second = catalogPlan(remaining,previous:first.state,at:1001);XCTAssertTrue(second.desired.isEmpty)
+        var removed = remaining;removed["mobile_attention"] = [];removed["attention_signature"] = .string(String(repeating:"c",count:64))
+        let third = catalogPlan(removed,previous:second.state,at:1002);XCTAssertTrue(third.desired.isEmpty)
+        var newChild = removed;newChild["subagents"] = ["b":.object(child("b")),"new":.object(child("new"))]
+        let fourth = catalogPlan(newChild,previous:third.state,at:1003);XCTAssertEqual(true,fourth.desired.first?.fresh)
+        var changedChild = newChild;changedChild["subagents"] = ["b":.object(child("b")),"new":.object(child("new-again"))]
+        let fifth = catalogPlan(changedChild,previous:fourth.state,at:1004);XCTAssertEqual(true,fifth.desired.first?.fresh)
+        var newOptional = removed;newOptional["mobile_attention"] = [.object(optional("optional-new"))]
+        let sixth = catalogPlan(newOptional,previous:third.state,at:1005)
+        XCTAssertEqual(.optional,sixth.desired.first?.kind);XCTAssertEqual(true,sixth.desired.first?.fresh)
+        let unknownMain = changed(removed,"pending_question_count",1)
+        XCTAssertFalse(parsedCurrent(unknownMain).suppressed)
+        XCTAssertEqual(true,catalogPlan(unknownMain,previous:third.state,at:1006).desired.first?.fresh)
+    }
+
+    func testPendingOrUncertainMuteBlocksQueuedDeliveryAndKnownNoWriteFailureReleasesIt() {
+        let now = parsedCurrent(raw()),bound = target.with(computerId:"22222222-2222-4222-8222-222222222222")
+        let pending = SessionAction(requestId:"pending",target:bound,operation:SessionNotificationPreferences.operation,arguments:["muted":true,"expected_revision":2])
+        XCTAssertFalse(SessionNotificationPreferences.deliveryAllowed(now,actions:[pending]))
+        XCTAssertFalse(SessionNotificationPreferences.deliveryAllowed(now,actions:[pending.recover()]))
+        let refused = SessionActionPolicies.result(pending,["request_id":"pending","state":"completed","result":["ok":false,"error":"conflict"]])
+        XCTAssertEqual("failed",refused.status);XCTAssertFalse(refused.blocksSending)
+        XCTAssertTrue(SessionNotificationPreferences.deliveryAllowed(now,actions:[refused]))
+        XCTAssertTrue(SessionNotificationPreferences.known(actions:[pending]).isEmpty)
+    }
+
+    private final class FailingSink: Sendable {
+        let failing = Mutex(true)
+        func write(_ state: MessageState) throws { if failing.withLock({ $0 }) { throw ZerusError.invalid("disk full") } }
+    }
+    @MainActor func testFailedReceiptPersistenceKeepsOriginalRecoveryAndQueuedNoticeBlocked() async throws {
+        let now = parsedCurrent(raw()),bound = target.with(computerId:"22222222-2222-4222-8222-222222222222")
+        let success = confirmed(true,revision:3,bound:bound)
+        var pending = success;pending.status = "sending";pending.confirmedNotificationPreference = nil
+        let sink = FailingSink()
+        let writer = OrderedStatePersistence(initial:MessageState(sessionActions:[pending])) { try sink.write($0) }
+        defer { writer.close() }
+        do { _ = try await writer.durable { $0.action(success) };XCTFail("Receipt write must fail") } catch {}
+        XCTAssertEqual("sending",writer.state.sessionActions[0].status)
+        XCTAssertNil(writer.state.sessionActions[0].confirmedNotificationPreference)
+        XCTAssertTrue(SessionNotificationPreferences.known(actions:writer.state.sessionActions).isEmpty)
+        XCTAssertFalse(SessionNotificationPreferences.deliveryAllowed(now,actions:writer.state.sessionActions))
+        sink.failing.withLock { $0 = false }
+        _ = try await writer.durable { $0.action(success) }
+        XCTAssertEqual("completed",writer.state.sessionActions[0].status)
+        XCTAssertNotNil(writer.state.sessionActions[0].confirmedNotificationPreference)
+        XCTAssertFalse(SessionNotificationPreferences.deliveryAllowed(now,actions:writer.state.sessionActions))
     }
 }

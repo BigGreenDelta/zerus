@@ -208,6 +208,7 @@ public enum SessionNotificationPreferences {
     }
     public static func deliveryAllowed(_ current: NotificationCurrent, actions: [SessionAction]) -> Bool {
         let target = Target(computerId:current.slot.computer,session:current.slot.session,run:"",conversation:current.conversation,connectionId:current.slot.connection)
+        if actions.contains(where:{ $0.operation == operation && $0.blocksSending && sameConversation($0.target,target) }) { return false }
         guard let value = known(actions:actions.filter { key($0.target) == key(target) })[key(target)],
               let latest = parse(["notification_preferences":.object(value)],target) else { return true }
         guard let observed = current.notificationPreference else { return false }
@@ -228,14 +229,31 @@ public enum SessionNotificationPreferences {
         }
     }
     public static func hasChildAttention(_ raw: JSONObject) -> Bool { !currentChildren(raw).isEmpty }
+    public static func attentionIdentity(_ raw: JSONObject, _ target: Target) -> JSON {
+        func edge(_ value: NotificationAttention) -> JSON {
+            .array([.string(value.run),.string(value.phase),.string(value.requestId),value.requestId.isEmpty ? value.startedAt.map(JSON.double) ?? .null : .null])
+        }
+        let children = Array(Set(currentChildren(raw).map { id,value in JSON.array([.string(id),edge(value)]).compact })).sorted()
+        return .array([edge(currentMain(raw,target)),.array(children.map(JSON.string))])
+    }
     public static func attentionSuppressed(_ raw: JSONObject, _ target: Target, _ pref: SessionNotificationPreference) -> Bool {
         let main = currentMain(raw,target)
-        if currentChildren(raw).contains(where:{ id,value in pref.suppressed.children.first { $0.key.utf8.elementsEqual(id.utf8) }?.value.matches(value) != true }) { return false }
-        if ["approval","input","error"].contains(main.phase) || ["uncertain","blocked","exhausted"].contains(raw.object("recovery")?.string("state") ?? "") {
+        let children = currentChildren(raw)
+        if children.contains(where:{ id,value in pref.suppressed.children.first { $0.key.utf8.elementsEqual(id.utf8) }?.value.matches(value) != true }) { return false }
+        let aggregate: Bool
+        if case .string(let signature)? = raw["attention_signature"] { aggregate = signature == pref.suppressed.signature } else { aggregate = false }
+        if ["approval","input","error"].contains(main.phase) {
             return pref.suppressed.main?.matches(main) == true
         }
-        guard case .string(let signature)? = raw["attention_signature"] else { return false }
-        return signature == pref.suppressed.signature
+        if ["uncertain","blocked","exhausted"].contains(raw.object("recovery")?.string("state") ?? "") { return aggregate }
+        if raw.objects("mobile_attention").contains(where:{ !QuestionPolicies.optionalAttention($0) }) || raw.int("pending_question_count") > 0 { return aggregate }
+        return !children.isEmpty || aggregate
+    }
+    public static func alertKind(_ raw: JSONObject, _ target: Target, kind: SessionAlertKind?, optional: [String]) -> SessionAlertKind? {
+        guard let pref = parse(raw,target) else { return kind }
+        if !pref.muted,(kind == .input || kind == .error),attentionSuppressed(raw,target,pref),
+           optional.contains(where:{ id in !pref.suppressed.optionalIds.contains { $0.utf8.elementsEqual(id.utf8) } }) { return .optional }
+        return kind
     }
     public static func suppressed(_ raw: JSONObject, _ target: Target, kind: SessionAlertKind?, optional: [String]) -> Bool {
         guard let pref = parse(raw,target) else { return false }

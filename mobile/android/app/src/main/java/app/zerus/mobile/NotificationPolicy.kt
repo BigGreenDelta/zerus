@@ -120,7 +120,8 @@ object NotificationPolicy {
             val previous = old[session.slot.key]
             if(session.suppressed) {
                 records += NotificationRecord(session.slot,session.target,now,
-                    observedFingerprint=session.identity,optionalSeen=(previous?.optionalSeen.orEmpty()+session.optional).distinct().takeLast(maxOptionalSeen))
+                    observedFingerprint=session.kind?.let { fingerprint(JSONArray(listOf(session.target,it.name,session.identity)).toString()) }.orEmpty(),
+                    optionalSeen=(previous?.optionalSeen.orEmpty()+session.optional).distinct().takeLast(maxOptionalSeen))
                 continue
             }
             if (!session.live) {

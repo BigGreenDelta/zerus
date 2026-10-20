@@ -397,7 +397,8 @@ public enum NotificationPolicy {
             let key = session.slot.key
             let previous = old[key]
             if session.suppressed {
-                records.append(NotificationRecord(slot:session.slot,target:session.target,observedAt:now,observedFingerprint:session.identity,
+                records.append(NotificationRecord(slot:session.slot,target:session.target,observedAt:now,
+                    observedFingerprint:session.kind.map { fingerprint(JSON.array([.string(session.target),.string($0.rawValue),.string(session.identity)]).compact) } ?? "",
                     optionalSeen:Array(Set((previous?.optionalSeen ?? []) + session.optional)).sorted().suffix(maxOptionalSeen).map { $0 }))
                 continue
             }
@@ -610,16 +611,17 @@ public enum NotificationCatalogParser {
                 // Optional questions never change the identity of a request that needs action.
                 let pending = blocking.map { JSON.array([.string($0.string("question_id")), .string($0.string("question_hash"))]).compact }.sorted()
                 let optional = Array(Set(items.filter(QuestionPolicies.optionalAttention).map { $0.string("question_id") }.filter { !$0.isEmpty })).sorted()
-                let kind: SessionAlertKind?
+                let nativeKind: SessionAlertKind?
                 if (phase == "error" && !["waiting", "dispatching", "retrying"].contains(recovery)) || ["uncertain", "blocked", "exhausted"].contains(recovery) {
-                    kind = .error
+                    nativeKind = .error
                 } else if ["input", "approval"].contains(phase) || !pending.isEmpty || value.int("pending_question_count") > 0 || SessionNotificationPreferences.hasChildAttention(value) {
-                    kind = .input
+                    nativeKind = .input
                 } else if !optional.isEmpty {
-                    kind = .optional
+                    nativeKind = .optional
                 } else {
-                    kind = nil
+                    nativeKind = nil
                 }
+                let kind = SessionNotificationPreferences.alertKind(value,session.target,kind:nativeKind,optional:optional)
                 let providerError: JSON = value.object("provider_error").map { error in
                     .array([.string(error.string("source")), .string(error.string("message_id")),
                             .string(error.string("code").isEmpty ? error.string("type") : error.string("code")), .string(error.string("message"))])
@@ -629,7 +631,7 @@ public enum NotificationCatalogParser {
                 } ?? .null
                 let identity = NotificationPolicy.fingerprint(JSON.array([.string(phase), .string(value.string("attention_id")), value["question_request"] ?? .null,
                                                                           value["question_requests"] ?? .null, .array(pending.map(JSON.string)), .string(recovery),
-                                                                          providerError, recoveryDetail]).compact)
+                                                                          providerError, recoveryDetail,SessionNotificationPreferences.attentionIdentity(value,session.target),.int(Int64(value.int("pending_question_count")))]).compact)
                 let target = !session.target.run.isEmpty && !session.target.conversation.isEmpty
                     ? JSON.array([.string(session.target.run), .string(session.target.conversation)]).compact : ""
                 current.append(NotificationCurrent(slot: NotificationSlot(connection: connection.id, computer: machine.id, session: session.target.session),

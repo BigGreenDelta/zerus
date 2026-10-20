@@ -255,6 +255,7 @@ extension ConversationModel {
             })
         } catch {
             app.error = "Could not save the action result. Its original request remains recoverable."
+            if action.operation == SessionNotificationPreferences.operation { return }
         }
         if ["archive", "terminate", "restore", "forget", "rename"].contains(action.operation) { app.archive.refresh() }
         if action.operation == SessionNotificationPreferences.operation {
