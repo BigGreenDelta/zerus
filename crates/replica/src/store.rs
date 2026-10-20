@@ -10,7 +10,7 @@ use crate::schema::{Actor, Stage, SCHEMA};
 use crate::task::TaskDoc;
 use crate::{ids, rank, Error, Result};
 use fs2::FileExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -27,7 +27,7 @@ const FOLD_BYTES: u64 = 256 * 1024;
 const HEADER: usize = 8;
 
 /// A task file that failed to load. It stays on disk and never blocks the others.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Damaged {
     pub uuid: String,
     pub error: String,

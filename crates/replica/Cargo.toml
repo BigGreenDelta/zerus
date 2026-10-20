@@ -8,6 +8,7 @@ description = "Replicated Zerus documents on Loro: the task schema, its rules an
 publish = false
 
 [dependencies]
+base64 = "0.22"
 # The only crate in Zerus that imports Loro. Raise this pin deliberately: the
 # golden vectors in tests/vectors must still decode (see tests/vectors.rs).
 loro = { version = "=1.16.2", default-features = false }

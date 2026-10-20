@@ -4,6 +4,7 @@
 mod error;
 pub mod ids;
 mod ops;
+pub mod phone;
 mod project;
 pub mod rank;
 mod render;
