@@ -7,6 +7,8 @@ enum Theme {
     static let background = Color(hex: 0x101517)
     static let surface = Color(hex: 0x1A2225)
     static let muted = Color(hex: 0x9AACB2)
+    /// Desktop's notice violet: messages the person did not write.
+    static let notice = Color(hex: 0xC5A8F5)
     static let onSurface = Color(hex: 0xE9F0F2)
     static let outline = Color(hex: 0x354449)
     static let errorSurface = Color(hex: 0x3A2821)

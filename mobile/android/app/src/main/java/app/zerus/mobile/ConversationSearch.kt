@@ -10,7 +10,8 @@ object ConversationSearch {
     fun prepare(events: List<Event>): List<SearchableMessage> = events.map { event ->
         val replies = if(QuestionReplyPresentation.isOwnRole(event.role)) QuestionReplyPresentation.parse(event.text) else null
         val body = replies?.joinToString("\n\n") { "Question\n${it.question}\nYour answer\n${it.answer}" } ?: event.text
-        SearchableMessage(event.id,if(replies != null) "You (answer)" else event.role,
+        SearchableMessage(event.id,if(replies != null) "You (answer)"
+            else if(event.role == ActivityNotices.ROLE) ActivityNotices.label(event.origin,event.sender) else event.role,
             listOf(body,event.attachments.joinToString("\n") { it.name }).filter { it.isNotBlank() }.joinToString("\n"),event.at)
     }
     fun find(messages: List<SearchableMessage>,query: String,limit: Int = 100): MessageSearchResults {

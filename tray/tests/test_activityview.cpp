@@ -22,6 +22,7 @@
 #include <QMediaPlayer>
 #include <QAudioOutput>
 #include <QFile>
+#include <QFileInfo>
 #include <QtEndian>
 #include <QLabel>
 #include <QLineEdit>
@@ -235,6 +236,7 @@ private slots:
     void taskNotificationIsAColoredNoticeNotYou();
     void subagentReportIsShortUntilExpanded();
     void crossSessionMessageIsAFullNoticeFromThatSession();
+    void noticesFollowSharedActivityContract();
     void kimiWireAnswerReplacesEmptyStop();
     void progressCommentaryAppearsBeforeFinalResponse();
     void claudeThinkingStaysSeparateFromToolsAndReplies();
@@ -2086,6 +2088,37 @@ void TestActivityView::crossSessionMessageIsAFullNoticeFromThatSession()
     QVERIFY(!plain.contains("**Re-apply**"));
     QVERIFY(links(view.browser()).filter(QRegularExpression("^hgs-activity:report-")).isEmpty());
     QVERIFY(view.browser()->toHtml().contains("#c5a8f5", Qt::CaseInsensitive));
+}
+
+void TestActivityView::noticesFollowSharedActivityContract()
+{
+    // Android and iOS read the same cases; the hgs journal produces their events.
+    QFile file(QFileInfo(QString::fromUtf8(__FILE__)).dir().filePath(
+        "../../mobile/android/app/src/test/resources/activity-notice-contract.json"));
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto cases = QJsonDocument::fromJson(file.readAll()).object().value("cases").toArray();
+    QVERIFY(!cases.isEmpty());
+    for (const auto &value : cases) {
+        const auto example = value.toObject(); const auto name = example.value("name").toString().toUtf8();
+        auto event = journalEvent(2, "UserPromptSubmit", {});
+        const auto fields = example.value("event").toObject();
+        for (auto field = fields.begin(); field != fields.end(); ++field) event[field.key()] = field.value();
+        SettledActivityView view;
+        view.setActivity({}, {event});
+        const auto plain = view.browser()->toPlainText();
+        const auto presentation = example.value("presentation").toObject();
+        const auto body = presentation.value("body").toString().section('\n', 0, 0);
+        QVERIFY2(plain.contains(body), name);
+        QVERIFY2(!plain.contains("verified", Qt::CaseInsensitive), name);
+        if (presentation.value("kind") == "notice") {
+            QVERIFY2(plain.contains(presentation.value("label").toString()), name);
+            QVERIFY2(!plain.contains("You"), name);
+        } else {
+            QCOMPARE(presentation.value("kind").toString(), QString("user"));
+            QVERIFY2(plain.contains("You"), name);
+            QVERIFY2(!plain.contains("Message from"), name);
+        }
+    }
 }
 
 void TestActivityView::subagentReportIsShortUntilExpanded()

@@ -102,6 +102,8 @@ private val Amber = Color(0xFFFFCB7D)
 private val Background = Color(0xFF101517)
 private val Surface = Color(0xFF1A2225)
 private val Muted = Color(0xFF9AACB2)
+/** Desktop's notice violet. */
+private val Notice = Color(0xFFC5A8F5)
 private val Scheme = darkColorScheme(primary = Mint, onPrimary = Background, secondary = Amber,
     background = Background, surface = Surface, surfaceContainer = Surface, onSurface = Color(0xFFE9F0F2),
     onSurfaceVariant = Muted, outline = Color(0xFF354449))
@@ -1079,6 +1081,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
 
 @Composable internal fun ConversationMessage(target: Target, event: Event, agent: String, outgoing: OutgoingMessage?,
     model: ZerusViewModel, onReview: (OutgoingMessage) -> Unit) {
+    if (event.role == ActivityNotices.ROLE) return ActivityNotice(target, event, model)
     val own = QuestionReplyPresentation.isOwnRole(event.role)
     val parsedReply by produceState<Pair<String, List<PresentedQuestionReply>?>>(event.text to null, event.text, own) {
         value = event.text to if (own) withContext(Dispatchers.Default) { QuestionReplyPresentation.parse(event.text) } else null
@@ -1146,6 +1149,35 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
 }
 
+
+/** A message the person did not write, framed like desktop's notice cards (ActivityNotices). */
+@Composable private fun ActivityNotice(target: Target, event: Event, model: ZerusViewModel) {
+    val label = ActivityNotices.label(event.origin, event.sender)
+    var expanded by rememberSaveable(event.id) { mutableStateOf(false) }
+    val files: (ComputerFileReference) -> Unit = { reference ->
+        model.computerFiles.show(target, reference, model.machines.find {
+            it.connectionId == target.connectionId && it.id == target.computerId
+        }?.name.orEmpty().ifBlank { "computer" })
+    }
+    Surface(color = Surface, shape = RoundedCornerShape(17.dp), border = BorderStroke(1.dp, Notice.copy(alpha = .45f)),
+        modifier = Modifier.fillMaxWidth().semantics { contentDescription = label }) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(label, color = Notice, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+            ProvideTextStyle(conversationTextStyle()) { MarkdownText(event.text, fileScope = target.key, onFileReference = files) }
+            if (event.report.isNotBlank()) {
+                TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Hide report" else "Show report") }
+                if (expanded) ProvideTextStyle(conversationTextStyle()) {
+                    MarkdownText(event.report, fileScope = target.key, onFileReference = files)
+                }
+            }
+            AttachmentRows(event.attachments, target, model)
+            if (event.detailTruncated) Text("Message text shortened", color = Amber, style = MaterialTheme.typography.labelSmall)
+            if (event.at > 0) Text(java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date((event.at * 1000).toLong())), color = Muted, style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.align(Alignment.End))
+        }
+    }
+}
 @Composable private fun MessageComposer(model: ZerusViewModel, session: Session, online: Boolean,
     onReview: (Draft) -> Unit, onAttach: (Target) -> Unit, onReviewOutgoing: (OutgoingMessage) -> Unit) {
     val target = session.target

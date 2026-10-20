@@ -23,6 +23,41 @@ enum MessageTime {
     static func text(_ at: Double) -> String { formatter.string(from: Date(timeIntervalSince1970: at)) }
 }
 
+/// A message the person did not write, framed like desktop's notice cards (ActivityNotices).
+struct NoticeCard: View {
+    let event: Event
+    @State private var expanded = false
+
+    private var label: String { ActivityNotices.label(origin: event.origin ?? "", sender: event.sender ?? "") }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label).font(.caption.weight(.semibold)).foregroundStyle(Theme.notice)
+            MarkdownContent(source: event.text)
+            if let report = event.report, !report.isEmpty {
+                Button(expanded ? "Hide report" : "Show report") { expanded.toggle() }
+                    .font(.caption)
+                if expanded { MarkdownContent(source: report) }
+            }
+            if event.at > 0 {
+                HStack {
+                    Spacer(minLength: 0)
+                    Text(MessageTime.text(event.at))
+                }
+                .font(.caption2)
+                .foregroundStyle(Theme.muted)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 17))
+        .overlay(RoundedRectangle(cornerRadius: 17).stroke(Theme.notice.opacity(0.45), lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(label)
+    }
+}
+
 /// One conversation row: your messages on the right, agent replies as full-width Markdown.
 struct MessageBubble: View {
     @Environment(AppModel.self) private var app
@@ -35,6 +70,18 @@ struct MessageBubble: View {
     private var own: Bool { QuestionReplyPresentation.isOwnRole(event.role) }
 
     var body: some View {
+        if event.role == ActivityNotices.role {
+            VStack(alignment: .leading, spacing: 4) {
+                NoticeCard(event: event)
+                if !event.attachments.isEmpty { attachments }
+                if event.detailTruncated { Text("Message text shortened").font(.caption2).foregroundStyle(Theme.amber) }
+            }
+        } else {
+            bubble
+        }
+    }
+
+    @ViewBuilder private var bubble: some View {
         let replies = own ? QuestionReplyPresentation.parse(event.text) : nil
         HStack {
             if own { Spacer(minLength: 28) }
