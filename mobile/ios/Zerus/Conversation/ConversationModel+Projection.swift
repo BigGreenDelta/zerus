@@ -37,11 +37,13 @@ extension ConversationModel {
                     }
                     guard let updated = committed else { return }
                     if let frame = self.activeFrame, frame.target == target, self.selected?.target == target {
+                        let revision = self.presentationRevision
                         let messages = self.normalizedOutgoing.filter { $0.belongs(to: target) }
                         let display = await Task.detached(priority: .userInitiated) {
                             target.archiveId.isEmpty ? ConversationMerge.merge(target: target, native: updated.events, outgoing: messages).events : updated.events
                         }.value
-                        if self.activeFrame === frame, self.historyWindows[target.key] == updated, self.selected?.target == target {
+                        if self.activeFrame === frame, self.historyWindows[target.key] == updated, self.selected?.target == target,
+                           self.presentationRevision == revision, self.normalizedOutgoing.filter({ $0.belongs(to: target) }) == messages {
                             self.presentationTask?.cancel()
                             self.presentationRevision += 1
                             let next = frame.with(events: updated.events, truncated: frame.truncated, window: updated,

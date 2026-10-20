@@ -410,9 +410,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     // Reprepare the visible rows without settling outbox, changing the divider or read metadata.
                     val frame=activeFrame?.takeIf { it.target==target && selected?.target==target }
                     if(frame!=null) {
+                        val revision=presentationRevision
                         val messages=outgoing.filter { it.belongsTo(target) }
                         val display=withContext(Dispatchers.Default) { if(target.archiveId.isBlank()) ConversationMerge.merge(target,next.displayed,messages).events else next.displayed }
-                        if(activeFrame===frame && historyWindows[target.key]===next && selected?.target==target) {
+                        if(activeFrame===frame && historyWindows[target.key]===next && selected?.target==target &&
+                            presentationRevision==revision && outgoing.filter { it.belongsTo(target) }==messages) {
                             presentationJob?.cancel();presentationRevision++
                             val updated=frame.copy(events=next.displayed,window=next,presentation=Presentation(messages,display,conversationQuestions))
                             activeFrame=updated;rememberFrame(updated)
