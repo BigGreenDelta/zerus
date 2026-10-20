@@ -14,6 +14,9 @@ private slots:
     void sendsExactPayloadToEachSessionHost();
     void unreachableHostBacksOffAndConfirmedMarksWaitForSnapshots();
     void limitsConcurrentHostWrites();
+    void busyHostLeavesSlotsForOtherHosts();
+    void unappliedMarksAreWrittenLessOften();
+    void transientlyUnappliedMarkIsRetriedAfterTwoMinutes();
     void keyedPendingPassesThroughOneWritePerKey();
     void duplicateKeysMergeFieldsWhateverTheObjectKeyOrder_data();
     void duplicateKeysMergeFieldsWhateverTheObjectKeyOrder();
@@ -39,6 +42,8 @@ with (root/'calls.jsonl').open('a') as log: log.write(json.dumps({'argv':sys.arg
 if (root/'slow').exists(): time.sleep(0.5)
 if (root/'fail').exists(): print('ssh: connect to host mac port 22: No route to host',file=sys.stderr); sys.exit(255)
 read={'conversation_id':payload['conversation_id'],'reply_id':payload['reply_id'],'attention_signature':payload['attention_signature'],'at':1.0}
+if (root/'unapplied').exists(): print(json.dumps({'ok':True,'applied':{'reply_id':False,'attention_signature':False},'read':None})); sys.exit(0)
+if (root/'reply-only').exists(): print(json.dumps({'ok':True,'applied':{'reply_id':True,'attention_signature':False},'read':dict(read,attention_signature=None)})); sys.exit(0)
 print(json.dumps({'ok':True,'applied':{'reply_id':payload['reply_id'] is not None,'attention_signature':payload['attention_signature'] is not None},'read':read}))
 )");
     script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
@@ -46,7 +51,7 @@ print(json.dumps({'ok':True,'applied':{'reply_id':payload['reply_id'] is not Non
 
 void TestReadMarkSync::init()
 {
-    for (const char *name : {"calls.jsonl", "slow", "fail"}) QFile::remove(m_dir.filePath(name));
+    for (const char *name : {"calls.jsonl", "slow", "fail", "unapplied", "reply-only"}) QFile::remove(m_dir.filePath(name));
 }
 
 QList<QJsonObject> TestReadMarkSync::calls() const
@@ -111,6 +116,78 @@ void TestReadMarkSync::limitsConcurrentHostWrites()
     QCOMPARE(sync.inFlight(), ReadMarkSync::kMaxInFlight);
     QTRY_COMPARE_WITH_TIMEOUT(done.size(), 6, 10000);
     QCOMPARE(calls().size(), 6);
+}
+
+void TestReadMarkSync::busyHostLeavesSlotsForOtherHosts()
+{
+    touch("slow");
+    HgsClient client(FakeCli::program(hgs())); ReadMarkSync sync(&client); QSignalSpy done(&sync, &ReadMarkSync::markFinished);
+    QJsonObject pending;
+    for (int i = 0; i < 6; ++i) {
+        const ReadMark mark{"alpha", QString("codex/project/s%1").arg(i), "run", QString("conversation-%1").arg(i), "1:1.0", {}};
+        pending[mark.key()] = mark.toJson();
+    }
+    // Sorted after every mark of the busy host.
+    const ReadMark other{"zeta", "codex/project/other", "run", "conversation", "1:1.0", {}};
+    pending[other.key()] = other.toJson();
+    sync.setPending(pending);
+    QCOMPARE(sync.inFlight(), ReadMarkSync::kMaxInFlight);
+    QTRY_COMPARE(calls().size(), ReadMarkSync::kMaxInFlight);
+    QStringList hosts;
+    for (const auto &call : calls()) hosts << call.value("argv").toArray().first().toString();
+    QVERIFY2(hosts.contains("@zeta"), qPrintable(hosts.join(' ')));
+    QTRY_COMPARE_WITH_TIMEOUT(done.size(), 7, 10000);
+}
+
+void TestReadMarkSync::unappliedMarksAreWrittenLessOften()
+{
+    qint64 now = 1000000;
+    HgsClient client(FakeCli::program(hgs())); ReadMarkSync sync(&client); sync.setClock([&now] { return now; });
+    QSignalSpy done(&sync, &ReadMarkSync::markFinished);
+    touch("unapplied");
+    // The host applies nothing: the request is no longer current or its
+    // question index is not ready. Writing it again cannot help before a
+    // snapshot changes, so the interval doubles from two minutes.
+    const ReadMark mark{"mac", "codex/project/review", "run-1", "conversation-1", "7:100.5", QString(64, 'a')};
+    sync.setPending({{mark.key(), mark.toJson()}});
+    QTRY_COMPARE(done.size(), 1); QVERIFY(done[0][1].toBool());
+    now += ReadMarkSync::kConfirmedResendMs; sync.pump(); QTRY_COMPARE(done.size(), 2);
+    now += ReadMarkSync::kConfirmedResendMs; sync.pump(); QTest::qWait(300); QCOMPARE(calls().size(), 2);
+    now += ReadMarkSync::kConfirmedResendMs; sync.pump(); QTRY_COMPARE(done.size(), 3);
+    now += 4 * ReadMarkSync::kConfirmedResendMs - 1; sync.pump(); QTest::qWait(300); QCOMPARE(calls().size(), 3);
+    now += 1; sync.pump(); QTRY_COMPARE(done.size(), 4);
+    for (int i = 0; i < 2; ++i) {
+        now += ReadMarkSync::kMaxUnappliedResendMs - 1; sync.pump(); QTest::qWait(300); QCOMPARE(calls().size(), 4 + i);
+        now += 1; sync.pump(); QTRY_COMPARE(done.size(), 5 + i);
+    }
+    // Once the host applies it, the usual confirmed interval returns.
+    QFile::remove(m_dir.filePath("unapplied"));
+    now += ReadMarkSync::kMaxUnappliedResendMs; sync.pump(); QTRY_COMPARE(done.size(), 7);
+    now += ReadMarkSync::kConfirmedResendMs - 1; sync.pump(); QTest::qWait(300); QCOMPARE(calls().size(), 7);
+    now += 1; sync.pump(); QTRY_COMPARE(done.size(), 8);
+}
+
+void TestReadMarkSync::transientlyUnappliedMarkIsRetriedAfterTwoMinutes()
+{
+    qint64 now = 1000000;
+    HgsClient client(FakeCli::program(hgs())); ReadMarkSync sync(&client); sync.setClock([&now] { return now; });
+    QSignalSpy done(&sync, &ReadMarkSync::markFinished);
+    // The host applies the reply but not the request, for example because its
+    // own question index slice ran out; the listing still shows that request.
+    touch("reply-only");
+    const ReadMark mark{"mac", "codex/project/review", "run-1", "conversation-1", "7:100.5", QString(64, 'a')};
+    sync.setPending({{mark.key(), mark.toJson()}});
+    QTRY_COMPARE(done.size(), 1); QVERIFY(done[0][1].toBool());
+    QCOMPARE(done[0][2].toJsonObject().value("applied").toObject().value("attention_signature").toBool(), false);
+    // The first retry comes after two minutes, as for any delivered mark.
+    QFile::remove(m_dir.filePath("reply-only"));
+    now += ReadMarkSync::kConfirmedResendMs - 1; sync.pump(); QTest::qWait(300); QCOMPARE(calls().size(), 1);
+    now += 1; sync.pump(); QTRY_COMPARE(done.size(), 2);
+    QCOMPARE(calls().last().value("payload").toObject().value("attention_signature").toString(), QString(64, 'a'));
+    QVERIFY(done[1][2].toJsonObject().value("applied").toObject().value("attention_signature").toBool());
+    // Applied: the next write is again two minutes later, not a doubled interval.
+    now += ReadMarkSync::kConfirmedResendMs - 1; sync.pump(); QTest::qWait(300); QCOMPARE(calls().size(), 2);
+    now += 1; sync.pump(); QTRY_COMPARE(done.size(), 3);
 }
 
 void TestReadMarkSync::keyedPendingPassesThroughOneWritePerKey()

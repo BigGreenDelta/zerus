@@ -41,6 +41,7 @@ private slots:
     void tooltipAgeIsMinuteGrained();
     void sharedReadComesFromTheSessionHost();
     void sharedMarksApplyAtOnceAndSettleFromSnapshots();
+    void unknownOptionalQuestionsKeepAttentionMarks();
     void queuedMarksNeverHideNewerRepliesOrRequests();
     void legacyMarksMigrateOnlyCurrentValues();
     void olderHostsKeepLocalReadStateAndQueueNothing();
@@ -336,6 +337,23 @@ void TestFleetState::sharedMarksApplyAtOnceAndSettleFromSnapshots()
     local.sessions[0].readReplyId = "7:100.5"; local.sessions[0].readAttentionSignature = signature; f.setLocal(local, 4000);
     QCOMPARE(f.takeSettledReadMarks().size(), 1); QVERIFY(f.pendingReads().isEmpty());
     QVERIFY(!f.local().sessions[0].needsAttention());
+}
+
+void TestFleetState::unknownOptionalQuestionsKeepAttentionMarks()
+{
+    // optional_questions is null both for an index still catching up and for
+    // one that cannot be read, whose signature hgs read acknowledges. The
+    // desktop cannot tell them apart and never drops the acknowledgement.
+    const QString signature(64, 'a');
+    BoxState local = box("arch", true, 0); local.sessions = {shared("7:100.5", signature)};
+    local.sessions[0].optionalQuestionsReported = true; local.sessions[0].optionalQuestions = -1;
+    FleetState f; f.setLocal(local, 1000);
+    QVERIFY(f.markSessionRead({}, f.local().sessions[0]));
+    const ReadMark key{{}, local.sessions[0].name, {}, local.sessions[0].conversationId, {}, {}};
+    QCOMPARE(ReadMark::fromJson(f.pendingReads().value(key.key()).toObject()).attentionSignature, signature);
+    QVERIFY(f.local().sessions[0].attentionAcknowledged);
+    local.sessions[0].readReplyId = "7:100.5"; local.sessions[0].readAttentionSignature = signature; f.setLocal(local, 2000);
+    QCOMPARE(f.takeSettledReadMarks().size(), 1); QVERIFY(f.local().sessions[0].attentionAcknowledged);
 }
 
 void TestFleetState::queuedMarksNeverHideNewerRepliesOrRequests()

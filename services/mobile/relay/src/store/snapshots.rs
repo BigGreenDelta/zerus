@@ -1,4 +1,4 @@
-use super::*;
+use super::{candidates::Accepted, *};
 use crate::{
     alerts::{Candidate, Delivery, Presence},
     db::{Arg, Tx},
@@ -208,9 +208,16 @@ impl Store {
                 t.commit().await?;
             }
             // The snapshot is accepted; maintenance retries a failed evaluation.
+            let accepted = Accepted {
+                computer: &computer,
+                gateway: &c.id,
+                // A local route is keyed by its gateway.
+                route: peer.map_or(c.id.as_str(), |(route, _)| route),
+                snapshot,
+            };
             if held
                 && self
-                    .evaluate_workspace(&c.workspace, Some((computer.as_str(), snapshot)))
+                    .evaluate_workspace(&c.workspace, Some(accepted))
                     .await
                     .is_err()
             {
