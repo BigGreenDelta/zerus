@@ -424,11 +424,10 @@ page shows the phone beside the desktop window, with the same tasks in both.
   the session changes in the task settings, and To do is reordered with Move
   to the top.
 - **Task input**: the app's message input without the attach button. With
-  text, its round button adds the task (the microphone otherwise): to To do,
-  or to Backlog while the Backlog tab is open, as on the desktop. The
-  placeholder names the stage. Nothing is sent to the agent. The app's speech
-  capture sends a voice message to the session, so the task input has no
-  microphone until the phone can have speech transcribed without sending it.
+  text, its round button adds the task: to To do, or to Backlog while the
+  Backlog tab is open, as on the desktop. The placeholder names the stage.
+  Nothing is sent to the agent. For now the task input has no microphone
+  (owner decision, 2026-10-20).
 - **Cancel**: an M3 alert dialog with the task text, what will happen, the
   optional Reason, and the buttons Keep running and Cancel task.
 - **Colours**: popups use the app's own surfaces, not the Material 3 baseline
