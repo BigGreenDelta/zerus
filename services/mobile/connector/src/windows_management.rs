@@ -57,16 +57,46 @@ pub struct Guard {
     _directory: zerus_windows_private::DirectoryGuard,
     _lock: File,
 }
-pub fn guard(path: &Path, create: bool) -> Result<Guard> {
+fn try_guard(path: &Path, create: bool) -> Result<Option<Guard>> {
     let parent = path.parent().ok_or("configuration parent required")?;
     let directory = zerus_windows_private::directory(parent, create)?;
     let lock =
         zerus_windows_private::open_file(&parent.join("gateway-management.lock"), true, true)?;
-    lock.try_lock()
-        .map_err(|_| io::Error::other("another connector management operation is in progress"))?;
-    Ok(Guard {
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+    }
+    Ok(Some(Guard {
         _directory: directory,
         _lock: lock,
+    }))
+}
+pub fn guard(path: &Path, create: bool) -> Result<Guard> {
+    try_guard(path, create)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "another connector management operation is in progress",
+        )
+        .into()
+    })
+}
+/// The parent's readiness probe can briefly own the same lock. Retry only
+/// contention for one allowance, without restarting the child or changing the
+/// expected revision. This bounds retries, not an OS/filesystem stall.
+pub fn admission_guard(path: &Path) -> Result<Guard> {
+    let deadline = Instant::now() + crate::admission::ALLOWANCE;
+    crate::admission::acquire(
+        || try_guard(path, false),
+        || deadline.saturating_duration_since(Instant::now()),
+        std::thread::sleep,
+    )?
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "connector admission lock remained busy",
+        )
+        .into()
     })
 }
 fn validated(path: &Path) -> Result<config::Config> {
@@ -339,4 +369,69 @@ pub async fn signals(stopping: &runtime::Event, state: PathBuf, generation: Stri
     runtime::log("INFO", "Connector stopping after the request in progress");
     stopping.set();
     std::future::pending::<()>().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("gateway-admission-{}", nonce().unwrap()));
+            zerus_windows_private::directory(&path, true).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn held_management_guard_releases_the_same_child_admission() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("mobile/connector.json");
+        let held = RefCell::new(Some(guard(&path, true).unwrap()));
+        let elapsed = Cell::new(Duration::ZERO);
+        let attempts = Cell::new(0);
+        let acquired = crate::admission::acquire(
+            || {
+                attempts.set(attempts.get() + 1);
+                try_guard(&path, false)
+            },
+            || crate::admission::ALLOWANCE.saturating_sub(elapsed.get()),
+            |delay| {
+                // Reaching the wait proves the real OS lock reported contention.
+                assert_eq!(attempts.get(), 1);
+                drop(held.borrow_mut().take());
+                elapsed.set(elapsed.get() + delay);
+            },
+        )
+        .unwrap();
+        assert!(acquired.is_some());
+        assert_eq!(attempts.get(), 2);
+        assert!(!path.exists());
+        drop(acquired);
+    }
+
+    #[test]
+    fn held_management_guard_exhausts_only_one_child_allowance() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("mobile/connector.json");
+        let held = guard(&path, true).unwrap();
+        let elapsed = Cell::new(Duration::ZERO);
+        let acquired = crate::admission::acquire(
+            || try_guard(&path, false),
+            || crate::admission::ALLOWANCE.saturating_sub(elapsed.get()),
+            |delay| elapsed.set(elapsed.get() + delay),
+        )
+        .unwrap();
+        assert!(acquired.is_none());
+        assert_eq!(elapsed.get(), crate::admission::ALLOWANCE);
+        assert!(!path.exists());
+        drop(held);
+    }
 }

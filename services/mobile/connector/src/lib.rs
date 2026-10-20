@@ -5,6 +5,8 @@
 //! Rust connector deliberately differs from the Python one.
 
 pub mod accounts;
+#[cfg(any(windows, test))]
+mod admission;
 pub mod archives;
 pub mod capabilities;
 pub mod check;
@@ -83,8 +85,12 @@ pub fn start_bound(
     expected_revision: Option<&str>,
 ) -> Result<Started, ConnectorError> {
     #[cfg(windows)]
-    let _guard =
-        windows_management::guard(path, false).map_err(|_| ConnectorError::new(STARTUP_FAILURE))?;
+    let _guard = if expected_revision.is_some() {
+        windows_management::admission_guard(path)
+    } else {
+        windows_management::guard(path, false)
+    }
+    .map_err(|_| ConnectorError::new(STARTUP_FAILURE))?;
     let (text, findings) = config::read_file(path, fsguard::euid())?;
     let revision = zerus_relay::json::digest(text.as_bytes());
     if expected_revision.is_some_and(|expected| expected != revision) {

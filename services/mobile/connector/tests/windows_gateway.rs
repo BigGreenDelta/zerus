@@ -65,13 +65,16 @@ fn inheritable_world_allow_refuses_existing_database_before_sidecar_creation() {
     let state = scratch.0.join("receipts");
     drop(Journal::open(&state, "fixture", 1.0).unwrap());
     let db = state.join("journal.sqlite3");
-    let protected = std::process::Command::new("icacls")
-        .arg(&db)
-        .args(["/inheritance:d"])
-        .output()
-        .unwrap();
-    assert!(protected.status.success());
-    zerus_windows_private::open_file(&db, false, false).unwrap();
+    let lock = state.join("connector.lock");
+    for file in [&db, &lock] {
+        let protected = std::process::Command::new("icacls")
+            .arg(file)
+            .args(["/inheritance:d"])
+            .output()
+            .unwrap();
+        assert!(protected.status.success());
+        zerus_windows_private::open_file(file, false, false).unwrap();
+    }
     let before = std::fs::read(&db).unwrap();
     for suffix in ["-wal", "-shm", "-journal"] {
         assert!(!state.join(format!("journal.sqlite3{suffix}")).exists());
@@ -82,8 +85,11 @@ fn inheritable_world_allow_refuses_existing_database_before_sidecar_creation() {
         .output()
         .unwrap();
     assert!(result.status.success());
-    // The existing DB remains private: only future children inherit the ACE.
-    zerus_windows_private::open_file(&db, false, false).unwrap();
+    // Both existing files remain private. Refusal cannot accidentally come
+    // from the lock inheriting the unsafe ACE instead of directory admission.
+    for file in [&db, &lock] {
+        zerus_windows_private::open_file(file, false, false).unwrap();
+    }
     assert!(Journal::open(&state, "fixture", 2.0).is_err());
     assert_eq!(std::fs::read(&db).unwrap(), before);
     for suffix in ["-wal", "-shm", "-journal"] {
