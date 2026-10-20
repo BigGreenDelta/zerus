@@ -54,12 +54,13 @@ jobs:
           python3 -I -B - <<'PY'
           import hashlib, json, os, re
           from pathlib import Path
+          HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1"})
           os.umask(0o077)
           folder = Path(os.environ['RUNNER_TEMP']) / 'android-project-ui-admission'
           folder.mkdir(mode=0o700)
           admission = {
               'actual_image': os.environ.get('ImageVersion'),
-              'expected_image': '20261018.339.1',
+              'allowed_images': sorted(HOSTED_IMAGES),
               'environment': os.environ.get('RUNNER_ENVIRONMENT'),
               'source': os.environ.get('EXPECTED_SOURCE'),
               'expected_java': '17.0.20+1',
@@ -103,7 +104,7 @@ jobs:
           require('emulator_revision', os.environ.get('REQUESTED_EMULATOR_REVISION') == os.environ.get('EXPECTED_EMULATOR_REVISION') == '37.2.12')
           require('system_image_revision', os.environ.get('REQUESTED_SYSTEM_IMAGE_REVISION') == os.environ.get('EXPECTED_SYSTEM_IMAGE_REVISION') == '9.0.0')
           require('hosted_environment', os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted')
-          require('hosted_image', os.environ.get('ImageVersion') == '20261018.339.1')
+          require('hosted_image', os.environ.get('ImageVersion') in HOSTED_IMAGES)
           require('java_home', bool(os.environ.get('JAVA_HOME_17_X64')))
           release = Path(os.environ['JAVA_HOME_17_X64']) / 'release'
           try:

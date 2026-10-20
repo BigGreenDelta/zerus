@@ -203,8 +203,8 @@ class HostedJavaAdmissionTests(unittest.TestCase):
     def test_precheckout_retains_actual_release_and_names_refused_guard(self):
         workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
         block = textwrap.dedent(workflow.split("python3 -I -B - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
-        for refused in (None, "hosted_image", "java_base_build"):
-            with self.subTest(refused=refused), tempfile.TemporaryDirectory() as directory:
+        for refused, image in ((None, "20261012.334.1"), (None, "20261018.339.1"), ("hosted_image", "unknown"), ("java_base_build", "20261012.334.1")):
+            with self.subTest(refused=refused, image=image), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 java = root / "jdk"
                 java.mkdir()
@@ -212,11 +212,9 @@ class HostedJavaAdmissionTests(unittest.TestCase):
                 if refused == "java_base_build":
                     raw = raw.replace(b"+1", b"+2")
                 (java / "release").write_bytes(raw)
-                env = {"RUNNER_TEMP": str(root), "ImageVersion": "20261018.339.1", "RUNNER_ENVIRONMENT": "github-hosted", "EXPECTED_SOURCE": "a" * 40,
+                env = {"RUNNER_TEMP": str(root), "ImageVersion": image, "RUNNER_ENVIRONMENT": "github-hosted", "EXPECTED_SOURCE": "a" * 40,
                        "EXPECTED_EMULATOR_REVISION": "37.2.12", "REQUESTED_EMULATOR_REVISION": "37.2.12",
                        "EXPECTED_SYSTEM_IMAGE_REVISION": "9.0.0", "REQUESTED_SYSTEM_IMAGE_REVISION": "9.0.0", "JAVA_HOME_17_X64": str(java)}
-                if refused == "hosted_image":
-                    env["ImageVersion"] = "unknown"
                 with patch.dict(os.environ, env, clear=True):
                     if refused:
                         with self.assertRaisesRegex(SystemExit, "Hosted admission refused: " + refused):
@@ -231,9 +229,24 @@ class HostedJavaAdmissionTests(unittest.TestCase):
 
 
 class WorkflowBoundaryTests(unittest.TestCase):
+    def test_only_two_reviewed_images_are_allowed_with_the_same_version_guards(self):
+        self.assertEqual(UI.HOSTED_IMAGES, {"20261012.334.1", "20261018.339.1"})
+        workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
+        block = textwrap.dedent(workflow.split("python3 -I -B - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
+        assignment = next(node for node in ast.parse(block).body if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "HOSTED_IMAGES")
+        self.assertEqual(ast.literal_eval(assignment.value.args[0]), UI.HOSTED_IMAGES)
+        pins = json.loads((ROOT / "scripts/ci/android-project-ui-pins.json").read_text())
+        self.assertEqual({image["version"] for image in pins["hosted_images"]}, UI.HOSTED_IMAGES)
+        for image in pins["hosted_images"]:
+            self.assertEqual(image["jdk"], "17.0.20+1")
+            self.assertEqual(image["sdk"], {"command_line_tools": "12.0", "platform_tools": "37.0.1", "build_tools": "36.0.0", "platform": "android-36"})
+        for unknown in ("20261019.340.1", "20261018.339.2", "ubuntu-latest", "", None):
+            with self.subTest(image=unknown):
+                self.assertNotIn(unknown, UI.HOSTED_IMAGES)
+
     def test_pr_and_manual_run_the_exact_source_with_no_write_authority(self):
         workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
-        for literal in ("pull_request:", "branches: [main]", "workflow_dispatch:", "github.event.pull_request.head.sha", "ref: ${{ env.EXPECTED_SOURCE }}", "contents: read", "persist-credentials: false", "EXPECTED_EMULATOR_REVISION: '37.2.12'", "EXPECTED_SYSTEM_IMAGE_REVISION: '9.0.0'", "require('hosted_image', os.environ.get('ImageVersion') == '20261018.339.1')"):
+        for literal in ("pull_request:", "branches: [main]", "workflow_dispatch:", "github.event.pull_request.head.sha", "ref: ${{ env.EXPECTED_SOURCE }}", "contents: read", "persist-credentials: false", "EXPECTED_EMULATOR_REVISION: '37.2.12'", "EXPECTED_SYSTEM_IMAGE_REVISION: '9.0.0'", "require('hosted_image', os.environ.get('ImageVersion') in HOSTED_IMAGES)"):
             self.assertIn(literal, workflow)
         for forbidden in ("pull_request_target", "secrets.", "environment:", "self-hosted", "actions/cache", "permissions: write-all", "contents: write"):
             self.assertNotIn(forbidden, workflow)

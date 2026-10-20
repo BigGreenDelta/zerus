@@ -1,16 +1,42 @@
 {
-  "hosted_image": {
-    "image": "ubuntu-24.04",
-    "java_home_variable": "JAVA_HOME_17_X64",
-    "jdk": "17.0.20+1",
-    "readme_git_blob": "52bec860302a71d5808c020cec996bf6e0491111",
-    "readme_sha256": "b34e8e11c5a3a4cd034d06823c10a6b47549e6e7995de13ff208a9ad9abc83a6",
-    "readme_url": "https://github.com/actions/runner-images/blob/ubuntu24/20261018.339/images/ubuntu/Ubuntu2404-Readme.md",
-    "release_target_commit": "b4067e48bd9bd803e958bfe1503ea0a06a3a127f",
-    "release_url": "https://github.com/actions/runner-images/releases/tag/ubuntu24/20261018.339",
-    "scope": "Runner release metadata binds the selected base/build; actual bounded JDK release text is retained by admission. Vendor spelling is not inferred from the failed previous job.",
-    "version": "20261018.339.1"
-  },
+  "hosted_images": [
+    {
+      "image": "ubuntu-24.04",
+      "java_home_variable": "JAVA_HOME_17_X64",
+      "jdk": "17.0.20+1",
+      "readme_git_blob": "e627f14a3702c8c01ea2cc3ed3a7eae6b1941da5",
+      "readme_sha256": "3911b4bc1aa423be7b7469a75f3093f51306c02f2638f2a8b4f5ed31f3ffe791",
+      "readme_url": "https://github.com/actions/runner-images/blob/ubuntu24/20261012.334/images/ubuntu/Ubuntu2404-Readme.md",
+      "release_target_commit": "7e7dc1bcc0ef464e5e315a2b4c33609590c6cffe",
+      "release_url": "https://github.com/actions/runner-images/releases/tag/ubuntu24/20261012.334",
+      "scope": "Runner release metadata binds the selected base/build; actual bounded JDK release text is retained by admission. Vendor spelling is not inferred from the failed previous job.",
+      "sdk": {
+        "build_tools": "36.0.0",
+        "command_line_tools": "12.0",
+        "platform": "android-36",
+        "platform_tools": "37.0.1"
+      },
+      "version": "20261012.334.1"
+    },
+    {
+      "image": "ubuntu-24.04",
+      "java_home_variable": "JAVA_HOME_17_X64",
+      "jdk": "17.0.20+1",
+      "readme_git_blob": "52bec860302a71d5808c020cec996bf6e0491111",
+      "readme_sha256": "b34e8e11c5a3a4cd034d06823c10a6b47549e6e7995de13ff208a9ad9abc83a6",
+      "readme_url": "https://github.com/actions/runner-images/blob/ubuntu24/20261018.339/images/ubuntu/Ubuntu2404-Readme.md",
+      "release_target_commit": "b4067e48bd9bd803e958bfe1503ea0a06a3a127f",
+      "release_url": "https://github.com/actions/runner-images/releases/tag/ubuntu24/20261018.339",
+      "scope": "Runner release metadata binds the selected base/build; actual bounded JDK release text is retained by admission. Vendor spelling is not inferred from the failed previous job.",
+      "sdk": {
+        "build_tools": "36.0.0",
+        "command_line_tools": "12.0",
+        "platform": "android-36",
+        "platform_tools": "37.0.1"
+      },
+      "version": "20261018.339.1"
+    }
+  ],
   "packages": {
     "emulator": {
       "archive": {

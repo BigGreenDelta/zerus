@@ -130,8 +130,11 @@ acceptance; this document grants none of them.
 `.github/workflows/android-project-ui.yml` runs on relevant pull requests and
 offers an explicit exact-commit manual run. It has read-only repository access,
 no secrets, publication environment or caches, and uses SHA-pinned actions on a
-standard disposable GitHub-hosted Ubuntu VM. A changed hosted image or JDK is a
-refusal requiring review. Manual package inputs must equal the checked-in pins;
+standard disposable GitHub-hosted Ubuntu VM. The finite reviewed image list is
+`20261012.334.1` and `20261018.339.1`, which GitHub currently assigns during its
+rolling update. Both official image releases list the same required Java and
+SDK tool versions; all individual guards still apply. Other images or JDKs are
+refused pending review. Manual package inputs must equal the checked-in pins;
 there is no latest-version fallback.
 
 Admission retains the bounded actual JDK `release` file and names the failing

@@ -20,6 +20,7 @@ CASES = "current_selection,close_no_write,durable_single_post,route_refusal,orig
 IMAGE = "system-images;android-35;google_apis;x86_64"
 SERIAL = "emulator-5554"
 REVISIONS = {"emulator": "37.2.12", IMAGE: "9.0.0"}
+HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1"})
 
 
 def java_release(text):
@@ -163,7 +164,7 @@ def defined_classes(apk):
 
 def main():
     assert sys.platform == "linux" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-    assert os.environ.get("ImageVersion") == "20261018.339.1"
+    assert os.environ.get("ImageVersion") in HOSTED_IMAGES
     pins = json.loads(Path(__file__).with_name("android-project-ui-pins.json").read_text())
     validate_inputs(os.environ, pins)
     source = os.environ["EXPECTED_SOURCE"]
