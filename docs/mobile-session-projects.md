@@ -160,7 +160,9 @@ The helper creates private HOME/XDG/Gradle/Android/AVD state, uses an absent
 signing-properties path and a new synthetic debug signer, and checks the actual
 app/test certificate equality, manifest runner/target and defined DEX classes.
 An explicit foreground ADB server and one fresh KVM emulator use empty fixed
-loopback ports. Other attached devices cause refusal. App networking is disabled
+loopback ports. Its port-only `-L tcp:5037` listener retains the default localhost
+binding without `-a`; clients explicitly use 127.0.0.1. Other attached devices
+cause refusal. App networking is disabled
 before installing the fixture. No owner device, existing profile, retained APK,
 keystore, native agent, relay or gateway is involved.
 

@@ -23,6 +23,11 @@ REVISIONS = {"emulator": "37.2.12", IMAGE: "9.0.0"}
 HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1"})
 
 
+def adb_server_command(adb):
+    # ADB's listener parser accepts the port-only spec; omitting -a keeps localhost.
+    return [str(adb), "-L", "tcp:5037", "nodaemon", "server"]
+
+
 def java_release(text):
     """Exact published base/build, with only the recognized optional LTS suffix."""
     assert len(text.encode("utf-8")) <= 65536, "java_release_size"
@@ -290,7 +295,7 @@ def main():
         for port in (5037, 5554, 5555):
             with socket.socket() as probe:
                 probe.bind(("127.0.0.1", port))
-        server = spawn("adb-server", [adb, "-L", "tcp:127.0.0.1:5037", "nodaemon", "server"])
+        server = spawn("adb-server", adb_server_command(adb))
         ready_end = min(end - 20, time.monotonic() + 5)
         server_ready = False
         while time.monotonic() < ready_end:

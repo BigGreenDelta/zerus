@@ -170,6 +170,19 @@ class InputAdmissionTests(unittest.TestCase):
                 UI.revision(xml)
 
 
+class HostedAdbCommandTests(unittest.TestCase):
+    def test_only_the_fixed_port_loopback_foreground_server_is_started(self):
+        command = UI.adb_server_command(Path("/fixture/sdk/platform-tools/adb"))
+        self.assertEqual(command, ["/fixture/sdk/platform-tools/adb", "-L", "tcp:5037", "nodaemon", "server"])
+        self.assertNotIn("-a", command)
+        self.assertNotIn("tcp:127.0.0.1:5037", command)
+        tree = ast.parse((ROOT / "scripts/ci/android-project-ui.py").read_text())
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        calls = [node for node in ast.walk(main) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "spawn" and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "adb-server"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(ast.dump(calls[0].args[1]), ast.dump(ast.parse("adb_server_command(adb)", mode="eval").body))
+
+
 class HostedJavaAdmissionTests(unittest.TestCase):
     def test_actual_full_hosted_release_and_wrong_patch_or_build(self):
         raw = (ROOT / "tests/fixtures/android-project-ui-java-release.txt").read_text()
