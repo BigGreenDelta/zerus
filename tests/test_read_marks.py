@@ -194,6 +194,7 @@ class ReadMarks(unittest.TestCase):
         path = self.state / 'read-marks.json'
         for text in ('{', '{"version":2,"sessions":{}}', '{"version":1,"sessions":[]}'):
             path.write_text(text)
+            path.chmod(0o600)
             before = path.stat()
             result = self.read(reply_id=reply)
             self.assertEqual(result.returncode, 1)
