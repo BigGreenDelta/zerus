@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Private aggregate transport, with synthetic native replies and journals.
 mod common;
 

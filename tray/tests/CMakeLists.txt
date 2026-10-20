@@ -605,6 +605,12 @@ set_tests_properties(updates PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 target_link_libraries(test_sessionswindow PRIVATE hgs-updates)
 target_link_libraries(test_traymenu PRIVATE hgs-updates)
 
+add_executable(test_windowsmobilesettings test_windowsmobilesettings.cpp)
+target_include_directories(test_windowsmobilesettings PRIVATE ../src)
+target_link_libraries(test_windowsmobilesettings PRIVATE Qt6::Test Qt6::Widgets)
+zerus_add_test(windowsmobilesettings test_windowsmobilesettings)
+set_tests_properties(windowsmobilesettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_relaysettings test_relaysettings.cpp)
 target_include_directories(test_relaysettings PRIVATE ../src)
 target_link_libraries(test_relaysettings PRIVATE Qt6::Test Qt6::Widgets)

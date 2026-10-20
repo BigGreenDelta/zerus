@@ -16,6 +16,12 @@
 namespace RelaySettings {
 inline QString canonicalRelay(){return QStringLiteral("https://relay.zerus.dev");}
 inline QString configPath(){
+#ifdef Q_OS_WIN
+    const auto explicitRoot=qEnvironmentVariable("HGS_CONFIG_DIR");
+    if(QDir::isAbsolutePath(explicitRoot))return explicitRoot+"/mobile/connector.json";
+    const auto home=qEnvironmentVariable("HOME");
+    return (QDir::isAbsolutePath(home)?home:QDir::homePath())+"/.config/hgs/mobile/connector.json";
+#endif
     auto root=qEnvironmentVariable("XDG_CONFIG_HOME");
     if(!QDir::isAbsolutePath(root))root=QDir::homePath()+"/.config";
     return root+"/hgs/mobile/connector.json";

@@ -267,7 +267,8 @@ pub(crate) fn validate_lookup(value: &Value) -> Result<(&str, &str)> {
 
 /// Recover a phone's exact target after a connector restart without listing
 /// other archives, reading transcript journals or rebuilding the catalog.
-pub(crate) fn lookup(value: &Value) -> Result<Value> {
+pub(crate) fn lookup(value: &Value) -> Result<Value> { lookup_scoped(value,false) }
+pub(crate) fn lookup_scoped(value: &Value, windows_mobile: bool) -> Result<Value> {
     let (name, id) = validate_lookup(value)?;
     let _guard = lock(None)?;
     let path = archive::path(id)?;
@@ -279,8 +280,13 @@ pub(crate) fn lookup(value: &Value) -> Result<Value> {
         return Err("archive record is not a regular file".into());
     }
     let record = archive::read_archive(name, id)?;
-    Ok(json!({"version":1,"name":name,"archive_id":id,
-        "run_id":string(&record,"run_id"),"conversation_id":string(&record,"conversation_id")}))
+    let mut result=json!({"version":1,"name":name,"archive_id":id,
+        "run_id":string(&record,"run_id"),"conversation_id":string(&record,"conversation_id")});
+    if windows_mobile {
+        if !supported_provider(&record["agent"]) { return Err("provider is unavailable on a Windows local gateway".into()); }
+        result["cmd"]=record["agent"].clone();
+    }
+    Ok(result)
 }
 pub(crate) fn page(value: &Value) -> Result<Value> {
     let q = validate(value)?;
@@ -401,4 +407,19 @@ pub(crate) fn page(value: &Value) -> Result<Value> {
     Ok(
         json!({"version":1,"sessions":sessions,"next_cursor":next,"previous_cursor":previous,"position":position,"total":total,"from":q.from,"until":q.until,"query":q.query}),
     )
+}
+
+fn supported_provider(provider: &Value) -> bool {
+    matches!(provider.as_str(),Some("codex"|"claude"|"kimi"))
+}
+/// The authoritative archive reader already rejects providers outside AGENTS
+/// before indexing/counting. Keep its bounded totals and cursors unchanged.
+/// Refuse an inconsistent page instead of guessing a filtered total.
+pub(crate) fn page_scoped(value: &Value, windows_mobile: bool) -> Result<Value> {
+    let result=page(value)?;
+    if windows_mobile && !result["sessions"].as_array().is_some_and(|rows|
+        rows.iter().all(|row|supported_provider(&row["cmd"]))) {
+        return Err("archive provider scope is unavailable".into());
+    }
+    Ok(result)
 }

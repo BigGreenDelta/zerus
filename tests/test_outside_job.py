@@ -147,6 +147,11 @@ class Cleanup(unittest.TestCase):
         self.assertNotIn(b"no process of the suites is left", log.getvalue())
         self.assertEqual(cleanup.exit_code(0), 1)
 
+    def test_custody_timeout_never_attempts_pid_tree_or_image_cleanup(self):
+        outside_job.timeout_cleanup(4321, [], self.messages.append, custody_only=True)
+        self.run.assert_not_called()
+        self.assertIn("process outcome unknown", "".join(self.messages))
+
     def test_command_failure_is_kept_when_cleanup_also_fails(self):
         self.run.side_effect = lambda argv, **kwargs: subprocess.CompletedProcess(argv, 7)
         cleanup = self.stop()
@@ -154,6 +159,19 @@ class Cleanup(unittest.TestCase):
         self.assertEqual(cleanup.exit_code(19), 19)
 
     def test_main_timeout_bounds_taskkill_and_retains_unknown_cleanup(self):
+        self.main_timeout(False)
+
+    def test_custody_main_timeout_retains_unknown_without_any_kill(self):
+        self.main_timeout(True)
+
+    def test_custody_parser_rejects_executable_cleanup(self):
+        with mock.patch.object(outside_job.sys, "argv", ["outside-job", "--custody-only", "--end", "fixture"]), \
+                mock.patch.object(outside_job.sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as error: outside_job.main()
+        self.assertEqual(error.exception.code, 2)
+        self.run.assert_not_called()
+
+    def main_timeout(self, custody_only):
         # This control also reaches the original main's actual taskkill call:
         # its missing timeout fails the same assertion, without invoking it.
         case = self
@@ -205,7 +223,7 @@ class Cleanup(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0)
         self.run.side_effect = run
         args = SimpleNamespace(child=None, command=["fixture-command"], log="fixture-log",
-                               timeout=600, end=["one", "two"])
+                               timeout=600, end=[] if custody_only else ["one", "two"], custody_only=custody_only)
         error = io.StringIO()
         with mock.patch.object(outside_job.argparse.ArgumentParser, "parse_args", return_value=args), \
                 mock.patch.object(outside_job.os, "name", "nt"), \
@@ -220,9 +238,14 @@ class Cleanup(unittest.TestCase):
                 mock.patch.object(outside_job.sys, "stderr", error):
             code = outside_job.main()
         self.assertEqual(code, 124)
-        self.assertEqual(len(self.calls), 4)  # WMI, one taskkill, both cleanup patterns.
-        self.assertEqual(sum(call[0][0] == "taskkill" for call in self.calls), 1)
-        self.assertIn("taskkill: outcome unknown (TimeoutExpired)", error.getvalue())
+        if custody_only:
+            self.assertEqual(len(self.calls), 1)  # Only WMI launch; no cleanup process.
+            self.assertIn("custody-only timeout", error.getvalue())
+            self.assertFalse(any(call[0][0] == "taskkill" for call in self.calls))
+        else:
+            self.assertEqual(len(self.calls), 4)  # WMI, one taskkill, both cleanup patterns.
+            self.assertEqual(sum(call[0][0] == "taskkill" for call in self.calls), 1)
+            self.assertIn("taskkill: outcome unknown (TimeoutExpired)", error.getvalue())
         self.assertIn("retained status/work directory fixture-work", error.getvalue())
         self.assertNotIn("ended pid", error.getvalue())
         self.assertEqual(removals, [])

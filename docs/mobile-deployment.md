@@ -28,6 +28,35 @@ The application ID is `app.zerus.mobile`; the minimum Android version is 8.0
 (API 26). The default build requires no Firebase account or private credentials.
 See [Android build details](../mobile/android/README.md) for optional FCM setup.
 
+## Windows gateway
+
+Use a portable bundle that includes `zerus-mobile-connector.exe` beside
+`hgs.exe` and `hgs-tray.exe`. In Machines, enable local sessions if needed.
+In Settings → Mobile connection, enter an HTTPS relay and the **computer**
+credential issued by that relay, save and choose **Start connector**. Refresh
+Phones below and pair the phone with the generated QR invitation. Windows is
+its own outbound gateway; a Linux/macOS computer is not required.
+
+Configuration lives at `%USERPROFILE%\.config\hgs\mobile\connector.json`
+(or the explicit `HGS_CONFIG_DIR`), with private receipt directories beside it.
+The connector checks actual ownership/DACLs, reparse points and file links.
+It refuses unsafe existing entries without changing their ACLs. A changed relay
+or credential gets a new receipt directory; old receipts remain untouched.
+Keep credentials and `--check` reports private.
+
+Start is explicit after each Windows login. Closing the GUI leaves the connector
+running. **Stop connector** stops claiming, completes its in-flight native call
+and journals the outcome; reload status to confirm it has stopped before saving
+changes. It never kills the independent ConPTY session host or native agents.
+There is no automatic login task or Windows service registration in this slice.
+
+Supported scope is existing local Codex, Claude and Kimi sessions and their
+native inspection, history, messages, questions, Terminal and allowed session
+controls. Mobile session/folder/worktree creation, Git/file operations, one-hop
+peers, DeepSeek/OpenCode and speech/voice are unavailable. Capability publication
+and request dispatch both enforce this restriction; existing durable UUID and
+uncertain-delivery handling still applies. No live gateway migration is implied.
+
 ## Start the relay
 
 The [relay README](../services/mobile/README.md) documents Rust and Docker

@@ -187,7 +187,7 @@ fn mobile_peers(config: &Config, args: &[String]) -> Result<i32> {
 fn mobile_peers(_: &Config, _: &[String]) -> Result<i32> {
     Err(Error::new(
         2,
-        "Mobile peers are not supported on Windows yet; use a Linux or macOS machine as the mobile gateway.",
+        "One-hop mobile peer routing is unavailable on a Windows gateway; local Windows sessions are supported.",
     ))
 }
 fn state_command(verb: &str, args: &[String]) -> Result<i32> {
@@ -456,7 +456,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             }
             print!("{}", usage_text(cfg!(unix)));
             #[cfg(windows)]
-            print!("{}", crate::host::admin::HELP);
+            print!("{}\nMobile gateway ABI: windows-local-v1\n", crate::host::admin::HELP);
             return Ok(0);
         }
         "--version" | "version" => return crate::status::version(&config, &target, args),
@@ -571,11 +571,14 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         }
         "ls" => list(&config, args, dry),
         "archives" => {
+            let mobile = cfg!(windows) && args.last().map(String::as_str)==Some("--windows-mobile");
+            let args = if mobile { &args[..args.len()-1] } else { args };
             if (args != ["--json"] && args != ["lookup","--json"]) || dry { return Err(Error::new(1,"usage: hgs archives [lookup] --json (JSON query on stdin)")); }
             let query = state::archive_catalog::read_query().map_err(|e| Error::new(1,e))?;
             let result = if args.first().map(String::as_str) == Some("lookup") {
-                state::archive_catalog::lookup(&query)
-            } else { state::archive_catalog::page(&query) }.map_err(|e| Error::new(1,e))?;
+                if mobile { state::archive_catalog::lookup_scoped(&query,true) } else { state::archive_catalog::lookup(&query) }
+            } else if mobile { state::archive_catalog::page_scoped(&query,true) }
+            else { state::archive_catalog::page(&query) }.map_err(|e| Error::new(1,e))?;
             println!("{result}"); Ok(0)
         },
         "reference" => {

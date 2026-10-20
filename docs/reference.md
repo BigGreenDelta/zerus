@@ -2075,6 +2075,12 @@ or revoke for another relay or workspace, and a code for another workspace is
 never shown. A revocation that fails or cannot be confirmed stays reported until
 **Refresh**; it is never retried automatically.
 
+On Windows, these phone-management commands pass a nonempty `CURL_CA_BUNDLE`
+path explicitly to curl's `--cacert`, so Schannel verifies the relay using that
+PEM CA bundle. If the variable is absent or empty, curl keeps its default
+trust behavior. An invalid bundle or failed certificate verification refuses
+the request; there is no fallback to an unverified connection.
+
 Multiple machine filters narrow both sessions and content search. Label color,
 Bright/Soft mode and appearance previews are local. Color pickers cancel on an
 outside click or Escape; only explicit confirmation saves a color. Project
@@ -2837,7 +2843,13 @@ it is listed at most once every 15 seconds. With local sessions enabled, New
 session and Accounts offer this computer without DeepSeek and OpenCode, the shell
 entry is **Run PowerShell**, voice messages to its sessions are disabled with the
 reason as the tooltip, and it is listed at most once every 5 seconds. In both modes,
-Settings → Mobile connection is hidden and no desktop presence is recorded.
+Settings → Mobile connection configures the bundled outbound Rust connector on
+Windows, including before local sessions are enabled. Start and Stop are explicit;
+closing the GUI preserves the connector, session host and native agents. The
+first Windows transport controls existing local Codex/Claude/Kimi sessions and
+refuses mobile creation, path/worktree/Git/file operations, peers and voice/speech.
+Windows desktop presence is not recorded, so desktop activity does not delay
+phone alerts. See [Windows gateway setup](mobile-deployment.md#windows-gateway).
 Attention notices are tray notifications with the Zerus icon and a taskbar
 badge. A start without options opens the workspace, because Windows 11 first
 hides a new notification

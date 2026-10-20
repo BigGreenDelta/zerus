@@ -428,9 +428,14 @@ stops an idle session host without disabling anything.
   a DeepSeek session cannot be opened externally either. Its Activity still works;
   DeepSeek sessions have no Terminal tab on any platform.
 - Voice messages cannot be sent to sessions on the Windows computer.
-- No mobile gateway: pair your phone with a Linux or macOS machine. Settings →
-  Mobile connection is hidden, and activity on the Windows computer does not
-  delay phone alerts.
+- Mobile connection runs the bundled Rust connector on this PC. Configure its
+  HTTPS relay and computer credential, choose Start connector, then refresh
+  Phones and pair by QR code. No other gateway is needed. Start the connector
+  again after login; closing the GUI keeps it and native agents running.
+  The first Windows gateway controls existing local Codex/Claude/Kimi sessions;
+  mobile creation, folder/worktree/Git/file operations, peer routing and
+  voice/speech are unavailable. Stop drains the current request and keeps
+  the independent session host and native agents running.
 - Other machines cannot connect to the Windows computer as a peer: its local
   sessions appear only in Zerus on that computer, and its folders in Projects are
   not shared with other machines.

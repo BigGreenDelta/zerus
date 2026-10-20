@@ -145,7 +145,11 @@ struct Connection {
 
 fn connection(config: &Config) -> Result<Option<Connection>> {
     let path = config.dir.join("mobile/connector.json");
-    let file = match std::fs::File::open(&path) {
+    #[cfg(unix)]
+    let opened = std::fs::File::open(&path);
+    #[cfg(windows)]
+    let opened = crate::platform::refuse_link(std::fs::OpenOptions::new().read(true)).open(&path);
+    let file = match opened {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => {
@@ -155,6 +159,13 @@ fn connection(config: &Config) -> Result<Option<Connection>> {
             ))
         }
     };
+    #[cfg(windows)]
+    if !crate::platform::verify_private_file(&file).unwrap_or(false) {
+        return Err(Error::new(
+            1,
+            "The mobile connection configuration must be private to this Windows user",
+        ));
+    }
     let mut bytes = Vec::new();
     file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
     let settings: Value = serde_json::from_slice(&bytes)
@@ -234,6 +245,10 @@ impl Connection {
             "--request",
             method,
         ]);
+        // Schannel ignores curl's CA environment override; pass the explicitly
+        // selected bundle without changing default native trust or verification.
+        #[cfg(windows)]
+        apply_ca_bundle(&mut command, std::env::var_os("CURL_CA_BUNDLE").as_deref());
         if let Some(body) = body {
             command.args(["--header", "Content-Type: application/json", "--data", body]);
         }
@@ -303,6 +318,13 @@ impl Connection {
     }
 }
 
+#[cfg(any(windows, test))]
+fn apply_ca_bundle(command: &mut Command, bundle: Option<&std::ffi::OsStr>) {
+    if let Some(path) = bundle.filter(|path| !path.is_empty()) {
+        command.arg("--cacert").arg(path);
+    }
+}
+
 fn object(value: &mut Value) -> Result<&serde_json::Map<String, Value>> {
     value
         .as_object()
@@ -339,6 +361,60 @@ fn encode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absent_or_empty_windows_ca_bundle_preserves_curl_arguments() {
+        for bundle in [None, Some(std::ffi::OsStr::new(""))] {
+            let mut command = Command::new("curl");
+            command.args(["-q", "--proto", "=https", "--max-time", "20"]);
+            let before: Vec<_> = command.get_args().map(|arg| arg.to_owned()).collect();
+            apply_ca_bundle(&mut command, bundle);
+            let after: Vec<_> = command.get_args().map(|arg| arg.to_owned()).collect();
+            assert_eq!(after, before);
+        }
+    }
+
+    #[test]
+    fn windows_ca_bundle_is_one_path_argument_without_verification_bypass() {
+        for path in [
+            r"C:\private TLS\Δ CA.pem",
+            r"\\fixture.example.test\share\CA file.pem",
+        ] {
+            let mut command = Command::new("curl");
+            command.args([
+                "-q",
+                "--silent",
+                "--show-error",
+                "--noproxy",
+                "*",
+                "--proto",
+                "=https",
+                "--connect-timeout",
+                "5",
+                "--max-time",
+                "20",
+                "--max-filesize",
+                "1048576",
+                "--config",
+                "-",
+            ]);
+            let before: Vec<_> = command.get_args().map(|arg| arg.to_owned()).collect();
+            apply_ca_bundle(&mut command, Some(std::ffi::OsStr::new(path)));
+            let args: Vec<_> = command.get_args().map(|arg| arg.to_owned()).collect();
+            assert_eq!(&args[..before.len()], before.as_slice());
+            assert_eq!(args.len(), before.len() + 2);
+            assert_eq!(args[before.len()].as_os_str(), "--cacert");
+            assert_eq!(
+                args[before.len() + 1].as_os_str(),
+                std::ffi::OsStr::new(path)
+            );
+            assert!(!args.iter().any(|arg| {
+                ["--insecure", "-k", "--ssl-no-revoke"]
+                    .iter()
+                    .any(|flag| arg.as_os_str() == std::ffi::OsStr::new(flag))
+            }));
+        }
+    }
 
     #[test]
     fn pairing_links_encode_the_server_and_device_ids_are_exact() {

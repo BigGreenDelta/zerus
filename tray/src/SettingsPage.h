@@ -6,6 +6,7 @@
 #include "WorkspaceIcons.h"
 #include "UpdatesWidget.h"
 #include "RelaySettings.h"
+#include "WindowsMobileSettings.h"
 #include "MobileDeliverySettings.h"
 #include "DownloadCacheSettings.h"
 #include "AutomaticApprovalSettings.h"
@@ -118,7 +119,12 @@ public:
         auto *updates=makePage(tr("Updates"));updates->addWidget(new UpdatesWidget);updates->addStretch();
         // This computer's connector configuration, then the timing every computer and the phone share.
         auto *mobile=new QWidget;mobile->setMaximumWidth(850);auto *mobileLayout=new QVBoxLayout(mobile);mobileLayout->setContentsMargins(0,0,0,0);mobileLayout->setSpacing(28);
-        mobileLayout->addWidget(new RelaySettings::Panel);mobileLayout->addWidget(new PhonePairing::Panel(executable));mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
+#ifdef Q_OS_WIN
+        mobileLayout->addWidget(new WindowsMobileSettings::Panel);
+#else
+        mobileLayout->addWidget(new RelaySettings::Panel);
+#endif
+        mobileLayout->addWidget(new PhonePairing::Panel(executable));mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
         files=new DownloadCacheSettings;addPage(files);
         approvalSection=pages->count();approvals=new AutomaticApprovalSettings(executable);addPage(approvals);
         speechSection=pages->count();speech=new SpeechSettings(executable);speech->setMaximumWidth(850);addPage(speech);
@@ -141,8 +147,7 @@ public:
     void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);analytics->setPeers(peers);}
     // A control-only computer keeps no recovery policy of its own.
     void setLocalSessions(bool enabled,bool offered=false){sync->setLocalSessions(enabled);sync->setLocalSessionsOffered(offered);}
-    // Neither a control-only computer nor Windows is a mobile gateway: the Mobile
-    // connection page is hidden (the row stays, so indices do not move).
+    // Hide the page only where this build offers no mobile gateway. Preserve indices.
     void setMobileGateway(bool gateway){
         nav->item(5)->setHidden(!gateway);
         if(!gateway&&nav->currentRow()==5)nav->setCurrentRow(0);

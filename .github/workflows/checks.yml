@@ -894,6 +894,16 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      - name: Windows mobile connector build and native filesystem contracts
+        run: |
+          cargo +1.99.1 clippy --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --lib windows_management::tests </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-locks.log
+          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --test windows_gateway </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-config.log
+          cargo +1.99.1 test --locked --offline -j2 --manifest-path services/mobile/connector/Cargo.toml --target-dir target -p zerus-windows-private --lib -- --test-threads=2 </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-launch-builder.log
+          cargo +1.99.1 build --locked --release --manifest-path services/mobile/connector/Cargo.toml --target-dir target
       - name: Windows client integration tests
         run: |
           HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
@@ -926,6 +936,19 @@ jobs:
             --log ../artifacts/test-results/windows-host.log -- \
             python -m unittest -v test_windows_host test_windows_host_conpty test_windows_host_survival \
             test_windows_lifecycle test_windows_hooks test_backend_contract </dev/null
+      # A detached connector has fixture-owned handle custody. Keep this gate
+      # outside the legacy host harness's PID/tree and wildcard image cleanup.
+      - name: Windows mobile gateway isolated custody gate
+        timeout-minutes: 20
+        run: |
+          HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
+          HGS_TEST_FAKE_AGENT=$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")
+          HGS_TEST_CONPTY_DIR=$(cygpath -w "$RUNNER_TEMP/conpty")
+          HGS_TEST_CONNECTOR=$(cygpath -w "$PWD/target/release/zerus-mobile-connector.exe")
+          export HGS_TEST_BIN HGS_TEST_FAKE_AGENT HGS_TEST_CONPTY_DIR HGS_TEST_CONNECTOR
+          python scripts/ci/outside-job.py --custody-only --timeout 900 \
+            --log artifacts/test-results/windows-mobile-gateway.log -- \
+            python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
       # Only trusted main checks save it; PR, manual and candidate runs restore
       # it. The key covers the Qt pin and the installer.
       - name: Restore Qt 6.10.3 for MSVC
@@ -1005,7 +1028,7 @@ jobs:
       - name: Portable zip from the tested executables
         run: |
           python scripts/package-windows.py --cli target/release/hgs.exe --gui .ci-build/gui/hgs-tray.exe \
-            --conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log
+            --connector target/release/zerus-mobile-connector.exe --conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log
           python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest \
             </dev/null 2>&1 | tee artifacts/test-results/portable.log
       # The per-user installer (packaging/windows/zerus.iss) from that zip, with

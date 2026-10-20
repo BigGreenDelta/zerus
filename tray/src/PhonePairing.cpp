@@ -297,7 +297,13 @@ void Panel::render() {
     m_tree->expandAll();
     QStringList lines;
     if (!m_notice.isEmpty()) lines << m_notice;
-    if (m_targets.isEmpty()) lines << tr("No computer here has a mobile connection. Set one up in Settings → Mobile connection on a computer that connects to the relay.");
+    if (m_targets.isEmpty()) {
+#ifdef Q_OS_WIN
+        lines << tr("No mobile connection is configured. Open Settings → Mobile connection on this Windows PC, save its relay configuration and start the connector. Then refresh Phones.");
+#else
+        lines << tr("No computer here has a mobile connection. Set one up in Settings → Mobile connection on a computer with local sessions enabled, then refresh Phones.");
+#endif
+    }
     else lines << (phones == 1 ? tr("1 phone") : tr("%1 phones").arg(phones));
     for (const auto &problem : std::as_const(m_problems)) lines << problem;
     if (!m_revoking) m_status->setText(lines.join('\n'));

@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Session mutations where no golden vector or black-box test reaches:
 //! Python's KeyError and TypeError paths, which become the generic receipt,
 //! the stop rule of divergence h for a write that never started, and the

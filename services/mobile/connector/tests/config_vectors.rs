@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! `config.jsonl`, `identities.json`, `request_hash.jsonl` and the operation
 //! sets of `operations.json`, against the library.
 mod common;

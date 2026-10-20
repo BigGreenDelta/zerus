@@ -29,6 +29,27 @@ pub const PREVIEW_ERROR: &str =
 pub const UNAVAILABLE: &str = "Update the computer CLI to browse archive pages";
 pub const LOOKUP_MISMATCH: &str = "fresh native archive identity did not match";
 
+/// Native archive admission happens before count/position/cursor calculation.
+/// Refuse an inconsistent page instead of manufacturing scoped totals by
+/// dropping rows from an unscoped native page.
+pub fn call(lookup: bool, windows: bool) -> crate::native::Call {
+    let mut argv = vec!["archives"];
+    if lookup {
+        argv.push("lookup");
+    }
+    argv.push("--json");
+    if windows {
+        argv.push("--windows-mobile");
+    }
+    crate::native::Call::new(argv)
+}
+pub fn supported_page(page: &Value) -> bool {
+    page["sessions"].as_array().is_some_and(|rows| {
+        rows.iter()
+            .all(|row| crate::capabilities::windows_provider(&row["cmd"]))
+    })
+}
+
 /// The preview keeps these listing fields of a row, and these texts cut to
 /// 240 code points.
 const PREVIEW_FIELDS: [&str; 26] = [

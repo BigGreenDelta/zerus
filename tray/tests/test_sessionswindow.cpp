@@ -213,7 +213,7 @@ private slots:
     void enablableConsoleNamesBothWaysToStartSessions();
     void controlOnlyComputerKeepsRecoveryOnRemoteMachines();
     void controlOnlyComputerAloneExplainsRecovery();
-    void enabledWindowsComputerIsNoMobileGateway();
+    void enabledWindowsComputerOffersMobileGateway();
     void localWindowsSessionExplainsDisabledVoice();
     // Shards run functions and data rows in any order, so every test starts without
     // the settings an earlier one saved, window geometry included.
@@ -11010,20 +11010,23 @@ void TestSessionsWindow::mobileConnectionSettingsOfferTheSharedDeliveryChoice(){
     SessionsWindow window(program()); window.show();
     window.findChild<QPushButton *>("workspaceSettings")->click();
     auto *choice=window.findChild<QComboBox *>("mobileDelivery"); QVERIFY(choice); QCOMPARE(choice->count(),6);
+#ifdef Q_OS_WIN
+    QVERIFY(window.findChild<QWidget *>("windowsMobileSettings"));
+#else
     QVERIFY(window.findChild<QWidget *>("relaySettings"));
+#endif
 }
 
 // hgs.exe on Windows reports a computer without sessions of its own; the
 // workspace then manages remote machines only (driven by data, not by #ifdef).
 void TestSessionsWindow::controlOnlyComputerOffersOnlyRemoteMachines(){
-    auto state=fleet();auto local=state.local();local.sessions.clear();local.localSessions=false;
+    auto state=fleet();auto local=state.local();local.sessions.clear();local.localSessions=false;local.metrics={{"platform","linux"}};
     state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program());window.resize(1100,760);window.setFleet(state);window.show();
     window.findChild<QPushButton *>("workspaceSettings")->click();
     auto *sections=window.findChild<QListWidget *>("settingsSections");QVERIFY(sections);
     QVERIFY(sections->item(5)->isHidden());QVERIFY(!sections->item(2)->isHidden());QVERIFY(!sections->item(4)->isHidden());
-    // A Linux computer that runs sessions is a mobile gateway; without a platform
-    // a Windows build would take this computer for Windows, which never is one.
+    // A Unix gateway needs local sessions enabled; Windows offers setup even before enablement.
     auto linuxFleet=fleet();auto linuxBox=linuxFleet.local();linuxBox.metrics=QJsonObject{{"platform","linux"}};
     linuxFleet.setLocal(linuxBox,QDateTime::currentMSecsSinceEpoch());
     window.setFleet(linuxFleet);QVERIFY(!sections->item(5)->isHidden());window.setFleet(state);
@@ -11130,9 +11133,8 @@ void TestSessionsWindow::controlOnlyComputerAloneExplainsRecovery(){
     window.setFleet(alone);QTRY_VERIFY(status->text().startsWith("Add a remote machine in Machines"));
 }
 
-// An enabled Windows computer runs sessions, so it keeps its recovery policy, but
-// it is no mobile gateway (spec D16): Mobile connection stays hidden.
-void TestSessionsWindow::enabledWindowsComputerIsNoMobileGateway(){
+// Windows retains recovery and exposes its real local mobile gateway configuration.
+void TestSessionsWindow::enabledWindowsComputerOffersMobileGateway(){
     QTemporaryDir fixture;QVERIFY(fixture.isValid());const auto script=fixture.filePath("hgs");
     QVERIFY(FakeCli::install(script,R"PY(#!/usr/bin/env python3
 import sys
@@ -11147,7 +11149,7 @@ print('{"order":[7,"writer"],"policy":{"version":2,"revision":7,"writer":"writer
     SessionsWindow window(FakeCli::program(script));window.resize(1100,900);window.setFleet(state);window.show();
     window.findChild<QPushButton *>("workspaceSettings")->click();
     auto *sections=window.findChild<QListWidget *>("settingsSections");QVERIFY(sections);
-    QVERIFY(sections->item(5)->isHidden());QVERIFY(!sections->item(2)->isHidden());QVERIFY(!sections->item(4)->isHidden());
+    QVERIFY(!sections->item(5)->isHidden());QVERIFY(!sections->item(2)->isHidden());QVERIFY(!sections->item(4)->isHidden());
     // Recovery includes this computer as well as the remote machine.
     static_cast<SettingsPage *>(window.findChild<QWidget *>("settingsPage"))->openRecovery();
     auto *status=window.findChild<QLabel *>("recoverySyncStatus");QVERIFY(status);
@@ -11155,7 +11157,8 @@ print('{"order":[7,"writer"],"policy":{"version":2,"revision":7,"writer":"writer
     local.metrics=QJsonObject{{"platform","linux"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
     window.setFleet(state);QVERIFY(!sections->item(5)->isHidden());
     local.metrics=QJsonObject{{"platform","windows"}};state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
-    sections->setCurrentRow(5);window.setFleet(state);QVERIFY(sections->item(5)->isHidden());QCOMPARE(sections->currentRow(),0);
+    sections->setCurrentRow(5);window.setFleet(state);QVERIFY(!sections->item(5)->isHidden());QCOMPARE(sections->currentRow(),5);
+    local.localSessions=false;state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QVERIFY(!sections->item(5)->isHidden());
 }
 
 // Voice sends to local Windows sessions are a Phase 2 non-goal (spec D16): the

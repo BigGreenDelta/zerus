@@ -23,7 +23,7 @@ peer's heartbeat and runs routed requests in that peer's context through
 `hgs swarm mobile-peer`, rechecking the route at every call. Every black-box
 module runs against it (`tests/ported.json`, with the operations it implements
 under `rust_operations`); an unknown operation is refused with Python's
-`unsupported operation` receipt. Arch packages and signed macOS bundles include
+`unsupported operation` receipt. Arch packages, signed macOS bundles and new Windows portable ZIPs include
 this binary; source installs build it only when requested or when updating an
 existing Rust copy. Installation does not start or switch a gateway. Follow the
 explicit [per-computer cutover](../../../docs/mobile-deployment.md#move-a-computer-to-the-rust-connector)
@@ -333,3 +333,35 @@ needs no proc-macro crates. There is no reqwest, url crate, IDNA, OpenSSL or
 aws-lc-rs. The media operations add base64 0.22, the relay's version, to read
 file ranges, recordings and sealed credentials as Python's strict
 `base64.b64decode(validate=True)` does.
+
+## Windows local gateway
+
+See [Windows gateway setup](../../../docs/mobile-deployment.md#windows-gateway)
+and the [design](../../../docs/superpowers/specs/2026-10-20-windows-mobile-gateway-design.md).
+The bundled connector exposes `--manage status|save|start|stop --config PATH`
+with bounded JSON stdin/stdout for the desktop. Status is read-only and redacts
+credentials. Save and Start pin the configuration revision; Stop also pins the
+current random generation. Neither control names a PID or kills a tree. Save
+requires the connector to be stopped. The native executable always comes from
+beside the running connector, including after a portable folder moves.
+
+Windows uses protected current-user/SYSTEM/Administrators DACLs, reparse-point
+refusal, single-link files and Windows file locks. Unix retains its existing
+0700/0600, uid and flock rules. Windows native calls use hgs.exe pipes and its
+SSH adapter; ssh.exe is never spawned directly. The session host remains outside
+the connector/GUI lifetime. Windows Ctrl+C or a generation-bound Stop drains the
+in-flight request before exit. Unsupported media/path/peer/provider operations
+are refused after duplicate lookup and before any native call.
+
+Native Windows validation (no skips count as qualification):
+
+```sh
+cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --test windows_gateway
+cargo +1.99.1 clippy --locked --manifest-path services/mobile/connector/Cargo.toml --all-targets -- -D warnings
+```
+
+`tests/windows_scope.rs` runs policy and durable refusal controls on Unix; it
+is not evidence of Windows ACL/process behavior. `tests/windows_gateway.rs`
+runs the actual Windows ACL, hard-link, lock, revision, credential rotation and
+stop-generation controls without contacting a relay. The isolated Windows host
+and HTTPS transport suite is described in CONTRIBUTING.md.

@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! The Rust and Python connectors on one journal: each lock excludes the
 //! other in both directions, `hgs status` sees the Rust lock, a Rust-written
 //! journal reopens under the Python `Journal` unchanged, and `--check` never

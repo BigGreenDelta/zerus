@@ -531,7 +531,8 @@ locates Visual Studio with `vswhere` and applies `vcvars64.bat` (with its CMake
 and Ninja first on `PATH`) to that build only, then builds with Ninja and `cl` and
 runs every CTest suite offscreen.
 
-`scripts/package-windows.py` bundles the exact tested `hgs.exe` and `hgs-tray.exe`
+`scripts/package-windows.py` bundles the exact tested `hgs.exe`, `hgs-tray.exe`
+and `zerus-mobile-connector.exe`
 into `zerus-windows-x86_64.zip` with one top-level `zerus-windows-x86_64/` folder:
 
 - `windeployqt` adds Qt, its plugins (including the SVG image and icon plugins

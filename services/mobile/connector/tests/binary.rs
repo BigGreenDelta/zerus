@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! The built binary: `main()` vectors of `config.jsonl`, `--version`, the
 //! run-mode startup refusals and the read-only `--check` report.
 mod common;
