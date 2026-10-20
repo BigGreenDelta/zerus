@@ -64,8 +64,11 @@ The public structures alone do not prove the private environment offset.
 
 ## Finite proposed hosted gate
 
-`.github/workflows/kimi-approvals.yml` is manual-only, contents-read and cache-
-free. Root must review the exact commit and workflow before dispatch. Its only
+`.github/workflows/kimi-approvals.yml` runs on main-targeting PRs for its explicit
+gate/fixture/pin/ConPTY paths and supports manual dispatch. Checkout and source
+identity use the exact PR head, never the synthetic merge revision. It is
+contents-read and cache-free. Root must review the exact commit and workflow
+before the push or dispatch that starts execution. Its only
 machines are standard `macos-15` and `windows-2025`; no development-machine
 runner, larger paid runner, publication environment or signing material is used.
 

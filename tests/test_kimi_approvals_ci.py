@@ -1,5 +1,6 @@
 """Memory/source controls; none starts a process, native agent or OS service."""
 import ast
+import ctypes
 import importlib.util
 import json
 from pathlib import Path
@@ -69,9 +70,13 @@ class ApprovalGateControls(unittest.TestCase):
         for name in ('process_sample', 'environment', 'launched_environment'):
             self.assertIn(name + ' = guard.NativeKimi.' + name, source)
 
-    def test_workflow_is_manual_standard_hosted_without_write_permissions(self):
+    def test_workflow_uses_exact_pr_head_or_manual_standard_hosted_without_write_permissions(self):
         source = (ROOT / '.github/workflows/kimi-approvals.yml').read_text()
         self.assertIn('workflow_dispatch:', source)
+        self.assertIn('pull_request:\n    branches: [main]\n    paths:', source)
+        self.assertEqual(source.count('${{ github.event.pull_request.head.sha || github.sha }}'), 2)
+        self.assertNotIn("'src/**'", source)
+        self.assertNotIn("'tests/**'", source)
         self.assertNotIn('pull_request_target:', source)
         self.assertNotIn('self-hosted', source)
         self.assertIn('os: ["macos-15", "windows-2025"]', source)
@@ -156,6 +161,50 @@ class WindowsCustodyControls(unittest.TestCase):
         second.wait.assert_called_once_with(15)
         second.close.assert_called_once_with()
         self.assertEqual(case.pinned, {})
+
+
+class WindowsSidControls(unittest.TestCase):
+    def reader(self, offset=16, revision=1, count=2, length=16):
+        from types import SimpleNamespace
+        reader = object.__new__(process.Process)
+        reader.w = SimpleNamespace(HANDLE=ctypes.c_void_p, DWORD=ctypes.c_uint32)
+        reader.k = SimpleNamespace(CloseHandle=mock.Mock(return_value=True))
+        def opened(_process, _access, token):
+            token._obj.value = 9
+            return True
+        def information(_token, _kind, data, _size, needed):
+            needed._obj.value = 32
+            if data is not None:
+                base = ctypes.addressof(data)
+                ctypes.c_void_p.from_buffer(data).value = base + offset
+                if 0 <= offset <= 24:
+                    header = bytes((revision, count)) + b'\0' * 6
+                    ctypes.memmove(base + offset, header, len(header))
+            return True
+        reader.a = SimpleNamespace(OpenProcessToken=opened, GetTokenInformation=information,
+                                   GetLengthSid=mock.Mock(return_value=length))
+        return reader
+
+    def test_invalid_sid_pointer_and_declaration_never_reach_getlengthsid(self):
+        for fields in (dict(offset=-1), dict(offset=31), dict(offset=16, revision=2),
+                       dict(offset=16, count=16), dict(offset=16, count=3)):
+            with self.subTest(fields=fields):
+                reader = self.reader(**fields)
+                with self.assertRaises(OSError):
+                    reader.sid(7)
+                reader.a.GetLengthSid.assert_not_called()
+                reader.k.CloseHandle.assert_called_once()
+
+    def test_bounded_sid_is_read_and_native_length_is_checked_again(self):
+        reader = self.reader()
+        self.assertEqual(len(reader.sid(7)), 16)
+        reader.a.GetLengthSid.assert_called_once()
+        for length in (0, 8, 68, 1024):
+            reader = self.reader(length=length)
+            with self.assertRaisesRegex(OSError, 'invalid TokenUser SID'):
+                reader.sid(7)
+            reader.a.GetLengthSid.assert_called_once()
+            reader.k.CloseHandle.assert_called_once()
 
 
 if __name__ == '__main__':

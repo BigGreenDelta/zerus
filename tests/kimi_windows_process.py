@@ -109,10 +109,20 @@ class Process:
             data = ctypes.create_string_buffer(needed.value)
             if not self.a.GetTokenInformation(token, 1, data, len(data), ctypes.byref(needed)):
                 raise OSError('cannot read TokenUser')
+            if not 16 <= needed.value <= len(data):
+                raise OSError('TokenUser returned an invalid size')
             pointer = ctypes.c_void_p.from_buffer(data).value
+            first, end = ctypes.addressof(data), ctypes.addressof(data) + needed.value
+            # Even GetLengthSid reads its pointer: admit the fixed SID header
+            # first, then its declared subauthorities, before any SID API call.
+            if not pointer or not first <= pointer <= end - 8:
+                raise OSError('TokenUser SID header is outside its buffer')
+            header = ctypes.string_at(pointer, 8)
+            expected = 8 + 4 * header[1]
+            if header[0] != 1 or header[1] > 15 or pointer + expected > end:
+                raise OSError('TokenUser SID declaration is outside its buffer')
             length = self.a.GetLengthSid(pointer)
-            if not pointer or not 8 <= length <= 68 or not (ctypes.addressof(data) <= pointer
-                    and pointer + length <= ctypes.addressof(data) + len(data)):
+            if length != expected or not 8 <= length <= 68 or pointer + length > end:
                 raise OSError('invalid TokenUser SID')
             return ctypes.string_at(pointer, length)
         finally:
