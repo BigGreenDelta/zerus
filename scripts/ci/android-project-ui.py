@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot synthetic picker UI fixture on a disposable GitHub-hosted VM only."""
+"""One finite synthetic UI suite on a disposable GitHub-hosted VM only."""
 import hashlib
 import json
 import os
@@ -17,10 +17,25 @@ import zipfile
 
 RUNNER = "app.zerus.mobile.SessionProjectSmokeInstrumentation"
 CASES = "current_selection,close_no_write,durable_single_post,route_refusal,original_receipt,stale_navigation"
+RESULT_NAMESPACE = "project"
+RESULT_PREFIX = "Session project smoke passed:"
+APP_CLASSES = {"Lapp/zerus/mobile/SessionProjectController;", "Lapp/zerus/mobile/SessionProjectProtocol;"}
 IMAGE = "system-images;android-35;google_apis;x86_64"
 SERIAL = "emulator-5554"
 REVISIONS = {"emulator": "37.2.12", IMAGE: "9.0.0"}
 HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1"})
+
+
+def select_suite(arguments):
+    """Only these two reviewed finite runners; no arbitrary instrumentation/argv injection."""
+    global RUNNER, CASES, RESULT_NAMESPACE, RESULT_PREFIX, APP_CLASSES
+    assert arguments in ([], ["--approval-choices"]), "unknown UI suite"
+    if arguments:
+        RUNNER = "app.zerus.mobile.ApprovalChoicesSmokeInstrumentation"
+        CASES = "countdown_once,broader_cancel,broader_confirm,card_replacement,feedback_keyboard,lifecycle_no_submit,readonly_stale_identity"
+        RESULT_NAMESPACE = "approval"
+        RESULT_PREFIX = "Approval choices smoke passed:"
+        APP_CLASSES = {"Lapp/zerus/mobile/QuestionUiKt;", "Lapp/zerus/mobile/QuestionPolicies;", "Lapp/zerus/mobile/ApprovalReview;"}
 
 
 def adb_server_command(adb):
@@ -89,11 +104,11 @@ def instrumentation_result(text):
             continue
         assert line.startswith("INSTRUMENTATION_RESULT: "), line
         key, separator, value = line.removeprefix("INSTRUMENTATION_RESULT: ").partition("=")
-        assert separator and key not in fields and key in {"project_cases", "project_case_ids", "stream"}
+        assert separator and key not in fields and key in {RESULT_NAMESPACE + "_cases", RESULT_NAMESPACE + "_case_ids", "stream"}
         fields[key] = value
-    assert codes == ["-1"] and set(fields) == {"project_cases", "project_case_ids", "stream"}
-    assert fields["project_cases"] == "6" and fields["project_case_ids"].split(",") == CASES.split(",")
-    assert fields["stream"].startswith("Session project smoke passed:")
+    assert codes == ["-1"] and set(fields) == {RESULT_NAMESPACE + "_cases", RESULT_NAMESPACE + "_case_ids", "stream"}
+    assert fields[RESULT_NAMESPACE + "_cases"] == str(len(CASES.split(","))) and fields[RESULT_NAMESPACE + "_case_ids"].split(",") == CASES.split(",")
+    assert fields["stream"].startswith(RESULT_PREFIX)
     return fields
 
 
@@ -294,8 +309,8 @@ def main():
         certificate = matching_signers(*certificate_outputs)
         xml = run("test-manifest", [build / "aapt", "dump", "xmltree", test, "AndroidManifest.xml"])
         instrumentation_manifest(xml)
-        assert "Lapp/zerus/mobile/SessionProjectSmokeInstrumentation;" in defined_classes(test)
-        assert {"Lapp/zerus/mobile/SessionProjectController;", "Lapp/zerus/mobile/SessionProjectProtocol;"} <= defined_classes(app)
+        assert "L" + RUNNER.replace(".", "/") + ";" in defined_classes(test)
+        assert APP_CLASSES <= defined_classes(app)
         for label, apk, package in (("app", app, "app.zerus.mobile"), ("test", test, "app.zerus.mobile.test")):
             assert "package: name='" + package + "'" in run(label + "-package", [build / "aapt", "dump", "badging", apk])
         apk_before = {str(app): sha(app), str(test): sha(test)}
@@ -398,9 +413,10 @@ def main():
         apk_equal = all(sha(path) == digest for path, digest in apk_before.items())
         success = success and equal and source_equal and apk_equal and time.monotonic() < end and all(row.get("reaped") for row in cleanup)
         save("outcome.json", {"qualified": success, "commands": results, "cleanup": cleanup, "tools_unchanged": equal, "source_unchanged": source_equal, "apks_unchanged": apk_equal,
-                              "whole_end_retained": True, "scope": "synthetic picker UI only; no installed/provider/tool-closure proof"})
+                              "whole_end_retained": True, "scope": "synthetic " + RESULT_NAMESPACE + " UI only; no installed/provider/tool-closure proof"})
     assert success
 
 
 if __name__ == "__main__":
+    select_suite(sys.argv[1:])
     main()

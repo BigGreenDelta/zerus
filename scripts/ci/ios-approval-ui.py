@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""One unsigned, no-network approval UI campaign on a fresh GitHub-hosted macOS VM.
+
+Requires separately reviewed exact Xcode-build/runtime/device-type inputs. No latest fallback,
+runtime installation, keychain, physical device, product app launch, or broad cleanup command.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import selectors
+import subprocess
+import sys
+import time
+import uuid
+
+CASES = (
+    "testRealCountdownAndOneTimeChoice", "testBroaderCancelThenSeparateConfirm",
+    "testReplacementRetiresAnOpenConfirmation", "testUnavailableRetiresAnOpenConfirmation",
+    "testFeedbackKeyboardCannotBypassReview", "testBackgroundClosesConfirmationWithoutSending",
+    "testHiddenAndReadOnlyCardsNeverSubmit",
+)
+
+
+def results(text):
+    """Exact original method inventory, one start and one PASS each, no native skips/retries."""
+    started = re.findall(r"Test Case '-\[(?:ApprovalUIFixtureTests\.)?ApprovalChoicesUITests (test\w+)\]' started\.", text)
+    passed = re.findall(r"Test Case '-\[(?:ApprovalUIFixtureTests\.)?ApprovalChoicesUITests (test\w+)\]' passed \([0-9.]+ seconds\)\.", text)
+    assert len(re.findall(r"Test Case '.+' started\.", text)) == 7, "no additional native tests"
+    assert len(re.findall(r"Test Case '.+' passed \([0-9.]+ seconds\)\.", text)) == 7
+    assert len(started) == len(passed) == 7 and set(started) == set(passed) == set(CASES), "exact native case inventory"
+    assert not re.search(r"Test Case .* (?:failed|skipped) ", text)
+    assert "** TEST SUCCEEDED **" in text
+    return {"started": started, "passed": passed, "failed": 0, "skipped": 0}
+
+
+def owned_device(inventory, runtime, identifier, name):
+    rows = [(key, row) for key, devices in inventory["devices"].items() for row in devices if row.get("udid") == identifier]
+    assert len(rows) == 1 and rows[0][0] == runtime and rows[0][1].get("name") == name
+    return rows[0][1]
+
+
+def digest(path):
+    value = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
+
+
+def main():
+    assert sys.platform == "darwin" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+    source = os.environ["EXPECTED_SOURCE"]
+    runtime, device = os.environ["EXPECTED_RUNTIME"], os.environ["EXPECTED_DEVICE_TYPE"]
+    expected_build = os.environ["EXPECTED_XCODE_BUILD"]
+    assert re.fullmatch(r"[0-9a-f]{40}", source)
+    assert re.fullmatch(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-[0-9]+-[0-9]+(?:-[0-9]+)?", runtime)
+    assert int(runtime.split(".iOS-", 1)[1].split("-", 1)[0]) >= 18
+    assert re.fullmatch(r"com\.apple\.CoreSimulator\.SimDeviceType\.iPhone-[A-Za-z0-9-]+", device)
+    assert re.fullmatch(r"[0-9A-Za-z]{3,32}", expected_build)
+    # The workflow selects this reviewed installed Xcode; this driver never searches for or switches it.
+    developer = Path(os.environ["DEVELOPER_DIR"]).resolve(strict=True)
+    assert developer.parent.name == "Contents" and developer.parent.parent.parent == Path("/Applications")
+    assert developer.parent.parent.name.startswith("Xcode") and developer.name == "Developer"
+    root = Path(os.environ["RUNNER_TEMP"]) / "ios-approval-ui-evidence"
+    root.mkdir(mode=0o700)  # No resume/replay into an existing result root.
+    end = time.monotonic() + 900
+    project = Path.cwd()
+    environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8", "DEVELOPER_DIR": str(developer)}
+    for name, child in (("HOME", "home"), ("TMPDIR", "tmp"), ("XDG_CACHE_HOME", "cache"), ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data")):
+        value = root / child; value.mkdir(mode=0o700); environment[name] = str(value)
+    commands, cleanup = [], []
+    identifier = None
+    name = "Zerus approval " + str(uuid.uuid4())
+    success = False
+    unknown_child = False
+    source_before = {}
+    tools_before = {}
+
+    def save(filename, value):
+        with (root / filename).open("x") as stream:
+            json.dump(value, stream, indent=2, sort_keys=True); stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+
+    def run(label, arguments, cap=30, cleaning=False):
+        nonlocal unknown_child
+        remaining = min(cap, end - time.monotonic() - (0 if cleaning else 60))
+        assert remaining > 0, "original whole deadline"
+        save(label + ".command.json", {"argv": list(map(str, arguments)), "remaining": remaining})
+        command = {"label": label, "argv": list(map(str, arguments))}; commands.append(command)
+        out, err = root / (label + ".stdout"), root / (label + ".stderr")
+        value = bytearray()
+        with out.open("xb") as stdout, err.open("xb") as stderr:
+            child = subprocess.Popen(command["argv"], cwd=project, env=environment, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            command["pid"] = child.pid  # Own the unreaped child before any later fallible call.
+            try:
+                deadline = min(end, time.monotonic() + remaining)
+                with selectors.DefaultSelector() as selector:
+                    selector.register(child.stdout, selectors.EVENT_READ, stdout)
+                    selector.register(child.stderr, selectors.EVENT_READ, stderr)
+                    total = 0
+                    while selector.get_map():
+                        assert time.monotonic() < deadline, "command deadline"
+                        for key, _ in selector.select(min(.1, max(0, deadline - time.monotonic()))):
+                            data = os.read(key.fileobj.fileno(), 65536)
+                            if not data:
+                                selector.unregister(key.fileobj); continue
+                            total += len(data)
+                            assert total <= 32 * 1024 * 1024, "bounded raw output"
+                            key.data.write(data)
+                            if key.fileobj is child.stdout: value.extend(data)
+                    child.wait(timeout=max(.001, deadline - time.monotonic()))
+                command["returncode"] = child.returncode
+                assert child.returncode == 0 and time.monotonic() < deadline
+            finally:
+                if child.poll() is None:
+                    success_stop = False
+                    try:
+                        child.terminate(); child.wait(timeout=min(3, max(.001, end - time.monotonic())))
+                        success_stop = True
+                    except BaseException:
+                        try:
+                            child.kill(); child.wait(timeout=min(3, max(.001, end - time.monotonic())))
+                            success_stop = True
+                        except BaseException:
+                            pass
+                    command["forced_child_stop"] = success_stop
+                    unknown_child = True  # A forced parent exit is never all-descendant proof or a passing gate.
+                command["reaped"] = child.returncode is not None
+                for pipe in (child.stdout, child.stderr): pipe.close()
+                stdout.flush(); os.fsync(stdout.fileno()); stderr.flush(); os.fsync(stderr.fileno())
+        return value.decode("utf-8", errors="strict")
+
+    try:
+        assert run("source", ["/usr/bin/git", "rev-parse", "HEAD"]).strip() == source
+        assert run("source-clean", ["/usr/bin/git", "status", "--porcelain"]).strip() == ""
+        paths = run("source-paths", ["/usr/bin/git", "ls-files", "-z"]).split("\0")
+        assert len(paths) <= 10000
+        source_before = {path: digest(project / path) for path in paths if path}
+        save("source-before.json", source_before)
+        version = run("xcode", ["/usr/bin/xcodebuild", "-version"])
+        assert re.fullmatch(r"Xcode (?:2[6-9]|[3-9][0-9])(?:\.[0-9]+)*\nBuild version " + re.escape(expected_build) + r"\n", version)
+        tools_before = {str(path): digest(path) for path in (developer / "usr/bin/xcodebuild", Path("/usr/bin/xcrun"))}
+        save("tools.json", {"xcode": version, "developer": str(developer), "runtime": runtime, "device_type": device,
+                            "sha256": tools_before,
+                            "scope": "selected installed tools on disposable VM; not transitive closure"})
+        runtimes = json.loads(run("runtimes", ["/usr/bin/xcrun", "simctl", "list", "runtimes", "--json"]))["runtimes"]
+        assert len([row for row in runtimes if row.get("identifier") == runtime and row.get("isAvailable") is True]) == 1
+        types = json.loads(run("device-types", ["/usr/bin/xcrun", "simctl", "list", "devicetypes", "--json"]))["devicetypes"]
+        assert len([row for row in types if row.get("identifier") == device]) == 1
+        before = json.loads(run("devices-before", ["/usr/bin/xcrun", "simctl", "list", "devices", "--json"]))
+        run("project", ["/usr/bin/python3", "-I", "-B", "scripts/ci/ios-approval-ui-project.py", root / "project"])
+        identifier = run("create", ["/usr/bin/xcrun", "simctl", "create", name, device, runtime]).strip()
+        assert str(uuid.UUID(identifier)).upper() == identifier
+        assert not any(row.get("udid") == identifier for rows in before["devices"].values() for row in rows)
+        created = json.loads(run("created", ["/usr/bin/xcrun", "simctl", "list", "devices", "--json"]))
+        assert owned_device(created, runtime, identifier, name)["state"] == "Shutdown"
+        save("owned-simulator.json", {"udid": identifier, "name": name, "runtime": runtime, "device_type": device})
+        run("boot", ["/usr/bin/xcrun", "simctl", "boot", identifier])
+        run("bootstatus", ["/usr/bin/xcrun", "simctl", "bootstatus", identifier, "-b"], 120)
+        text = run("ui-test", ["/usr/bin/xcodebuild", "-project", root / "project/ApprovalUIFixture.xcodeproj", "-scheme", "ApprovalUIFixture",
+                   "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "platform=iOS Simulator,id=" + identifier,
+                   "-derivedDataPath", root / "derived", "-clonedSourcePackagesDirPath", root / "packages", "-packageCachePath", root / "package-cache",
+                   "-disableAutomaticPackageResolution", "-disablePackageRepositoryCache", "-parallel-testing-enabled", "NO",
+                   "-maximum-concurrent-test-simulator-destinations", "1", "-jobs", "2", "-test-timeouts-enabled", "YES",
+                   "-default-test-execution-time-allowance", "30", "-maximum-test-execution-time-allowance", "30",
+                   "-resultBundlePath", root / "result.xcresult", "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO", "CODE_SIGN_IDENTITY=", "test"], 600)
+        save("native-results.json", results(text))
+        assert (root / "result.xcresult").is_dir()
+        app = root / "derived/Build/Products/Debug-iphonesimulator/ApprovalUIFixture.app"
+        with (app / "Info.plist").open("rb") as stream: metadata = plistlib.load(stream)
+        assert metadata["CFBundleIdentifier"] == "test.example.zerus.approval-fixture" and not (app / "embedded.mobileprovision").exists()
+        save("fixture-product.json", {"info": metadata, "executable_sha256": digest(app / metadata["CFBundleExecutable"]),
+                                       "scope": "separate unsigned simulator fixture; no maintained app"})
+        success = True
+    finally:
+        try:
+            if identifier:
+                current = json.loads(run("cleanup-identity", ["/usr/bin/xcrun", "simctl", "list", "devices", "--json"], 8, True))
+                state = owned_device(current, runtime, identifier, name)["state"]
+                assert state in {"Booted", "Shutdown"}
+                if state == "Booted": run("shutdown", ["/usr/bin/xcrun", "simctl", "shutdown", identifier], 10, True)
+                stopped = json.loads(run("cleanup-stopped", ["/usr/bin/xcrun", "simctl", "list", "devices", "--json"], 8, True))
+                assert owned_device(stopped, runtime, identifier, name)["state"] == "Shutdown"
+                run("delete", ["/usr/bin/xcrun", "simctl", "delete", identifier], 8, True)
+                cleanup.append({"udid": identifier, "shutdown_and_deleted": True})
+        except BaseException as error:
+            success = False; cleanup.append({"unknown": type(error).__name__})
+        same = bool(source_before) and all(digest(project / path) == value for path, value in source_before.items())
+        tools_same = bool(tools_before) and all(digest(path) == value for path, value in tools_before.items())
+        success = success and same and tools_same and not unknown_child and time.monotonic() < end
+        save("outcome.json", {"qualified": success, "source_unchanged": same, "tools_unchanged": tools_same, "cleanup": cleanup, "commands": commands,
+                              "unknown_child": unknown_child, "scope": "seven native SwiftUI/memory callback cases only; no real delivery, owner device or keychain"})
+    assert success
+
+
+if __name__ == "__main__":
+    assert len(sys.argv) == 1
+    main()
