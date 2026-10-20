@@ -940,7 +940,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             let mut job = load_job(string(&request, "name"));
             if job["id"] != request["id"] || job["state"] != "waiting" {
                 return Err(
-                    "This scheduled recovery is no longer current; refresh Activity".into(),
+                    "This scheduled recovery is no longer current; nothing was changed".into(),
                 );
             }
             match string(&request, "action") {
@@ -1068,7 +1068,7 @@ fn scoped_action(request: Value) -> Result<()> {
                 || job["identity"] != identity(&normalized)
             {
                 return Err(
-                    "Recovery job or exact native session identity changed; refresh Activity"
+                    "Recovery job or exact native session identity changed; nothing was changed"
                         .into(),
                 );
             }

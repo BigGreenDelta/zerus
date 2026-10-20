@@ -494,13 +494,13 @@ fn bound(record: &Value, card: &Value) -> Result<Value> {
         return Err(UNVERIFIED.into());
     }
     let id = string(card, "question_id");
-    let gone = "This approval is no longer pending; refresh Activity";
+    let gone = "This approval is no longer pending; nothing was sent";
     let event = open.pending.get(id).ok_or(gone)?;
     let fresh = self::card(record, event).ok_or(gone)?;
     if fresh["question_hash"] != card["question_hash"]
         || fresh["questions"][0]["allow_other"] != true
     {
-        return Err("This approval changed; refresh Activity".into());
+        return Err("This approval changed; nothing was sent".into());
     }
     if open.pending.len() != 1 {
         return Err("Another Kimi request is waiting. Answer in Terminal.".into());
@@ -1846,7 +1846,7 @@ mod tests {
             &mut || {
                 checks += 1;
                 if checks == 2 {
-                    Err("This approval changed; refresh Activity".into())
+                    Err("This approval changed; nothing was sent".into())
                 } else {
                     Ok(())
                 }

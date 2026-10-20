@@ -1195,7 +1195,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             || error.trimmed() == "This turn is no longer working";
         if (ok) showNotice(tr("Interrupt sent to %1. Waiting for the agent to stop…").arg(target));
         else if (alreadyStopped) showNotice(tr("Stop %1: the turn already ended or is waiting for input. No action needed.").arg(target));
-        else showNotice(tr("Stop %1 failed: %2\nRefresh status or open Terminal to check the agent before trying again.").arg(target, error), true);
+        else showNotice(tr("Stop %1 failed: %2\nOpen Terminal to check the agent before trying again.").arg(target, error), true);
         if(m_selectedKey==m_interruptKey)inspect();
         emit refreshRequested();
         renderDetails();

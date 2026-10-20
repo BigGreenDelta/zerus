@@ -8362,7 +8362,7 @@ else: print('{}')
     QCOMPARE(notice->property("error").toBool(), outcome == "failed");
     if (outcome == "failed") {
         QVERIFY(notice->text().contains("Native interruption could not be verified"));
-        QVERIFY(notice->text().contains("Refresh status or open Terminal"));
+        QVERIFY(notice->text().contains("Open Terminal to check the agent"));
         QVERIFY(notice->toolTip().contains("Terminal"));
         // An older information timeout must not erase the newer error.
         QTest::qWait(5100); QVERIFY(notice->isVisible()); QVERIFY(dismiss->isVisible());

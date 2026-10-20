@@ -160,7 +160,7 @@ pub(super) fn current(record: &Value) -> Option<Value> {
 pub(super) fn available(record: &Value, question: &Value) -> Result<()> {
     let active = kimi_tui_choice::identity(record)?;
     if snapshot(&active, &kimi_tui_choice::capture(&active)?).map(|s| s.0) != Some(question["question_hash"].clone()) {
-        return Err("Codex's update request changed; refresh Activity".into());
+        return Err("Codex's update request changed; nothing was sent".into());
     }
     Ok(())
 }
@@ -174,7 +174,7 @@ pub(super) fn answer(record: &Value, question: &Value, answers: &Value) -> Resul
         // the pinned process before the pane is read.
         let label = &question["questions"][0]["options"][0]["label"];
         let command = *COMMANDS.iter().find(|command| *label == update_label(command))
-            .ok_or("Codex's update request changed; refresh Activity")?;
+            .ok_or("Codex's update request changed; nothing was sent")?;
         let started = |screen: &str| installing(screen, command);
         let handoff = kimi_tui_choice::answer_handoff(record, question, chosen, IDS.len(), snapshot, &started, INSTALLER_START)?;
         return Ok(Some(if handoff == Handoff::Running { "installing" } else { "exited" }));
