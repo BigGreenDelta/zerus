@@ -22,6 +22,7 @@ from test_windows_host import FAKE_AGENT, HGS, HIDDEN, LIMIT
 from test_windows_lifecycle import LifecycleCase, read_json, read_events
 from windows_gateway_custody import ConnectorCustody, guard_root_cleanup, termination_adapter
 from windows_gateway_diagnostics import GatewayDiagnostics, gateway_phase
+from windows_gateway_management import ManagementCapture
 
 CONNECTOR = Path(os.environ.get("HGS_TEST_CONNECTOR", Path(__file__).resolve().parents[1] /
                                "services/mobile/connector/target/release/zerus-mobile-connector.exe"))
@@ -66,9 +67,12 @@ class Gateway(LifecycleCase):
         self.pending, self.results, self.snapshots = [], {}, []
         self.mutex = threading.Lock()
         self.custody = None
+        self.managers = []
         # Replace only this case's registered TemporaryDirectory cleanup. Its
         # GC finalizer must not bypass custody after an uncertain detached start.
-        guard_root_cleanup(self, self.temp, lambda: self.custody is None or self.custody.may_remove_root)
+        guard_root_cleanup(self, self.temp, lambda:
+            (self.custody is None or self.custody.may_remove_root)
+            and all(manager.may_remove_root for manager in self.managers))
         tls = self.root / "tls"
         tls.mkdir()
         config = tls / "openssl.cnf"
@@ -148,9 +152,11 @@ class Gateway(LifecycleCase):
 
     @gateway_phase("manage")
     def manage(self, action, payload=None):
-        result = subprocess.run([str(self.connector), "--manage", action, "--config", str(self.config)],
-                                input=json.dumps(payload or {}), capture_output=True, text=True, env=self.env,
-                                timeout=15, creationflags=HIDDEN)
+        capture = ManagementCapture(self.root)
+        self.managers.append(capture)  # Before Popen: unknown exit retains the root.
+        result = capture.run([str(self.connector), "--manage", action, "--config", str(self.config)],
+                             payload, self.env, HIDDEN)
+        self.assertTrue(capture.pipes_ended, "manager pipes must end while its detached connector stays live")
         self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
         return json.loads(result.stdout)
 

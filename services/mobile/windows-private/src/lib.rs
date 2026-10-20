@@ -1,6 +1,8 @@
 //! Small Windows boundary. Callers remain safe Rust. Existing unsafe entries
 //! are refused; ACLs are applied at creation, never repaired after opening.
 #![cfg(windows)]
+mod connector_process;
+pub use connector_process::{spawn_connector, ConnectorChild};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};

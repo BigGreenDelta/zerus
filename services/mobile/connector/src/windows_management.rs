@@ -4,9 +4,7 @@ use crate::{config, fsguard, journal, native, runtime};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -276,33 +274,21 @@ pub fn manage(action: &str, path: &Path, input: &Value) -> Result<Value> {
     if current["running"] == true {
         return Ok(current);
     }
-    let mut command = Command::new(std::env::current_exe()?);
-    command
-        .arg("--admit-revision")
-        .arg(
-            current["revision"]
-                .as_str()
-                .ok_or("configuration revision unavailable")?,
-        )
-        .arg("--config")
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    for key in native::CONTEXT_KEYS {
-        command.env_remove(key);
-    }
-    command
-        .env_remove("HGS_HOST_SESSION")
-        .env_remove("HGS_HOST_PANE");
+    let executable = std::env::current_exe()?;
+    let expected_revision = current["revision"]
+        .as_str()
+        .ok_or("configuration revision unavailable")?;
+    let removed_keys: Vec<_> = native::CONTEXT_KEYS.into_iter()
+        .chain(["HGS_HOST_SESSION", "HGS_HOST_PANE"]).collect();
     // The GUI's job permits breakaway. Refuse launch if an enclosing job does
     // not permit it; never silently attach the connector to a kill-on-close job.
-    command.creation_flags(0x01000000 | 0x00000200 | 0x08000000);
     // The child has a nonblocking admission guard. Release before spawning so
     // it cannot race this parent's still-held lock. A Save in this gap changes
     // the revision and makes child admission refuse before any runtime exists.
     drop(_guard);
-    let mut child = command.spawn()?;
+    // Null standard streams alone still let Rust's broad inheritance copy the
+    // manager's original pipe handles. The fixed launcher allowlists NUL only.
+    let child = zerus_windows_private::spawn_connector(&executable, expected_revision, path, &removed_keys)?;
     // Readiness requires the observed revision, journal lock and generation.
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
