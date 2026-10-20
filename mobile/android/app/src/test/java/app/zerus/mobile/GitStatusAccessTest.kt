@@ -84,7 +84,7 @@ class GitStatusAccessTest {
         val direct = access()!!
         val unknown = access(machines = listOf(machine.copy(route = MachineRoute.Unknown)))!!
         val via = access(machines = listOf(machine.copy(route = MachineRoute.Via(gatewayId, "Reported gateway"))))!!
-        assertTrue(direct.available); assertTrue(unknown.available); assertTrue(via.available)
+        assertTrue(direct.available); assertFalse(unknown.available); assertTrue(via.available)
         assertNotEquals(direct.epoch, unknown.epoch); assertNotEquals(direct.epoch, via.epoch); assertNotEquals(unknown.epoch, via.epoch)
         assertEquals(GitStatusRouteIdentity.Via(gatewayId), (via.epoch as GitStatusEpoch).routeIdentity)
         assertEquals(via.epoch, access(machines = listOf(machine.copy(route = MachineRoute.Via(gatewayId, "Private gateway alias"))))!!.epoch)

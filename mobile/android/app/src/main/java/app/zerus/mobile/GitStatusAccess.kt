@@ -39,7 +39,7 @@ internal object GitStatusAccessPolicies {
         }
         return GitStatusAccess(GitStatusEpoch(connection, key, machine.machineId, route),
             machine.online && !machine.lastKnown, GitStatus.OPERATION in relayOperations,
-            GitStatus.OPERATION in machineOperations)
+            GitStatus.OPERATION in machineOperations, route != GitStatusRouteIdentity.Unknown)
     }
 
     /** Only the raw original cwd chooses the request argument. Missing checkout proof stays unknown. */

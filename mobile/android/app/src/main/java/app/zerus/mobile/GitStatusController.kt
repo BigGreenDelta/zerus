@@ -14,8 +14,9 @@ import java.util.LinkedHashMap
 import java.util.UUID
 
 /** epoch must be an immutable full Connection plus native machine identity snapshot. */
-internal data class GitStatusAccess(val epoch: Any, val online: Boolean, val relaySupported: Boolean, val computerSupported: Boolean) {
-    val available: Boolean get() = online && relaySupported && computerSupported
+internal data class GitStatusAccess(val epoch: Any, val online: Boolean, val relaySupported: Boolean, val computerSupported: Boolean,
+    val routeKnown: Boolean = true) {
+    val available: Boolean get() = online && relaySupported && computerSupported && routeKnown
 }
 
 /**

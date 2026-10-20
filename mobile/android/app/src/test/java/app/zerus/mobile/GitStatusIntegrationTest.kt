@@ -37,6 +37,25 @@ class GitStatusIntegrationTest {
         }
     }
 
+    @Test fun anUnknownRouteCannotReadOrKeepCurrentProofWhenAnOnlineCardReturns() = ListHarness().use { h ->
+        val candidate = GitStatusTestData.candidate()
+        h.catalog = h.catalog.copy(machines = listOf(h.machine.copy(route = MachineRoute.Unknown)))
+        h.controller.setForeground(true)
+        h.controller.watch(candidate, true)
+        assertEquals(0, h.requests.size)
+        h.catalog = h.catalog.copy(machines = listOf(h.machine))
+        h.controller.refresh()
+        assertEquals(1, h.requests.size)
+        h.complete(0)
+        assertTrue(h.controller.badge(candidate)!!.current)
+        h.catalog = h.catalog.copy(machines = listOf(h.machine.copy(route = MachineRoute.Unknown)))
+        h.controller.refresh()
+        assertFalse(h.controller.badge(candidate)!!.current)
+        h.now += GitStatusController.CADENCE_NANOS
+        h.controller.refresh()
+        assertEquals(1, h.requests.size)
+    }
+
     @Test fun storageAndPreviewCannotGrantListReadsAndCapabilitiesMustAgreeOnBothSides() = ListHarness().use { h ->
         h.controller.setForeground(true)
         val candidate = GitStatusTestData.candidate()
