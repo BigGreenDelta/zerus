@@ -3,6 +3,36 @@
 Build requirements are documented in `docs/installation.md`. Keep fixtures synthetic and
 machine connection settings local. `AGENTS.md` describes the Beads workflow.
 
+## Proposals and repository labels
+
+A feature PR is a proposal until maintainers accept its product scope. Before
+adopting it, establish the use cases, configuration and lifecycle behavior, and
+behavior on every supported platform. Optional third-party tools can be useful
+extension proposals without belonging in the Zerus core. Deferring one does not
+commit the project to implementing it or to a particular extension API.
+
+Keep the existing `bug`, `enhancement`, `documentation` and technical labels.
+Use these additional labels to retain product decisions on issues and PRs:
+
+| Label | Meaning |
+| --- | --- |
+| `proposal` | An idea whose product scope has not been accepted. |
+| `deferred` | Retained for future consideration, without an active implementation or release commitment. |
+| `extensions` | An optional third-party integration suited to a future plugin or extension. |
+| `partially-adopted` | Part of a PR was adopted separately; the closing comment records what happened to the rest. |
+
+Close deferred implementation PRs with a short explanation and retain their
+labels, commits and discussion. Use `wontfix` for work the project does not plan
+to take, rather than for an idea being kept for later. When a PR mixes a bug fix
+and an unaccepted feature, investigate and take the fix separately with author
+attribution; explain exactly what was adopted before closing the original PR.
+Beads continues to own accepted implementation tasks and blockers.
+
+To revisit retained ideas, search GitHub for
+`is:pr is:closed label:proposal label:deferred`; add `label:extensions` to find
+plugin candidates. Search `is:pr is:closed label:partially-adopted` to find PRs
+whose fixes were taken separately.
+
 ## Local checks
 
 ```sh
