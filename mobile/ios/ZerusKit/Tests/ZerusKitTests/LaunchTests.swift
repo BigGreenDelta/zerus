@@ -3,6 +3,18 @@ import XCTest
 
 /// Ported from Android LaunchPresentationTest and DirectoryCreationTest.
 final class LaunchPresentationTests: XCTestCase {
+    func testOpenCodeMarksSurviveTheSanitizedCatalog() throws {
+        let contract = try XCTUnwrap(SharedFixture.json("opencode-provider-catalog.json").object)
+        let raw: JSONObject = ["agents": ["opencode"], "accounts": .array([.object(try XCTUnwrap(contract.object("stopped_account")))])]
+        let clean = LaunchPresentation.sanitizeCatalog(raw)
+        let models = LaunchPresentation.models(clean, provider: "opencode", accountId: "native-opencode")
+        XCTAssertEqual(models.map(\.value), ["fixture/local"]); XCTAssertTrue(models[0].isDefault)
+        XCTAssertEqual(models[0].providerLabel, "Private keyless fixture")
+        XCTAssertEqual(LaunchPresentation.catalogNotice(clean, provider: "opencode", accountId: "native-opencode"),
+                       "OpenCode is not running on fixture Showing a shortened list. Choose other models on the desktop.")
+        XCTAssertEqual(LaunchPresentation.catalogNotice(clean, provider: "codex", accountId: "native-opencode"), "")
+        XCTAssertEqual(LaunchPresentation.catalogNotice(clean, provider: "opencode", accountId: "missing"), "")
+    }
     private let machine = MachineKey(connectionId: "workspace", computerId: "computer")
     private func choices(_ raw: JSONObject?, _ catalogs: [AccountCatalog], _ now: Double, provider: String = "", account: String = "") -> [LaunchAccountChoice] {
         LaunchPresentation.accountChoices(raw, machine: machine, catalogs: catalogs, now: now, selectedProvider: provider, selectedAccount: account) { $0.lowercased() }

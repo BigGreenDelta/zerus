@@ -6,6 +6,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LaunchPresentationTest {
+    @Test fun openCodeMarksSurviveTheSanitizedCatalog() {
+        val contract = JSONObject(checkNotNull(javaClass.getResourceAsStream("/opencode-provider-catalog.json")).bufferedReader().use { it.readText() })
+        val raw = JSONObject().put("agents", JSONArray(listOf("opencode"))).put("accounts", JSONArray().put(contract.getJSONObject("stopped_account")))
+        val clean = LaunchPresentation.sanitizeCatalog(raw)
+        val models = LaunchPresentation.models(clean, "opencode", "native-opencode")
+        assertEquals("fixture/local", models.single().value); assertTrue(models.single().isDefault)
+        assertEquals("Private keyless fixture", models.single().providerLabel)
+        assertEquals("OpenCode is not running on fixture Showing a shortened list. Choose other models on the desktop.",
+            LaunchPresentation.catalogNotice(clean, "opencode", "native-opencode"))
+        assertEquals("", LaunchPresentation.catalogNotice(clean, "codex", "native-opencode"))
+        assertEquals("", LaunchPresentation.catalogNotice(clean, "opencode", "missing"))
+    }
     private fun choices(raw:JSONObject?,machine:MachineKey,catalogs:List<AccountCatalog>,now:Double,provider:String="",account:String="")=
         LaunchPresentation.accountChoices(raw,machine,catalogs,now,provider,account) { it.lowercase(java.util.Locale.ROOT) }
     private fun choiceCatalog(usage:JSONObject?=null)=JSONObject().put("agents",JSONArray().put("codex")).put("accounts",JSONArray()

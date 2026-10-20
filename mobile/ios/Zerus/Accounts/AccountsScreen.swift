@@ -234,6 +234,7 @@ private struct AccountDetails: View {
                         if !problem.isEmpty { Text(problem).font(.footnote).foregroundStyle(Theme.muted) }
                         if AccountPresentation.stale(member.catalog, item, now: now) { Text("Last known report").font(.footnote).foregroundStyle(Theme.muted) }
                         if let date = AccountPresentation.date(item.checkedAt) { Text("Provider updated \(date)").font(.footnote).foregroundStyle(Theme.muted) }
+                        if let openCode = item.openCode { OpenCodeProvidersDetails(catalog: openCode) }
                     }
                 }
             }
