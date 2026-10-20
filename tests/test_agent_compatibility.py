@@ -460,13 +460,63 @@ class AgentCompatibility(unittest.TestCase):
             log = Path(temporary) / 'default.log'
 
             def run(argv, **options):
+                self.assertEqual(options['timeout'], 5)
+                self.assertEqual(options['env']['ZERUS_NATIVE_DIAGNOSTIC_DEADLINE'], '105')
                 options['stderr'].write(b'test_launch ... ')
                 raise compat.subprocess.TimeoutExpired(argv, options['timeout'])
 
-            with patch.object(compat.subprocess, 'run', side_effect=run), patch('sys.stdout', io.StringIO()), \
+            with patch.object(compat.subprocess, 'run', side_effect=run), \
+                    patch.object(compat.time, 'monotonic', return_value=100), patch('sys.stdout', io.StringIO()), \
                     self.assertRaises(compat.subprocess.TimeoutExpired):
                 compat.run_suites(['fixture'], {}, 5, Path(temporary), log)
             self.assertEqual(log.read_bytes(), b'test_launch ... ')
+
+    def test_native_runner_diagnostics_record_the_current_case_without_changing_outcomes(self):
+        import faulthandler
+        import os
+        import threading
+        import time
+        for passing in (True, False):
+            timer, invoked, namespace = SimpleNamespace(daemon=False), [], {}
+            timer.start, timer.cancel = unittest.mock.Mock(), unittest.mock.Mock()
+
+            def make_timer(delay, callback):
+                timer.delay, timer.callback = delay, callback
+                return timer
+
+            def fixture():
+                invoked.append('body')
+                timer.callback()  # A memory-only watchdog observation during this exact case.
+                self.assertEqual(namespace['current']['id'], case.id())
+                self.assertTrue(passing)
+
+            case = unittest.FunctionTestCase(fixture)
+            output, error = io.StringIO(), io.StringIO()
+            with self.subTest(passing=passing), \
+                    patch.object(os, 'environ', {'ZERUS_NATIVE_DIAGNOSTIC_DEADLINE': '1000'}), \
+                    patch.object(threading, 'Timer', side_effect=make_timer), \
+                    patch.object(time, 'monotonic', side_effect=[100, 101, 105, 106, 110]), \
+                    patch.object(faulthandler, 'dump_traceback') as stack, \
+                    patch.object(unittest.defaultTestLoader, 'loadTestsFromNames', return_value=unittest.TestSuite([case])), \
+                    patch('sys.stdout', output), patch('sys.stderr', error), \
+                    self.assertRaises(SystemExit) as exited:
+                exec(compile(compat.NATIVE_RUNNER, '<native-runner-control>', 'exec'), namespace)
+            self.assertEqual(exited.exception.code, not passing)
+            self.assertEqual(invoked, ['body'])
+            self.assertEqual(timer.delay, 899)
+            self.assertTrue(timer.daemon)
+            timer.start.assert_called_once_with()
+            timer.cancel.assert_called_once_with()
+            stack.assert_called_once_with(file=error, all_threads=True)
+            rows = [json.loads(line.removeprefix('ZERUS_NATIVE_DIAGNOSTIC=')) for line in error.getvalue().splitlines()
+                    if line.startswith('ZERUS_NATIVE_DIAGNOSTIC=')]
+            self.assertEqual([row['event'] for row in rows], ['start', 'before-aggregate-timeout', 'end'])
+            self.assertEqual(rows[0], dict(event='start', id=case.id(), started_monotonic=101))
+            self.assertEqual(rows[1], dict(event='before-aggregate-timeout', monotonic=105,
+                                          current=dict(id=case.id(), started_monotonic=101), case_elapsed=4))
+            self.assertEqual(rows[2], dict(event='end', id=case.id(), ended_monotonic=106, elapsed=5))
+            self.assertIsNone(namespace['current'])
+            self.assertEqual(output.getvalue(), 'ZERUS_NATIVE_RESULT={"tests": 1, "skipped": 0}\n')
 
     def test_native_runner_rejects_an_empty_or_skipped_suite(self):
         # Execute the actual CI runner with an unavailable native executable:

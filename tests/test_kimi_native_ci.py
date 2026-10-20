@@ -241,8 +241,14 @@ class KimiNativeCI(unittest.TestCase):
             self.assertNotIn(forbidden, workflow)
         self.assertIn('os: ["ubuntu-24.04", "macos-15"]', workflow)
         self.assertIn('CARGO_BUILD_JOBS: 2', workflow)
+        for variable, directory in (('CARGO_TARGET_DIR', 'target'), ('CARGO_HOME', 'cargo'), ('RUSTUP_HOME', 'rustup')):
+            self.assertIn('echo "' + variable + '=$RUNNER_TEMP/kimi-' + directory + '" >> "$GITHUB_ENV"', workflow)
         self.assertIn('persist-credentials: false', workflow)
-        self.assertIn('ref: ${{ github.sha }}', workflow)
+        exact_source = '${{ github.event.pull_request.head.sha || github.sha }}'
+        self.assertIn('SOURCE_SHA: ' + exact_source, workflow)
+        self.assertIn('ref: ' + exact_source, workflow)
+        for family in ('results', 'retained'):
+            self.assertIn('name: kimi-native-' + family + '-${{ matrix.os }}-${{ env.SOURCE_SHA }}', workflow)
 
 
 if __name__ == '__main__':
