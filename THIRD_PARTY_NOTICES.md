@@ -94,9 +94,14 @@ and Qt Multimedia) as unmodified, dynamically linked and replaceable Qt componen
 under LGPL-3.0-only. It contains no Qt WebEngine or Chromium. Third-party audio components retain their own license notices.
 `Zerus.app/Contents/Resources/licenses/qt` contains the LGPL-3.0 and GPL-3.0
 texts, Qt's official SPDX documents for every bundled module, including its
-third-party components, and the location of the exact Qt sources. The same folder also carries the Zerus, libvterm, md4c, Codex and
-Cargo dependency notices; `scripts/check-macos-bundle.py` rejects a bundle when
-any of them is missing.
+third-party components, and the location of the exact Qt sources. It also
+includes the standard license and exception texts those documents name;
+custom LicenseRef texts remain in the documents. This conservative coverage
+includes alternatives and optional components in the module metadata, without
+asserting that each component is compiled. The parent `licenses` folder carries
+the Zerus, libvterm, md4c, Codex and Cargo dependency notices.
+`scripts/check-macos-bundle.py` rejects missing notices and Qt identifiers without
+their texts.
 
 The CLI's `rusqlite` build includes SQLite through `libsqlite3-sys`. The collected
 notices also preserve its upstream public-domain dedication, separate from the

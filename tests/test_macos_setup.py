@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 SCRIPT = ROOT / "packaging/macos/zerus-setup"
 _spec = importlib.util.spec_from_file_location("package_macos", ROOT / "scripts/package-macos.py")
 _package = importlib.util.module_from_spec(_spec)
