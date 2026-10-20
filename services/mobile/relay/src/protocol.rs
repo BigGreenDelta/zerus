@@ -29,6 +29,7 @@ pub const READS: &[&str] = &[
     "voice_profiles",
     "voice_status",
     "task_exchange",
+    "task_done",
 ];
 /// Predicate of the persisted `read_history_v3` index and the one-hour read
 /// retention class. `attachment_read` is a read with its own shorter class
@@ -60,9 +61,14 @@ pub const SPEECH_READ_SQL: &str =
     "('speech_profiles','speech_stats','speech_status','voice_profiles','voice_status')";
 pub const SPEECH_AUDIO_MAX: usize = 16000 * 2 * 120;
 pub const COMPUTER: &[&str] = &["set_mobile_delivery"];
-/// Computer-scoped: the phone's task exchange, a short read that the computer
-/// answers from its own replica. Only the Rust connector offers it.
-pub const TASKS: &[&str] = &["task_exchange"];
+/// Computer-scoped: the phone's tasks, which only the Rust connector offers.
+/// The exchange and the Done list are short reads the computer answers from
+/// its own replica; Send now and Cancel are mutations on the session's computer.
+pub const TASKS: &[&str] = &["task_exchange", "task_send", "task_cancel", "task_done"];
+/// A Done page lists at most this many tasks.
+pub const TASK_DONE_MAX: u64 = 50;
+/// The longest cancel reason, in characters.
+pub const TASK_REASON_MAX: usize = 4096;
 pub const MOBILE_DELIVERY: &[&str] = &[
     "immediate",
     "away",
@@ -120,6 +126,9 @@ pub const OPERATIONS: &[&str] = &[
     "worktree_create",
     "worktrees",
     "task_exchange",
+    "task_send",
+    "task_cancel",
+    "task_done",
 ];
 pub const FEATURES: &[&str] = &[
     "inspect_after",
@@ -361,7 +370,36 @@ pub fn request(v: &Value) -> Result<()> {
         if v["session"] != "" {
             return Err(Error::BAD);
         }
-        task_exchange(p)?;
+        match op {
+            "task_exchange" => task_exchange(p)?,
+            "task_send" => {
+                fields(p, &["schema", "project", "task", "session"], &[])?;
+                task_request(p)?;
+                text(&p["session"], 1024, false)?;
+            }
+            "task_cancel" => {
+                fields(p, &["schema", "project", "task"], &["reason"])?;
+                task_request(p)?;
+                if let Some(reason) = p.get("reason") {
+                    text(reason, TASK_REASON_MAX, true)?;
+                }
+            }
+            _ => {
+                fields(p, &["schema", "project", "limit"], &["before"])?;
+                task_project(p)?;
+                if p["limit"]
+                    .as_u64()
+                    .is_none_or(|n| !(1..=TASK_DONE_MAX).contains(&n))
+                {
+                    return Err(Error::BAD);
+                }
+                if let Some(before) = p.get("before") {
+                    fields(before, &["at", "uuid"], &[])?;
+                    before["at"].as_u64().ok_or(Error::BAD)?;
+                    uuid(&before["uuid"], false)?;
+                }
+            }
+        }
     } else if COMPUTER.contains(&op) {
         fields(p, &["value"], &[])?;
         if v["session"] != "" || !MOBILE_DELIVERY.iter().any(|x| p["value"] == *x) {
@@ -624,14 +662,7 @@ pub fn task_exchange(p: &Value) -> Result<()> {
         &["schema", "project", "inventory"],
         &["updates", "continue", "range"],
     )?;
-    if p["schema"] != 1 {
-        return Err(Error::BAD);
-    }
-    // A project ID as the replica stores it.
-    let project = text(&p["project"], TASK_PROJECT_MAX, false)?;
-    if project.len() > TASK_PROJECT_MAX || project.chars().any(char::is_control) {
-        return Err(Error::BAD);
-    }
+    task_project(p)?;
     // The task UUIDs the request covers: after `after`, up to `through`.
     let (mut after, mut through) = (None, None);
     if let Some(range) = p.get("range") {
@@ -679,6 +710,23 @@ pub fn task_exchange(p: &Value) -> Result<()> {
         hex(&next["sha256"])?;
         next["offset"].as_u64().ok_or(Error::BAD)?;
     }
+    Ok(())
+}
+/// The schema and a project ID as the replica stores it.
+fn task_project(p: &Value) -> Result<()> {
+    if p["schema"] != 1 {
+        return Err(Error::BAD);
+    }
+    let project = text(&p["project"], TASK_PROJECT_MAX, false)?;
+    if project.len() > TASK_PROJECT_MAX || project.chars().any(char::is_control) {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
+/// A Send now or Cancel: the project and the task's UUID.
+fn task_request(p: &Value) -> Result<()> {
+    task_project(p)?;
+    uuid(&p["task"], false)?;
     Ok(())
 }
 /// A Loro version: each peer's decimal ID and its change count.

@@ -546,3 +546,27 @@ computer that does not, so the relay, hgs and the connector update in any order.
 Each computer's heartbeat also names every project's phone-view digest
 (`mobile_projects.projects[].tasks_digest`), which the relay keeps as part of
 the opaque snapshot.
+
+### Phone task actions
+
+Three more operations of the `TASKS` family, which only the Rust connector
+offers, carry the phone's Send now, Cancel and Done list; each runs only on a
+computer whose heartbeat lists it (409 otherwise), with an empty session:
+
+- `task_send` (`schema` 1, `project`, `task` UUID, `session` at most 1024
+  characters) and `task_cancel` (`schema`, `project`, `task`, optional `reason`
+  of at most 4096 characters) are mutations: the relay keeps their durable
+  identity, mutation quota and retention as for any mutation, a duplicate
+  replays its receipt, and the connector journal runs each identity once. A
+  receipt is failed when hgs refused before anything happened, with its reason,
+  and uncertain when the outcome cannot be confirmed (for example a prompt sent
+  but not recorded). The phone exchanges the project first, so its edits reach
+  that computer, and again afterwards to show the result.
+- `task_done` (`schema`, `project`, `limit` 1–50, optional `before` with `at`
+  and `uuid`) is a short read with its own `task_done_history` index and
+  two-minute retention: one page of the Done tasks newest first (`uuid`, `id`,
+  the first 200 characters of `text`, `session`, `accepted_at`), the cursor
+  `next`, `total` and `recent` (the last 7 days). Opening a Done task fetches
+  its document through the exchange, with that task in the inventory.
+
+Apply the additive index with the normal coordinated runtime replacement.

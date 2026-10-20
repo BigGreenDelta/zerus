@@ -22,7 +22,7 @@ import relay_fixture
 OPERATIONS = set(json.loads((Path(__file__).resolve().parents[1] / 'vectors/operations.json')
                             .read_text())['sets']['OPERATIONS'])
 # The phone's task exchange, which only the Rust relay and connector offer.
-RUST_OPERATIONS = {'task_exchange'}
+RUST_OPERATIONS = {'task_exchange', 'task_send', 'task_cancel', 'task_done'}
 # Background maintenance every 0.1 s, so expired rows leave while a test waits.
 MAINTAINED = dict(background=True, maintenance_interval=0.1)
 TOMBSTONE = 'request history expired; delivery must not be retried'

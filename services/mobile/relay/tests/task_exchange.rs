@@ -245,3 +245,190 @@ async fn a_delivered_exchange_leaves_the_relay_within_two_minutes() {
     fixture.check_accounting().await;
     fixture.close().await;
 }
+
+fn action(computer: &str, operation: &str, payload: Value) -> Value {
+    json!({"request_id":Uuid::new_v4().to_string(),"computer_id":computer,"operation":operation,
+        "session":"","payload":payload})
+}
+
+fn send(computer: &str) -> Value {
+    action(
+        computer,
+        "task_send",
+        json!({"schema":1,"project":"project-1","task":TASK,"session":"codex/api"}),
+    )
+}
+
+fn cancel(computer: &str) -> Value {
+    action(
+        computer,
+        "task_cancel",
+        json!({"schema":1,"project":"project-1","task":TASK,"reason":"Wrong approach"}),
+    )
+}
+
+fn done(computer: &str) -> Value {
+    action(
+        computer,
+        "task_done",
+        json!({"schema":1,"project":"project-1","limit":50,"before":{"at":1_760_000_000_000_i64,"uuid":TASK}}),
+    )
+}
+
+#[test]
+fn the_task_actions_wire_is_strict() {
+    let computer = Uuid::new_v4().to_string();
+    for value in [send(&computer), cancel(&computer), done(&computer)] {
+        protocol::request(&value).unwrap_or_else(|_| panic!("refused {value}"));
+        let mut session = value.clone();
+        session["session"] = json!("codex/api");
+        assert!(protocol::request(&session).is_err());
+    }
+    assert!(protocol::READS.contains(&"task_done"));
+    for op in ["task_send", "task_cancel"] {
+        assert!(protocol::OPERATIONS.contains(&op) && !protocol::READS.contains(&op));
+    }
+    let mut minimal = cancel(&computer);
+    minimal["payload"].as_object_mut().unwrap().remove("reason");
+    protocol::request(&minimal).unwrap();
+    let mut first = done(&computer);
+    first["payload"].as_object_mut().unwrap().remove("before");
+    protocol::request(&first).unwrap();
+    type Make = fn(&str) -> Value;
+    let cases: &[(Make, &str, Value)] = &[
+        (send, "schema", json!(2)),
+        (send, "task", json!("T-a1b2c3")),
+        (send, "session", json!("")),
+        (send, "session", json!("codex/\napi")),
+        (send, "project", json!("界".repeat(43))),
+        (send, "extra", json!(1)),
+        (cancel, "reason", json!("x".repeat(4097))),
+        (cancel, "reason", json!(7)),
+        (done, "limit", json!(0)),
+        (done, "limit", json!(51)),
+        (done, "before", json!({"at": -1, "uuid": TASK})),
+        (done, "before", json!({"at": 1, "uuid": "x"})),
+        (done, "before", json!({"at": 1, "uuid": TASK, "extra": 1})),
+    ];
+    for (make, key, value) in cases {
+        let mut bad = make(&computer);
+        bad["payload"][*key] = value.clone();
+        assert!(protocol::request(&bad).is_err(), "accepted {key} = {value}");
+    }
+}
+
+#[tokio::test]
+async fn sends_and_cancels_are_mutations_that_keep_their_receipts() {
+    let fixture = Fixture::new().await;
+    for body in [
+        send(&fixture.node.id),
+        cancel(&fixture.node.id),
+        done(&fixture.node.id),
+    ] {
+        assert_eq!(fixture.submit(&body).await.unwrap_err().0.as_u16(), 409);
+    }
+    beat(&fixture, &["task_send", "task_cancel", "task_done"]).await;
+    let body = send(&fixture.node.id);
+    let id = s(&body, "request_id");
+    assert_eq!(fixture.submit(&body).await.unwrap()["state"], "queued");
+    assert_eq!(fixture.submit(&body).await.unwrap()["state"], "queued");
+    let usage = fixture
+        .store
+        .db
+        .one(
+            "SELECT reads,mutations FROM workspace_usage WHERE workspace_id=?",
+            args![&fixture.phone.workspace],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (usage["reads"].clone(), usage["mutations"].clone()),
+        (json!(0), json!(1))
+    );
+    fixture
+        .store
+        .claim(&fixture.node, false)
+        .await
+        .unwrap()
+        .unwrap();
+    let receipt = json!({"state":"completed","result":{"schema":1,"ok":true,"task":TASK,"stage":"active"},"error":null});
+    fixture
+        .store
+        .result(
+            &fixture.node,
+            id,
+            &receipt,
+            Some(&canonical(&receipt["result"]).unwrap()),
+        )
+        .await
+        .unwrap();
+    // A send is never a short read: its receipt outlives two minutes.
+    fixture
+        .store
+        .db
+        .exec(
+            "UPDATE requests SET updated=? WHERE id=?",
+            args![zerus_relay::db::now() - 600.0, id],
+        )
+        .await
+        .unwrap();
+    fixture.store.maintain(false).await.unwrap();
+    assert_eq!(
+        fixture.submit(&body).await.unwrap()["result"],
+        receipt["result"]
+    );
+    assert!(fixture
+        .store
+        .claim(&fixture.node, false)
+        .await
+        .unwrap()
+        .is_none());
+    fixture.check_accounting().await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_delivered_done_page_leaves_within_two_minutes() {
+    let fixture = Fixture::new().await;
+    beat(&fixture, &["task_done"]).await;
+    let body = done(&fixture.node.id);
+    let id = s(&body, "request_id");
+    fixture.submit(&body).await.unwrap();
+    fixture
+        .store
+        .claim(&fixture.node, false)
+        .await
+        .unwrap()
+        .unwrap();
+    let receipt = json!({"state":"completed","result":{"schema":1,"tasks":[],"next":null,"total":0,"recent":0},"error":null});
+    fixture
+        .store
+        .result(
+            &fixture.node,
+            id,
+            &receipt,
+            Some(&canonical(&receipt["result"]).unwrap()),
+        )
+        .await
+        .unwrap();
+    fixture
+        .store
+        .db
+        .exec(
+            "UPDATE requests SET updated=? WHERE id=?",
+            args![zerus_relay::db::now() - 121.0, id],
+        )
+        .await
+        .unwrap();
+    fixture.store.maintain(false).await.unwrap();
+    assert!(fixture
+        .store
+        .db
+        .one("SELECT id FROM requests WHERE id=?", args![id])
+        .await
+        .unwrap()
+        .is_none());
+    fixture.check_accounting().await;
+    fixture.close().await;
+}

@@ -271,8 +271,9 @@ impl Store {
             let mut rows = vec![];
             for (predicate, threshold) in [
                 ("operation='terminal_snapshot'".into(), at - 120.0),
-                // The `task_exchange_history` index holds only these rows.
+                // The `task_exchange_history` and `task_done_history` indexes hold only these rows.
                 ("operation='task_exchange'".into(), at - 120.0),
+                ("operation='task_done'".into(), at - 120.0),
                 (
                     format!("operation IN {}", crate::speech_config::READ_SQL),
                     at - 120.0,
@@ -318,7 +319,8 @@ impl Store {
                             | "speech_status"
                             | "voice_profiles"
                             | "voice_status"
-                            | "task_exchange" => 120.0,
+                            | "task_exchange"
+                            | "task_done" => 120.0,
                             "attachment_read" | "file_read" => ATTACHMENT_RESULT_TTL,
                             _ => self.db.cfg.retention.min(3600) as f64,
                         }
