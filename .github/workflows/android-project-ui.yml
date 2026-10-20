@@ -60,6 +60,14 @@ jobs:
           persist-credentials: false
       - name: Check result and APK admission controls without an SDK
         run: python3 -I -B tests/test_android_project_ui.py
+      - name: Enable KVM only on this disposable hosted VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
       - name: Build and qualify the disposable picker fixture once
         shell: bash
         run: |
