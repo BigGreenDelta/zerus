@@ -939,10 +939,11 @@ jobs:
       - name: Windows mobile gateway isolated custody gate
         timeout-minutes: 20
         run: |
-          export HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
-          export HGS_TEST_FAKE_AGENT=$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")
-          export HGS_TEST_CONPTY_DIR=$(cygpath -w "$RUNNER_TEMP/conpty")
-          export HGS_TEST_CONNECTOR=$(cygpath -w "$PWD/target/release/zerus-mobile-connector.exe")
+          HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
+          HGS_TEST_FAKE_AGENT=$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")
+          HGS_TEST_CONPTY_DIR=$(cygpath -w "$RUNNER_TEMP/conpty")
+          HGS_TEST_CONNECTOR=$(cygpath -w "$PWD/target/release/zerus-mobile-connector.exe")
+          export HGS_TEST_BIN HGS_TEST_FAKE_AGENT HGS_TEST_CONPTY_DIR HGS_TEST_CONNECTOR
           python scripts/ci/outside-job.py --custody-only --timeout 900 \
             --log artifacts/test-results/windows-mobile-gateway.log -- \
             python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
