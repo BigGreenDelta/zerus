@@ -77,6 +77,8 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
     private val waiting = ConcurrentHashMap<Pair<ProjectKey, String>, Long>()
     /** After an exchange: the phone's digest, the heartbeat's it answered, and the computer's after it. */
     private val quiet = ConcurrentHashMap<Pair<ProjectKey, String>, Triple<String, String, String>>()
+    /** Tasks whose Send now may have happened, with their project and computer. */
+    private val sends = ConcurrentHashMap<String, Pair<ProjectKey, String>>()
 
     /** Exchanges `key`'s tasks with each of `peers` whose digest is not the phone's; the failures by computer. */
     suspend fun sync(connection: Connection, key: ProjectKey, name: String, peers: List<TaskPeer>): Map<String, String> =
@@ -114,6 +116,22 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
     suspend fun send(connection: Connection, key: ProjectKey, name: String, computerId: String, task: String, session: String): TaskOutcome =
         act(connection, key, name, computerId, "task_send",
             JSONObject().put("schema", 1).put("project", key.id).put("task", task).put("session", session))
+            .also { if (it is TaskOutcome.Uncertain) sends[task] = key to computerId }
+
+    /** A Send now that may have happened holds the task until an exchange with that computer shows its stage. */
+    fun held(task: String) = sends.containsKey(task)
+    fun heldTasks(): Set<String> = sends.keys.toSet()
+
+    /** Exchanges once with each computer of this connection that holds a task back; one that completes releases them. */
+    suspend fun settleSends(connection: Connection, names: (ProjectKey) -> String) {
+        for (pending in sends.values.filter { it.first.connectionId == connection.id }.toSet()) {
+            try {
+                exchangeNow(connection, pending.first, names(pending.first), pending.second)
+                sends.values.removeAll { it == pending }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { /* The next sync tries again. */ }
+        }
+    }
 
     suspend fun cancel(connection: Connection, key: ProjectKey, name: String, computerId: String, task: String, reason: String): TaskOutcome =
         act(connection, key, name, computerId, "task_cancel", JSONObject().put("schema", 1).put("project", key.id).put("task", task)
@@ -140,14 +158,23 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
         try { bounded { exchange(connection, store, computerId) } }
         catch (e: CancellationException) { throw e }
         catch (e: Exception) { return@project TaskOutcome.Refused("The tasks could not reach that computer: ${e.message.orEmpty()}") }
-        val receipt = request(connection, computerId, operation, payload, maxPolls = 150)
-        val reason = receipt.string("error")
-        val outcome = when (receipt.string("state")) {
-            "completed" -> TaskOutcome.Done
-            "failed" -> TaskOutcome.Refused(reason.ifBlank { "The computer refused it." })
-            "uncertain" -> TaskOutcome.Uncertain(reason.ifBlank { "The computer could not confirm it." })
-            else -> TaskOutcome.Uncertain("The computer has not answered yet.")
+        val outcome = try {
+            val receipt = request(connection, computerId, operation, payload, maxPolls = 150)
+            val reason = receipt.string("error")
+            when (receipt.string("state")) {
+                "completed" -> TaskOutcome.Done
+                "failed" -> TaskOutcome.Refused(reason.ifBlank { "The computer refused it." })
+                "uncertain" -> TaskOutcome.Uncertain(reason.ifBlank { "The computer could not confirm it." })
+                else -> TaskOutcome.Uncertain("The computer has not answered yet.")
+            }
+        } catch (e: CancellationException) { throw e }
+        // The relay refused the request itself: nothing was queued.
+        catch (e: RelayException) {
+            if (e.status in 400..499 && e.status != 408) TaskOutcome.Refused(e.message.orEmpty().ifBlank { "The relay refused it." })
+            else TaskOutcome.Uncertain("The relay did not confirm it: ${e.message.orEmpty()}")
         }
+        // The request may be queued although its answer was lost.
+        catch (e: Exception) { TaskOutcome.Uncertain("The relay did not confirm it: ${e.message.orEmpty().ifBlank { e.javaClass.simpleName }}") }
         // Its copy comes back now; when that fails the next sync brings it.
         try { bounded { exchange(connection, store, computerId) } }
         catch (e: CancellationException) { throw e }

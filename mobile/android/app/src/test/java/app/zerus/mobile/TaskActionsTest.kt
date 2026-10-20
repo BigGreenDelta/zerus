@@ -9,6 +9,8 @@ import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
+import org.junit.Assert.assertFalse
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -26,12 +28,15 @@ class TaskActionsTest {
         val envelopes = mutableListOf<JSONObject>()
         /** Receipts for the operations other than the exchange: state, result, error. */
         val receipts = mutableMapOf<String, (JSONObject) -> Triple<String, Any, Any>>()
+        /** Whole responses for an operation instead of its receipt: a lost answer, a relay refusal. */
+        val raw = mutableMapOf<String, () -> MockResponse>()
         @Volatile var exchangeFails = false
         override fun dispatch(request: RecordedRequest): MockResponse {
             val envelope = JSONObject(request.body.readUtf8())
             synchronized(this) { envelopes += envelope }
             val id = envelope.getString("request_id")
             val operation = envelope.getString("operation")
+            raw[operation]?.let { return it() }
             val payload = envelope.getJSONObject("payload")
             val (state, result, error) = when {
                 operation == "task_exchange" && exchangeFails -> Triple("failed", JSONObject.NULL, "the project's tasks are busy; try again")
@@ -94,6 +99,42 @@ class TaskActionsTest {
         val unrecorded = "the prompt was sent, but the task could not record it: disk full"
         computer.receipts["task_send"] = { Triple("uncertain", JSONObject.NULL, unrecorded) }
         assertEquals(TaskOutcome.Uncertain(unrecorded), sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api"))
+    }
+
+    @Test fun aLostAnswerToTheSendIsUncertainAndHoldsTheTask() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Add rate limiting")
+        // The relay may hold the request although its answer never arrived.
+        computer.raw["task_send"] = { MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST) }
+        val outcome = sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api")
+        assertTrue(outcome.toString(), outcome is TaskOutcome.Uncertain)
+        assertTrue(sync.held(task.uuid))
+    }
+
+    @Test fun aRelayRefusalBeforeTheSendIsRefused() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Add rate limiting")
+        computer.raw["task_send"] = { MockResponse().setResponseCode(400).setBody(JSONObject().put("error", "invalid task_send payload").toString()) }
+        assertEquals(TaskOutcome.Refused("invalid task_send payload"), sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api"))
+        assertFalse(sync.held(task.uuid))
+    }
+
+    @Test fun anUncertainSendHoldsUntilAnExchangeWithThatComputerEnds() = world { computer, connection, replicas, sync ->
+        val task = added(computer.store, "Add rate limiting")
+        computer.receipts["task_send"] = {
+            // Its copy cannot come back now either.
+            computer.exchangeFails = true
+            Triple("uncertain", JSONObject.NULL, "delivery uncertain")
+        }
+        assertEquals(TaskOutcome.Uncertain("delivery uncertain"), sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api"))
+        assertTrue(sync.held(task.uuid))
+        // A sync that exchanges nothing shows no stage: the heartbeat names the phone's own digest.
+        val mine = replicas.store(key, "orchard").use { it.liveDigest() }
+        assertTrue(sync.sync(connection, key, "orchard", listOf(TaskPeer("computer-1", mine))).isEmpty())
+        assertTrue(sync.held(task.uuid))
+        sync.settleSends(connection) { "orchard" }
+        assertTrue(sync.held(task.uuid))
+        computer.exchangeFails = false
+        sync.settleSends(connection) { "orchard" }
+        assertFalse(sync.held(task.uuid))
     }
 
     @Test fun aRefusedSendGivesHgsReason() = world { computer, connection, _, sync ->

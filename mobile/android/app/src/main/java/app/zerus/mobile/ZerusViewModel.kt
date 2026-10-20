@@ -2006,10 +2006,17 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 for ((key, peers) in TaskSyncPlan.peers(digests, relayOperations, operations, known)) {
                     if (connections != original) return@launch
                     val connection = original.find { it.id == key.connectionId } ?: continue
-                    if (taskSync.sync(connection, key, names[key] ?: "Project", peers).isEmpty()) settleSends(key)
+                    taskSync.sync(connection, key, names[key] ?: "Project", peers)
                     refreshReviewCount(key)
                     if (tasksKey == key) refreshTasks()
                 }
+                // A Send now that may have happened waits for an exchange with its computer.
+                for (connection in original) {
+                    if (connections != original) return@launch
+                    taskSync.settleSends(connection) { key -> names[key] ?: "Project" }
+                }
+                heldSends = taskSync.heldTasks()
+                refreshTasks()
             } catch (e: CancellationException) { throw e }
             // Failures wait in TaskSync's backoff; tasks have no screen to report them yet.
             catch (_: Exception) { }
@@ -2037,9 +2044,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var doneError by mutableStateOf(""); private set
     /** The tasks In review of each project, for the badge on the Tasks button. */
     var reviewCounts by mutableStateOf<Map<ProjectKey, Int>>(emptyMap()); private set
-    /** Tasks whose Send now may have happened: Send now waits for the next exchange to show their stage. */
-    private var uncertainSends by mutableStateOf<Map<String, ProjectKey>>(emptyMap())
-    private fun settleSends(key: ProjectKey) { uncertainSends = uncertainSends.filterValues { it != key } }
+    /** TaskSync's held Send nows, as state, so a card follows their release. */
+    private var heldSends by mutableStateOf<Set<String>>(emptySet())
 
     fun taskProjectName(key: ProjectKey) = projects.find { it.key == key }?.name ?: "Project"
     /** Only catalogued projects have tasks. */
@@ -2057,7 +2063,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun sendRoute(task: TaskInfo): RouteState {
         val key = tasksKey ?: return RouteState.Blocked("No project")
         if (taskBusy) return RouteState.Blocked("Another task action is running")
-        if (task.uuid in uncertainSends) return RouteState.Blocked("It may have been sent already; its stage arrives with the next sync")
+        if (task.uuid in heldSends) return RouteState.Blocked("It may have been sent already; its stage arrives with the next sync")
         return TasksPresentation.route(task, tasksChosen, machines, key.connectionId, ::taskOperations, projectSessions(key))
     }
     fun cancelRoute(task: TaskInfo): RouteState {
@@ -2134,7 +2140,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val connection = connections.find { it.id == key.connectionId } ?: return
         val peers = TaskSyncPlan.peers(mapOf(key to taskDigests[key].orEmpty()), relayOperations, machineOperations, machines)[key].orEmpty()
         if (peers.isEmpty()) return
-        try { if (taskSync.sync(connection, key, taskProjectName(key), peers).isEmpty()) settleSends(key) }
+        try { taskSync.sync(connection, key, taskProjectName(key), peers) }
         catch (e: CancellationException) { throw e }
         catch (_: Exception) { }
         if (tasksKey == key) refreshTasks()
@@ -2210,11 +2216,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 taskNotice = when (val outcome = taskSync.send(connection, key, taskProjectName(key), route.computerId, task.uuid, route.session)) {
                     TaskOutcome.Done -> "Sent to ${route.session}"
                     is TaskOutcome.Refused -> outcome.reason
-                    is TaskOutcome.Uncertain -> { uncertainSends = uncertainSends + (task.uuid to key); "It may have been sent: ${outcome.reason}" }
+                    is TaskOutcome.Uncertain -> "It may have been sent: ${outcome.reason}"
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be sent." } }
-            finally { taskBusy = false }
+            finally { taskBusy = false; heldSends = taskSync.heldTasks() }
             refreshTasks()
         }
     }
