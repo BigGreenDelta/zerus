@@ -8,6 +8,11 @@
 //!
 //! `ZERUS_BLESS=1 cargo test --test vectors` rewrites only the `relay` column;
 //! review its diff, then run `capture.py --check`.
+//! New project outcomes are captured separately: run only
+//! `project_expected_outcomes_and_scoped_relay_capture` with
+//! `ZERUS_PROJECT_RELAY_CAPTURE` naming a new absolute private output file.
+//! That output contains actual protocol decisions, after comparison with the
+//! explicit expectations below; it never rewrites any vector source file.
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -84,6 +89,35 @@ const ORACLE_DIFFERENCES: &[(&str, &str)] = &[
         "payload/run-delete",
         "the relay refuses DEL in expected_run_id",
     ),
+];
+
+/// Independently reviewable schema expectations, not executed/captured relay columns.
+/// Zero denotes acceptance; 400 denotes the exact BAD request status. In particular
+/// an empty conversation is valid for a first-message run, and only the read accepts
+/// a cursor. Launch/directory/whole-organization authority is never accepted here.
+const PROJECT_EXPECTED: &[(&str, u16)] = &[
+    ("valid/project_assign", 0),
+    ("valid/project_assignment", 0),
+    ("project_assign/forbidden-directory", 400),
+    ("project_assign/forbidden-add_folder", 400),
+    ("project_assign/forbidden-project_folder_id", 400),
+    ("project_assign/forbidden-archive_id", 400),
+    ("project_assign/forbidden-agent_id", 400),
+    ("project_assign/forbidden-organization", 400),
+    ("project_assign/machine-nil", 400),
+    ("project_assign/empty-conversation", 0),
+    ("project_assignment/forbidden-directory", 400),
+    ("project_assignment/forbidden-add_folder", 400),
+    ("project_assignment/forbidden-project_folder_id", 400),
+    ("project_assignment/forbidden-archive_id", 400),
+    ("project_assignment/forbidden-agent_id", 400),
+    ("project_assignment/forbidden-organization", 400),
+    ("project_assignment/machine-nil", 400),
+    ("project_assignment/empty-conversation", 0),
+    ("project_assignment/cursor", 0),
+    ("project_assignment/mutation-field", 400),
+    ("project_assign/short-proof", 400),
+    ("project_assign/cursor", 400),
 ];
 
 fn vectors() -> PathBuf {
@@ -240,8 +274,8 @@ fn request_hashes_match_python_through_the_batch_codec() {
         missing.is_empty(),
         "listed rows without a vector: {missing:?}"
     );
-    // 56 requests of request_hash.jsonl and 61 of request_envelopes.jsonl.
-    assert_eq!(hashed, 117); // Includes the shared session notification envelope.
+    // 56 requests of request_hash.jsonl and 63 of request_envelopes.jsonl.
+    assert_eq!(hashed, 119); // Includes the shared session notification envelope.
 }
 
 /// `services/mobile/tests/rust-only-operations.json`: each operation only
@@ -354,6 +388,11 @@ fn operation_tables_match_the_python_connector() {
     );
     // Baseline vectors predate optional recording video (zerus-eo7j). Video is
     // advertised only by native-capable connectors; presence alerts are relay-owned.
+    // The scoped project feature is additive; the legacy FEATURES vector stays frozen.
+    assert!(protocol::FEATURES.contains(&"session_project_assignment_v1"));
+    assert!(!set(&["FEATURES"])
+        .iter()
+        .any(|feature| feature == "session_project_assignment_v1"));
     let features: Vec<&str> = protocol::FEATURES
         .iter()
         .copied()
@@ -363,6 +402,7 @@ fn operation_tables_match_the_python_connector() {
                 "presence_alerts",
                 "voice_video",
                 "clear_context_dismiss",
+                "session_project_assignment_v1",
             ]
             .contains(feature)
         })
@@ -422,6 +462,82 @@ fn verdict(decision: &Value) -> (&Value, &Value) {
 }
 
 #[test]
+fn project_expected_outcomes_and_scoped_relay_capture() {
+    let input = std::fs::read_to_string(vectors().join("validation/project.jsonl")).unwrap();
+    let expected_ids: BTreeSet<_> = PROJECT_EXPECTED.iter().map(|(id, _)| *id).collect();
+    assert_eq!(expected_ids.len(), 22);
+    assert_eq!(PROJECT_EXPECTED.len(), expected_ids.len());
+    assert_eq!(
+        PROJECT_EXPECTED
+            .iter()
+            .filter(|(_, status)| *status == 0)
+            .count(),
+        5
+    );
+    assert!(PROJECT_EXPECTED
+        .iter()
+        .all(|(_, status)| [0, 400].contains(status)));
+    let mut ids = BTreeSet::new();
+    let mut contexts = 0;
+    let mut captured = String::with_capacity(input.len() + 4096);
+    for (index, line) in input.lines().enumerate() {
+        let mut row = record(line);
+        assert_eq!(json::canonical(&row).unwrap(), line, "project line {index}");
+        if row["kind"] == "context" {
+            assert_eq!(index, 0, "only the first row may be a context");
+            contexts += 1;
+        } else {
+            assert_eq!(row["kind"], "case");
+            let id = row["id"].as_str().unwrap().to_owned();
+            assert!(ids.insert(id.clone()), "duplicate project case {id}");
+            let status = PROJECT_EXPECTED
+                .iter()
+                .find(|(key, _)| *key == id)
+                .unwrap_or_else(|| panic!("unreviewed project case {id}"))
+                .1;
+            let expected = if status == 0 {
+                json!({"decision":"accept"})
+            } else {
+                json!({"decision":"reject","status":status})
+            };
+            let actual = relay_decision(&row["submission"]);
+            assert_eq!(actual, expected, "project case {id}");
+            assert_eq!(
+                verdict(&row["oracle"]),
+                verdict(&expected),
+                "project oracle {id}"
+            );
+            // This is filled from the real Rust handler, never from PROJECT_EXPECTED.
+            row["relay"] = actual;
+        }
+        captured.push_str(&json::canonical(&row).unwrap());
+        captured.push('\n');
+    }
+    assert_eq!(contexts, 1);
+    assert_eq!(
+        ids.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+        expected_ids
+    );
+    if let Some(output) = std::env::var_os("ZERUS_PROJECT_RELAY_CAPTURE") {
+        use std::io::Write;
+        let output = PathBuf::from(output);
+        assert!(
+            output.is_absolute(),
+            "capture output must be an absolute private path"
+        );
+        // Never replace an old capture or a checked-in vector, including a symlink.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)
+            .unwrap();
+        file.write_all(captured.as_bytes()).unwrap();
+        file.flush().unwrap();
+        file.sync_all().unwrap();
+    }
+}
+
+#[test]
 fn validation_relay_column_is_protocol_request() {
     let bless = std::env::var_os("ZERUS_BLESS").is_some_and(|value| value == "1");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(vectors().join("validation"))
@@ -433,7 +549,20 @@ fn validation_relay_column_is_protocol_request() {
         })
         .collect();
     paths.sort();
-    assert_eq!(paths.len(), 5);
+    assert_eq!(
+        paths
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "control.jsonl",
+            "conversation.jsonl",
+            "envelope.jsonl",
+            "launch.jsonl",
+            "project.jsonl",
+            "speech.jsonl"
+        ]
+    );
     let mut stale = Vec::new();
     let mut differing = BTreeSet::new();
     let mut ids = BTreeSet::new();

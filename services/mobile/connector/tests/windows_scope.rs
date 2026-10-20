@@ -55,6 +55,7 @@ fn windows_advertisement_rejects_unix_and_unsupported_provider_features() {
         "voice_video",
         "opencode_launch_effort",
         "launch_project",
+        "session_project_assignment_v1",
     ] {
         assert!(
             !offered["features"]
@@ -87,6 +88,8 @@ async fn media_and_path_refusals_are_durable_and_cannot_replay_after_scope_chang
         "launch",
         "worktree_create",
         "git_status",
+        "project_assignment",
+        "project_assign",
     ]
     .iter()
     .enumerate()

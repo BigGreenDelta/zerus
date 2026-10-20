@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import uuid
 
-from zerus_mobile import analytics, archives, hook_health, file_reads, speech, speech_config, voice, session_notifications
+from zerus_mobile import analytics, archives, hook_health, file_reads, speech, speech_config, voice, session_notifications, session_projects
 from zerus_mobile.attachments import validate_read, validate_send
 from zerus_mobile.context import validate_clear_context
 from zerus_mobile.context import (COMPUTER_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS,
@@ -120,6 +120,9 @@ def validate_request(value):
         return
     if op == "recovery_action":
         validate_recovery(payload,request_id)
+        return
+    if op in session_projects.OPERATIONS:
+        session_projects.validate(op,payload,request_id)
         return
     if op == "hooks_status":
         hook_health.validate(payload,request_id)

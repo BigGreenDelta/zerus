@@ -12,6 +12,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Terminal
@@ -74,6 +75,7 @@ import org.json.JSONObject
     var menu by remember(target.key) { mutableStateOf(false) }
     var request by remember(target.key) { mutableStateOf<String?>(null) }
     var terminal by remember(target.key) { mutableStateOf(false) }
+    var projectPicker by remember(target.key) { mutableStateOf(false) }
     var search by remember(target.key) { mutableStateOf(false) }
     var readEvidence by remember(target.key) { mutableStateOf<ReadAttentionEvidence?>(null) }
     val clipboard = LocalClipboardManager.current
@@ -85,9 +87,9 @@ import org.json.JSONObject
     fun closeTerminal() { model.cancelTerminalAvailability();terminal = false }
     // A Sessions long-press action opened this session; confirm it here against fresh native details.
     LaunchedEffect(model.sessionMenuRequest,target.key) {
-        model.takeSessionMenuRequest(target)?.let { operation -> if(operation == "terminal") openTerminal() else request = operation }
+        model.takeSessionMenuRequest(target)?.let { operation -> when(operation) { "terminal" -> openTerminal();SessionProjectProtocol.assign -> projectPicker=true;else -> request=operation } }
     }
-    if(details || settingsOpen || menu || request != null || terminal || search) ObscureConversation()
+    if(details || settingsOpen || menu || request != null || terminal || search || projectPicker) ObscureConversation()
     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else if (onDetails != null) onDetails() else details = true },
             modifier = Modifier.weight(1f),contentPadding = PaddingValues(start = 8.dp,end = 4.dp)) {
@@ -142,6 +144,11 @@ import org.json.JSONObject
                     onClick = { menu = false;sessionReference.uri?.let { clipboard.setText(AnnotatedString(it)) } })
                 val folder = model.activity?.string("cwd").orEmpty()
                 if(folder.isNotBlank()) DropdownMenuItem(text = { Text("Copy folder") },onClick = { menu = false;clipboard.setText(AnnotatedString(folder)) })
+                if(target.agentId.isBlank() && target.archiveId.isBlank()) {
+                    val reason=model.projectAssignmentReason(target)
+                    DropdownMenuItem(text={ Column { Text("Move to project…");if(reason.isNotBlank()) Text(reason,style=MaterialTheme.typography.bodySmall) } },
+                        leadingIcon={ Icon(Icons.Default.Folder,null) },enabled=reason.isBlank(),onClick={ menu=false;projectPicker=true })
+                }
                 if (target.agentId.isBlank()) {
                     HorizontalDivider()
                     val operations = if (target.archiveId.isNotBlank()) listOf("restore","rename","fork","forget")
@@ -168,6 +175,7 @@ import org.json.JSONObject
         }
     }
     NativeRecoveryCard(model,target)
+    if(projectPicker) SessionProjectDialog(model.sessionProjects,target) { projectPicker=false }
     if(search) ConversationSearchDialog(model,session,onJump) { search = false }
     if(terminal) {
         val reason = model.terminalOpenReason(target)
@@ -446,7 +454,7 @@ internal fun actionLabel(operation: String,target: Target? = null) = when(operat
     SessionNotificationPreferences.operation -> "Shared notification settings"
     "pause" -> "Pause"; "resume" -> "Resume"; "archive" -> "Archive"; "rename" -> "Rename"; "fork" -> "Fork"
     "terminate" -> "Terminate"; "restore" -> "Restore"; "forget" -> if(target?.archiveId?.isNotBlank() == true) "Forget archived version" else "Forget session"; "send_now" -> "Send queued message"
-    "directory_create" -> "Create folder"; "set_mobile_delivery" -> "Phone notification timing"; "settings" -> "Change settings"; "process_stop" -> "Stop process"; "recovery_action" -> "Recovery action"; else -> "Native action"
+    "project_assign" -> "Move to project"; "directory_create" -> "Create folder"; "set_mobile_delivery" -> "Phone notification timing"; "settings" -> "Change settings"; "process_stop" -> "Stop process"; "recovery_action" -> "Recovery action"; else -> "Native action"
 }
 /** Computer-scoped actions such as set_mobile_delivery have no session, so the operation names the card. */
 internal fun sessionActionTitle(action: SessionAction) =

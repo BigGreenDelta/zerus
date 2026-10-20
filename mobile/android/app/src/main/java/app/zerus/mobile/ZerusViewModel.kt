@@ -1567,6 +1567,55 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     })
     fun processStop(target: Target, processId: String, generation: String? = null) = sessionAction(target,"process_stop",JSONObject().put("process_id",processId).also { if(generation != null) it.put("generation",generation) })
     fun sessionAction(target: Target, operation: String, args: JSONObject = JSONObject())=submitSessionAction(target,operation,args)
+    /** Logical grouping uses its own exact scoped metadata ABI, independent of launch folders. */
+    internal fun projectAssignmentReason(target:Target):String {
+        val key=MachineKey(target.connectionId,target.computerId)
+        val machine=machines.singleOrNull { it.connectionId==key.connectionId && it.id==key.computerId }
+        return when {
+            demo || !storageReady -> "Connect a computer and wait for private storage."
+            updateInstallPreparing -> "Saving drafts for an app update."
+            target.archiveId.isNotBlank() || target.agentId.isNotBlank() -> "Project grouping belongs to the parent session."
+            target.run.isBlank() -> "Wait for the session identity to finish loading."
+            connections.count { it.id==target.connectionId }!=1 -> "The original workspace is disconnected."
+            machine==null || !machine.online || machine.lastKnown -> "The selected computer is offline."
+            !AttachmentPolicy.validId(machine.machineId) || machine.route==MachineRoute.Unknown -> "Refresh to verify this computer's identity and route."
+            !relayOperations[target.connectionId].orEmpty().containsAll(SessionProjectProtocol.operations) || SessionProjectProtocol.feature !in relayFeatures[target.connectionId].orEmpty() -> "Update this gateway to move session project grouping."
+            !machineOperations[key].orEmpty().containsAll(SessionProjectProtocol.operations) || SessionProjectProtocol.feature !in machineFeatures[key].orEmpty() -> "Update Zerus on this computer to move session project grouping."
+            else -> ""
+        }
+    }
+    internal val sessionProjects by lazy {
+        val owner=this
+        SessionProjectController(object:SessionProjectAccess {
+        override fun capture(target:Target):SessionProjectHost? {
+            if(projectAssignmentReason(target).isNotBlank()) return null
+            val connection=connections.singleOrNull { it.id==target.connectionId } ?: return null
+            val machine=machines.singleOrNull { it.connectionId==target.connectionId && it.id==target.computerId } ?: return null
+            return SessionProjectHost(target,connection,machine,navigationId,connections)
+        }
+        override fun current(captured:SessionProjectHost):Boolean = captured.connectionGeneration===connections &&
+            captured.navigation==navigationId && selected?.target==captured.target && projectAssignmentReason(captured.target).isBlank() &&
+            capture(captured.target)?.let { it.connection==captured.connection && it.route==captured.route }==true
+        override fun reason(target:Target)=projectAssignmentReason(target)
+        override fun mutationReason(target:Target,ownRequest:String):String = projectAssignmentReason(target).ifBlank {
+            if(clearExpectation?.let { ContextPolicies.sameSessionRun(it.target,target) }==true ||
+                contextOperations.any { ContextPolicies.sameSessionRun(it.target,target) && it.blocksSending } ||
+                sessionActions.any { it.target==target && it.blocksSending && it.requestId!=ownRequest } ||
+                outgoing.any { it.belongsTo(target) && it.blocksSending } || target.key in preparingTargets)
+                "Resolve the pending delivery or action first." else ""
+        }
+        override fun actions()=sessionActions
+        override fun flight(id:String,active:Boolean) { actionFlights=if(active) actionFlights+id else actionFlights-id }
+        override suspend fun persist(action:SessionAction) {
+            durable({ state ->
+                val old=state.sessionActions.find { it.requestId==action.requestId }
+                check(old==null || old.target==action.target && old.operation==action.operation && old.arguments==action.arguments) { "The saved project request changed." }
+                if(old==null || old.blocksSending) state.action(action) else state
+            })
+        }
+        override suspend fun settle(action:SessionAction,receipt:JSONObject) { settleSessionAction(action,receipt) }
+        override fun refresh() { owner.refresh(explicit=true) }
+    },viewModelScope,api) }
     /** Presentation for one Sessions row's long-press actions; the opened conversation re-verifies before any native request. */
     fun sessionMenu(session: Session): List<List<SessionMenuItem>> {
         val target = session.target
@@ -1589,12 +1638,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             relayOperations[target.connectionId].orEmpty() intersect machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty(),
             blocked,if(busy) "Resolve the pending delivery or action first." else "",SessionFilters.needsAttention(session,online),read,
             reference.uri,session.raw.string("cwd"),reference.reason,
-            TerminalAvailability.reason(target,session.raw,online,relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)])))
+            TerminalAvailability.reason(target,session.raw,online,relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)]),projectAssignmentReason(target)))
     }
     var sessionMenuRequest by mutableStateOf<SessionMenuRequest?>(null); private set
     /** A Sessions action opens its exact session; the conversation header then confirms it against fresh native details. */
     fun openWithSessionAction(session: Session, operation: String) {
-        if(operation != "terminal" && operation != SessionNotificationPreferences.operation && operation !in SessionActionPolicies.lifecycle) return
+        if(operation != "terminal" && operation != SessionNotificationPreferences.operation && operation != SessionProjectProtocol.assign && operation !in SessionActionPolicies.lifecycle) return
         open(session,preserveProject = true)
         sessionMenuRequest = SessionMenuRequest(session.target,operation,navigationId)
     }
@@ -1775,6 +1824,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         sessionAction(target,"recovery_action",JSONObject().put("job_id",jobId).put("action",choice))
     }
     fun checkSessionAction(action: SessionAction) {
+        if(action.operation==SessionProjectProtocol.assign) { sessionProjects.check(action);return }
         if(action.requestId in actionFlights) return
         val connection=connections.find { it.id == action.target.connectionId } ?: return
         actionFlights += action.requestId

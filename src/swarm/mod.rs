@@ -3,6 +3,9 @@
 //! locked, atomically replaced store.
 mod catalog;
 mod launch_project;
+mod session_project;
+#[cfg(unix)]
+pub(crate) use session_project::validate_payload as validate_session_project;
 mod model;
 mod service;
 mod store;
@@ -142,6 +145,10 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
     let worker = matches!(action, "get" | "preference" | "exchange" | "join" | "sync")
         .then(|| service::supervise(config));
     match action {
+        "session-project" | "assign-session" => {
+            ensure!(args.len() == 2 && args[1] == "--json", "usage: hgs swarm {action} --json");
+            Ok(session_project::execute(config, input()?, action == "assign-session"))
+        }
         "assign-launch" => {
             ensure!(args.len() == 2 && args[1] == "--json", "usage: hgs swarm assign-launch --json");
             Ok(launch_project::execute(config, input()?))

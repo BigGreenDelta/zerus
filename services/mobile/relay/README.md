@@ -559,3 +559,12 @@ marker `Mobile clear-context ABI: dismiss-prompt-v1`. A `true` request requires
 fresh exact native identity, an unarchived session and actual Boolean
 `clear_context_dismiss: true`; the relay does not infer prompt eligibility.
 An uncertain receipt retains its original identity and never permits replay.
+
+### Session project grouping
+
+The additive session-scoped `project_assignment` read and `project_assign`
+mutation change only logical project membership. Both native command markers
+and `session_project_assignment_v1` gate clients; older peers stay disabled.
+The separate `project_assignment_history_v1` index is created on upgrade without
+changing legacy read-index predicates or mutation UUID tombstones. See
+[the exact scope, bounded paging and no-replay contract](../../../docs/mobile-session-projects.md).
