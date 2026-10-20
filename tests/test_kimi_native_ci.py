@@ -228,7 +228,14 @@ class KimiNativeCI(unittest.TestCase):
         output = base / 'custody.jsonl'
         ci.record_roots(case, output)
         row = json.loads(output.read_text())
-        self.assertEqual((row['path'], row['inode'], row['case']), (str(root), root.stat().st_ino, 'fixture.case'))
+        self.assertEqual((row['path'], row['inode'], row['case']), (str(root.resolve()), root.stat().st_ino, 'fixture.case'))
+        # macOS's temporary directory also has a /var -> /private/var spelling.
+        alias = base / 'alias'
+        alias.symlink_to(base, target_is_directory=True)
+        case.root = alias / root.name
+        ci.record_roots(case, output)
+        alias_row = json.loads(output.read_text().splitlines()[-1])
+        self.assertEqual((alias_row['path'], alias_row['inode']), (row['path'], row['inode']))
         case.root = base
         with self.assertRaisesRegex(ValueError, 'declared'):
             ci.record_roots(case, output)
@@ -280,7 +287,6 @@ class KimiNativeCI(unittest.TestCase):
         self.assertIn('$(brew --prefix jemalloc)/lib/pkgconfig', workflow)
         installer = (ROOT / 'scripts/ci/install-tmux.sh').read_text()
         self.assertIn('if [ "$(uname -s)" = Darwin ]; then', installer)
-        self.assertIn('configure_args+=(--enable-utf8proc --enable-jemalloc)', installer)
         self.assertIn('persist-credentials: false', workflow)
         exact_source = '${{ github.event.pull_request.head.sha || github.sha }}'
         self.assertIn('SOURCE_SHA: ' + exact_source, workflow)

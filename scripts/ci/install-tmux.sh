@@ -13,13 +13,13 @@ curl -fsSL "https://github.com/tmux/tmux/releases/download/$tmux_version/tmux-$t
     printf '%s  %s\n' "$tmux_sha256" "tmux-$tmux_version.tar.gz" | sha256sum --check -
     tar xzf "tmux-$tmux_version.tar.gz"
     cd "tmux-$tmux_version"
-    configure_args=()
     # tmux requires explicit Unicode and allocator choices on macOS. The hosted
     # job installs both libraries; Linux keeps its original defaults.
     if [ "$(uname -s)" = Darwin ]; then
-        configure_args+=(--enable-utf8proc --enable-jemalloc)
+        ./configure --prefix="$prefix" --enable-utf8proc --enable-jemalloc
+    else
+        ./configure --prefix="$prefix"
     fi
-    ./configure --prefix="$prefix" "${configure_args[@]}"
     make --jobs=2
     make install
 )
