@@ -65,7 +65,8 @@ object DesktopSessionPalette {
             SessionFilters.state(session) == "stopped" || raw.string("process_state") == "exited" -> DetailKind.Neutral
             !raw.optBoolean("tracked") && raw.string("activity").isBlank() -> DetailKind.Neutral
             phase in listOf("approval", "input") -> DetailKind.Attention
-            raw.optJSONObject("recovery")?.string("state") in listOf("waiting", "dispatching", "retrying") -> DetailKind.Neutral
+            raw.optJSONObject("recovery")?.string("state") in listOf("waiting", "dispatching", "retrying") &&
+                !RecoveryPresentation.resumed(raw.optJSONObject("recovery")) -> DetailKind.Neutral
             phase == "error" -> DetailKind.Error
             phase in listOf("interrupted", "starting") -> DetailKind.Neutral
             phase in listOf("compacting", "tool") || raw.string("activity") == "busy" -> DetailKind.Working

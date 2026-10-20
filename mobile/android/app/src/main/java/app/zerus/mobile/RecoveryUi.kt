@@ -16,7 +16,7 @@ import kotlinx.coroutines.delay
 @Composable internal fun NativeRecoveryCard(model: ZerusViewModel,target: Target) {
     val raw = model.activity
     val job = remember(raw,target,model.activityVerified) { RecoveryPresentation.from(raw,target,model.activityVerified) } ?: return
-    if(job.state == "succeeded") return
+    if(job.state == "succeeded" || job.resumed) return
     var now by remember(job.id) { mutableDoubleStateOf(System.currentTimeMillis()/1000.0) }
     LaunchedEffect(job.id,job.state) { while(job.state == "waiting") { now=System.currentTimeMillis()/1000.0;delay(1000) } }
     var history by remember(target,job.id) { mutableStateOf(false) }

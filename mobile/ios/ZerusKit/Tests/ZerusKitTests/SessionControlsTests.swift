@@ -226,6 +226,18 @@ final class RecoveryTests: XCTestCase {
         XCTAssertEqual("2 attempts (repeats until stopped)", pending?.attempts)
         XCTAssertEqual("Waiting for delivery confirmation…", pending?.status(now: 0))
         XCTAssertEqual("Recovery in progress", RecoveryPresentation.from(raw(["state": "retrying", "acknowledged": true]), target, verified: true)?.status(now: 0))
+        XCTAssertEqual(false, RecoveryPresentation.from(raw(["state": "retrying", "acknowledged": true]), target, verified: true)?.resumed)
+    }
+
+    func testResumedTurnIsOrdinaryWorkWhileTheEpisodeKeepsItsBudget() throws {
+        let view = try XCTUnwrap(RecoveryPresentation.from(raw(["state": "retrying", "acknowledged": true, "resumed_at": 125]), target, verified: true))
+        XCTAssertTrue(view.resumed)
+        XCTAssertEqual("Agent resumed after recovery", view.status(now: 0))
+        XCTAssertEqual("1/2 attempts", view.attempts)
+        XCTAssertEqual(false, RecoveryPresentation.from(raw(["state": "retrying", "acknowledged": false, "resumed_at": 125]), target, verified: true)?.resumed)
+        XCTAssertEqual(false, RecoveryPresentation.from(raw(["state": "retrying", "acknowledged": true, "resumed_at": "125"]), target, verified: true)?.resumed,
+                       "an invalid time is not a resumption")
+        XCTAssertFalse(RecoveryPresentation.resumed(["state": "waiting", "acknowledged": true, "resumed_at": 125]), "a rescheduled episode is no longer resumed")
     }
 
     func testCachedOrReusedJobIsReadOnly() {

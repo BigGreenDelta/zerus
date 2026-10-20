@@ -3457,7 +3457,7 @@ void SessionsWindow::renderDetails()
     const auto recoveryState=recoveryDetails.value("recovery").toObject().value("state").toString();
     const bool providerFailure=recoveryDetails.value("phase")=="error" && !recoveryDetails.value("provider_error").toObject().isEmpty();
     auto *recoveryFocus=QApplication::focusWidget();
-    if(!providerFailure&&(recoveryState.isEmpty()||recoveryState=="succeeded")&&m_recovery->isVisible()&&recoveryFocus
+    if(!providerFailure&&(recoveryState.isEmpty()||recoveryState=="succeeded"||RecoveryUi::resumed(recoveryDetails.value("recovery").toObject()))&&m_recovery->isVisible()&&recoveryFocus
         &&(recoveryFocus==m_recovery||m_recovery->isAncestorOf(recoveryFocus)))m_composer->editor()->setFocus(Qt::OtherFocusReason);
     m_recovery->setState(recoveryDetails,entry && entry->online);
     m_markRead->setActive(entry && entry->session.state!="archived" && entryNeedsAttention(*entry));

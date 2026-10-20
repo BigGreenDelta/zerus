@@ -289,6 +289,7 @@ private slots:
     void processPollingFollowsVisibilityAndSettings();
     void recoveryCountdownKeepsHistoryDraftAndFocus();
     void recoveryEndingReturnsKeyboardFocusToField();
+    void resumedRecoveryLeavesTheWorkingTurnUnmarked();
     void recoverySettingsValidateAndSaveForSelectedMachine();
     void recoverySettingsValidateAndSaveForSelectedMachine_data();
     void sessionLimitRecoveryShowsResetAndKeepsDraft();
@@ -2263,6 +2264,33 @@ void TestSessionsWindow::recoveryEndingReturnsKeyboardFocusToField()
     auto *now=panel->findChild<QPushButton *>("recoveryNow");now->setFocus();QTRY_VERIFY(now->hasFocus());
     job["state"]="succeeded";details["recovery"]=job;client->inspectionReady({},"codex/hgs/dashboard",details);
     QVERIFY(chip->isHidden());QVERIFY(!panel->isVisible());QTRY_VERIFY(editor->hasFocus());
+}
+
+void TestSessionsWindow::resumedRecoveryLeavesTheWorkingTurnUnmarked()
+{
+    SessionsWindow window(program()); window.resize(1280,900); window.setFleet(fleet()); window.show();
+    auto *client=window.findChild<HgsClient *>(); QSignalSpy inspections(client,&HgsClient::inspectionReady);
+    window.showSession({},"codex/hgs/dashboard");QTRY_VERIFY(!inspections.isEmpty());
+    const auto at=QDateTime::currentMSecsSinceEpoch()/1000.0;
+    QJsonObject job{{"id","episode"},{"name","codex/hgs/dashboard"},{"state","retrying"},{"action","continue_message"},
+        {"acknowledged",true},{"sent_at",at-60},{"user_at",at-59},{"attempt",1},{"class_attempt",1},{"delays",QJsonArray{15,30,60,300,0}}};
+    QJsonObject details{{"tracked",true},{"conversation_id","conversation-one"},{"run_id","run-one"},
+        {"activity","busy"},{"phase","tool"},{"last_event_at",at},{"cursor",1},{"recovery",job}};
+    client->inspectionReady({},"codex/hgs/dashboard",details);
+    auto *chip=window.findChild<ToolbarChip *>("recoveryChip");
+    QVERIFY(chip->isVisible());QCOMPARE(chip->fullLabel(),QString("Recovery in progress"));
+    // Provider progress after the accepted continuation: the turn is ordinary work again,
+    // although the episode stays open to keep its attempt budget until the turn ends.
+    job["resumed_at"]=at-30;details["recovery"]=job;client->inspectionReady({},"codex/hgs/dashboard",details);
+    QVERIFY(chip->isHidden());QCOMPARE(RecoveryUi::status(job),QString("Agent resumed after recovery"));
+    // A further failure in that turn shows the provider error at once, before rescheduling.
+    details["phase"]="error";details["activity"]="attention";
+    details["provider_error"]=QJsonObject{{"source","native"},{"at",at},{"detail","API Error: 529 Overloaded"}};
+    client->inspectionReady({},"codex/hgs/dashboard",details);
+    QVERIFY(chip->isVisible());QCOMPARE(chip->tone(),ChipTone::Danger);
+    job.remove("resumed_at");job["state"]="waiting";job["due_at"]=at+20;details["recovery"]=job;
+    client->inspectionReady({},"codex/hgs/dashboard",details);
+    QVERIFY(chip->isVisible());QVERIFY(chip->fullLabel().startsWith("Retry in"));
 }
 
 void TestSessionsWindow::recoveryCountdownKeepsHistoryDraftAndFocus()
