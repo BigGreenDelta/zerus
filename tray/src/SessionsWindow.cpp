@@ -2984,9 +2984,13 @@ void SessionsWindow::rebuild()
     const bool hasGroups = m_organization.groups().size() > 1;
     const bool filtering = !m_projectFilters.isEmpty() || !m_folderFilterPath.isEmpty() || !query.isEmpty() || !m_hostFilters.isEmpty() || m_filter != "all";
     const bool hideEmptyProjects = QSettings().value("workspace/hideEmptyProjects", true).toBool();
+    QStringList visibleIdentities;
+    visibleIdentities.reserve(visible.size());
+    for (const auto &entry : visible) visibleIdentities.append(entry.identity);
+    const auto projectMembers = m_organization.orderedMembers(visibleIdentities);
     for (const auto &group : m_organization.groups()) {
         if (!m_projectFilters.isEmpty() && !m_projectFilters.contains(group.id)) continue;
-        QList<int> members;
+        const auto members = projectMembers.value(group.id);
         QStringList launches;
         if (m_filter == "all"&&m_folderFilterPath.isEmpty()) for (auto it = m_pendingLaunches.begin(); it != m_pendingLaunches.end(); ++it) {
             const auto launch = it.value().toObject();
@@ -2998,10 +3002,6 @@ void SessionsWindow::rebuild()
             const QString host = launch.value("host").toString();
             if (destination == group.id && (m_hostFilters.isEmpty() || m_hostFilters.contains(host.isEmpty() ? "@local" : host))) launches.append(it.key());
         }
-        for (int i = 0; i < visible.size(); ++i) if (m_organization.groupFor(visible[i].identity) == group.id) members.append(i);
-        std::stable_sort(members.begin(), members.end(), [&](int a, int b) {
-            return group.sessions.indexOf(visible[a].identity) < group.sessions.indexOf(visible[b].identity);
-        });
         if (members.isEmpty() && launches.isEmpty() && (filtering || hideEmptyProjects || !group.accessible)) continue;
         if (hasGroups) rows.append({group.id, -1, false});
         for (int i : members) {
