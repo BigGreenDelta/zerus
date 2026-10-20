@@ -466,6 +466,29 @@ impl Session {
         }
     }
 
+    /// Make the pane `rows` tall, keeping its width, while no client is
+    /// attached; the next client to attach sets its size again. False when
+    /// the size stays as it was.
+    pub(crate) fn grow_unviewed(&self, rows: u16) -> Result<bool, ErrorBody> {
+        let mut screen = lock(&self.screen);
+        if screen.ended || self.dead() {
+            return Err(exited(&self.pane_id()));
+        }
+        if !screen.clients.is_empty() || rows <= screen.size.rows {
+            return Ok(false);
+        }
+        let size = Size {
+            cols: screen.size.cols,
+            rows,
+        };
+        if self.console.resize(size).is_err() {
+            return Ok(false);
+        }
+        screen.model.resize(size.rows, size.cols);
+        screen.size = size;
+        Ok(true)
+    }
+
     /// Attach a client: the pane takes its size, and its first output is a
     /// repaint of the screen, after which it gets everything the console writes.
     pub(crate) fn attach(&self, client: Arc<Attachment>) -> Result<(), ErrorBody> {

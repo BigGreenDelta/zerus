@@ -1,0 +1,106 @@
+name: Pinned Kimi native contracts
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/kimi-native.yml'
+      - 'scripts/ci/kimi-native*'
+      - 'scripts/ci/kimi-native-manifests/**'
+      - 'scripts/ci/install-tmux.sh'
+      - 'tests/test_kimi*.py'
+      - 'tests/test_questions.py'
+      - 'tests/test_input.py'
+      - 'tests/test_pause.py'
+      - 'tests/fixtures/kimi*'
+      - 'src/state/**'
+      - 'src/host/**'
+      - 'src/platform/**'
+      - 'src/cli.rs'
+      - 'src/main.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+cache-mode: none
+
+concurrency:
+  group: kimi-native-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contracts:
+    name: Kimi 2.1.1 and 2.2.0 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-24.04", "macos-15"]
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      CARGO_BUILD_JOBS: 2
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.8'
+      - name: Keep Cargo and Rustup in this ephemeral runner's private temporary directory
+        shell: bash
+        run: |
+          {
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/kimi-target"
+            echo "CARGO_HOME=$RUNNER_TEMP/kimi-cargo"
+            echo "RUSTUP_HOME=$RUNNER_TEMP/kimi-rustup"
+          } >> "$GITHUB_ENV"
+      - name: Refuse an unreviewed runner architecture before building
+        run: python -c "import runpy; runpy.run_path('scripts/ci/kimi-native.py')['target']()"
+      - name: Linux tmux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config
+      - name: macOS tmux build dependencies
+        if: runner.os == 'macOS'
+        run: brew install coreutils libevent ncurses utf8proc jemalloc bison pkg-config
+      - name: Build the existing pinned tmux release privately
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
+            PKG_CONFIG_PATH="$(brew --prefix libevent)/lib/pkgconfig:$(brew --prefix ncurses)/lib/pkgconfig:$(brew --prefix utf8proc)/lib/pkgconfig:$(brew --prefix jemalloc)/lib/pkgconfig"
+            export PATH PKG_CONFIG_PATH
+          fi
+          bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/kimi-tmux"
+      - name: Build the exact CLI once with pinned Rust and at most two jobs
+        shell: bash
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          cargo +1.99.1 build --locked --bin hgs -j 2
+      - name: Two reviewed versions, eight exact native cases each
+        shell: bash
+        run: |
+          python -s -B scripts/ci/kimi-native.py --source-sha "$SOURCE_SHA" \
+            --hgs "$CARGO_TARGET_DIR/debug/hgs" --tmux "$RUNNER_TEMP/kimi-tmux/bin/tmux" \
+            --output "$GITHUB_WORKSPACE/artifacts/test-results/kimi-native" </dev/null
+      - name: Retain exact native results and raw logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kimi-native-results-${{ matrix.os }}-${{ env.SOURCE_SHA }}
+          path: artifacts/test-results/kimi-native/evidence
+          retention-days: 7
+      - name: Retain images and diagnostic runtime when qualification is unknown or failed
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kimi-native-retained-${{ matrix.os }}-${{ env.SOURCE_SHA }}
+          path: |
+            artifacts/test-results/kimi-native/images
+            artifacts/test-results/kimi-native/unknown-runtime.tar.gz
+          retention-days: 3

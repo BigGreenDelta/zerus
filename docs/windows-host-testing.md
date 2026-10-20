@@ -373,6 +373,16 @@ the runner also sets `PYTHONUTF8` for the suites. CI runs the same command in th
 `windows-host` job, outside the step's job like the host suites
 ([CI](ci-and-aur.md#windows-real-agents-through-the-session-host)).
 
+The Claude class has eleven cases. Besides the ordinary launch, input and
+lifecycle contract, it requires the exec-form answer channel for questions and
+Bash approvals, verifies that a Terminal answer or the owned hook's exit settles
+the channel, and checks a Bash panel taller than the maximum unviewed height.
+The separate tall-question case deliberately retains an earlier shell-form
+tracking hook and asserts that no answer channel was installed: only the host's
+unviewed-pane growth can make that question answerable. The Codex class remains
+six cases. A channel-capable settings file is not proof of native delivery; the
+native classes must run on the exact candidate without skips.
+
 The input key cases also depend on the keyboard layout. Codex reads a control key
 through the console as its character plus the Ctrl state, and crossterm resolves that
 character's letter in the foreground window's layout: under a Cyrillic layout, Ctrl+C

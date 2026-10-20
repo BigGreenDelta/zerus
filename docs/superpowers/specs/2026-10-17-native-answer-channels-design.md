@@ -81,7 +81,7 @@ specific reason.
 | `claude_folder_trust`, `claude_permission_mode`, `claude_resume`, `claude_usage_limit`, terminal safety, auto-mode chooser | Claude | none known | only path |
 | `codex_async` | Codex | none on 0.160.1–0.162.1 (see Other agents) | only path, with A |
 | `codex_folder_trust`, `codex_hooks_trust`, `codex_update`, `codex_goal_resume` | Codex | none known | only path |
-| `kimi_wire` questions | Kimi | to investigate (wire protocol) | fallback |
+| `kimi_wire` questions | Kimi | none: the TUI resolves questions in process (`zerus-n88z`) | only path |
 | `kimi_folder_trust`, `kimi_cache_hint` | Kimi | none known | only path |
 | OpenCode, DeepSeek native requests | OpenCode, DeepSeek | already native APIs | not applicable |
 
@@ -337,6 +337,22 @@ delivery. The channel is only another transport.
   `PermissionRequest` for the same tool use. No screen proof can show that a
   child's request still waits.
 
+### Windows (`zerus-sser`)
+
+- Windows registers the same group, in Claude Code's exec form only
+  (`command` names the stable CLI, `args` `__state answer-channel`): Claude
+  starts hgs itself, so the hook process is the channel worker and its
+  recorded pid and start time identify it. Settings that keep the shell form
+  of an older Claude Code get no channel, since Git Bash would run between
+  Claude and hgs. hgs never wrote the AskUserQuestion-only group there.
+- No SIGTERM reaches the worker. A Terminal answer, decline or cancellation
+  ends it through the record, the transcript or Claude ending the hook
+  process; its own deadline stays below the hook timeout.
+- A rename is not exclusive on Windows, so claim and retract take
+  `handover.lock`. While holding it, a rename refused because a scanner or a
+  reader without delete sharing holds `answer.json` is tried again for up to
+  one second; a refused rename moved nothing. The outcome rules are unchanged.
+
 ## A, unviewed-terminal growth
 
 Implemented first for approvals in `zerus-6uhz` (agent-approval session) and
@@ -347,8 +363,11 @@ then reused here.
     window-local `window-size`. It runs `resize-window -y ROWS`, then
     `set -wu window-size`, so the next client sets the size again. Width never
     changes.
-  - The host and Windows backends return `false` (fail closed) until host
-    parity is implemented.
+  - The Windows session host answers a `grow_unviewed` request only while no
+    client is attached to the pane: it keeps the width, never shrinks, and the
+    next attaching client sets the size again (`zerus-5dox`). A host that
+    predates the request answers `unsupported`, which the backend reports as
+    `false` (fail closed).
   - tmux 3.8 behavior was verified on isolated sockets: after unsetting, the
     size persists while detached; an attach takes the client's size; a resize
     while attached reverts to the client's size.
@@ -393,7 +412,11 @@ version, like the Claude spike:
 - Codex: whether hooks or the app-server can answer `codex_async` questions,
   and approvals while the TUI runs.
 - Kimi: whether the wire protocol already observed for `kimi_wire` questions
-  can carry answers.
+  can carry answers. Kimi 2.1.1 answered no (`zerus-n88z`): its TUI runs the
+  agent engine in process and resolves questions and approvals only through its
+  own panels; hooks can only deny, `wire.jsonl` is output, and the local server
+  API belongs to a separate `kimi web` process. Kimi panels use screen delivery
+  with A.
 
 Until an adapter is qualified, these panels use screen delivery with A.
 
@@ -456,4 +479,7 @@ independent of the screen.
    start.
 3. Exact multi-choice and Other result formatting through `updatedInput`.
 4. Windows: hook process lifetime and parent-exit detection under the
-   Windows host.
+   Windows host. Answered for Claude Code 2.1.296 (`zerus-sser`, 2026-10-18):
+   in the native Windows suite a Terminal Yes or Esc ended the waiting
+   worker, a killed worker left the approval to the verified screen, and no
+   worker outlived its session or the suite's host.

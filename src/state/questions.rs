@@ -437,6 +437,7 @@ pub(super) fn inspection(record: &Value, live_pane: bool) -> Result<Value> {
                     }
                 }
                 if string(record, "agent") == "kimi" && string(card, "source") == "kimi_wire" {
+                    super::question_terminal::fit(record, card);
                     match super::question_terminal::available(record, card) {
                         Ok(()) => {
                             card["can_answer"] = json!(true);
