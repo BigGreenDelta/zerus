@@ -90,6 +90,8 @@ public struct ProjectCatalog: Sendable {
     public var projects: [ProjectSummary]
     public var sessions: [Session]
     public var unavailableComputers: [String]
+    /// For each catalogued project, every computer's tasks digest (by computer ID).
+    public var taskDigests: [ProjectKey: [String: String]] = [:]
 }
 
 /// Canonical IDs own membership; paths are only an exact fallback for uncatalogued sessions.
@@ -101,6 +103,7 @@ public enum ProjectParser {
             if groups.updateValue(summary, forKey: summary.key) == nil { order.append(summary.key) }
         }
         var catalogs: [String: JSONObject] = [:]
+        var digests: [ProjectKey: [String: String]] = [:]
         for computer in computers { if let catalog = computer.object("snapshot")?.object("mobile_projects") { catalogs[computer.string("id")] = catalog } }
         var assignments: [String: Set<ProjectKey>] = [:]
         var unavailable: [String] = []
@@ -119,6 +122,11 @@ public enum ProjectParser {
                 let id = project.string("id")
                 guard !id.isEmpty else { continue }
                 let key = ProjectKey(connectionId: connection.id, swarmId: swarm, id: id)
+                // Every computer of the swarm names its own digest of the project's tasks.
+                let digest = project.string("tasks_digest")
+                if digest.count == 64, digest.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) {
+                    digests[key, default: [:]][computerId] = digest
+                }
                 let folders = project.objects("folders").filter { $0.bool("local", default: true) }.map {
                     ProjectFolder(id: $0.string("id"), name: $0.string("name"), path: $0.string("path"), computerId: computerId, computerName: computerName)
                 }.filter { !$0.path.isEmpty }
@@ -185,7 +193,8 @@ public enum ProjectParser {
             copy.projectKey = key
             return copy
         }
-        return ProjectCatalog(projects: order.map { groups[$0]! }, sessions: mapped, unavailableComputers: unavailable)
+        return ProjectCatalog(projects: order.map { groups[$0]! }, sessions: mapped, unavailableComputers: unavailable,
+                              taskDigests: digests)
     }
 }
 

@@ -23,6 +23,23 @@ final class ProjectsTests: XCTestCase {
         return ProjectParser.parse(workspace, computers, computers.flatMap { NativeSessions.sessions(workspace, $0) })
     }
 
+    func testTaskDigestsComeFromCataloguedProjectsOnly() {
+        func orchard(_ digest: String?) -> JSON {
+            var fields: JSONObject = ["id": "orchard", "name": "Orchard", "sessions": .array([]), "folders": .array([])]
+            if let digest { fields = fields.putting("tasks_digest", .string(digest)) }
+            return .object(fields)
+        }
+        let a = String(repeating: "a", count: 64), b = String(repeating: "b", count: 64)
+        let computers = [computer("computer-1", [orchard(a)]), computer("computer-2", [orchard(b)]),
+                         computer("computer-3", [orchard("xyz")]), computer("computer-4", [orchard(String(repeating: "A", count: 64))]),
+                         computer("computer-5", [orchard(nil)], [session("loose", "/elsewhere")])]
+        let result = parse(computers)
+        let key = ProjectKey(connectionId: "workspace-a", swarmId: "swarm", id: "orchard")
+        XCTAssertEqual(result.taskDigests, [key: ["computer-1": a, "computer-2": b]])
+        // The session outside every project forms an uncatalogued group, which has no tasks.
+        XCTAssertTrue(result.projects.contains { !$0.catalogued })
+    }
+
     func testSharedCanonicalIdsMergeAcrossMachinesButDuplicateNamesDoNot() {
         let a = computer("a", [project("p", "Same", ["one"]), project("q", "Same")], [session("one", "/a", id: "p")])
         let b = computer("b", [project("p", "Same", ["two"]), project("q", "Same")], [session("two", "/b", id: "p")])
