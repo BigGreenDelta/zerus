@@ -69,8 +69,8 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
     suspend fun computers(connection: Connection) = call(connection.url, connection.token, "/v1/computers")
     suspend fun capabilities(connection: Connection) = call(connection.url, connection.token, "/v1/capabilities")
     suspend fun submit(connection: Connection, target: Target, operation: String, payload: JSONObject, id: String): JSONObject {
-        require(target.agentId.isBlank() || operation in setOf("inspect", "history", "send", "attachment_read", "file_read")) { "This control belongs to the parent session." }
-        require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
+        require(target.agentId.isBlank() || operation in setOf("inspect", "history", "history_projection", "send", "attachment_read", "file_read")) { "This control belongs to the parent session." }
+        require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "history_projection", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
         return call(connection.url, connection.token, "/v1/requests", JSONObject().put("request_id", id)
             .put("computer_id", target.computerId).put("session", target.session).put("operation", operation).put("payload", payload)).also {
                 check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
@@ -145,6 +145,14 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
         val receipt=await(connection,submit(connection,target,"history",payload,id))
         check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "History is not available yet. Try again." } }
         return withContext(Dispatchers.Default) { HistoryPage.parse(target,id,receipt.getJSONObject("result")) }
+    }
+    /** Read-only projection repair. The applied display marker belongs to the client cache only. */
+    suspend fun historyProjection(connection:Connection,target:Target,epoch:String,after:Long,until:Long):HistoryProjection.Page {
+        val id=UUID.randomUUID().toString()
+        val payload=HistoryProjection.payload(target,id,epoch,after,until)
+        val receipt=await(connection,submit(connection,target,"history_projection",payload,id))
+        check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "History changes are not available yet." } }
+        return withContext(Dispatchers.Default) { HistoryProjection.parse(target,id,epoch,after,until,receipt.getJSONObject("result")) }
     }
     /** Shared read mark; the computer applies only current values, so each attempt has its own request ID. */
     suspend fun markRead(connection: Connection, target: Target, payload: JSONObject): JSONObject {

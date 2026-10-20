@@ -149,8 +149,8 @@ public struct RelayClient: Sendable {
 
     // MARK: Requests
 
-    static let childOperations: Set<String> = ["inspect", "history", "send", "attachment_read", "file_read"]
-    static let archiveOperations: Set<String> = ["inspect", "history", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read"]
+    static let childOperations: Set<String> = ["inspect", "history", "history_projection", "send", "attachment_read", "file_read"]
+    static let archiveOperations: Set<String> = ["inspect", "history", "history_projection", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read"]
 
     /// Submits one request with an immutable UUID. The caller has already made it durable.
     public func submit(_ connection: Connection, target: Target, operation: String, payload: JSONObject, id: String) async throws -> JSONObject {
@@ -252,6 +252,19 @@ public struct RelayClient: Sendable {
             throw ZerusError(.unavailable, message.isEmpty ? "History is not available yet. Try again." : message)
         }
         return try await Task.detached(priority: .userInitiated) { try HistoryPage.parse(target: target, id: id, raw: result) }.value
+    }
+
+    /// One intact projection page; applying it is a separate display-cache operation.
+    public func historyProjection(_ connection: Connection, target: Target, epoch: String, after: Int64, until: Int64) async throws -> HistoryProjection.Page {
+        let id = UUID().uuidString.lowercased()
+        let payload = try HistoryProjection.payload(target, id: id, epoch: epoch, after: after, until: until)
+        let receipt = try await waitForReceipt(connection, initial: submit(connection, target: target, operation: "history_projection", payload: payload, id: id))
+        guard receipt.string("state") == "completed", let result = receipt.object("result") else {
+            throw ZerusError(.unavailable, "History changes are not available yet.")
+        }
+        return try await Task.detached(priority: .userInitiated) {
+            try HistoryProjection.parse(target: target, id: id, epoch: epoch, after: after, until: until, raw: result)
+        }.value
     }
 
     /// Shared read mark; the computer applies only current values, so each attempt has its own request.

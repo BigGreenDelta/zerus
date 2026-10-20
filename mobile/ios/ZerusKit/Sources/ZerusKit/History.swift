@@ -224,9 +224,10 @@ public struct HistoryPage: Sendable {
     public var complete: Bool
     public var indexing: Bool
     public var truncated: Bool
+    public var projectionApplied: Int64
 
     public init(target: Target, epoch: String, events: [Event], before: String?, after: String?, hasBefore: Bool, hasAfter: Bool,
-                latestIncoming: Int64?, totalIncoming: Int64?, complete: Bool, indexing: Bool, truncated: Bool) {
+                latestIncoming: Int64?, totalIncoming: Int64?, complete: Bool, indexing: Bool, truncated: Bool, projectionApplied: Int64 = 0) {
         self.target = target
         self.epoch = epoch
         self.events = events
@@ -239,6 +240,7 @@ public struct HistoryPage: Sendable {
         self.complete = complete
         self.indexing = indexing
         self.truncated = truncated
+        self.projectionApplied = projectionApplied
     }
 
     public static func parse(target: Target, id: String, raw: JSONObject) throws -> HistoryPage {
@@ -281,7 +283,8 @@ public struct HistoryPage: Sendable {
         try require(!hasBefore || before != nil)
         try require(!hasAfter || after != nil)
         return HistoryPage(target: target, epoch: epoch, events: events, before: before, after: after, hasBefore: hasBefore, hasAfter: hasAfter,
-                           latestIncoming: latest, totalIncoming: total, complete: complete, indexing: raw.bool("indexing"), truncated: raw.bool("truncated"))
+                           latestIncoming: latest, totalIncoming: total, complete: complete, indexing: raw.bool("indexing"), truncated: raw.bool("truncated"),
+                           projectionApplied: complete ? try HistoryProjection.generation(raw) : 0)
     }
 }
 
@@ -295,10 +298,11 @@ public struct HistoryWindow: Hashable, Sendable {
     public var hasBefore: Bool
     public var hasAfter: Bool
     public var atHead: Bool
+    public var projectionApplied: Int64 = 0
 
     public static func from(_ page: HistoryPage) -> HistoryWindow {
         HistoryWindow(target: page.target, epoch: page.epoch, events: page.events, before: page.before, after: page.after,
-                      hasBefore: page.hasBefore, hasAfter: page.hasAfter, atHead: !page.hasAfter)
+                      hasBefore: page.hasBefore, hasAfter: page.hasAfter, atHead: !page.hasAfter, projectionApplied: page.projectionApplied)
     }
 
     public func merge(_ page: HistoryPage, direction: String, maxEvents: Int = 500, maxBytes: Int = 2 * 1024 * 1024) -> HistoryWindow {
@@ -325,7 +329,7 @@ public struct HistoryWindow: Hashable, Sendable {
                              before: direction == "before" ? page.before : (dropped ? rows.first?.historyCursor : before),
                              after: direction == "after" ? page.after : (dropped ? rows.last?.historyCursor : after),
                              hasBefore: direction == "before" ? page.hasBefore : (hasBefore || dropped),
-                             hasAfter: nextHasAfter, atHead: !nextHasAfter)
+                             hasAfter: nextHasAfter, atHead: !nextHasAfter, projectionApplied: min(projectionApplied, page.projectionApplied))
     }
 
     /// Inspection rows that update or extend a head window; canonical rows stay in journal arrival order. Queued and
@@ -360,7 +364,7 @@ public struct HistoryWindow: Hashable, Sendable {
         if !newer.isEmpty {
             let cursor = events.last { !$0.historyCursor.isEmpty }?.historyCursor ?? after
             let page = HistoryPage(target: target, epoch: epoch, events: newer, before: before, after: cursor, hasBefore: hasBefore, hasAfter: false,
-                                   latestIncoming: nil, totalIncoming: nil, complete: false, indexing: false, truncated: false)
+                                   latestIncoming: nil, totalIncoming: nil, complete: false, indexing: false, truncated: false, projectionApplied: projectionApplied)
             copy = copy.merge(page, direction: "after")
         }
         let shown = Set(copy.events.map(\.id))

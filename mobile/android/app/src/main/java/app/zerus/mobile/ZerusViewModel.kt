@@ -320,6 +320,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val historyWindows=LinkedHashMap<String,HistoryWindow>(20,0.75f,true)
     private var currentHistoryHeads by mutableStateOf<Set<String>>(emptySet())
     private val historyFlights=mutableMapOf<String,Pair<Target,Deferred<HistoryPage>>>()
+    private val projectionJobs=mutableMapOf<String,Pair<Target,Job>>()
+    private val projectionHeads=LinkedHashMap<String,Pair<String,Long>>()
     private var olderJob:Job?=null
     private var viewportPageJob:Job?=null
     private var historyHeadJob:Job?=null
@@ -350,6 +352,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             val reason=historyNetworkReason(target)
             if(reason.isNotBlank()) throw java.io.IOException(reason)
             val page=api.history(connection,target,direction,cursor,limit)
+            projectionHeads[target.key]=page.epoch to page.projectionApplied
+            while(projectionHeads.size>20) projectionHeads.remove(projectionHeads.keys.first())
+            scheduleProjection(target)
             viewModelScope.launch { runCatching { HistoryPageRetention.retain(limit,page,direction) { pageCache.write(target,direction,cursor,it.raw) } } }
             page
         }
@@ -369,11 +374,67 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val window=if(page.atHead && inspected!=null) page.copy(inbox=HistoryInspection.inbox(inspected)) else page
         historyWindows[target.key]=window
         while(historyWindows.size>20) historyWindows.remove(historyWindows.keys.first())
+        scheduleProjection(target)
         if(selected?.target != target) return
         if(!readPositionReady) pendingHistoryPosition=target.key
         pendingHistoryPublication=target.key
         val head=frames[target.key] ?: activeFrame?.takeIf { it.target==target } ?: return
         installFrame(head.copy(events=window.displayed,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary),activityVerified)
+    }
+    /** Projection responses are display evidence only: never call observeHistoryHead,
+     * readWriter.supersede, installFrame or the ordinary delivery-settling presentation path. */
+    private fun scheduleProjection(target:Target) {
+        val window=historyWindows[target.key] ?: return
+        val head=projectionHeads[target.key]?.takeIf { it.first==window.epoch } ?: return
+        if(head.second<=window.projectionApplied || target.key in projectionJobs || projectionJobs.size>=4) return
+        fun supported()=connections.any { it.id==target.connectionId } &&
+            HistoryProjection.supported(relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)])
+        if(!supported()) return
+        val epoch=window.epoch;val start=window.projectionApplied;val until=head.second
+        val job=viewModelScope.launch(start=kotlinx.coroutines.CoroutineStart.LAZY) {
+            var progress=HistoryProjection.Run(start,until)
+            try {
+                while(progress.canRead) {
+                    if(!supported() || historyWindows[target.key]?.epoch!=epoch) return@launch
+                    val connection=connections.firstOrNull { it.id==target.connectionId } ?: return@launch
+                    val page=api.historyProjection(connection,target,epoch,progress.after,until)
+                    val applied=page.applied(progress.after)
+                    val initial=historyWindows[target.key] ?: return@launch
+                    val candidate=withContext(Dispatchers.Default) { HistoryProjection.apply(initial,target,epoch,start,page.prefix,applied) }
+                    val rebased=HistoryInspection.rebase(initial,candidate,{ historyWindows[target.key] }) { latest ->
+                        withContext(Dispatchers.Default) { latest?.let { HistoryProjection.apply(it,target,epoch,start,page.prefix,applied) } }
+                    }
+                    val next=rebased.value ?: return@launch
+                    if(!supported()) return@launch
+                    historyWindows[target.key]=next
+                    // Reprepare the visible rows without settling outbox, changing the divider or read metadata.
+                    val frame=activeFrame?.takeIf { it.target==target && selected?.target==target }
+                    if(frame!=null) {
+                        val messages=outgoing.filter { it.belongsTo(target) }
+                        val display=withContext(Dispatchers.Default) { if(target.archiveId.isBlank()) ConversationMerge.merge(target,next.displayed,messages).events else next.displayed }
+                        if(activeFrame===frame && historyWindows[target.key]===next && selected?.target==target) {
+                            presentationJob?.cancel();presentationRevision++
+                            val updated=frame.copy(events=next.displayed,window=next,presentation=Presentation(messages,display,conversationQuestions))
+                            activeFrame=updated;rememberFrame(updated)
+                            conversationEvents=display
+                        }
+                    }
+                    // Rows and their coverage marker are always serialized in one encrypted page value.
+                    val latest=historyWindows[target.key]?.takeIf { it.epoch==epoch } ?: return@launch
+                    val saved=readState.record(target)?.viewport?.cursor.orEmpty()
+                    val anchor=saved.takeIf { cursor -> latest.events.any { it.historyCursor==cursor } }
+                        ?: latest.events.lastOrNull { it.historyCursor.isNotBlank() }?.historyCursor
+                    if(anchor!=null) {
+                        val raw=withContext(Dispatchers.Default) { HistoryPage.retained(latest,anchor) }
+                        if(raw!=null) pageCache.write(target,"around",saved.ifBlank { anchor },raw)
+                    }
+                    progress=progress.accepted(page)
+                }
+            } catch(error:CancellationException) { throw error }
+            catch(_:Exception) { /* A later verified history page can resume the unchanged display prefix. */ }
+            finally { if(projectionJobs[target.key]?.second===kotlin.coroutines.coroutineContext[Job]) projectionJobs.remove(target.key) }
+        }
+        projectionJobs[target.key]=target to job;job.start()
     }
     private fun loadHistory(target:Target,direction:String,cursor:String="",latest:Boolean=false):Job? {
         if(selected?.target != target || olderLoading) return null
@@ -1982,6 +2043,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             editState { state -> state.copy(conversationIndex=state.conversationIndex.filterNot { it.target.connectionId == connection.id }) }
             val removedReadKeys=readState.records.filter { it.target.connectionId==connection.id }.map { ConversationReadPolicies.key(it.target) }.toSet()
             readWriter?.let { readState=it.edit { state -> state.copy(records=state.records.filterNot { it.target.connectionId == connection.id }) } };flushDrafts()
+            projectionJobs.values.filter { it.first.connectionId==connection.id }.forEach { it.second.cancel() }
+            projectionJobs.entries.removeAll { it.value.first.connectionId==connection.id }
+            projectionHeads.keys.removeAll { key -> historyWindows[key]?.target?.connectionId==connection.id }
             historyWindows.entries.removeAll { it.value.target.connectionId==connection.id }
             historySnapshotHints.keys.removeAll { it in removedReadKeys };currentHistoryHeads-=removedReadKeys
             historyFlights.values.filter { it.first.connectionId==connection.id }.forEach { it.second.cancel() }

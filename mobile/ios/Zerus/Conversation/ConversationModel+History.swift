@@ -38,6 +38,9 @@ extension ConversationModel {
         let flight = Task<HistoryPage, Error> {
             if !reason.isEmpty { throw ZerusError(.unavailable, reason) }
             let page = try await client.history(connection, target: target, direction: direction, cursor: cursor, limit: limit)
+            self.projectionHeads[target.key] = (page.epoch, page.projectionApplied)
+            while self.projectionHeads.count > 20, let oldest = self.projectionHeads.keys.filter({ $0 != target.key }).sorted().first { self.projectionHeads[oldest] = nil }
+            self.scheduleProjection(target)
             if let pages, HistoryPageRetention.retains(limit: limit, page: page, direction: direction) {
                 Task.detached(priority: .utility) { await pages.write(target, mode: direction, cursor: cursor, page: CachedHistoryPage(page)) }
             }
@@ -59,6 +62,7 @@ extension ConversationModel {
     func publishWindow(_ target: Target, _ window: HistoryWindow, complete: Bool = false, indexing: Bool = false, boundary: String? = nil) {
         historyWindows[target.key] = window
         historyWindows.trim { $0.count > 20 }
+        scheduleProjection(target)
         guard selected?.target == target else { return }
         if !readPositionReady { pendingHistoryPosition = target.key }
         pendingHistoryPublication = target.key
