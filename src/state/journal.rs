@@ -66,6 +66,13 @@ pub(super) fn clipped(value: &Value, limit: usize) -> String {
 /// notifications, subagent reports and cross-session messages. Several may
 /// arrive together, and a journal excerpt may be clipped.
 pub(super) fn system_prompt(text: &str) -> Option<Value> {
+    // This complete XML subset is a declared sender label, never authentication.
+    // Keep Claude's native envelope parser below unchanged.
+    if text.starts_with("<zerus-message") {
+        let (sender, reference, body) = crate::session_reference::sender_message(text)?;
+        return Some(json!({"kind":"peer_message","summary":"","status":"","report":body,
+            "agent_id":"","sender":sender,"sender_reference":reference}));
+    }
     fn envelope<'a>(body: &'a str, close: &str) -> Option<(&'a str, &'a str)> {
         match body.find(close) {
             Some(end) => Some((&body[..end], body[end + close.len()..].trim_start())),
@@ -161,6 +168,9 @@ pub(super) fn mark_system_prompt(record: &Value, event: &mut Value, prompt: &str
     }
     if notice["kind"] == "peer_message" {
         event["sender"] = notice["sender"].clone();
+        if !string(&notice, "sender_reference").is_empty() {
+            event["sender_reference"] = notice["sender_reference"].clone();
+        }
     }
 }
 
@@ -1702,6 +1712,42 @@ mod attention_regressions {
         assert_eq!(user_prompt(&json!({"prompt":message})), &Value::Null);
         for text in ["<cross-session-message>Hi</cross-session-message>", "<cross-session-message from-name=\"\">Hi</cross-session-message>",
                      &format!("{message}\nPlus my own words")] {
+            assert!(system_prompt(text).is_none(), "{text}");
+        }
+    }
+    #[test]
+    fn notices_match_the_shared_activity_contract() {
+        // Desktop, Android and iOS read the same cases for their presentation.
+        let contract: Value = serde_json::from_str(include_str!(
+            "../../mobile/android/app/src/test/resources/activity-notice-contract.json")).unwrap();
+        for case in contract["cases"].as_array().unwrap() {
+            let name = string(case, "name");
+            let mut event = json!({"type":"UserPromptSubmit","agent_id":"","detail":case["prompt"]});
+            mark_system_prompt(&json!({}), &mut event, "");
+            for (key, value) in case["event"].as_object().unwrap() {
+                assert_eq!(&event[key], value, "{name}: {key}");
+            }
+            for key in ["origin", "report", "sender", "sender_reference"] {
+                assert!(case["event"].get(key).is_some() || event.get(key).is_none(), "{name}: unexpected {key}");
+            }
+        }
+    }
+    #[test]
+    fn hgs_sender_envelopes_are_notices_from_the_declared_sender() {
+        let uri = "zerus://session?machine=11111111-1111-4111-8111-111111111111&host=arch&name=claude%2Fp%2Freview%20%26%20co&conversation=c&run=r";
+        let encoded = uri.replace('&', "&amp;");
+        let message = format!("<zerus-message from=\"claude/p/review &amp; co\" host=\"arch\" reference=\"{encoded}\">\nThe patch is ready.\n\n- one\n</zerus-message>");
+        let parsed = system_prompt(&message).unwrap();
+        assert_eq!((parsed["kind"].as_str(), parsed["sender"].as_str()), (Some("peer_message"), Some("claude/p/review & co")));
+        assert_eq!((parsed["report"].as_str(), parsed["sender_reference"].as_str()), (Some("The patch is ready.\n\n- one"), Some(uri)));
+        let mut event = json!({"type":"UserPromptSubmit","agent_id":"","detail":""});
+        mark_system_prompt(&json!({}), &mut event, &message);
+        assert_eq!((event["origin"].as_str(), event["detail"].as_str()), (Some("peer_message"), Some("Message from claude/p/review & co")));
+        assert_eq!(event["sender_reference"], uri);
+        assert_eq!(user_prompt(&json!({"prompt":message})), &Value::Null);
+        for text in ["<zerus-message>Hi</zerus-message>", "<zerus-message from=\"\">Hi</zerus-message>",
+                     "<zerus-message from=\"x/y\">Hi</zerus-message>", "<zerus-message host=\"arch\">Hi</zerus-message>",
+                     &format!("Quoted: {message}"), &format!("{message}\nPlus my own words")] {
             assert!(system_prompt(text).is_none(), "{text}");
         }
     }

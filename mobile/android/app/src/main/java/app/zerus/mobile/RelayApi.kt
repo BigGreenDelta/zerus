@@ -189,11 +189,16 @@ object NativeParser {
             val type = value.string("type")
             if (type !in listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted", "QuestionAnswered", "AgentMessage", "Stop") ||
                 !inScope(value)) return null
+            // A native prompt the person did not write is a notice, as on desktop.
+            val origin = value.string("origin").takeIf { it in ActivityNotices.origins && type in
+                listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted") }.orEmpty()
             val role = when (type) {
                 "QuestionAnswered" -> "You (answer)"
                 "UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted" -> "You"
                 else -> "AgentMessage"
             }
+            // Identities keep the native role, so cached rows stay the same rows.
+            val shown = if (origin.isNotEmpty()) ActivityNotices.ROLE else role
             val source = value.string("source").ifBlank { stream }
             val voice = if (source == "hgs_voice") value.optJSONObject("voice")?.let {
                 runCatching { VoiceProtocol.message(it) }.getOrNull()
@@ -202,15 +207,17 @@ object NativeParser {
                 DisplayedAttachment(it.string("name"), it.string("mime"), it.optLong("bytes"), it.string("reference"),
                     it.string("request_id"), (it.opt("index") as? Int) ?: -1)
             }
-            val text = if (source == "hgs_delivery" && files.isNotEmpty()) value.optString("detail", "")
+            // Fallback identity belongs to the original native row, not its display label/body.
+            val identityText = if (source == "hgs_delivery" && files.isNotEmpty()) value.optString("detail", "")
                 else value.string("detail", "text", "message", "prompt", "submitted_text")
+            val text = if (origin.isNotEmpty()) ActivityNotices.body(origin, value.string("detail"), value.string("report")) else identityText
             if (text.isBlank() && files.isEmpty() && voice == null) return null
             val at = value.optDouble("at", 0.0).takeIf { it.isFinite() } ?: 0.0
             val nativeId = value.string("message_id", "seq", "source_offset")
             // Count only indistinguishable rows, rather than the whole array.
             // Prepending unrelated history therefore preserves existing keys.
             val fallback = if (nativeId.isBlank()) {
-                val identity = JSONArray(listOf(type, role, source, at, value.string("timestamp"), text,
+                val identity = JSONArray(listOf(type, role, source, at, value.string("timestamp"), identityText,
                     files.map { listOf(it.name, it.mime, it.bytes, it.reference) })).toString()
                 val digest = MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(Charsets.UTF_8))
                     .joinToString("") { "%02x".format(it) }
@@ -222,7 +229,7 @@ object NativeParser {
             val originalId = value.string("original_id").ifBlank { "$stream:$source:$role:$fallback" }
             val historyId = value.string("history_id")
             val requestId = when {
-                role != "You" -> ""
+                shown != "You" -> ""
                 source in setOf("hgs_delivery", "hgs_voice") -> value.string("message_id")
                 // OpenCode dates a queued prompt by its delivery; hgs names the Zerus send
                 // that admitted it, so the phone can match its own message exactly.
@@ -230,13 +237,15 @@ object NativeParser {
                     runCatching { UUID.fromString(it).toString() == it }.getOrDefault(false) }.orEmpty()
                 else -> ""
             }
-            return Event(if (historyId.isBlank()) originalId else "history:$historyId", role,
+            return Event(if (historyId.isBlank()) originalId else "history:$historyId", shown,
                 text, value.string("at", "timestamp"), at, requestId, files, source,
-                delivery = if (role == "You") MessageDeliveryPresentation.inboxState(value) else "",
+                delivery = if (shown == "You") MessageDeliveryPresentation.inboxState(value) else "",
                 nativeType = type, submittedText = if (source == "hgs_delivery") value.string("submitted_text") else "",
                 originalId = originalId, historyId = historyId, historyCursor = value.string("history_cursor"),
                 historyEpoch = raw.string("history_epoch"), incomingSeq = (value.opt("incoming_seq") as? Number)?.toLong()?.takeIf { it >= 0 },
-                originalIds = value.optJSONArray("original_ids")?.let { ids -> (0 until minOf(ids.length(),8)).mapNotNull { ids.opt(it) as? String } }.orEmpty(), detailTruncated = value.optBoolean("detail_truncated"), voice = voice)
+                originalIds = value.optJSONArray("original_ids")?.let { ids -> (0 until minOf(ids.length(),8)).mapNotNull { ids.opt(it) as? String } }.orEmpty(), detailTruncated = value.optBoolean("detail_truncated"), voice = voice,
+                origin = origin, sender = if (origin == "peer_message") value.string("sender") else "",
+                report = ActivityNotices.report(origin, value.string("report")))
         }
         val rows = (journal.mapNotNull { item ->
             fun replaces(provider: JSONObject, hook: JSONObject) = provider.string("type") == "AgentMessage" && inScope(provider) && inScope(hook) &&
