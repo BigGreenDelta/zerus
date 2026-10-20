@@ -70,10 +70,26 @@ pub fn start(
     environment: &config::Environment,
     now: f64,
 ) -> Result<Started, ConnectorError> {
+    start_bound(path, allow_insecure_localhost, environment, now, None)
+}
+
+/// A management child must admit exactly the configuration its launcher saw.
+/// The comparison and journal/control publication share the management guard.
+pub fn start_bound(
+    path: &Path,
+    allow_insecure_localhost: bool,
+    environment: &config::Environment,
+    now: f64,
+    expected_revision: Option<&str>,
+) -> Result<Started, ConnectorError> {
     #[cfg(windows)]
     let _guard =
         windows_management::guard(path, false).map_err(|_| ConnectorError::new(STARTUP_FAILURE))?;
     let (text, findings) = config::read_file(path, fsguard::euid())?;
+    let revision = zerus_relay::json::digest(text.as_bytes());
+    if expected_revision.is_some_and(|expected| expected != revision) {
+        return Err(ConnectorError::new(STARTUP_FAILURE));
+    }
     if let Some(refusal) = findings.iter().find(|finding| finding.refusal) {
         return Err(ConnectorError::new(refusal.message));
     }
@@ -82,7 +98,7 @@ pub fn start(
     let journal = journal::Journal::open(&config.state_dir, &config.binding, now)
         .map_err(|error| ConnectorError::new(error.message()))?;
     #[cfg(windows)]
-    let generation = windows_management::prepare_running(&config.state_dir)
+    let generation = windows_management::prepare_running(&config.state_dir, &revision)
         .map_err(|_| ConnectorError::new(STARTUP_FAILURE))?;
     Ok(Started {
         config,

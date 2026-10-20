@@ -20,6 +20,10 @@ pub const PROBE_TIMEOUT: f64 = 3.0;
 /// providers absent from the host, speech and voice. Same table drives
 /// advertisement and dispatch refusal, after durable duplicate handling.
 pub const WINDOWS_HELP_MARKER: &str = "Mobile gateway ABI: windows-local-v1";
+pub const WINDOWS_PROVIDER_REFUSAL: &str = "provider is unavailable on a Windows local gateway";
+pub fn windows_provider(provider: &Value) -> bool {
+    matches!(provider.as_str(), Some("codex" | "claude" | "kimi"))
+}
 pub const WINDOWS_OPERATIONS: &[&str] = &[
     "inspect",
     "history",

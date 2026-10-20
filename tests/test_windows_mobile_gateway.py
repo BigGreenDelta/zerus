@@ -20,6 +20,7 @@ import uuid
 
 from test_windows_host import FAKE_AGENT, HGS, HIDDEN, LIMIT
 from test_windows_lifecycle import LifecycleCase, read_json, read_events
+from windows_gateway_custody import ConnectorCustody, guard_root_cleanup
 
 CONNECTOR = Path(os.environ.get("HGS_TEST_CONNECTOR", Path(__file__).resolve().parents[1] /
                                "services/mobile/connector/target/release/zerus-mobile-connector.exe"))
@@ -54,7 +55,10 @@ class Gateway(LifecycleCase):
         self.config = self.root / "config/mobile/connector.json"
         self.pending, self.results, self.snapshots = [], {}, []
         self.mutex = threading.Lock()
-        self.connector_handle = None
+        self.custody = None
+        # Replace only this case's registered TemporaryDirectory cleanup. Its
+        # GC finalizer must not bypass custody after an uncertain detached start.
+        guard_root_cleanup(self, self.temp, lambda: self.custody is None or self.custody.may_remove_root)
         tls = self.root / "tls"
         tls.mkdir()
         config = tls / "openssl.cnf"
@@ -128,9 +132,9 @@ class Gateway(LifecycleCase):
         self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
         return json.loads(result.stdout)
 
-    def pin_connector(self, state):
-        """Open only the process executing this case's unique copied binary.
-        The handle pins its identity for failure cleanup; a PID alone never does.
+    def pin_connector(self, control):
+        """Pin only the private control's PID executing this unique copied image.
+        Custody rereads the same revision/generation/control after opening it.
         """
         from ctypes import wintypes
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -139,34 +143,53 @@ class Gateway(LifecycleCase):
         kernel.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
                                                      ctypes.POINTER(wintypes.DWORD))
         kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
-        pid = read_json(Path(state["state_dir"]) / "connector-control.json")["pid"]
-        handle = kernel.OpenProcess(0x00100000 | 0x1000 | 0x0001, False, pid)
-        self.assertTrue(handle)
+        handle = kernel.OpenProcess(0x00100000 | 0x1000 | 0x0001, False, control["pid"])
+        if not handle:
+            raise RuntimeError("private connector handle could not be opened")
         buffer, size = ctypes.create_unicode_buffer(32768), wintypes.DWORD(32768)
         valid = kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size))
         if not valid or os.path.normcase(os.path.realpath(buffer.value)) != os.path.normcase(os.path.realpath(self.connector)):
             kernel.CloseHandle(handle)
-            self.fail("connector process image did not match the owned fixture")
-        self.connector_handle = handle
+            raise RuntimeError("connector process image did not match the owned fixture")
+        return handle
 
-    def close_connector(self):
-        if self.connector_handle is None:
-            return
+    def start_connector(self, state):
         from ctypes import wintypes
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
         kernel.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
         kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        control_path = Path(state["state_dir"]) / "connector-control.json"
+        def read_control():
+            # Missing is unknown once launch was attempted; malformed data also
+            # raises and preserves custody rather than authorizing deletion.
+            if not control_path.exists():
+                return None
+            return json.loads(control_path.read_text())
+        def stop(control):
+            self.manage("stop", {"revision": control["revision"], "generation": control["generation"]})
+        self.custody = ConnectorCustody(state["revision"], read_control, self.pin_connector,
+            kernel.WaitForSingleObject, kernel.TerminateProcess, kernel.CloseHandle, stop)
+        self.custody.begin()  # Before Start, so failure/timeout cannot lose custody.
+        running = self.manage("start", {"revision": state["revision"]})
+        self.custody.recover()
+        self.assertEqual(running["generation"], self.custody.control["generation"])
+        return running
+
+    def close_connector(self):
+        if self.custody is None:
+            return
         try:
-            state = self.manage("status")
-            if state.get("running"):
-                self.manage("stop", {"revision": state["revision"], "generation": state["generation"]})
-        finally:
-            if kernel.WaitForSingleObject(self.connector_handle, 50000) != 0:
-                kernel.TerminateProcess(self.connector_handle, 1)
-                kernel.WaitForSingleObject(self.connector_handle, 5000)
-            kernel.CloseHandle(self.connector_handle)
-            self.connector_handle = None
+            forced = self.custody.cleanup()
+        except Exception:
+            # This contains synthetic identity only, never a credential. Keep
+            # the handle and root on unknown final exit for manual diagnosis.
+            (self.root / "connector-custody-unknown.json").write_text(json.dumps({
+                "revision": self.custody.revision, "control": self.custody.control,
+                "image": str(self.connector), "exit_confirmed": self.custody.exited}))
+            raise
+        self.assertFalse(forced, "graceful connector stop failed; owned handle termination was required")
 
     def submit(self, operation, session, payload, request=None):
         request = request or {"request_id": str(uuid.uuid4()), "operation": operation,
@@ -196,9 +219,8 @@ class Gateway(LifecycleCase):
             json.loads(self.hgs("inspect", name).stdout)))
         host = self.status()
         state = self.manage("status")
-        running = self.manage("start", {"revision": state["revision"]})
+        running = self.start_connector(state)
         self.assertTrue(running["running"])
-        self.pin_connector(running)
         again = self.manage("start", {"revision": running["revision"]})
         self.assertEqual(again["generation"], running["generation"])
         self.wait_for("the direct Windows heartbeat", lambda: any(

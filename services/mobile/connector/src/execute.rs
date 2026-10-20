@@ -258,7 +258,16 @@ impl<N: Native + 'static> Connector<N> {
                 .validated(request, request_id)
                 .await
                 .map_err(Failure::Connector)?;
-            if self.flags.get().archive {
+            if self.flags.get().windows_gateway
+                && !validated.session.is_empty()
+                && !validated
+                    .payload
+                    .as_ref()
+                    .is_some_and(|p| p.get("archive_id").is_some())
+            {
+                self.windows_target(&validated).await?;
+            }
+            if self.flags.get().archive || self.flags.get().windows_gateway {
                 if let Some(payload) = validated
                     .payload
                     .as_ref()
@@ -343,15 +352,19 @@ impl<N: Native + 'static> Connector<N> {
     /// checked natively before anything runs for it.
     async fn archive_preflight(&self, session: &str, payload: &Value) -> Result<(), Failure> {
         let archive = payload["archive_id"].as_str().unwrap_or_default();
-        if self.context().admits(session, archive) {
+        let windows = self.flags.get().windows_gateway;
+        if !windows && self.context().admits(session, archive) {
             return Ok(());
         }
-        let call = Call::new(["archives", "lookup", "--json"])
+        let call = crate::archives::call(true, windows)
             .payload(json!({"name": session, "archive_id": archive}))
             .timeout(5.0);
         let detail = self.call(call).await?;
         if !crate::archives::lookup_matches(&detail, session, archive, payload) {
             return Err(Failure::text(crate::archives::LOOKUP_MISMATCH));
+        }
+        if windows && !crate::capabilities::windows_provider(&detail["cmd"]) {
+            return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
         }
         let now = self.clock();
         crate::archives::remember(
@@ -359,6 +372,35 @@ impl<N: Native + 'static> Connector<N> {
             [(session.to_owned(), archive.to_owned())],
             now,
         );
+        Ok(())
+    }
+
+    /// Snapshot admission never substitutes for an authoritative provider and
+    /// identity check just before dispatch. Duplicate receipts bypass this gate.
+    async fn windows_target(&self, validated: &Validated) -> Result<(), Failure> {
+        let detail = self
+            .call(Call::new([
+                "inspect",
+                &validated.session,
+                "--skip-processes",
+            ]))
+            .await?;
+        if detail["name"].as_str() != Some(&validated.session)
+            || !crate::capabilities::windows_provider(&detail["agent"])
+            || detail.as_object().is_none_or(is_archived)
+        {
+            return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
+        }
+        if let Some(payload) = &validated.payload {
+            for (expected, field) in [
+                ("expected_run_id", "run_id"),
+                ("expected_conversation_id", "conversation_id"),
+            ] {
+                if payload.get(expected).is_some_and(|v| v != &detail[field]) {
+                    return Err(Failure::text("fresh native target identity did not match"));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -395,7 +437,7 @@ impl<N: Native + 'static> Connector<N> {
     /// `hgs archives --json` for one query: a checked page with the project
     /// memberships of its rows and only the projects they use.
     async fn archive_page(&self, payload: &Value, request_id: &str) -> Result<Value, Failure> {
-        let call = Call::new(["archives", "--json"])
+        let call = crate::archives::call(false, self.flags.get().windows_gateway)
             .payload(payload.clone())
             .timeout(30.0);
         let raw = self.call(call).await?;
@@ -403,6 +445,9 @@ impl<N: Native + 'static> Connector<N> {
             crate::archives::PageError::Value(text) => Failure::Connector(text),
             crate::archives::PageError::Other => Failure::Generic,
         })?;
+        if self.flags.get().windows_gateway && !crate::archives::supported_page(&page) {
+            return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
+        }
         let groups = self
             .state
             .borrow()
@@ -669,6 +714,11 @@ impl<N: Native + 'static> Connector<N> {
             argv.extend(["--after".into(), int_literal(after).unwrap_or_default()]);
         }
         let result = self.call(Call::new(argv)).await?;
+        if self.flags.get().windows_gateway
+            && !crate::capabilities::windows_provider(&result["agent"])
+        {
+            return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
+        }
         let object = result.as_object();
         if let Some(archive) = archive {
             let matches = object.is_some_and(|result| {

@@ -81,10 +81,15 @@ Windows adapter, connector and CLI type-check and lint using the existing MSVC
 cross-check recipe (C compilation is stubbed, so this is not native execution).
 Six unchanged relay codec contracts also pass.
 
-A Debug Qt6.12 Sessions window run aborts at SessionList teardown with
-`Called object is not of the correct type`; its base-revision behavior is not
-established. The same selected tests pass in the normal Release configuration.
-This Debug failure remains separate evidence and is not a Windows pass claim.
+The minimal Debug Qt6.12 Sessions window case
+`mobileConnectionSettingsOfferTheSharedDeliveryChoice` aborts on both the frozen
+candidate and exact base `cd28322d`, with the same toolchain and private offscreen
+environment. Both bounded GDB traces show `modelReset` calling
+`SessionList::scheduleRowExpandButtons` during QWidget child deletion after the
+derived lifetime ends. SessionList and WorkspaceList sources are identical.
+Original failures and actual base results are retained. This preexisting defect
+has a separate repair scope, `zerus-eh8b.3`; Release passes are not lifetime proof
+or Windows qualification.
 
 Root must review the Windows OS adapter, lifecycle/config management, GUI,
 portable packaging and checks.yml diff before a hosted run. The concrete native
@@ -95,3 +100,73 @@ are in CONTRIBUTING.md; the existing hosted Windows job wires them without any
 new credentials, runner class or cache limit. No hosted run has been requested.
 Keep zerus-eh8b open until native Windows behavior is qualified and root accepts
 the source. Publication and owner deployment need separate root instructions.
+
+
+## Independent source review corrections
+
+The original 58-source packet is preserved in commit `35e680fa`, with every
+postimage verified against manifest `5afda4dc`. Corrections form a separate child;
+the packet and its evidence remain unchanged.
+
+- Directory ACL admission validates inherit-only allow recipients too. Such an
+  ACE can grant access to future SQLite sidecars even when the existing DB has
+  its own protected private ACL. Unsafe directories are refused before writes;
+  no permissions are repaired. Inherit-only ACEs on files remain inert.
+- Start passes the observed configuration revision to child admission. The
+  child compares it while holding the management guard, before opening the
+  journal or constructing a runtime. Its control record carries that revision;
+  parent readiness requires the same revision. Already-running Start remains
+  idempotent for that revision. A held admission/change/release control exercises
+  the common routine locally; the real Windows Save/admission ordering case is
+  present but UNRUN here.
+- The settings panel validates boolean types, configured revision, server and
+  state identity, and running generation before adopting results or clearing
+  replacement text. Start and Stop bind the prior identity; the real
+  `stopping`+generation acknowledgement stays locked pending a valid explicit
+  reload. Malformed responses preserve unknown state and replacement text.
+- Windows archive pages and direct targets use the same Codex/Claude/Kimi rule.
+  The current authoritative archive reader already rejects other providers
+  before indexing and counting. Scoped lookup supplies the provider from the
+  archive record. The connector refuses an inconsistent mixed/unknown-provider
+  page as a whole, with no row admission and no invented filtered totals or
+  cursors. Successful pages retain their exact native totals/cursors. Every
+  Windows direct archive dispatch checks authoritative lookup even after a
+  cached admission; live dispatch checks fresh native provider and identity.
+  Durable duplicate lookup remains first. Unix calls/responses are unchanged.
+- The native fixture reserves custody before Start, including launcher failure
+  or timeout. Recovery requires its private revision/generation/control and the
+  unique copied process image, then pins a process handle and rechecks control.
+  Cleanup confirms handle exit; failed final waits preserve both handle custody
+  and the private root. Forced termination uses only that verified handle and
+  fails the graceful-stop gate. No PID/tree fallback is allowed. The separate
+  workflow gate uses `outside-job.py --custody-only`, without `--end`; timeout
+  retains the wrapper/fixture and reports an unknown outcome.
+
+## Concrete native gate awaiting independent re-review
+
+All actual Windows checks below remain **UNRUN**. Root must review the child
+source, workflow and portable packaging before granting any execution. Use a
+disposable Windows user/profile with an already provisioned toolchain, exact
+reviewed source and no owner installation, services, agents, keys or phone.
+Set `CARGO_BUILD_JOBS=2` and `ZERUS_BUILD_JOBS=2` for the approved local gate.
+
+1. Build/lint the connector and CLI natively. Run `windows_gateway` explicitly:
+   five cases must execute, including the unsafe inheritable directory with a
+   private existing DB/absent sidecars, held Start revision A versus Save B, and
+   same-revision already-running Start. Zero tests/skips do not qualify it.
+2. Run the Windows Qt settings fixtures, including all malformed status/save/
+   start/stop cases and real successful response forms. Run supported native
+   host/agent contracts only under a separately reviewed runtime scope.
+3. Build the exact fake agent and use the isolated HTTPS gateway fixture via
+   the custody-only outside-job command in CONTRIBUTING. It must confirm the
+   connector process handle exits and the same native host/session survives
+   graceful Stop. On any custody uncertainty, retain the root and report the
+   exact unknown identity; never broaden cleanup or retry input.
+4. Assemble the portable ZIP from those same reviewed binaries and pinned ConPTY
+   pair. Inspect its contents/notices and run `check-windows-portable.py --run
+   --selftest` in its private profile. That selftest stages a host image only in
+   the temporary profile; it does not start an owner host. Preserve exact source,
+   binary/ZIP hashes and raw results. A partial/skipped gate remains incomplete.
+
+No source-only, Linux, stubbed compilation or Release smoke result substitutes
+for this gate. Keep `zerus-eh8b` and `zerus-tmc0` open until acceptance.

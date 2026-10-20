@@ -924,16 +924,25 @@ jobs:
           HGS_TEST_FAKE_AGENT=$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")
           HGS_TEST_FAKE_SSH=$(cygpath -w "$PWD/target/debug/examples/fake_ssh.exe")
           HGS_TEST_CONPTY_DIR=$(cygpath -w "$RUNNER_TEMP/conpty")
-          HGS_TEST_CONNECTOR=$(cygpath -w "$PWD/target/release/zerus-mobile-connector.exe")
           export HGS_TEST_BIN HGS_TEST_FAKE_AGENT HGS_TEST_FAKE_SSH HGS_TEST_CONPTY_DIR
-          export HGS_TEST_CONNECTOR
           cd tests
           # Also hosts the suites start from temporary image copies (hgs-host-* folders).
           python ../scripts/ci/outside-job.py --timeout 900 --end "$HGS_TEST_BIN" --end '*\hgs-host-*\hgs.exe' \
-            --end '*\hgs-host-*\gateway-bundle\zerus-mobile-connector.exe' \
             --log ../artifacts/test-results/windows-host.log -- \
             python -m unittest -v test_windows_host test_windows_host_conpty test_windows_host_survival \
-            test_windows_lifecycle test_windows_hooks test_windows_mobile_gateway test_backend_contract </dev/null
+            test_windows_lifecycle test_windows_hooks test_backend_contract </dev/null
+      # A detached connector has fixture-owned handle custody. Keep this gate
+      # outside the legacy host harness's PID/tree and wildcard image cleanup.
+      - name: Windows mobile gateway isolated custody gate
+        timeout-minutes: 20
+        run: |
+          export HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
+          export HGS_TEST_FAKE_AGENT=$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")
+          export HGS_TEST_CONPTY_DIR=$(cygpath -w "$RUNNER_TEMP/conpty")
+          export HGS_TEST_CONNECTOR=$(cygpath -w "$PWD/target/release/zerus-mobile-connector.exe")
+          python scripts/ci/outside-job.py --custody-only --timeout 900 \
+            --log artifacts/test-results/windows-mobile-gateway.log -- \
+            python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
       # Only trusted main checks save it; PR, manual and candidate runs restore
       # it. The key covers the Qt pin and the installer.
       - name: Restore Qt 6.10.3 for MSVC

@@ -13,7 +13,9 @@ breakaway, as an sshd session does, runs the command there with stdin from NUL,
 and writes its output and exit status to files that this side follows. When the
 command ends, or this side times out and ends the copy, the job ends everything
 the command left, and session hosts that legitimately broke away from it are
-ended by executable path (--end, a PowerShell -like pattern). Usage:
+ended by executable path (--end, a PowerShell -like pattern). A detached-connector
+fixture instead uses --custody-only, which forbids --end and retains the wrapper,
+private fixture and unknown outcome on timeout, without PID/tree cleanup. Usage:
 
     python scripts/ci/outside-job.py --log FILE [--timeout SECONDS] [--end EXE]... -- COMMAND...
 
@@ -165,6 +167,15 @@ def stop_copy(pid, patterns, report):
     return cleanup
 
 
+def timeout_cleanup(pid, patterns, report, custody_only=False):
+    if custody_only:
+        # Detached connector custody belongs to its fixture. A wrapper timeout
+        # proves neither child identity nor exit and grants no PID/tree kill.
+        report("outside-job: custody-only timeout; wrapper/fixture retained, process outcome unknown\n")
+        return
+    stop_copy(pid, patterns, report)
+
+
 def file_time_now():
     """Now as a Windows FILETIME (100 ns ticks since 1601)."""
     return int((time.time() + 11644473600) * 10_000_000)
@@ -202,8 +213,12 @@ def main():
     parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--end", action="append", default=[],
                         help="end processes whose executable path is -like this pattern afterwards")
+    parser.add_argument("--custody-only", action="store_true",
+                        help="retain unknown fixture on timeout; no PID/tree/image cleanup")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if getattr(args, "custody_only", False) and args.end:
+        parser.error("--custody-only forbids --end cleanup patterns")
     if args.child:
         child(args.child)
         return 0
@@ -264,9 +279,9 @@ def main():
                 keep_work = True
                 break
             if time.monotonic() > deadline:
-                # Ending the copy closes its job, which ends the command's processes.
-                stop_copy(pid, args.end, sys.stderr.write)
-                sys.stderr.write(f"outside-job: timed out after {args.timeout:.0f} s; cleanup attempted for pid {pid}\n")
+                # The custody-only gate leaves identity/exit to its fixture.
+                timeout_cleanup(pid, args.end, sys.stderr.write, getattr(args, "custody_only", False))
+                sys.stderr.write(f"outside-job: timed out after {args.timeout:.0f} s; outcome unknown for pid {pid}\n")
                 code = 124
                 keep_work = True
                 break

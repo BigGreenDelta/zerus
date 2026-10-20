@@ -106,6 +106,9 @@ fn status(path: &Path) -> Result<Value> {
     } else {
         json!({})
     };
+    if running && control["revision"] != revision(bytes.as_deref()) {
+        return refuse("running connector configuration identity changed");
+    }
     Ok(
         json!({"configured":bytes.is_some(), "server_url":settings.get("server_url"),
         "state_dir":settings.get("state_dir"), "revision":revision(bytes.as_deref()),
@@ -245,7 +248,13 @@ pub fn manage(action: &str, path: &Path, input: &Value) -> Result<Value> {
     }
     let mut command = Command::new(std::env::current_exe()?);
     command
-        .args(["--config"])
+        .arg("--admit-revision")
+        .arg(
+            current["revision"]
+                .as_str()
+                .ok_or("configuration revision unavailable")?,
+        )
+        .arg("--config")
         .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -259,23 +268,28 @@ pub fn manage(action: &str, path: &Path, input: &Value) -> Result<Value> {
     // The GUI's job permits breakaway. Refuse launch if an enclosing job does
     // not permit it; never silently attach the connector to a kill-on-close job.
     command.creation_flags(0x01000000 | 0x00000200 | 0x08000000);
-    let mut child = command.spawn()?;
-    // Release management serialization so the child can prove and open its
-    // binding. Readiness requires its journal lock AND fresh control generation.
+    // The child has a nonblocking admission guard. Release before spawning so
+    // it cannot race this parent's still-held lock. A Save in this gap changes
+    // the revision and makes child admission refuse before any runtime exists.
     drop(_guard);
+    let mut child = command.spawn()?;
+    // Readiness requires the observed revision, journal lock and generation.
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
-        if child.try_wait()?.is_some() {
-            return refuse("connector could not start; run its private --check report");
-        }
         if let Ok(_ready_guard) = guard(path, false) {
             if let Ok(state) = status(path) {
                 if state["running"] == true
+                    && state["revision"] == current["revision"]
                     && state["generation"].as_str().is_some_and(|g| g.len() == 32)
                 {
                     return Ok(state);
                 }
             }
+        }
+        // A concurrent Start of the same revision may have admitted first.
+        // Its confirmed readiness above remains idempotent success.
+        if child.try_wait()?.is_some() {
+            return refuse("connector could not start; run its private --check report");
         }
         if Instant::now() >= deadline {
             return refuse(
@@ -289,15 +303,17 @@ fn atomic_replace(from: &Path, to: &Path) -> io::Result<()> {
     zerus_windows_private::replace(from, to)
 }
 
-pub fn prepare_running(state: &Path) -> Result<String> {
+pub fn prepare_running(state: &Path, revision: &str) -> Result<String> {
     let generation = nonce()?;
     let mut stop = zerus_windows_private::open_file(&state.join(STOP), true, true)?;
     write(&mut stop, b"")?;
     let mut control = zerus_windows_private::open_file(&state.join(CONTROL), true, true)?;
     write(
         &mut control,
-        serde_json::to_string(&json!({"generation":generation,"pid":std::process::id()}))?
-            .as_bytes(),
+        serde_json::to_string(
+            &json!({"generation":generation,"revision":revision,"pid":std::process::id()}),
+        )?
+        .as_bytes(),
     )?;
     Ok(generation)
 }

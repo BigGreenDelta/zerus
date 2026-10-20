@@ -52,6 +52,42 @@ public:
         if(process){process->disconnect();process->kill();process->waitForFinished(1000);}
     }
 private:
+    static bool hex(const QJsonValue &value,int size){
+        if(!value.isString()||value.toString().size()!=size)return false;
+        for(const auto c:value.toString())if(!((c>='0'&&c<='9')||(c>='a'&&c<='f')))return false;
+        return true;
+    }
+    static bool statusShape(const QJsonObject &result){
+        if((result.contains("ok")&&result.value("ok")!=QJsonValue(true))
+            ||!result.value("configured").isBool()||!result.value("running").isBool()
+            ||result.value("startup_at_login")!=QJsonValue(false)||result.contains("stopping"))return false;
+        const bool configured=result.value("configured").toBool(),running=result.value("running").toBool();
+        if(!configured)return !running&&result.value("revision")==QJsonValue(QString())
+            &&(result.value("generation").isUndefined()||result.value("generation").isNull())
+            &&(result.value("server_url").isUndefined()||result.value("server_url").isNull())
+            &&(result.value("state_dir").isUndefined()||result.value("state_dir").isNull());
+        return hex(result.value("revision"),64)&&result.value("server_url").isString()
+            &&RelaySettings::validUrl(result.value("server_url").toString())
+            // A manually supplied configuration may use the connector's
+            // default state directory, reported as null by management.
+            &&(result.value("state_dir").isNull()||(result.value("state_dir").isString()
+                &&!result.value("state_dir").toString().isEmpty()))
+            &&(running?hex(result.value("generation"),32):result.value("generation").isNull());
+    }
+    static bool confirmed(const QString &action,const QJsonObject &result,const QJsonObject &sent,const QJsonObject &previous){
+        if(action=="stop"&&result.value("stopping")==QJsonValue(true)){
+            return result.keys().size()==2&&hex(result.value("generation"),32)
+                &&result.value("generation")==sent.value("generation");
+        }
+        if(!statusShape(result))return false;
+        if(action=="status")return true;
+        if(action=="save")return result.value("configured")==QJsonValue(true)
+            &&result.value("running")==QJsonValue(false)&&result.value("server_url")==sent.value("server_url");
+        if(result.value("revision")!=sent.value("revision")||result.value("configured")!=QJsonValue(true)
+            ||result.value("state_dir")!=previous.value("state_dir")
+            ||result.value("server_url")!=previous.value("server_url"))return false;
+        return action=="start"?result.value("running")==QJsonValue(true):action=="stop"&&result.value("running")==QJsonValue(false);
+    }
     QString program,path;QJsonObject snapshot;QProcess *process=nullptr;
     QLineEdit *url,*token;QLabel *state,*notice;QPushButton *save,*start,*stop,*reload;
     void controls(bool busy){
@@ -69,12 +105,13 @@ private:
         p->setProcessEnvironment(environment);p->setProcessChannelMode(QProcess::SeparateChannels);
         auto *deadline=new QTimer(p);deadline->setSingleShot(true);
         auto output=std::make_shared<QByteArray>();
-        auto finish=[this,p,deadline,output,action](bool success){
+        const auto previous=snapshot;
+        auto finish=[this,p,deadline,output,action,payload,previous](bool success){
             if(process!=p)return;
             deadline->stop();process=nullptr;
             const auto bytes=*output+p->readAllStandardOutput();
             const auto doc=QJsonDocument::fromJson(bytes);const auto result=doc.object();
-            if(!success||!doc.isObject()||result.value("ok")==false||bytes.size()>65536){
+            if(!success||!doc.isObject()||bytes.size()>65536||!confirmed(action,result,payload,previous)){
                 notice->setText(tr("Connector operation was not confirmed. Reload status before retrying. Check that the portable ZIP includes zerus-mobile-connector.exe and private configuration is available."));
                 state->setText(tr("Connector: status unknown"));
                 // An uncertain start/save/stop grants no retry authority. Only

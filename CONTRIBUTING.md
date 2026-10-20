@@ -217,7 +217,9 @@ cargo +1.99.1 build --release --locked --manifest-path services/mobile/connector
 HGS_TEST_CONNECTOR="$(cygpath -w "$PWD/services/mobile/connector/target/release/zerus-mobile-connector.exe")" \
 HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
 HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" \
-  python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
+  python scripts/ci/outside-job.py --custody-only --timeout 900 \
+    --log artifacts/test-results/windows-mobile-gateway.log -- \
+    python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
 python scripts/package-windows.py --cli target/release/hgs.exe \
     --connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
     --gui .ci-build/gui/hgs-tray.exe --conpty target/conpty \
@@ -276,8 +278,14 @@ It creates only a throwaway profile, tracked fake Codex session, copied gateway
 bundle and HTTPS loopback protocol fixture. It checks actual connector Start,
 duplicate Start, published capabilities, Terminal snapshot/input and duplicate
 receipts, phone-list/invitation APIs, graceful Stop and the same surviving native
-host/session. Failure cleanup verifies the unique copied process image and holds
-its Windows process handle before terminating that fixture. It does not install
+host/session. Startup custody is reserved before Start, including failed or
+timed-out launches. Recovery verifies the private revision/generation/control
+and unique copied process image, pins a Windows process handle and rechecks
+control. Cleanup requires confirmed handle exit; an unknown final wait retains
+the private root and fails the gate. Forced termination is limited to that owned
+handle and also fails the graceful-stop gate. The separate `--custody-only`
+launcher forbids executable-pattern cleanup and retains unknown timeout state;
+there is no PID/tree fallback for the connector. It does not install
 into an owner profile, contact a production relay or pair a real phone. Run the
 production relay's existing contract suites separately. A skipped or unavailable
 Windows suite is not evidence of supported runtime behavior.

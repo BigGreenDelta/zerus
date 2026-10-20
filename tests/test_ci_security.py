@@ -324,7 +324,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("rustup toolchain install 1.99.1 --profile minimal --component clippy", windows)
         # The runner's stdin is a synchronous pipe that Windows OpenSSH never exits on.
         for line in ("cargo test --locked </dev/null", "test_windows_client.py -v </dev/null",
-                     "test_windows_lifecycle test_windows_hooks test_windows_mobile_gateway test_backend_contract </dev/null",
+                     "test_windows_lifecycle test_windows_hooks test_backend_contract </dev/null",
+                     "test_windows_mobile_gateway.py -v </dev/null",
                      "bash scripts/ci/gui.sh build </dev/null", "bash scripts/ci/gui.sh test </dev/null",
                      "--output artifacts/zerus-windows-x86_64.zip </dev/null",
                      "--run --selftest \\\n            </dev/null"):
@@ -849,13 +850,18 @@ class WorkflowSecurityTests(unittest.TestCase):
         modules = [word for word in re.search(r"python -m unittest -v ([\w \\\n]+?)</dev/null", host)[1].split()
                    if word != "\\"]
         self.assertEqual(modules, ["test_windows_host", "test_windows_host_conpty", "test_windows_host_survival",
-                                   "test_windows_lifecycle", "test_windows_hooks", "test_windows_mobile_gateway", "test_backend_contract"])
+                                   "test_windows_lifecycle", "test_windows_hooks", "test_backend_contract"])
         connector = next(step for step in steps if "Windows mobile connector build" in step)
         self.assertIn("--test windows_gateway </dev/null", connector)
         self.assertIn("--locked --release --manifest-path services/mobile/connector/Cargo.toml", connector)
         self.assertNotIn("--features test-hooks", connector)
         self.assertLess(steps.index(connector), steps.index(host))
-        self.assertIn("export HGS_TEST_CONNECTOR\n", host)
+        gateway = next(step for step in steps if "Windows mobile gateway isolated custody gate" in step)
+        self.assertIn("--custody-only --timeout 900", gateway)
+        self.assertIn("test_windows_mobile_gateway.py", gateway)
+        self.assertNotIn("--end", gateway)
+        self.assertNotIn("test_windows_mobile_gateway", host)
+        self.assertNotIn("gateway-bundle", host)
         self.assertIn("--connector target/release/zerus-mobile-connector.exe", package)
         for module in modules:
             self.assertTrue((ROOT / "tests" / f"{module}.py").is_file(), module)

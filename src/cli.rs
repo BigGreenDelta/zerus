@@ -569,11 +569,14 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         }
         "ls" => list(&config, args, dry),
         "archives" => {
+            let mobile = cfg!(windows) && args.last().map(String::as_str)==Some("--windows-mobile");
+            let args = if mobile { &args[..args.len()-1] } else { args };
             if (args != ["--json"] && args != ["lookup","--json"]) || dry { return Err(Error::new(1,"usage: hgs archives [lookup] --json (JSON query on stdin)")); }
             let query = state::archive_catalog::read_query().map_err(|e| Error::new(1,e))?;
             let result = if args.first().map(String::as_str) == Some("lookup") {
-                state::archive_catalog::lookup(&query)
-            } else { state::archive_catalog::page(&query) }.map_err(|e| Error::new(1,e))?;
+                if mobile { state::archive_catalog::lookup_scoped(&query,true) } else { state::archive_catalog::lookup(&query) }
+            } else if mobile { state::archive_catalog::page_scoped(&query,true) }
+            else { state::archive_catalog::page(&query) }.map_err(|e| Error::new(1,e))?;
             println!("{result}"); Ok(0)
         },
         "reference" => {

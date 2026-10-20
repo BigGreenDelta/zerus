@@ -157,7 +157,11 @@ pub fn verify(file: &File, directory: bool) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
         let header = unsafe { &*(ace as *const ACE_HEADER) };
-        if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 || header.AceType == 1 {
+        // An inherit-only allow is inert on a file, but a directory can pass
+        // it to SQLite sidecars created with the default security descriptor.
+        // Check its recipient before admitting the directory for any write.
+        if (!directory && u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0) || header.AceType == 1
+        {
             continue;
         }
         if header.AceType != 0 {

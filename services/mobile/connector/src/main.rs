@@ -7,6 +7,35 @@ use zerus_mobile_connector::{check, cli, config, start, STARTUP_FAILURE};
 
 fn main() -> ExitCode {
     #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--admit-revision")) {
+        let args: Vec<_> = std::env::args_os().collect();
+        let admitted = (|| {
+            if args.len() != 5 || args[3] != "--config" {
+                return None;
+            }
+            let revision = args[2].to_str()?;
+            if revision.len() != 64 || !revision.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let environment = config::Environment::current().ok()?;
+            zerus_mobile_connector::start_bound(
+                std::path::Path::new(&args[4]),
+                false,
+                &environment,
+                zerus_mobile_connector::now(),
+                Some(revision),
+            )
+            .ok()
+        })();
+        return match admitted {
+            Some(started) => ExitCode::from(zerus_mobile_connector::run(started)),
+            None => {
+                log("ERROR", STARTUP_FAILURE);
+                ExitCode::from(1)
+            }
+        };
+    }
+    #[cfg(windows)]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--manage")) {
         use std::io::Read;
         let args: Vec<_> = std::env::args_os().collect();

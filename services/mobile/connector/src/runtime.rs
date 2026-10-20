@@ -361,7 +361,7 @@ impl<N: Native + 'static> Connector<N> {
             snapshot.insert("mobile_archive".into(), state.archive_preview_meta.clone());
         }
         if self.flags.get().windows_gateway {
-            sessions.retain(|row| matches!(row["cmd"].as_str(), Some("codex" | "claude" | "kimi")));
+            sessions.retain(|row| crate::capabilities::windows_provider(&row["cmd"]));
         }
         // Native SSH aliases and the peer-of-peer inventory stay local.
         snapshot.remove("peers");
@@ -449,11 +449,19 @@ impl<N: Native + 'static> Connector<N> {
             state.archive_preview.clear();
             state.archive_preview_meta = crate::archives::unavailable();
         }
-        let call = Call::new(["archives", "--json"])
+        let windows = self.flags.get().windows_gateway;
+        let call = crate::archives::call(false, windows)
             .payload(json!({}))
             .timeout(5.0);
         let preview = match self.native(call).await {
-            Ok(output) => crate::archives::preview(&output.json()).ok(),
+            Ok(output) => {
+                let page = output.json();
+                if windows && !crate::archives::supported_page(&page) {
+                    None
+                } else {
+                    crate::archives::preview(&page).ok()
+                }
+            }
             Err(_) => None,
         };
         let mut state = self.state.borrow_mut();

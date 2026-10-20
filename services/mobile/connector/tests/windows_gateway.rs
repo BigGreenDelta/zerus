@@ -60,6 +60,77 @@ fn journal_lock_has_one_writer_and_preserves_binding() {
     assert!(Journal::open(&state, "original-binding", 4.0).is_ok());
 }
 #[test]
+fn inheritable_world_allow_refuses_existing_database_before_sidecar_creation() {
+    let scratch = Scratch::new();
+    let state = scratch.0.join("receipts");
+    drop(Journal::open(&state, "fixture", 1.0).unwrap());
+    let db = state.join("journal.sqlite3");
+    let protected = std::process::Command::new("icacls")
+        .arg(&db)
+        .args(["/inheritance:d"])
+        .output()
+        .unwrap();
+    assert!(protected.status.success());
+    zerus_windows_private::open_file(&db, false, false).unwrap();
+    let before = std::fs::read(&db).unwrap();
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(!state.join(format!("journal.sqlite3{suffix}")).exists());
+    }
+    let result = std::process::Command::new("icacls")
+        .arg(&state)
+        .args(["/grant", "*S-1-1-0:(OI)(CI)(IO)(R)"])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    // The existing DB remains private: only future children inherit the ACE.
+    zerus_windows_private::open_file(&db, false, false).unwrap();
+    assert!(Journal::open(&state, "fixture", 2.0).is_err());
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(!state.join(format!("journal.sqlite3{suffix}")).exists());
+    }
+}
+#[test]
+fn saved_revision_cannot_win_a_held_child_admission() {
+    let scratch = Scratch::new();
+    let path = scratch.0.join("mobile/connector.json");
+    let first=manage("save", &path, &json!({"revision":"","server_url":"https://relay.example.test","node_token":"synthetic-token-a"})).unwrap();
+    let revision = first["revision"].as_str().unwrap().to_owned();
+    let (release, held) = std::sync::mpsc::channel();
+    let child_path = path.clone();
+    // The child is held just before the exact admission routine called by
+    // --admit-revision. No runtime/native/network object is constructed here.
+    let child = std::thread::spawn(move || {
+        held.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        zerus_mobile_connector::start_bound(
+            &child_path,
+            false,
+            &Environment::current().unwrap(),
+            1.0,
+            Some(&revision),
+        )
+        .is_err()
+    });
+    let second=manage("save", &path, &json!({"revision":first["revision"],"server_url":"https://relay.example.test","node_token":"synthetic-token-b"})).unwrap();
+    release.send(()).unwrap();
+    assert!(child.join().unwrap());
+    assert_eq!(
+        manage("status", &path, &json!({})).unwrap()["running"],
+        false
+    );
+    for state in [&first["state_dir"], &second["state_dir"]] {
+        let state = PathBuf::from(state.as_str().unwrap());
+        for file in [
+            "connector-control.json",
+            "connector.lock",
+            "journal.sqlite3",
+        ] {
+            assert!(!state.join(file).exists());
+        }
+    }
+}
+#[test]
 fn configuration_is_redacted_revision_guarded_and_stop_is_generation_bound() {
     let scratch = Scratch::new();
     let path = scratch.0.join("mobile/connector.json");
@@ -79,6 +150,10 @@ fn configuration_is_redacted_revision_guarded_and_stop_is_generation_bound() {
     let running = start(&path, false, &environment, 1.0).unwrap();
     let status = manage("status", &path, &json!({})).unwrap();
     assert_eq!(status["running"], true);
+    assert_eq!(
+        manage("start", &path, &json!({"revision":status["revision"]})).unwrap(),
+        status
+    );
     assert!(manage("save",&path,&json!({"revision":status["revision"],"server_url":"https://relay.example.test","node_token":""})).is_err());
     assert!(manage(
         "stop",
