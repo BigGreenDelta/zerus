@@ -278,8 +278,10 @@ pub fn manage(action: &str, path: &Path, input: &Value) -> Result<Value> {
     let expected_revision = current["revision"]
         .as_str()
         .ok_or("configuration revision unavailable")?;
-    let removed_keys: Vec<_> = native::CONTEXT_KEYS.into_iter()
-        .chain(["HGS_HOST_SESSION", "HGS_HOST_PANE"]).collect();
+    let removed_keys: Vec<_> = native::CONTEXT_KEYS
+        .into_iter()
+        .chain(["HGS_HOST_SESSION", "HGS_HOST_PANE"])
+        .collect();
     // The GUI's job permits breakaway. Refuse launch if an enclosing job does
     // not permit it; never silently attach the connector to a kill-on-close job.
     // The child has a nonblocking admission guard. Release before spawning so
@@ -288,7 +290,12 @@ pub fn manage(action: &str, path: &Path, input: &Value) -> Result<Value> {
     drop(_guard);
     // Null standard streams alone still let Rust's broad inheritance copy the
     // manager's original pipe handles. The fixed launcher allowlists NUL only.
-    let child = zerus_windows_private::spawn_connector(&executable, expected_revision, path, &removed_keys)?;
+    let child = zerus_windows_private::spawn_connector(
+        &executable,
+        expected_revision,
+        path,
+        &removed_keys,
+    )?;
     // Readiness requires the observed revision, journal lock and generation.
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
