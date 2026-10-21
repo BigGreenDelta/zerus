@@ -6,7 +6,7 @@ import copy
 import builtins
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sys
 import tempfile
 import types
@@ -39,12 +39,48 @@ def card():
                 questions=[dict(id='hooks_trust', options=[dict(id='trust')])])
 
 
+def readonly_hooks():
+    return dict(source='startup_terminal_choice', question_id='startup-choice:' + 'd' * 64,
+                question_hash='d' * 64, can_answer=False, run_id='run', agent_id='main',
+                conversation_id=None, tool_call_id='', answer_transport='',
+                answer_unavailable_reason='Answer this in Terminal.', questions=[dict(
+                    id='terminal', header='Terminal', question='Hooks need review',
+                    body='13 hooks are new or changed.\nHooks can run outside the sandbox after you trust them.',
+                    multi_select=False, allow_other=False, options=[dict(id='1', label='Review hooks'),
+                    dict(id='2', label='Trust all and continue'),
+                    dict(id='3', label="Continue without trusting (hooks won't run)")])])
+
+
 def state(*cards, ready=False):
     return dict(run_id='run', tracked=True, pending_questions=list(cards), first_message_can_send=ready,
                 first_message_reason='' if ready else 'not ready')
 
 
 class HintFixtureControls(unittest.TestCase):
+    def test_macos_image_uses_kernel_path_and_preserves_birth_and_absolute_identity_guards(self):
+        import posixpath
+        class Identity(fixture.HintContract, unittest.TestCase): pass
+        value = Identity()
+        value.AGENT, value.bin, value.phase, value.env = 'claude', PurePosixPath('/fixture/owned/bin'), 'candidate', {}
+        value.checkpoints, value.remaining = [], lambda maximum: maximum
+        record = dict(pid=123, process_start='Wed Oct 21 07:21:07 2026', run_id='run')
+        value.binding = lambda name: record
+        helper = SimpleNamespace(executable=lambda pid: PurePosixPath('/fixture/owned/bin/claude'))
+        frozen_os = SimpleNamespace(name='posix', path=posixpath, PathLike=fixture.os.PathLike, fspath=fixture.os.fspath)
+        with patch.object(fixture, 'os', frozen_os), patch.object(fixture.sys, 'platform', 'darwin'), \
+                patch.dict(sys.modules, {'test_kimi_native': helper}), \
+                patch.object(fixture.subprocess, 'check_output', return_value=b'Wed Oct 21 07:21:07 2026 claude'):
+            value.native_identity('claude/p/test')
+            self.assertEqual(value.checkpoints[-1]['image'], '/fixture/owned/bin/claude')
+            for image in (PurePosixPath('claude'), PurePosixPath('/fixture/foreign/claude'), None):
+                helper.executable = lambda pid, result=image: result
+                with self.subTest(image=image), self.assertRaises(AssertionError):
+                    value.native_identity('claude/p/test')
+            helper.executable = lambda pid: PurePosixPath('/fixture/owned/bin/claude')
+            record['process_start'] = 'Wed Oct 21 07:21:08 2026'
+            with self.assertRaises(AssertionError): value.native_identity('claude/p/test')
+        self.assertEqual(len(value.checkpoints), 1)
+
     def test_claude_folder_trust_selects_exact_positive_label_and_rejects_refusal_or_changed_labels(self):
         item = dict(card(), source='claude_folder_trust', question_id='claude-trust:' + 'c' * 64,
                     questions=[dict(id='trust', options=[dict(id='trust_0', label='No, exit'),
@@ -275,6 +311,44 @@ class HintFixtureControls(unittest.TestCase):
         self.assertEqual(value.startup_ends['run'], 120)
         self.assertEqual(value.proven, ['codex/p/test'])
 
+    def test_readonly_hooks_waits_for_supported_card_and_only_that_card_is_answered_once(self):
+        views = [state(readonly_hooks(), ready=True), state(card()), state(ready=True)]
+        value, calls, now = self.gate_double(views), [], [0.]
+        with patch.object(fixture.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(fixture.time, 'sleep', side_effect=lambda n: now.__setitem__(0, now[0] + n)), \
+                patch.object(fixture.subprocess, 'run', side_effect=self.fake_answer(calls)):
+            value.gate('codex/p/test', 'run')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(json.loads(calls[0][1]['input'])['question_id'], card()['question_id'])
+        self.assertEqual(value.checkpoints[0]['consent'], 'codex_hooks_trust')
+        self.assertEqual(value.startup_ends['run'], 120.)
+        self.assertEqual(value.proven, ['codex/p/test'])
+
+    def test_readonly_hooks_forever_expires_without_answer_prompt_or_new_deadline(self):
+        value, calls, now = self.gate_double([state(readonly_hooks(), ready=True)]), [], [119.9]
+        value.startup_ends['run'] = 120.
+        with patch.object(fixture.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(fixture.time, 'sleep', side_effect=lambda n: now.__setitem__(0, now[0] + n)), \
+                patch.object(fixture.subprocess, 'run', side_effect=self.fake_answer(calls)), \
+                self.assertRaisesRegex(AssertionError, 'gate remained closed'):
+            value.gate('codex/p/test', 'run')
+        self.assertEqual((calls, value.proven, value.attempted), ([], [], set()))
+        self.assertEqual(value.startup_ends['run'], 120.)
+
+    def test_changed_readonly_hooks_frames_are_refused_instead_of_waited_or_answered(self):
+        for change in ('count', 'title', 'option', 'hash', 'run', 'answerable', 'transport', 'typed-choice'):
+            item = readonly_hooks()
+            if change == 'count': item['questions'][0]['body'] = item['questions'][0]['body'].replace('13', '14')
+            if change == 'title': item['questions'][0]['question'] = 'Unknown review'
+            if change == 'option': item['questions'][0]['options'][1]['label'] = 'Continue'
+            if change == 'hash': item['question_hash'] = 'c' * 64
+            if change == 'run': item['run_id'] = 'other'
+            if change == 'answerable': item['can_answer'] = None
+            if change == 'transport': item['answer_transport'] = 'codex_tui'
+            if change == 'typed-choice': item['questions'][0]['multi_select'] = 0
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                fixture.startup_answer(state(item), dict(run_id='run', agent='codex'), set())
+
     def test_existing_original_deadline_is_never_renewed(self):
         value, calls, now = self.gate_double([state()]), [], [119.9]
         value.startup_ends['run'] = 120
@@ -465,6 +539,73 @@ class HintFixtureControls(unittest.TestCase):
             fixture.stop_pinned_handle(123, lambda: '/fixture/owned/hgs.exe', '/fixture/owned',
                                        lambda *args: 0x102, stop, expired)
         self.assertEqual(stopped, [])
+
+    def test_unavailable_pinned_image_requires_exit_on_that_same_handle_or_remains_unknown(self):
+        calls, signals = [], []
+        for state_after in (0, 0x102, 0xffffffff):
+            states = iter((0x102, state_after))
+            def wait(handle, timeout):
+                calls.append((handle, timeout))
+                return next(states)
+            def stop(*args): signals.append(args); return 1
+            if state_after == 0:
+                fixture.stop_pinned_handle(123, lambda: None, '/fixture/owned', wait, stop, lambda n: n)
+            else:
+                with self.assertRaisesRegex(AssertionError, 'image unavailable'):
+                    fixture.stop_pinned_handle(123, lambda: None, '/fixture/owned', wait, stop, lambda n: n)
+        self.assertEqual(calls, [(123, 0)] * 6)
+        with self.assertRaisesRegex(AssertionError, 'absolute image unavailable'):
+            fixture.stop_pinned_handle(123, lambda: 'hgs.exe', '/fixture/owned', lambda *args: 0x102,
+                                       lambda *args: signals.append(args), lambda n: n)
+        self.assertEqual(signals, [])
+
+    def test_image_query_uses_only_the_supplied_handle_and_never_opens_a_pid(self):
+        import ctypes
+        seen = []
+        class Query:
+            def __call__(self, handle, flags, buffer, size):
+                seen.append((handle, flags))
+                buffer.value = '/fixture/owned/hgs.exe'
+                return 1
+        kernel = SimpleNamespace(QueryFullProcessImageNameW=Query())
+        with patch.object(ctypes, 'WinDLL', return_value=kernel, create=True):
+            image = fixture.pinned_image_query()
+            self.assertEqual(image(123), '/fixture/owned/hgs.exe')
+        self.assertEqual(seen, [(123, 0)])
+        self.assertFalse(hasattr(kernel, 'OpenProcess'))
+
+    def test_cleanup_details_bound_arguments_and_retain_error_source_without_locals(self):
+        def failed(): raise TypeError('missing image', None, 'x' * 2048)
+        try:
+            failed()
+        except TypeError as error:
+            detail = fixture.cleanup_error('owned handle', error, pid=123)
+        self.assertEqual(detail['error'], 'TypeError')
+        self.assertEqual(detail['arguments'][0], dict(type='str', text='missing image', truncated=False))
+        self.assertEqual(detail['arguments'][1], dict(type='NoneType', text='None', truncated=False))
+        self.assertEqual(len(detail['arguments'][2]['text']), 1024)
+        self.assertIs(detail['arguments'][2]['truncated'], True)
+        self.assertEqual(detail['frames'][-1]['function'], 'failed')
+        self.assertEqual(detail['context'], dict(pid=123))
+        self.assertNotIn('locals', json.dumps(detail))
+
+    def test_cleanup_detail_overflow_is_explicit_and_never_turns_failed_cleanup_into_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, evidence = Path(folder) / 'runtime', Path(folder) / 'evidence'
+            root.mkdir(); evidence.mkdir()
+            value = self.cleanup_double(root, evidence)
+            for _ in range(17): value.note_cleanup_error('private stop', AssertionError('unconfirmed stop'))
+            def fail(): raise AssertionError('unconfirmed stop')
+            value.stop_unix = value.stop_host = fail
+            with patch.object(fixture.time, 'monotonic', return_value=0), self.assertRaises(AssertionError):
+                value.cleanup_owned()
+            saved = json.loads((evidence / 'cleanup.json').read_text())
+            self.assertEqual(len(saved['errors']), 16)
+            self.assertIs(saved['errors_overflow'], True)
+            self.assertIs(saved['verified'], False)
+            self.assertIn('model', value.steps)
+            self.assertIn('observer', value.steps)
+            self.assertTrue(root.exists())
 
     def test_hanging_model_close_join_is_clamped_to_original_end(self):
         joined = []

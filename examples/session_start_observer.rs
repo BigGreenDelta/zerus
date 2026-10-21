@@ -178,6 +178,32 @@ fn identity(child: &process::Child) -> Option<Value> {
     Some(json!({"pid":child.id(),"birth":birth.to_string(),"image":image}))
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn absolute_kernel_image(bytes: &[u8]) -> Option<&str> {
+    let end = bytes.iter().position(|byte| *byte == 0)?;
+    let image = std::str::from_utf8(&bytes[..end]).ok()?;
+    if !image.starts_with('/') {
+        return None;
+    }
+    Some(image)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_image(pid: u32) -> Option<String> {
+    let mut path = [0u8; 4096];
+    let count = unsafe {
+        libc::proc_pidpath(
+            pid as i32,
+            path.as_mut_ptr() as *mut libc::c_void,
+            path.len() as u32,
+        )
+    };
+    if count <= 0 || count as usize > path.len() {
+        return None;
+    }
+    Some(absolute_kernel_image(&path)?.to_owned())
+}
+
 #[cfg(all(unix, not(target_os = "linux")))]
 fn identity(child: &process::Child) -> Option<Value> {
     // A read-only process query, not a native-agent capability probe. The real
@@ -196,7 +222,11 @@ fn identity(child: &process::Child) -> Option<Value> {
     if fields.len() < 6 {
         return None;
     }
-    Some(json!({"pid":child.id(),"birth":fields[..5].join(" "),"image":fields[5..].join(" ")}))
+    #[cfg(target_os = "macos")]
+    let image = macos_image(child.id())?;
+    #[cfg(not(target_os = "macos"))]
+    let image = fields[5..].join(" ");
+    Some(json!({"pid":child.id(),"birth":fields[..5].join(" "),"image":image}))
 }
 
 #[cfg(windows)]
@@ -428,6 +458,22 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernel_image_requires_absolute_terminated_utf8_without_ps_reconstruction() {
+        assert_eq!(
+            absolute_kernel_image(b"/fixture/owned/agent with spaces\0"),
+            Some("/fixture/owned/agent with spaces")
+        );
+        for unknown in [
+            &b"claude\0"[..],
+            &b"\0"[..],
+            &b"/fixture/no-terminator"[..],
+            &b"/fixture/\xff\0"[..],
+        ] {
+            assert!(absolute_kernel_image(unknown).is_none());
+        }
+    }
 
     #[test]
     fn capture_ceiling_never_truncates_forwarding() {

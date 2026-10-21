@@ -25,6 +25,13 @@ PRE_FEATURE = 'ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce'
 PREPARATION_SECONDS = 2400
 FETCH_SECONDS = 600
 BUILD_SECONDS = 900
+HASH_PROFILE = 'profile.dev.package.sha2.opt-level=3'
+
+
+def build_arguments(cargo, *targets):
+    """Optimize the qualification images' hashing without changing defaults."""
+    return [cargo, 'build', '--locked', '--offline', '-j2', '-vv',
+            '--config', HASH_PROFILE, '--bin', 'hgs', *targets]
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -200,8 +207,7 @@ def prepare(args):
                                    ('pre-feature', args.pre_feature, [])):
             target_dir = output / (label + '-target')
             build_env = dict(env, CARGO_TARGET_DIR=str(target_dir))
-            command(label + '-build', [args.cargo, 'build', '--locked', '--offline', '-j2', '-vv',
-                                      '--bin', 'hgs', *extra], path, BUILD_SECONDS, build_env)
+            command(label + '-build', build_arguments(args.cargo, *extra), path, BUILD_SECONDS, build_env)
             report[label.replace('-', '_')]['build_target'] = str(target_dir)
         suffix = '.exe' if os.name == 'nt' else ''
         paths = dict(candidate=output / 'candidate-target/debug' / ('hgs' + suffix),

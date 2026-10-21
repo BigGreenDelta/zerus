@@ -23,6 +23,16 @@ class HostedHintContract(unittest.TestCase):
     def workflow(self):
         return (ROOT / '.github/workflows/agent-hint.yml').read_text()
 
+    def test_only_the_qualification_build_argv_optimize_the_existing_sha2_dependency(self):
+        cargo = Path('/fixture/toolchain/cargo')
+        base = [cargo, 'build', '--locked', '--offline', '-j2', '-vv', '--config',
+                'profile.dev.package.sha2.opt-level=3', '--bin', 'hgs']
+        self.assertEqual(prepare.build_arguments(cargo), base)
+        self.assertEqual(prepare.build_arguments(cargo, '--example', 'session_start_observer'),
+                         base + ['--example', 'session_start_observer'])
+        self.assertEqual((prepare.PREPARATION_SECONDS, prepare.FETCH_SECONDS, prepare.BUILD_SECONDS),
+                         (2400, 600, 900))
+
     def test_five_public_disposable_jobs_are_explicitly_opted_in(self):
         text = self.workflow()
         self.assertIn('  workflow_dispatch:', text)

@@ -147,6 +147,10 @@ def startup_answer(state, binding, attempted):
         raise AssertionError('ambiguous startup consent')
     card = cards[0]
     if not isinstance(card, dict): raise AssertionError('unknown startup card')
+    if readonly_hooks_review(card, binding):
+        # A later public inspection must expose the supported answerable card.
+        # This observation grants no answer, prompt, count or fresh deadline.
+        return None
     choices = {'claude_folder_trust': ('claude-trust:', 'trust', 'trust_1'),
                'codex_folder_trust': ('codex-trust:', 'trust', 'trust_0'),
                'codex_hooks_trust': ('codex-hooks-trust:', 'hooks_trust', 'trust'),
@@ -169,6 +173,29 @@ def startup_answer(state, binding, attempted):
             dict(id='trust_1', label='Yes, I trust this folder')]:
         raise AssertionError('changed Claude trust choices; no answer authorized')
     return key, card, dict(question_id=question, selected_option_ids=[option], text='')
+
+
+def readonly_hooks_review(card, binding):
+    """The one observed read-only frame may wait; it can never authorize input."""
+    value = card.get('question_hash')
+    questions = card.get('questions')
+    return (binding.get('agent') == 'codex' and binding.get('conversation_id') in (None, '')
+            and card.get('source') == 'startup_terminal_choice' and card.get('can_answer') is False
+            and card.get('run_id') == binding['run_id'] and card.get('agent_id') == 'main'
+            and card.get('conversation_id') in (None, '') and card.get('tool_call_id') == ''
+            and card.get('answer_transport') == ''
+            and card.get('answer_unavailable_reason') == 'Answer this in Terminal.'
+            and isinstance(value, str) and len(value) == 64
+            and all(char in '0123456789abcdef' for char in value)
+            and card.get('question_id') == 'startup-choice:' + value
+            and isinstance(questions, list) and len(questions) == 1 and isinstance(questions[0], dict)
+            and questions[0].get('multi_select') is False and questions[0].get('allow_other') is False
+            and questions == [dict(id='terminal', header='Terminal',
+                question='Hooks need review',
+                body='13 hooks are new or changed.\nHooks can run outside the sandbox after you trust them.',
+                multi_select=False, allow_other=False, options=[
+                    dict(id='1', label='Review hooks'), dict(id='2', label='Trust all and continue'),
+                    dict(id='3', label="Continue without trusting (hooks won't run)")])])
 
 
 def public_ready(state, record):
@@ -206,11 +233,51 @@ def stop_pinned_handle(handle, image, root, wait, terminate, remaining):
     state = wait(handle, 0)
     if state == 0: return
     if state != 0x102: raise AssertionError('UNKNOWN pinned handle state')
-    root, actual = (os.path.normcase(os.path.realpath(value)) for value in (root, image()))
+    actual = image()
+    if actual is None:
+        if wait(handle, 0) == 0: return
+        raise AssertionError('UNKNOWN pinned handle image unavailable')
+    if not isinstance(actual, (str, os.PathLike)) or not os.path.isabs(actual):
+        raise AssertionError('UNKNOWN pinned handle absolute image unavailable')
+    root, actual = (os.path.normcase(os.path.realpath(value)) for value in (root, actual))
     if os.path.commonpath([root, actual]) != root: raise AssertionError('foreign image: no forced stop')
     remaining(1)
     if not terminate(handle, 1): raise AssertionError('UNKNOWN owned forced stop')
     if wait(handle, int(remaining(5) * 1000)) != 0: raise AssertionError('UNKNOWN owned reap at original end')
+
+
+def pinned_image_query():
+    """Query an already-owned handle; never reopen a numeric process ID."""
+    import ctypes
+    from ctypes import wintypes
+    library = ctypes.WinDLL('kernel32', use_last_error=True)
+    query = library.QueryFullProcessImageNameW
+    query.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+    query.restype = wintypes.BOOL
+    def image(handle):
+        buffer = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buffer))
+        if not query(handle, 0, buffer, ctypes.byref(size)):
+            return None
+        return buffer.value
+    return image
+
+
+def cleanup_error(stage, error, **context):
+    """Bounded private exception details, without locals or an extra OS query."""
+    arguments = []
+    for value in error.args[:8]:
+        text = (value if isinstance(value, str) else repr(value)
+                if value is None or isinstance(value, (bool, int, float, bytes)) else '<non-scalar argument>')
+        arguments.append(dict(type=type(value).__name__, text=text[:1024], truncated=len(text) > 1024))
+    frames, frame = [], error.__traceback__
+    while frame is not None and len(frames) < 8:
+        code = frame.tb_frame.f_code
+        frames.append(dict(file=code.co_filename[-512:], line=frame.tb_lineno, function=code.co_name[:128]))
+        frame = frame.tb_next
+    return dict(stage=stage, error=type(error).__name__, arguments=arguments,
+                arguments_truncated=len(error.args) > 8, frames=frames,
+                frames_truncated=frame is not None, context=context)
 
 
 class HintContract:
@@ -230,6 +297,7 @@ class HintContract:
         self.phase, self.attempted, self.checkpoints = 'candidate', set(), []
         self.startup_ends, self.completed_runs = {}, set()
         self.cli_children, self.cleanup_intents, self.cli_observations = [], [], []
+        self.cleanup_errors, self.cleanup_errors_overflow = [], False
         self.result_dir = Path(os.environ['ZERUS_HINT_RESULTS']) / self.id()
         self.result_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
         self.observations = self.result_dir / 'calls'
@@ -615,8 +683,15 @@ class HintContract:
                                           env=dict(self.env, LC_ALL='C', TZ='UTC'), text=True,
                                           timeout=self.remaining(10)).strip().split(None, 5)
             self.assertEqual(' '.join(out[:5]), ' '.join(record['process_start'].split()))
-            # Linux comm is only a basename; macOS comm retains the full image.
-            image = os.readlink('/proc/' + str(pid) + '/exe') if sys.platform.startswith('linux') else out[5]
+            if sys.platform == 'darwin':
+                from test_kimi_native import executable
+                image = executable(pid)  # Existing libproc proc_pidpath helper.
+            else:
+                image = os.readlink('/proc/' + str(pid) + '/exe') if sys.platform.startswith('linux') else out[5]
+        self.assertTrue(isinstance(image, (str, os.PathLike)) and os.path.isabs(image),
+                        'native absolute image unavailable')
+        image = os.fspath(image)
+        self.assertIsInstance(image, str, 'native image text unavailable')
         self.assertEqual(os.path.normcase(os.path.realpath(image)),
                          os.path.normcase(os.path.realpath(self.bin / (self.AGENT + ('.exe' if os.name == 'nt' else '')))))
         self.checkpoints.append(dict(native_pid=pid, process_start=record['process_start'], image=image,
@@ -870,12 +945,22 @@ class HintContract:
     def save_cleanup(self, stage, problems=()):
         document = dict(stage=stage, verified=self.cleanup_verified, original_end=self.row_end,
                         runtime=str(getattr(self, 'root', '')), project_root=str(getattr(self, 'project_parent', '') or ''),
-                        intents=self.cleanup_intents, problems=list(problems))
+                        intents=self.cleanup_intents, problems=list(problems),
+                        errors=getattr(self, 'cleanup_errors', []),
+                        errors_overflow=getattr(self, 'cleanup_errors_overflow', False))
         encoded = json.dumps(document, indent=2).encode()
         self.assertLessEqual(len(encoded), MAX_RECORD, 'cleanup evidence bound')
         temporary = self.result_dir / 'cleanup.tmp'
         temporary.write_bytes(encoded)
         os.replace(temporary, self.result_dir / 'cleanup.json')
+
+    def note_cleanup_error(self, stage, error, **context):
+        if not hasattr(self, 'cleanup_errors'):
+            self.cleanup_errors, self.cleanup_errors_overflow = [], False
+        if len(self.cleanup_errors) < 16:
+            self.cleanup_errors.append(cleanup_error(stage, error, **context))
+        else:
+            self.cleanup_errors_overflow = True
 
     def stop_unix(self):
         if not hasattr(self, 'socket') or not hasattr(self, 'env'):
@@ -942,8 +1027,12 @@ class HintContract:
     def stop_host(self):
         """Only the hint classes use this; no inherited renewed wait or PID kill."""
         import test_windows_host as host
-        from test_windows_host_conpty import image_of
         problems = []
+        query = None
+        def image(handle):
+            nonlocal query
+            if query is None: query = pinned_image_query()
+            return query(handle)
         try:
             status = self.status()  # Private endpoint also covers failed launches.
             if status.get('running') is True:
@@ -963,16 +1052,18 @@ class HintContract:
                 self.ok({'op': 'stop_host'})
         except BaseException as error:
             problems.append('private stop: ' + type(error).__name__)
+            self.note_cleanup_error('private stop', error)
         # Host job is no-breakaway and kill-on-close. Pinned handles, not a PID
         # search, are the only forced-stop authority. Missing proof stays unknown.
         handles = [(pid, handle) for pid, handle in self.hosts.items()]
         handles += [(pid, handle) for (pid, _), handle in self.pinned.items()]
         for pid, handle in handles:
             try:
-                stop_pinned_handle(handle, lambda: image_of(pid), self.root,
+                stop_pinned_handle(handle, lambda: image(handle), self.root,
                                    host.KERNEL32.WaitForSingleObject, host.KERNEL32.TerminateProcess, self.remaining)
             except BaseException as error:
                 problems.append('owned handle: ' + type(error).__name__)
+                self.note_cleanup_error('owned handle', error, pid=pid)
             finally:
                 host.KERNEL32.CloseHandle(handle)
         self.hosts.clear()
@@ -1009,6 +1100,7 @@ class HintContract:
                 operation()
             except BaseException as error:
                 problems.append(type(error).__name__ + ': ' + str(error)[:400])
+                self.note_cleanup_error(getattr(operation, '__name__', 'cleanup operation'), error)
         self.cleanup_verified = not problems and time.monotonic() < self.row_end
         self.save_cleanup('verified before deletion' if self.cleanup_verified else 'UNKNOWN: runtime retained', problems)
         if self.cleanup_verified:

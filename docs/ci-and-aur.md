@@ -940,6 +940,12 @@ Admission requires typed `tracked: true`, an explicit question list, and the
 selected first/resume gate exactly `true` with its reason exactly empty. A known
 already-bound steady conversation uses its exact run/conversation and idle
 activity; its normal false first-message field has no first-message reason.
+The exact observed read-only `Hooks need review` frame with 13 new or changed
+hooks may wait within that same original gate for an answerable
+`codex_hooks_trust` card. Its current run, hash, title, disclosure and all three
+choices must match. This read-only card authorizes no answer or prompt; an altered
+card is refused, and a card that never upgrades expires at the original end.
+The product hook-review parser is unchanged.
 
 Hint cases own cleanup before partial setup or launch can return. Their process
 queries, private socket/endpoint stops, pinned-handle reaping, model shutdown and
@@ -952,6 +958,12 @@ pinned owned handles; no numeric-PID fallback is added. A parent timeout is not
 proof of descendant exit. Files are removed only after every cleanup check has
 verified within the original end. This bounds the fixture's waits, not arbitrary
 host filesystem or logging stalls.
+Windows cleanup queries the image through the already-pinned process handle.
+If that image is unavailable, one zero-time wait on the same handle must prove
+exit; otherwise cleanup remains UNKNOWN without a forced stop. Private cleanup
+evidence retains at most 16 exception records, each with at most eight bounded
+arguments and eight source frames, with explicit truncation/overflow metadata.
+It records no frame locals. Private-stop failures still fail cleanup.
 
 The fixture intentionally seeds an observed retained owned hook entry at a
 separate private executable named `hgs` or `hgs.exe`. It leaves the real stable
@@ -968,6 +980,9 @@ distinct actual SessionStart output, then empty output on the next marked resume
 marks, model counts and transcripts alone cannot prove that, particularly with
 Claude's identical-context deduplication. This is no OS/network-isolation claim,
 native execution grant, shipped feature or release-dependency waiver.
+On macOS, the observer child and fixture native process use `proc_pidpath` for
+their absolute image paths and retain the existing `ps` birth identity. A `ps`
+basename cannot establish executable identity.
 
 Each call may add five fixed, exclusive stage files: before spawn, child identity,
 first stdin write progress, child exit and drained streams. A stdin prefix is
@@ -1056,6 +1071,25 @@ and each Windows host step 28 minutes. Every job has a 120-minute whole-job cap,
 including upload. Each native row keeps its original 1200 seconds, including the
 60-second fixture cleanup reserve, original 120-second startup gates and unchanged
 five-second hook timeout.
+
+Both qualification builds pass the per-command Cargo override
+`--config profile.dev.package.sha2.opt-level=3`. The candidate hgs and observer
+share that dependency profile; the real pre-feature hgs uses it as well. Normal
+Cargo profiles, manifests and dependency pins remain unchanged. Both full
+subject hashes and all stream joins remain required under the same five-second
+hook limit. Incomplete diagnostics cannot distinguish an unfinished stream join
+from an unfinished post-exit subject hash.
+
+Focused helper qualification uses the same override in each command:
+
+```sh
+cargo test --locked --offline --example session_start_observer \
+  --config profile.dev.package.sha2.opt-level=3 -- --nocapture
+cargo clippy --locked --offline --example session_start_observer \
+  --config profile.dev.package.sha2.opt-level=3 -- -D warnings
+cargo build --locked --offline --bin hgs --example session_start_observer \
+  --config profile.dev.package.sha2.opt-level=3
+```
 
 Windows reuses `outside-job.py` unchanged: WMI creation has a 120-second cap,
 followed by a 1320-second monitor cap allowing the 1200-second row and up to 120
