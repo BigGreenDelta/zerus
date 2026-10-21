@@ -55,11 +55,12 @@ first disabled/zero-answer assertion; they never override the three-second polic
 The three early-window assertions first use the same real Home/resume route as the lifecycle case, with the exact owned
 Activity required to lose and regain focus. Only these assertions use a scoped cached Send node captured for the verified
 card: refresh, exact visible label, window and card/run/conversation identity must still match, without a fallback search.
-The cache is cleared in `finally`. Monotonic time begins before resume and must remain below the original three seconds
-after the early assertion or Enter; a slow fixture cannot qualify that precondition. The independent lifecycle case keeps
-its original Home/resume boundary exactly once, with the same cache and elapsed check around its original
-focus/question/confirmation-retired/count/disabled assertions; it never performs an additional reset. No production
-visibility, foreground or review clock is set.
+The cache is cleared in `finally`. The monotonic timestamp before the sole resume intent is a lower bound, not the
+production review-clock start. The same existing ten-second focus wait also requires a newer eligible owned production
+observation; no additional wait slot is introduced. The early assertion or Enter must finish within the original three
+seconds of that first actual review start. The independent lifecycle case keeps its original Home/resume boundary exactly
+once, with the same cache and elapsed check around its original focus/question/confirmation-retired/count/disabled
+assertions; it never performs an additional reset. No production visibility, foreground or review clock is set.
 
 The lifecycle case starts with an open native Confirm dialog, which can remove the Activity's window focus while the
 Activity is still resumed. Its single Home transition therefore waits for the same live Activity to reach lifecycle
@@ -68,13 +69,19 @@ Activity is still resumed. Its single Home transition therefore waits for the sa
 original ten-second wait slots and three-second early-review requirement remain unchanged. The former focus-only stop
 predicate did not prove an `onStop` transition; the retained failed run does not establish the exact OS event ordering.
 
-Each scoped Send cache arms its deadline once from the original pre-resume timestamp plus three seconds. A cached read
-refreshes the same exact visible owned label and current card, then follows at most sixteen ancestors in that window and
-package. Only an ancestor that fails `refresh()` permits another walk from that same validated label; the passive poll
-is clamped to the remaining original deadline. A stale label, changed card/window/package, missing action, read error,
-depth limit or late result refuses the read. There is no root search, anchor rebinding, input retry or extra review time;
-the returned native node must still satisfy the original disabled assertion. The retained feedback failure identifies
-the ancestor-loop refresh check, but not which iteration or node failed.
+Each scoped Send cache arms its deadline once from the first newer eligible committed `review.startedAt` in the same
+active owned DEBUG probe, for the exact current card/run/conversation, plus three seconds. That start must be at or after
+the pre-intent resume timestamp and no later than the observed clock. Missing, stale, foreign, closed or faulted evidence
+cannot bind the cache. An expired first start refuses; it cannot select a later reset or renew the bound window.
+A cached read refreshes the same exact visible owned label and current card with that same review start, then follows at
+most sixteen ancestors in that window and package. Only an ancestor that fails `refresh()` permits another walk from that
+same validated label; the passive poll is clamped to the remaining original deadline. A stale label, changed
+card/window/package, missing action, read error, depth limit or late result refuses the read. There is no root search,
+anchor rebinding, input retry or extra review time; the returned native node must still satisfy the original disabled
+assertion. The retained feedback failure identifies the ancestor-loop refresh check, but not which iteration or node
+failed. The `dd209de8` run entered its first assertion 3,214 ms after the resume intent while the last committed card still
+reported three review seconds remaining and Send disabled. That deadline failure produced no disabled-node oracle and
+did not reach the ancestor walk; it does not retrospectively qualify the ancestry repair.
 
 Ordinary Home/resume can also initiate the production catalog refresh. The interceptor admits only GET
 `/v1/capabilities` and `/v1/computers` at the exact reserved HTTPS origin, default port, empty userinfo/query/fragment/body,
