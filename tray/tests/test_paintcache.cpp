@@ -276,8 +276,10 @@ private slots:
             }
         } counter;
         list.show(); QVERIFY(QTest::qWaitForWindowExposed(&list)); QTest::qWait(100);
-        list.viewport()->installEventFilter(&counter); QTest::qWait(260);
-        QVERIFY(counter.paints >= 2); QVERIFY(counter.area < qint64(counter.paints) * 8 * 200);
+        // Wait for the frames themselves: a loaded runner can deliver fewer of
+        // the 80 ms activity frames within any fixed interval.
+        list.viewport()->installEventFilter(&counter);
+        QTRY_VERIFY(counter.paints >= 2); QVERIFY(counter.area < qint64(counter.paints) * 8 * 200);
         list.hide(); QVERIFY(!list.activityAnimationRunning());
     }
     void overviewScrollsWithoutRepaintingVisibleCards()
