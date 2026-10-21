@@ -27,6 +27,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     private val cases = mutableListOf<String>()
     private val phases = ArrayDeque<String>()
     private var failureEvidence = "owned-window-evidence UNKNOWN not captured"
+    // BEGIN STALE_OPTION_EVIDENCE state
+    private var staleOptionFailureEvidence = "stale-option-evidence status=UNKNOWN outcome=NOT_REACHED"
+    // END STALE_OPTION_EVIDENCE state
     private var touchTrace: OwnedWindowTouchTrace? = null
     private var staleSendEvidence = "stale-send status=UNKNOWN reason=not-completed"
     // BEGIN QUESTION_UI_PROBE fixture-report
@@ -217,7 +220,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only. ${touchResultEvidence().replace("\n", " | ")} | ${actionProbeEvidence().replace("\n", " | ")} | $staleSendEvidence\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
-            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n$staleSendEvidence\n${actionProbeEvidence()}\n")
+            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n$staleSendEvidence\n${actionProbeEvidence()}\n"/* BEGIN STALE_OPTION_EVIDENCE failure-stream */ + "$staleOptionFailureEvidence\n"/* END STALE_OPTION_EVIDENCE failure-stream */)
             finish(Activity.RESULT_CANCELED, result)
         }
     }
@@ -998,6 +1001,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                     }
                 var accepted: AccessibilityNodeInfo? = null
                 var directRole = false
+                // BEGIN STALE_OPTION_EVIDENCE completed-state
+                var diagnosticCompleted = false
+                // END STALE_OPTION_EVIDENCE completed-state
                 try {
                     check(staleInspectionCurrent()) { "Known-stale option identity changed before role proof" }
                     check(label.refresh() && label.windowId == ownedWindow &&
@@ -1018,6 +1024,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                         if (owner.className?.toString() == "android.widget.RadioButton") {
                             check(composeOptionOwner == null) { "Known-stale option role shape changed" }
                             directRole = true
+                            // BEGIN STALE_OPTION_EVIDENCE delegate-complete
+                            diagnosticCompleted = true
+                            // END STALE_OPTION_EVIDENCE delegate-complete
                             return null
                         }
                         if (owner.className?.toString() == "android.view.View" && owner.isVisibleToUser &&
@@ -1074,8 +1083,32 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                             composeOptionBounds == geometry) { "Known-stale option owner, role witness or label geometry changed" }
                     }
                     accepted = found?.first
+                    // BEGIN STALE_OPTION_EVIDENCE return-complete
+                    diagnosticCompleted = true
+                    // END STALE_OPTION_EVIDENCE return-complete
                     return accepted
                 } finally {
+                    // BEGIN STALE_OPTION_EVIDENCE publish
+                    // Copy only existing memory observations; never inspect a node during failure reporting.
+                    try {
+                        val rows = facts.take(48)
+                        val unknown = !diagnosticCompleted || factsOverflow || facts.size > 48 || rows.any { it.length > 512 }
+                        val status = if (unknown) "UNKNOWN" else "observed"
+                        val outcome = when {
+                            !diagnosticCompleted -> "UNKNOWN_INTERRUPTED"
+                            directRole -> "DIRECT_ROLE_DELEGATED"
+                            accepted != null -> "OWNER_ACCEPTED"
+                            else -> "NO_OWNER"
+                        }
+                        val header = "stale-option-evidence status=$status outcome=$outcome completed=$diagnosticCompleted directRole=$directRole accepted=${accepted != null} rows=${rows.size}\n"
+                        val marker = if (unknown) "stale-option-evidence UNKNOWN cap-or-fault\n" else ""
+                        val captured = header + rows.joinToString("\n") { it.take(512) } + "\n" + marker
+                        check(captured.length <= 25_600)
+                        staleOptionFailureEvidence = captured
+                    } catch (_: Throwable) {
+                        staleOptionFailureEvidence = "stale-option-evidence status=UNKNOWN outcome=CAPTURE_FAULT"
+                    }
+                    // END STALE_OPTION_EVIDENCE publish
                     // Fixed bounded descriptors from this walk, emitted only on refusal. Log I/O is cooperative.
                     if (accepted == null && !directRole) try {
                         for (line in facts) Log.i("ZerusApprovalUI", line)

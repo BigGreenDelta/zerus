@@ -38,6 +38,13 @@ at most 48 fixed class/flag/geometry descriptors from the failing walk, plus one
 logcat tag; logging is cooperative and cannot turn a refusal into acceptance. Source-bound memory controls exercise this
 source-supported shape, not compiled Kotlin or observed native classes. The retained 4233 failure completed six cases
 and four receipts before the ancestor-only option proof refused; its failing class shape remains unknown.
+The helper also copies only those existing strings into bounded memory on every exit, including direct-role delegation.
+The existing failure result stream appends that snapshot with a fixed completion/outcome sentinel; the pass stream stays
+unchanged. At most 48 rows of 512 characters plus fixed markers fit within 25,600 characters. Copy faults, interruption or
+truncation report UNKNOWN and preserve the original failure. Reporting does not read accessibility nodes or clocks.
+The snapshot describes the helper's own observations, not a later walker or unvisited children. The retained 9a4b failure
+again completed six cases and four receipts, but preserved no class descriptors through its logcat-only route; its actual
+class shape and helper return route remain unknown.
 Before its one negative physical DOWN/UP attempt, it freshly resolves the exact visible Send
 label in the current owned window, requires that control to be disabled, and checks its current on-screen bounds. A
 missing label, changed identity/window/geometry or enabled control fails; there is no cached-node fallback, second

@@ -16,7 +16,7 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
-# Fixture pins include the option-only Compose role seam; its reverse projection retains the full 4233 fixture.
+# Fixture pins include failure-only memory evidence; the diagnostic reverse projection retains the full 9a4b fixture.
 
 
 def android_approval_progress():
@@ -240,6 +240,57 @@ def review_clock_memory(source, observation, clock, current_card=lambda: True):
         record = observation(None)
         return state['start'] <= clock.now < state['end'] and record.generation >= state['bound'] and record.eligible and record.start is not None and state['start'] <= record.start <= clock.now
     return SimpleNamespace(begin=begin, bind=bind, current=current, state=state)
+
+
+def strip_stale_option_evidence(source):
+    pattern = re.compile(r'^([ ]*)// BEGIN STALE_OPTION_EVIDENCE ([a-z-]+)\n[\s\S]*?^\1// END STALE_OPTION_EVIDENCE \2\n', re.M)
+    assert [match[2] for match in pattern.finditer(source)] == [
+        'state', 'completed-state', 'delegate-complete', 'return-complete', 'publish']
+    inline = '/* BEGIN STALE_OPTION_EVIDENCE failure-stream */ + "$staleOptionFailureEvidence\\n"/* END STALE_OPTION_EVIDENCE failure-stream */'
+    assert source.count(inline) == 1
+    return pattern.sub('', source).replace(inline, '')
+
+
+def stale_option_evidence_memory(source, facts, *, completed, direct=False, accepted=None, overflow=False, capture_fault=False):
+    """Finite source-string/predicate stand-in; no Kotlin, logger, node or instrumentation execution."""
+    publish = source.split('// BEGIN STALE_OPTION_EVIDENCE publish\n', 1)[1].split('// END STALE_OPTION_EVIDENCE publish', 1)[0]
+    count = int(re.search(r'val rows = facts.take\((\d+)\)', publish)[1])
+    width = int(re.search(r'rows.any \{ it.length > (\d+) }', publish)[1])
+    cap = int(re.search(r'check\(captured.length <= ([0-9_]+)\)', publish)[1].replace('_', ''))
+    assert (count, width, cap) == (48, 512, 25_600)
+    assert f'facts.size > {count}' in publish and f'it.take({width})' in publish
+    expression = re.search(r'val unknown = ([^\n]+)', publish)[1]
+    expression = expression.replace('rows.any { it.length > 512 }', 'over_width').replace('facts.size', 'total').replace(
+        'factsOverflow', 'overflow').replace('diagnosticCompleted', 'completed').replace('||', ' or ').replace('!', 'not ')
+    branches = publish.split('val outcome = when {\n', 1)[1].split('                        }', 1)[0]
+    choices = []
+    for line in branches.splitlines():
+        match = re.fullmatch(r'\s*(!diagnosticCompleted|directRole|accepted != null|else) -> "([A-Z_]+)"', line)
+        assert match
+        condition = {'!diagnosticCompleted': 'not completed', 'directRole': 'direct',
+                     'accepted != null': 'present', 'else': 'True'}[match[1]]
+        choices.append((condition, match[2]))
+    assert [value for _, value in choices] == ['UNKNOWN_INTERRUPTED', 'DIRECT_ROLE_DELEGATED', 'OWNER_ACCEPTED', 'NO_OWNER']
+    header = re.search(r'val header = "([^"\n]+)"', publish)[1].replace('\\n', '\n')
+    marker = re.search(r'val marker = if \(unknown\) "([^"\n]+)" else ""', publish)[1].replace('\\n', '\n')
+    fallback = re.search(r'catch \(_: Throwable\) \{\s*staleOptionFailureEvidence = "([^"\n]+)"', publish)[1]
+    try:
+        if capture_fault: raise MemoryError('controlled diagnostic copy fault')
+        rows = facts[:count]
+        unknown = finite_source_predicate(expression, dict(over_width=any(len(row) > width for row in rows),
+            total=len(facts), overflow=overflow, completed=completed))
+        outcome = next(value for condition, value in choices if finite_source_predicate(condition,
+            dict(completed=completed, direct=direct, present=accepted is not None)))
+        values = {'$status': 'UNKNOWN' if unknown else 'observed', '$outcome': outcome,
+            '$diagnosticCompleted': str(completed).lower(), '$directRole': str(direct).lower(),
+            '${accepted != null}': str(accepted is not None).lower(), '${rows.size}': str(len(rows))}
+        for key, value in values.items(): header = header.replace(key, value)
+        assert '$' not in header
+        captured = header + '\n'.join(row[:width] for row in rows) + '\n' + (marker if unknown else '')
+        assert len(captured) <= cap
+        return captured
+    except BaseException:
+        return fallback
 
 
 def compose_option_memory(source, label, binding, current=lambda: True):
@@ -686,7 +737,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
             'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
         # Baseline includes guarded preparation and passive lifecycle checkpoints; progress stripping stays exact.
-        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), 'b5a82298ef8ba0650355f8640af902998c7241bcd375462b56085fbe4a7510a0')
+        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), 'fb5977209925e863cc07c7dac808e52a0234f4e5d71ee35e19ba57a3b05cd2c9')
         definition = source.split('// BEGIN APPROVAL_PROGRESS definition\n', 1)[1].split('// END APPROVAL_PROGRESS definition', 1)[0]
         self.assertIn('check(progressSequence in 0 until 32)', definition)
         self.assertIn('check(record.length <= 160)', definition)
@@ -712,7 +763,7 @@ class ApprovalHarnessTests(unittest.TestCase):
                  'primary-failure-capture-begin', 'finally-begin']
         self.assertEqual([match[2] for match in pattern.finditer(source)], names)
         self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(),
-                         '03dcc71866c2aac07e84b85dae489feb904eeaaf59f4548d5d6b34d740158658')
+                         'f1b961c9ecb956aa766ba1ffa7eea1186a568b3fbbeae0f7f4a483be7e0a7a73')
         stages = ['RESUMED_MAIN_RETURNED', 'BODY_RESTORE_BEGIN', 'BODY_RESTORE_PASSED',
                   'CONFIRM_RETIRE_BEGIN', 'CONFIRM_RETIRE_PASSED', 'DISABLED_SEND_BEGIN', 'DISABLED_SEND_PASSED',
                   'PRIMARY_FAILURE_CAPTURE_BEGIN', 'FINALLY_BEGIN']
@@ -1090,7 +1141,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(projected.count(constructor), 1)
         projected = projected.replace(constructor, 'private data class EarlySend(val node: AccessibilityNodeInfo,')
         self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(),
-                         'dbd60787f4828c29653e35d4e09689d078bbed984141a46d5182d80b0f7f701d')
+                         '04ba75ac86cf9b625ac8ed569020802ee5709a785480236374d11b62c07425d7')
         reader = lambda value: value.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
         self.assertEqual(reader(source), reader(projected))
         early = source.split('        fun earlyReview(', 1)[1].split('        var primaryFailure:', 1)[0]
@@ -2089,6 +2140,7 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
 
     def test_option_only_seams_restore_every_byte_of_4233_and_the_send_walker(self):
         source = self.source()
+        source = strip_stale_option_evidence(source)
         pattern = re.compile(r'^([ ]*)// BEGIN STALE_COMPOSE_ROLE ([a-z-]+)\n[\s\S]*?^\1// END STALE_COMPOSE_ROLE \2\n', re.M)
         self.assertEqual([m[2] for m in pattern.finditer(source)], ['definition', 'admission'])
         original = pattern.sub('', source)
@@ -2201,6 +2253,60 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
             self.assertNotIn(forbidden, fact)
         self.assertIn('finally {', helper)
         self.assertNotIn('catch (error:', helper)
+
+    def test_retained_diagnostic_seams_restore_all_9a4_bytes_and_original_throwable_path(self):
+        source = self.source()
+        original = strip_stale_option_evidence(source)
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+                         '2faf47b7c2d2f8e948e859e3a16eb5e85dd96fdf88896c1335e3bb99cd129d4f')
+        walker = lambda value: value.split('            fun staleDisabledAction(', 1)[1].split('            val choice =', 1)[0]
+        self.assertEqual(walker(source), walker(original))
+        passed = next(line for line in source.splitlines() if 'Approval choices smoke passed:' in line)
+        self.assertNotIn('staleOptionFailureEvidence', passed)
+        self.assertIn('/* BEGIN STALE_OPTION_EVIDENCE failure-stream */', source)
+        helper = source.split('            fun composeStaleOptionAction(', 1)[1].split('// END STALE_COMPOSE_ROLE definition', 1)[0]
+        self.assertEqual(helper.count('diagnosticCompleted = true'), 2)
+        self.assertIn('diagnosticCompleted = true\n                            // END STALE_OPTION_EVIDENCE delegate-complete\n                            return null', helper)
+        self.assertIn('diagnosticCompleted = true\n                    // END STALE_OPTION_EVIDENCE return-complete\n                    return accepted', helper)
+        publish = helper.split('// BEGIN STALE_OPTION_EVIDENCE publish\n', 1)[1].split('// END STALE_OPTION_EVIDENCE publish', 1)[0]
+        for forbidden in ('refresh(', 'getChild(', 'getBounds', 'className', 'SystemClock', 'main {', 'Log.',
+                          'roleOnly(', 'staleInspectionCurrent(', 'performAction', 'injectInputEvent', 'sendStatus'):
+            self.assertNotIn(forbidden, publish)
+        self.assertLess(helper.index('staleOptionFailureEvidence = captured'), helper.index('for (line in facts) Log.i('))
+
+    def test_source_bound_memory_retains_null_direct_and_accepted_paths_without_logcat(self):
+        source = self.source()
+        facts = ['stale-option-node kind=ancestor index=0 class=android.widget.TextView',
+                 'stale-option-node kind=ancestor index=1 class=android.view.View']
+        for direct, accepted, expected in ((False, None, 'NO_OWNER'), (True, None, 'DIRECT_ROLE_DELEGATED'),
+                                           (False, object(), 'OWNER_ACCEPTED')):
+            with self.subTest(outcome=expected):
+                captured = stale_option_evidence_memory(source, facts, completed=True, direct=direct, accepted=accepted)
+                self.assertIn('status=observed outcome=' + expected, captured)
+                self.assertTrue(all(line in captured for line in facts))
+                # A controlled dropped/throwing logger has no route back into this already copied memory value.
+                try: raise OSError('controlled log sink failure')
+                except OSError: pass
+                self.assertTrue(all(line in captured for line in facts))
+        interrupted = stale_option_evidence_memory(source, facts, completed=False)
+        self.assertIn('status=UNKNOWN outcome=UNKNOWN_INTERRUPTED', interrupted)
+
+    def test_source_bound_diagnostic_caps_and_copy_fault_preserve_failure_and_mark_unknown(self):
+        source = self.source()
+        captured = stale_option_evidence_memory(source, ['x' * 513] * 49, completed=True)
+        self.assertLessEqual(len(captured), 25_600)
+        self.assertIn('status=UNKNOWN', captured)
+        self.assertIn('rows=48', captured)
+        self.assertEqual(captured.count('UNKNOWN cap-or-fault'), 1)
+        self.assertFalse(any(len(line) > 512 for line in captured.splitlines()))
+        self.assertIn('status=UNKNOWN', stale_option_evidence_memory(source, ['partial'], completed=True, overflow=True))
+        original = RuntimeError('controlled original refusal')
+        try:
+            try: raise original
+            finally: captured = stale_option_evidence_memory(source, [], completed=False, capture_fault=True)
+        except RuntimeError as observed:
+            self.assertIs(observed, original)
+        self.assertEqual(captured, 'stale-option-evidence status=UNKNOWN outcome=CAPTURE_FAULT')
 
 
 class QuestionLayoutSourceTests(unittest.TestCase):
