@@ -596,6 +596,32 @@ class HintFixtureControls(unittest.TestCase):
             self.assertNotIn('f_locals', frame)
         self.assertNotIn(sentinel, json.dumps(detail))
 
+    def test_cleanup_scalar_rendering_bounds_before_conversion_and_never_calls_custom_repr(self):
+        class Untrusted(int):
+            def __repr__(self): raise AssertionError('custom repr must not run')
+        detail = fixture.cleanup_error('synthetic', AssertionError(b'\xff' * 100_000, 1 << 100_000, Untrusted(1)))
+        self.assertEqual([x['truncated'] for x in detail['arguments']], [True, True, False])
+        self.assertTrue(all(len(x['text']) <= 1024 for x in detail['arguments']))
+        self.assertEqual(detail['arguments'][1]['text'], '<integer exceeds diagnostic bound>')
+        self.assertEqual(detail['arguments'][2]['text'], '<non-scalar argument>')
+
+    def test_diagnostic_failure_preserves_unknown_and_does_not_skip_independent_cleanup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, evidence = Path(folder) / 'runtime', Path(folder) / 'evidence'
+            root.mkdir(); evidence.mkdir()
+            value = self.cleanup_double(root, evidence)
+            def fail(): raise AssertionError('unconfirmed owned stop')
+            value.stop_unix = value.stop_host = fail
+            with patch.object(fixture, 'cleanup_error', side_effect=ValueError('synthetic formatter failure')), \
+                    patch.object(fixture.time, 'monotonic', return_value=0), self.assertRaises(AssertionError):
+                value.cleanup_owned()
+            saved = json.loads((evidence / 'cleanup.json').read_text())
+            self.assertFalse(saved['verified'])
+            self.assertTrue(saved['errors_overflow'])
+            self.assertTrue(root.exists())
+            self.assertIn('model', value.steps)
+            self.assertIn('observer', value.steps)
+
     def test_cleanup_detail_overflow_is_explicit_and_never_turns_failed_cleanup_into_success(self):
         with tempfile.TemporaryDirectory() as folder:
             root, evidence = Path(folder) / 'runtime', Path(folder) / 'evidence'

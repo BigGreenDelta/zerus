@@ -267,9 +267,20 @@ def cleanup_error(stage, error, **context):
     """Bounded private exception details, without locals or an extra OS query."""
     arguments = []
     for value in error.args[:8]:
-        text = (value if isinstance(value, str) else repr(value)
-                if value is None or isinstance(value, (bool, int, float, bytes)) else '<non-scalar argument>')
-        arguments.append(dict(type=type(value).__name__, text=text[:1024], truncated=len(text) > 1024))
+        kind, truncated = type(value), False
+        if kind is str:
+            text, truncated = value[:1024], len(value) > 1024
+        elif kind is bytes:
+            # Bound the input before repr: escaped bytes can expand fourfold.
+            text, truncated = repr(value[:240]), len(value) > 240
+        elif kind is int:
+            text = repr(value) if value.bit_length() <= 512 else '<integer exceeds diagnostic bound>'
+            truncated = value.bit_length() > 512
+        elif value is None or kind in (bool, float):
+            text = repr(value)
+        else:
+            text = '<non-scalar argument>'
+        arguments.append(dict(type=kind.__name__[:80], text=text, truncated=truncated))
     frames, frame = [], error.__traceback__
     while frame is not None and len(frames) < 8:
         code = frame.tb_frame.f_code
@@ -957,9 +968,14 @@ class HintContract:
     def note_cleanup_error(self, stage, error, **context):
         if not hasattr(self, 'cleanup_errors'):
             self.cleanup_errors, self.cleanup_errors_overflow = [], False
-        if len(self.cleanup_errors) < 16:
-            self.cleanup_errors.append(cleanup_error(stage, error, **context))
-        else:
+        try:
+            if len(self.cleanup_errors) < 16:
+                self.cleanup_errors.append(cleanup_error(stage, error, **context))
+            else:
+                self.cleanup_errors_overflow = True
+        except BaseException:
+            # The original cleanup problem remains failed/UNKNOWN. Diagnostics
+            # must not prevent independent stop, reap and seal attempts.
             self.cleanup_errors_overflow = True
 
     def stop_unix(self):
