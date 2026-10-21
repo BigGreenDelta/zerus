@@ -466,19 +466,65 @@ class ApprovalHarnessTests(unittest.TestCase):
         cancel = source.split("    private func cancelBroaderConfirmation()", 1)[1].split("    func testRealCountdown", 1)[0]
         for required in ('if app.buttons["Cancel"].exists', 'XCTAssertEqual(app.popovers.count, 1',
                          'popover.buttons["Confirm"].exists && popover.staticTexts[disclosure].exists',
-                         'anchor.exists && anchor.isHittable', '["regular", "compact"].contains(',
+                         'XCTAssertTrue(anchor.exists)', 'XCTAssertEqual(anchor.identifier, "fixture-dismiss-anchor")',
+                         'XCTAssertEqual(anchor.label, "Synthetic UI only — no native delivery")', '["regular", "compact"].contains(',
+                         '$0.staticTexts["fixture-dismiss-anchor"].exists && $0.popovers.count == 1',
                          'XCTAssertEqual(windows.count, 1', '.allSatisfy { $0.isFinite }', '!popup.intersects(frame)',
-                         'anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()',
+                         'let coordinate = anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))',
+                         'let point = coordinate.screenPoint', 'XCTAssertEqual(app.state, .runningForeground)',
+                         'XCTAssertTrue(pointInside,', 'coordinate.tap()',
                          'XCTWaiter.wait(for: [retired], timeout: 2)'):
             self.assertIn(required, cancel)
         self.assertLess(cancel.index('XCTAssertEqual(app.popovers.count, 1'), cancel.index('anchor.coordinate('))
-        for forbidden in ('notify_post(', 'while ', 'try?', 'coordinate(withOffset:', 'broader =', 'available ='):
+        self.assertLess(cancel.index('let point = coordinate.screenPoint'), cancel.index('XCTAssertTrue(pointInside,'))
+        self.assertLess(cancel.index('XCTAssertTrue(pointInside,'), cancel.index('coordinate.tap()'))
+        self.assertEqual(cancel.count('coordinate.tap()'), 1)
+        for forbidden in ('notify_post(', 'while ', 'try?', 'coordinate(withOffset:', 'broader =', 'available =', '.isHittable'):
             self.assertNotIn(forbidden, cancel)
         host = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalUIFixtureApp.swift").read_text()
         anchor = host.split('Text("Synthetic UI only — no native delivery")', 1)[1].split('Text("Callbacks:', 1)[0]
         self.assertIn('.accessibilityIdentifier("fixture-dismiss-anchor")', anchor)
         self.assertNotIn("Button(", anchor)
         self.assertNotIn("onTapGesture", anchor)
+
+    def test_ios_outside_coordinate_source_point_refuses_edges_other_windows_and_popover(self):
+        source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
+        condition = source.split('            let pointInside = ', 1)[1].split('\n            XCTAssertTrue(pointInside,', 1)[0]
+        condition = condition.replace('!popup.contains(point)', 'not popup_contains').replace('&&', ' and ')
+        for value in ('point.x', 'point.y', 'frame.minX', 'frame.maxX', 'frame.minY', 'frame.maxY',
+                      'window.minX', 'window.maxX', 'window.minY', 'window.maxY',
+                      'canvas.minX', 'canvas.maxX', 'canvas.minY', 'canvas.maxY'):
+            condition = condition.replace(value, value.replace('.', '_'))
+        condition = '(' + condition + ')'
+        good = dict(point_x=50, point_y=50, frame_minX=40, frame_maxX=60, frame_minY=40, frame_maxY=60,
+                    window_minX=0, window_maxX=100, window_minY=0, window_maxY=100,
+                    canvas_minX=0, canvas_maxX=100, canvas_minY=0, canvas_maxY=100, popup_contains=False)
+        self.assertTrue(finite_source_predicate(condition, good))
+        departures = [dict(popup_contains=True), dict(point_x=float('nan')), dict(point_y=float('inf'))]
+        for axis in ('X', 'Y'):
+            for owner in ('frame', 'window', 'canvas'):
+                departures += [{owner + '_min' + axis: 50}, {owner + '_max' + axis: 50}]
+        for change in departures:
+            with self.subTest(change=change):
+                self.assertFalse(finite_source_predicate(condition, {**good, **change}))
+
+    def test_ios_feedback_refocus_preserves_real_early_return_text_and_final_oracle(self):
+        source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
+        feedback = source.split('    func testFeedbackKeyboardCannotBypassReview()', 1)[1].split('    func testBackground', 1)[0]
+        early, late = feedback.split('        count(0)\n', 1)
+        self.assertIn('field.typeText("d\\n")', early)
+        self.assertIn('XCTAssertLessThan(earlyElapsed, 3', early)
+        self.assertIn('ack("begin-feedback-review", serial: 0)', early)
+        self.assertEqual(early.count('field.tap()'), 1)
+        for earlier, later in [('XCTAssertEqual(field.value as? String, "Use a safer command")', 'field.tap()'),
+                               ('field.tap()', 'count(0)'), ('count(0)', 'reviewed(); field.typeText("\\n")')]:
+            self.assertLess(late.index(earlier), late.index(later))
+        self.assertEqual(late.count('field.tap()'), 1)
+        self.assertEqual(late.count('XCTAssertEqual(field.value as? String, "Use a safer command")'), 2)
+        self.assertEqual(feedback.count('field.typeText('), 2)
+        self.assertIn('XCTAssertEqual(answer, "fixture-hash-0|[', late)
+        self.assertNotIn('typeText("Use a safer command', feedback)
+        self.assertNotIn('sleep(', feedback)
 
 
 if __name__ == "__main__":

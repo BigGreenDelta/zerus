@@ -162,15 +162,26 @@ Feedback mode seeds only the fixed memory draft prefix and keeps the synthetic c
 opens. The one-time `begin-feedback-review` notification makes that card available through its ordinary production
 eligibility path; a real short edit and Return must finish inside the original three-second window and leave zero
 callbacks. After the real review, another Return must record exactly the original answer. A missed early window fails
-the fixture without a bypass claim. Replacement mode posts its one-time `replace` only after native Confirm is observed,
+the fixture without a bypass claim. The early Return can resign native keyboard focus. After its original timing/ACK/
+zero-callback proof, the test checks the full retained text, taps that actual field once, checks unchanged text and zero
+callbacks again, then runs the original final review/Return and exact payload assertions. It does not replace the text
+or assume [`typeText`](https://developer.apple.com/documentation/xcuiautomation/xcuielement/typetext(_:)) focuses a field.
+Replacement mode posts its one-time `replace` only after native Confirm is observed,
 then requires the same native retirement and no-submit assertions. The broad disclosure check expects the entire
 production message, including its description. These controls never set a review clock, foreground flag, native dialog,
 or provider permission. Monotonic phase records and exact ACKs are evidence only; all seven UI tests still have to pass.
 
 Broader cancellation first uses an actual native Cancel when present. If absent, the test requires exactly one actual
 native popover containing Confirm and the full production disclosure, a recognized actual horizontal size class, and
-a hittable passive fixture header whose entire frame is outside that popover and inside the same unique owned app
-window. One physical header-coordinate tap may then dismiss the adaptive presentation. Unknown role/geometry/traits
+a positively identified passive fixture header whose entire frame is outside that popover and inside the same unique
+owned app window. That window must contain the actual header and popover, and the app must be foreground. The derived
+header-centre [`XCUICoordinate`](https://developer.apple.com/documentation/xcuiautomation/xcuicoordinate) must have a finite
+screen point strictly inside the header, window and app canvas, and outside the popover, before one physical tap.
+Background `isHittable` is deliberately not an admission predicate for this outside-dismissal gesture: Apple documents
+that [popover presentation](https://developer.apple.com/documentation/uikit/uipopoverpresentationcontroller/passthroughviews)
+normally disables underlying view interaction. [SwiftUI confirmation dialogs](https://developer.apple.com/documentation/swiftui/view/confirmationdialog(_:ispresented:titlevisibility:presenting:actions:)-9ibgk)
+use an outside tap instead of the standard dismiss action for regular-size popovers. This replaces a new fixture-only
+guard that failed before the actual geometry/tap; original product and callback oracles are unchanged. Unknown role/geometry/traits
 fails instead of guessing a screen point or altering presentation. Confirm retirement and zero callbacks are required
 before the original separate Send/Confirm and final option2 payload. This path is source-only until actually qualified.
 

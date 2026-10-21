@@ -156,16 +156,33 @@ import Dispatch
             let popover = app.popovers.element(boundBy: 0)
             XCTAssertTrue(popover.buttons["Confirm"].exists && popover.staticTexts[disclosure].exists)
             let anchor = app.staticTexts["fixture-dismiss-anchor"]
-            XCTAssertTrue(anchor.exists && anchor.isHittable)
+            XCTAssertTrue(anchor.exists)
+            XCTAssertEqual(anchor.identifier, "fixture-dismiss-anchor")
+            XCTAssertEqual(anchor.label, "Synthetic UI only — no native delivery")
             XCTAssertTrue(["regular", "compact"].contains(anchor.value as? String ?? ""), "Missing actual fixture size class")
             let popup = popover.frame, frame = anchor.frame
-            let windows = app.windows.allElementsBoundByIndex.filter { $0.exists && $0.frame.contains(popup) && $0.frame.contains(frame) }
+            let windows = app.windows.allElementsBoundByIndex.filter {
+                $0.exists && $0.staticTexts["fixture-dismiss-anchor"].exists && $0.popovers.count == 1 &&
+                $0.popovers.element(boundBy: 0).buttons["Confirm"].exists && $0.frame.contains(popup) && $0.frame.contains(frame)
+            }
             XCTAssertEqual(windows.count, 1, "Native dialog and passive anchor must share one owned app window")
             XCTAssertTrue([popup.minX, popup.minY, popup.width, popup.height, frame.minX, frame.minY, frame.width, frame.height].allSatisfy { $0.isFinite })
             XCTAssertTrue(popup.width > 0 && popup.height > 0 && frame.width > 0 && frame.height > 0 && !popup.intersects(frame))
-            phase("cancel-popover-\(popup)-anchor-\(frame)-trait-\(anchor.value as? String ?? "unknown")")
-            XCTAssertTrue(confirm.exists && anchor.isHittable)
-            anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            let window = windows[0].frame, canvas = app.frame
+            XCTAssertEqual(app.state, .runningForeground)
+            XCTAssertTrue(confirm.exists && anchor.exists)
+            // Modal popovers disable background interaction: this is a physical outside tap, not a header action.
+            let coordinate = anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            let point = coordinate.screenPoint
+            XCTAssertTrue([window.minX, window.minY, window.width, window.height, canvas.minX, canvas.minY,
+                           canvas.width, canvas.height, point.x, point.y].allSatisfy { $0.isFinite })
+            XCTAssertTrue(window.width > 0 && window.height > 0 && canvas.width > 0 && canvas.height > 0)
+            let pointInside = point.x > frame.minX && point.x < frame.maxX && point.y > frame.minY && point.y < frame.maxY &&
+                point.x > window.minX && point.x < window.maxX && point.y > window.minY && point.y < window.maxY &&
+                point.x > canvas.minX && point.x < canvas.maxX && point.y > canvas.minY && point.y < canvas.maxY && !popup.contains(point)
+            XCTAssertTrue(pointInside, "Derived outside tap must be strictly inside the passive anchor and owned visible window")
+            phase("cancel-popover-\(popup)-anchor-\(frame)-point-\(point)")
+            coordinate.tap()
         }
         let retired = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: confirm)
         XCTAssertEqual(XCTWaiter.wait(for: [retired], timeout: 2), .completed)
@@ -237,6 +254,10 @@ import Dispatch
         XCTAssertLessThan(earlyElapsed, 3, "Fixture missed the real early-review window; no bypass conclusion")
         let appBegan = ack("begin-feedback-review", serial: 0)
         XCTAssertGreaterThanOrEqual(appBegan, review.began); XCTAssertLessThanOrEqual(appBegan, review.received)
+        count(0)
+        XCTAssertEqual(field.value as? String, "Use a safer command")
+        field.tap() // The early Return can resign native keyboard focus; never replace the retained text.
+        XCTAssertEqual(field.value as? String, "Use a safer command")
         count(0)
         reviewed(); field.typeText("\n")
         let recorded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'Callbacks: 1'"), object: app.staticTexts["callback-count"])
