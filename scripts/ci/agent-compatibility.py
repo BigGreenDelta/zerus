@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Keyless released Codex, Claude Code and OpenCode contracts and read-only upstream capability reports."""
 import argparse
+import contextlib
 import base64
 import datetime
 import difflib
@@ -82,6 +83,37 @@ AGENTS = {
 }
 # Suite inputs taken from the caller; every other HGS_ variable is dropped.
 FORWARDED = ('HGS_TEST_CONPTY_DIR',)
+HINT_METHODS = ('test_lifecycle', 'test_lost_mark', 'test_pre_feature_first_resume', 'test_optouts_and_instructions')
+HINT_CLASSES = {
+    'claude': ('NativeClaudeHint', 'NativeWindowsClaudeHint'),
+    'codex': ('NativeCodexHint', 'NativeWindowsCodexHint'),
+}
+PRE_FEATURE_SOURCE = 'ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce'
+
+
+def hint_suites(agent, target):
+    name = HINT_CLASSES[agent][target == WINDOWS]
+    return ['test_agent_hint_native.' + name + '.' + method for method in HINT_METHODS]
+
+
+def hint_input(path, source):
+    """Byte seal only. Reviewed build receipts must establish the declared source.
+
+    No version probe can establish a binary's Git source. The qualification
+    grant must bind that source and hash to its separately reviewed build.
+    """
+    if not source or not re.fullmatch(r'[0-9a-f]{40}', source):
+        raise ValueError('Hint source inputs need complete reviewed Git object IDs')
+    path = Path(path).resolve()
+    if not path.is_file() or path.stat().st_size > MAX_PACKAGE_BYTES:
+        raise ValueError('Hint source input is absent or exceeds its byte bound')
+    value = hashlib.sha256()
+    with path.open('rb') as file:
+        for block in iter(lambda: file.read(1024 * 1024), b''):
+            value.update(block)
+    return dict(path=str(path), source=source, sha256=value.hexdigest())
+
+
 NATIVE_RUNNER = '''
 import faulthandler, json, os, sys, threading, time, unittest
 current = None
@@ -124,7 +156,15 @@ if deadline is not None:
     timer.start()
 try:
     suite = unittest.defaultTestLoader.loadTestsFromNames(sys.argv[1:])
-    result = unittest.TextTestRunner(verbosity=2, resultclass=DiagnosticResult).run(suite)
+    def ids(node):
+        return [item for child in node for item in ids(child)] if isinstance(node, unittest.TestSuite) else [node.id()]
+    expected = json.loads(os.environ.get('ZERUS_NATIVE_EXPECTED_IDS', 'null'))
+    if expected is not None and (ids(suite) != expected or len(expected) != 4):
+        diagnostic('discovery-mismatch', actual_ids=ids(suite), expected_ids=expected,
+                   loader_errors=[error[:8192] for error in unittest.defaultTestLoader.errors[:4]])
+        raise ValueError('Named hint contract discovery differs from its fixed four-method inventory')
+    result = unittest.TextTestRunner(verbosity=2, resultclass=DiagnosticResult,
+                                   failfast=os.environ.get('ZERUS_NATIVE_FAILFAST') == '1').run(suite)
 finally:
     if timer is not None:
         timer.cancel()
@@ -267,7 +307,7 @@ def download(url, archive):
         time.sleep(5 * attempt)
 
 
-def install_native(agent, package, destination):
+def install_native(agent, package, destination, archive_input=None, deadline=None):
     """Verify published bytes, then extract exactly one regular native executable."""
     spec = AGENTS[agent]
     url = package['url']
@@ -284,7 +324,23 @@ def install_native(agent, package, destination):
     destination.mkdir(parents=True, exist_ok=True)
     archive = destination / 'native.tgz'
     try:
-        if download(url, archive) != expected:
+        if archive_input is None:
+            actual = download(url, archive)
+        else:
+            # The hint contract consumes public pinned cache data only. No
+            # download, retry or fallback is hidden in its preparation budget.
+            actual, size = hashlib.sha512(), 0
+            with Path(archive_input).open('rb') as source, archive.open('wb') as output:
+                while block := source.read(1024 * 1024):
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('Original hint row work end exhausted copying package')
+                    size += len(block)
+                    if size > MAX_PACKAGE_BYTES:
+                        raise ValueError('Native package exceeds its size limit')
+                    actual.update(block)
+                    output.write(block)
+            actual = actual.digest()
+        if actual != expected:
             raise ValueError('Native package integrity mismatch')
         with tarfile.open(archive, 'r:gz') as tar:
             member = tar.getmember(name)
@@ -292,7 +348,13 @@ def install_native(agent, package, destination):
                 raise ValueError('Expected one regular bounded native executable')
             native = destination / name.rsplit('/', 1)[-1]
             with tar.extractfile(member) as source, native.open('wb') as output:
-                shutil.copyfileobj(source, output)
+                if deadline is None:
+                    shutil.copyfileobj(source, output)
+                else:
+                    while block := source.read(1024 * 1024):
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError('Original hint row work end exhausted extracting package')
+                        output.write(block)
         native.chmod(0o755)
         return native
     finally:
@@ -343,7 +405,7 @@ def probe(native, arguments, env, timeout=60):
                                    encoding='utf-8', errors='replace', timeout=timeout)
 
 
-def run_suites(suites, env, timeout, scratch, log):
+def run_suites(suites, env, timeout, scratch, log, absolute_end=None):
     """Run unittest names in a fresh interpreter and keep its stdout, then stderr, in
     `log`; returns the exit status and stdout. Files rather than pipes: reading a pipe
     waits for every process that inherited it, a session host or agent a suite left
@@ -352,7 +414,14 @@ def run_suites(suites, env, timeout, scratch, log):
     out, err = scratch / (log.stem + '.stdout'), scratch / (log.stem + '.stderr')
     try:
         with out.open('wb') as stdout, err.open('wb') as stderr:
-            diagnostics_env = dict(env, ZERUS_NATIVE_DIAGNOSTIC_DEADLINE=str(time.monotonic() + timeout))
+            if absolute_end is None:
+                deadline = time.monotonic() + timeout
+            else:
+                deadline = absolute_end
+                timeout = min(timeout, deadline - time.monotonic())
+                if timeout <= 0:
+                    raise TimeoutError('Original hint row end exhausted before runner spawn')
+            diagnostics_env = dict(env, ZERUS_NATIVE_DIAGNOSTIC_DEADLINE=str(deadline))
             run = subprocess.run([sys.executable, '-c', NATIVE_RUNNER, *suites], cwd=ROOT, env=diagnostics_env,
                                  stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=timeout)
     finally:
@@ -409,17 +478,29 @@ def schema_changes(before, after):
     }
 
 
-def qualify(agent, package, work, results, hgs):
+def qualify(agent, package, work, results, hgs, hint_inputs=None, package_cache=None):
+    # Hint selection has one original 1200-second row end, preparation included.
+    # Its fixtures reserve the last 60 seconds for their existing owned cleanup.
+    hint_end = time.monotonic() + 1200 if hint_inputs is not None else None
     target = package['target']
     spec = target_spec(agent, target)
     version = version_text(package['version'])
     print('Checking real', spec['name'], version, flush=True)
     row = {'agent': agent, 'version': version, 'target': target,
            'package_integrity': package['integrity'], 'status': 'failed'}
+    if hint_inputs is not None:
+        row.update(contract='agent-hint', source_inputs=hint_inputs, original_end_monotonic=hint_end,
+                   coverage='four named hook-output/context lifecycle, lost-mark, real pre-feature migration and opt-out/instruction cases; '
+                            'fixture retained-hook interposition, no customer-receipt or kernel-isolation claim')
     directory = results / agent / version
     directory.mkdir(parents=True, exist_ok=True)
     try:
-        native = install_native(agent, package, work / agent / version)
+        if hint_inputs is None:
+            native = install_native(agent, package, work / agent / version)
+        else:
+            archive = package_cache / package['url'].rsplit('/', 1)[-1]
+            native = install_native(agent, package, work / agent / version,
+                                    archive_input=archive, deadline=hint_end - 60)
         home = work / agent / version / 'home'
         env = fixture_environment(home)
         # The runner's own probes get a private Windows profile too. The suites keep
@@ -429,17 +510,22 @@ def qualify(agent, package, work, results, hgs):
         probes = private_profile(env, home) if target == WINDOWS else env
         if spec.get('private_xdg'):
             probes = private_xdg(probes, home)
-        actual = probe(native, ['--version'], probes).strip()
+        def checked_probe(arguments):
+            remaining = 60 if hint_end is None else min(60, hint_end - time.monotonic() - 60)
+            if remaining <= 0:
+                raise TimeoutError('Original hint row work end exhausted')
+            return probe(native, arguments, probes, timeout=remaining)
+        actual = checked_probe(['--version']).strip()
         if actual != spec['version_output'].format(version):
             raise ValueError('Native executable version mismatch: ' + actual)
-        help_text = probe(native, ['--help'], probes)
+        help_text = checked_probe(['--help'])
         (directory / 'cli-help.txt').write_text(help_text, encoding='utf-8')
         row['cli_help_sha256'] = hashlib.sha256(help_text.encode()).hexdigest()
         cases = {'default': {}}
         if agent == 'codex':
             for label, flags in [('stable', []), ('experimental', ['--experimental'])]:
                 schemas = directory / ('schemas-' + label)
-                probe(native, ['app-server', 'generate-json-schema', '--out', str(schemas), *flags], probes)
+                checked_probe(['app-server', 'generate-json-schema', '--out', str(schemas), *flags])
                 row['schema_' + label] = schema_snapshot(schemas)
             # Only the tmux suites take a terminal size and animation mode.
             if target != WINDOWS:
@@ -447,18 +533,43 @@ def qualify(agent, package, work, results, hgs):
                          for geometry in ('95x47', '110x35')
                          for mode, animations in (('animated', 'true'), ('reduced', 'false'))}
         row['cases'] = {}
+        if hint_inputs is not None:
+            # Context delivery is a separate named contract, not four extra
+            # claims about geometry/animation. The default UI matrix is intact.
+            cases = {'agent-hint': {}}
         for case, settings in cases.items():
             test_env = dict(env, HGS_TEST_BIN=str(hgs), **{spec['variable']: str(native)},
                             **spec.get('environment', {}), **settings)
-            runner = run_macos_claude_suites if (agent, target) == ('claude', 'darwin-arm64') else run_suites
-            status, stdout = runner(spec['suites'], test_env, spec['timeout'], work / agent / version,
-                                    directory / (case + '.log'))
+            suites, timeout = spec['suites'], spec['timeout']
+            if hint_inputs is not None:
+                suites = hint_suites(agent, target)
+                timeout = hint_end - time.monotonic()
+                if timeout <= 60:
+                    raise TimeoutError('Original hint row leaves no work and cleanup budget')
+                test_env.update(ZERUS_HINT_INPUTS=json.dumps(hint_inputs),
+                                ZERUS_HINT_RESULTS=str(directory / 'hook-output'),
+                                ZERUS_NATIVE_EXPECTED_IDS=json.dumps(suites), ZERUS_NATIVE_FAILFAST='1')
+            runner = run_macos_claude_suites if hint_inputs is None and (agent, target) == ('claude', 'darwin-arm64') else run_suites
+            arguments = (suites, test_env, timeout, work / agent / version, directory / (case + '.log'))
+            if hint_inputs is None:
+                status, stdout = runner(*arguments)
+            else:
+                status, stdout = runner(*arguments, absolute_end=hint_end)
             marker = next((line.removeprefix('ZERUS_NATIVE_RESULT=') for line in stdout.splitlines()
                            if line.startswith('ZERUS_NATIVE_RESULT=')), None)
             if marker is not None:
                 row['cases'][case] = json.loads(marker)
+                if hint_inputs is not None and row['cases'][case] != {'tests': 4, 'skipped': 0}:
+                    raise ValueError('Hint contract did not complete its exact four methods without skips')
             if status or marker is None:
                 raise ValueError('Native contract failed at ' + case)
+            if hint_inputs is not None:
+                cleanup = [json.loads((directory / 'hook-output' / name / 'cleanup.json').read_text()) for name in suites]
+                if any(record.get('verified') is not True for record in cleanup):
+                    raise ValueError('Hint owned cleanup is UNKNOWN; runtime namespaces retained')
+                row['owned_cleanup_verified'] = True
+        if hint_inputs is not None and time.monotonic() >= hint_end:
+            raise TimeoutError('Original hint row expired during result collection')
         row['status'] = 'passed'
     except Exception as error:
         row['error'] = str(error)
@@ -479,7 +590,7 @@ def write_report(report, results):
         if rows:
             lines.extend(['', '## Real ' + spec['name'] + ' contracts', ''])
             lines.extend(f"- `{row['version']}` ({row['target']}): {row['status']}; "
-                         f"{target_spec(agent, row['target'])['coverage']}." for row in rows)
+                         f"{row.get('coverage', target_spec(agent, row['target'])['coverage'])}." for row in rows)
     for label, changes in report.get('capability_changes', {}).items():
         lines.extend(['', '## ' + label + ' protocol changes', '', 'Experimental methods remain separate from supported APIs.'])
         for kind in ('added_methods', 'removed_methods', 'added_schemas', 'removed_schemas', 'changed_schemas'):
@@ -508,7 +619,26 @@ def main():
     debug = ROOT / 'target/debug' / ('hgs.exe' if os.name == 'nt' else 'hgs')
     parser.add_argument('--hgs', type=Path, default=os.environ.get('HGS_TEST_BIN') or debug,
                         help='The hgs build under test; default: HGS_TEST_BIN, else the debug build')
+    parser.add_argument('--contract', choices=['agent-hint'], help='Select the fixed hint-output contract instead of default UI suites')
+    parser.add_argument('--pre-feature-hgs', type=Path, help='Reviewed real ad328 main CLI for the migration case')
+    parser.add_argument('--hook-observer', type=Path, help='Reviewed build of the fixture-only session_start_observer example')
+    parser.add_argument('--hgs-source', help='Complete source object bound to --hgs by the reviewed build receipt')
+    parser.add_argument('--observer-source', help='Complete source object bound to --hook-observer by its reviewed build receipt')
+    parser.add_argument('--native-package-cache', type=Path,
+                        help='Public official tarballs named by the pin URLs; agent-hint never downloads missing inputs')
     args = parser.parse_args()
+    hint_inputs = None
+    if args.contract:
+        if args.latest or not args.pre_feature_hgs or not args.hook_observer or not args.native_package_cache:
+            parser.error('agent-hint requires sealed CLI/observer inputs and --native-package-cache; --latest is separate')
+        try:
+            hint_inputs = dict(candidate=hint_input(args.hgs, args.hgs_source),
+                               pre_feature=hint_input(args.pre_feature_hgs, PRE_FEATURE_SOURCE),
+                               observer=hint_input(args.hook_observer, args.observer_source))
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+    elif any((args.pre_feature_hgs, args.hook_observer, args.hgs_source, args.observer_source, args.native_package_cache)):
+        parser.error('Hint source inputs require --contract agent-hint')
     manifest = json.loads(MANIFEST.read_text(encoding='utf-8'))
     try:
         check_manifest(manifest)
@@ -518,6 +648,10 @@ def main():
     results.mkdir(parents=True, exist_ok=True)
     target = host_target()
     agents = args.agent or [agent for agent, spec in AGENTS.items() if agent_target(agent, target) in spec['members']]
+    if hint_inputs is not None:
+        if args.agent and any(agent not in HINT_CLASSES for agent in agents):
+            parser.error('The agent-hint contract covers Claude and Codex only')
+        agents = [agent for agent in agents if agent in HINT_CLASSES]
     unsupported = [agent for agent in agents if agent_target(agent, target) not in AGENTS[agent]['members']]
     if not agents or unsupported:
         parser.error('No reviewed native packages for ' + str(target) + ': ' + ', '.join(unsupported or AGENTS))
@@ -544,10 +678,25 @@ def main():
             except Exception as error:
                 report['errors'].append(spec['name'] + ' canary discovery: ' + str(error))
     # A scanner or a leftover process may still hold a file there on Windows.
-    with tempfile.TemporaryDirectory(prefix='zerus-native-compat-', ignore_cleanup_errors=True) as temporary:
+    work_context = (tempfile.TemporaryDirectory(prefix='zerus-native-compat-', ignore_cleanup_errors=True)
+                    if hint_inputs is None else contextlib.nullcontext(tempfile.mkdtemp(prefix='zerus-hint-compat-')))
+    with work_context as temporary:
         for agent in agents:
             for package in packages[agent]:
-                report['contracts'].append(qualify(agent, package, Path(temporary), results, args.hgs.resolve()))
+                if hint_inputs is None:
+                    row = qualify(agent, package, Path(temporary), results, args.hgs.resolve())
+                else:
+                    row = qualify(agent, package, Path(temporary), results, args.hgs.resolve(), hint_inputs,
+                                  args.native_package_cache.resolve())
+                    row['work_root'] = temporary
+                report['contracts'].append(row)
+                if hint_inputs is not None and row['status'] != 'passed':
+                    write_report(report, results)
+                    return 1  # First failed pin stops; never replay or run later pins.
+        if hint_inputs is not None:
+            # No finalizer removes failed or unknown hint work. All case cleanup
+            # records were checked before removing this successful cache root.
+            shutil.rmtree(temporary)
     for agent in agents:
         rows = {row['version']: row for row in report['contracts'] if row['agent'] == agent}
         current = rows.get(next((package['version'] for package in reversed(manifest[agent])

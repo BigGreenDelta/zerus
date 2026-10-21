@@ -900,7 +900,246 @@ python3 scripts/ci/agent-compatibility.py --agent opencode
 python3 scripts/ci/agent-compatibility.py --latest
 ```
 
-On Windows it takes the release build and the ConPTY pair as
+The unshipped static coordination hint has a separately selected source candidate:
+`--contract agent-hint`. Its fixture is authored for the same reviewed Claude and
+Codex pins and targets above. Native acceptance requires retained successful
+results on the exact reviewed source. It selects
+exactly four methods per pin: actual hgs lifecycle (launch, compact, clear, two
+resumes, rename, fork), lost-mark output, real pre-feature first resume, and
+global/account exclusions with instruction and personal-hook preservation. The
+Unix launcher sentinel covers supported project shell launchers; Windows starts
+the real executable directly and makes no shell-launcher claim. Existing default
+UI matrices, geometry/animation coverage and pin values are unchanged.
+
+The source inputs are the candidate hgs, a real CLI built from pre-feature main
+`ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce`, the `session_start_observer` Rust example,
+and cached public official package tarballs whose exact filenames and SHA-512
+pins are already in `agent-compatibility.json`. The hint selection never downloads
+or retries missing packages. Build receipts must bind each declared Git source to
+its binary hash; a version string cannot establish that association. A future
+separately authorized run has this shape (all paths are examples, not inputs):
+
+```sh
+python3 scripts/ci/agent-compatibility.py --contract agent-hint --agent claude \
+  --hgs /fixture/candidate/hgs --hgs-source <reviewed-40-digit-source> \
+  --pre-feature-hgs /fixture/pre-feature/hgs \
+  --hook-observer /fixture/observer/session_start_observer \
+  --observer-source <reviewed-40-digit-observer-source> \
+  --native-package-cache /fixture/public-package-cache --results /fixture/fresh-results
+```
+
+Each selected pin has one original 1200-second row end including preparation and
+a 60-second cleanup reserve, with four fixed methods and first failure stopping
+the selected campaign. Startup and deferred-resume gates keep their original
+120-second ends, including late native consent answered only through `hgs answer`.
+The native five-second hook timeout is unchanged. No prompt or count precedes the
+actual public gate and native-process proof. Pre-feature migration launches and
+pauses through the old CLI, then resumes through the candidate; Windows records a
+resident old host separately from the newly installed candidate stable CLI.
+Admission requires typed `tracked: true`, an explicit question list, and the
+selected first/resume gate exactly `true` with its reason exactly empty. A known
+already-bound steady conversation uses its exact run/conversation and idle
+activity; its normal false first-message field has no first-message reason.
+The exact observed read-only `Hooks need review` frame with 13 new or changed
+hooks may wait within that same original gate for an answerable
+`codex_hooks_trust` card. Its current run, hash, title, disclosure and all three
+choices must match. This read-only card authorizes no answer or prompt; an altered
+card is refused, and a card that never upgrades expires at the original end.
+The product hook-review parser is unchanged.
+
+Hint cases own cleanup before partial setup or launch can return. Their process
+queries, private socket/endpoint stops, pinned-handle reaping, model shutdown and
+post-stop image/observer checks share the same original row end. The ordinary
+fixtures' cleanup defaults are not used or changed. Hint Windows profiles and the
+outer hint scratch root have no automatic TemporaryDirectory deletion. Unknown
+identity, a failed/expired cleanup or a parent timeout retains the namespaces and
+fails qualification. Forced native stops use only a verified private socket or
+pinned owned handles; no numeric-PID fallback is added. A parent timeout is not
+proof of descendant exit. Files are removed only after every cleanup check has
+verified within the original end. This bounds the fixture's waits, not arbitrary
+host filesystem or logging stalls.
+Windows cleanup queries the image through the already-pinned process handle.
+If that image is unavailable, one zero-time wait on the same handle must prove
+exit; otherwise cleanup remains UNKNOWN without a forced stop. Private cleanup
+evidence retains at most 16 exception records, each with at most eight bounded
+arguments and eight source frames, with explicit truncation/overflow metadata.
+It records no frame locals. Private-stop failures still fail cleanup.
+
+The fixture intentionally seeds an observed retained owned hook entry at a
+separate private executable named `hgs` or `hgs.exe`. It leaves the real stable
+CLI, staged images, supervisor/native argv and real answer channel intact. The
+normal installer must retain that entry; this does not qualify fresh registration
+as having generated the observer path. Each observed call starts one standalone
+phase-sealed real hgs. Bounded capture never truncates forwarded streams; stdin,
+stdout and stderr preserve their own byte order, without a cross-stream ordering
+claim. Missing identity, incomplete capture/forwarding, overflow or unknown output
+fails the case. Pipes add interposition and can change fault-path behavior.
+Recorded output and completed forwarding do not prove customer receipt or
+crash-atomic exactly-once delivery. The lost-mark control requires a second
+distinct actual SessionStart output, then empty output on the next marked resume;
+marks, model counts and transcripts alone cannot prove that, particularly with
+Claude's identical-context deduplication. This is no OS/network-isolation claim,
+native execution grant, shipped feature or release-dependency waiver.
+On macOS, the observer child and fixture native process use `proc_pidpath` for
+their absolute image paths and retain the existing `ps` birth identity. A `ps`
+basename cannot establish executable identity.
+
+Each call may add five fixed, exclusive stage files: before spawn, child identity,
+first stdin write progress, child exit and drained streams. A stdin prefix is
+bounded captured data and may be incomplete; these diagnostics never substitute
+for complete `begin.json`/`result.json`, forwarding or cleanup proof. Their file
+writes and syncs add observer timing overhead under the same five-second hook
+limit. A missing result or recording failure remains UNKNOWN and fails the case.
+Private Codex profiles set `sandbox_mode="danger-full-access"` and
+`approval_policy="never"` for the keyless fixture, as the ordinary Windows native
+suite does. Hook and folder trust still require their exact public hgs cards and
+answers; the fixture never answers a Terminal-only sandbox setup card.
+
+The finite allocation is six pin/OS rows: Claude 2.1.296 on Linux x86_64,
+macOS arm64 and Windows x86_64; retained Codex 0.160.1 on Linux x86_64, and
+Codex 0.162.0 on Linux x86_64 and Windows x86_64. A disposable Linux job needs
+Python, tmux and private short TMPDIR; macOS needs Python, tmux and its native
+arm64 build; Windows needs Python and the reviewed ConPTY pair supplied through
+`HGS_TEST_CONPTY_DIR`. Candidate and pre-feature hgs and the observer must be built
+for that job's OS/architecture, with separate source/command/toolchain/hash
+receipts. Linux Codex selection runs its two manifest pins sequentially; all
+other provider/OS selections run one row. Each selection uses the command above
+with `--agent claude` or `--agent codex` and fresh results, its OS-native binary
+paths and official public cache. Existing version/help/schema probes remain part
+of the runner. These focused disposable hosted or local jobs can be allocated
+after review; ordinary CI defaults, suites and pins are unchanged.
+
+#### Opt-in hosted hint gate
+
+`agent-hint.yml` provides five disposable standard public-runner jobs. It runs
+only in the public upstream repository, through `workflow_dispatch` or a PR to
+main carrying the `native-agent-hint` label and changing one of its scoped source
+paths. A PR run checks out the exact head commit. External-contributor workflow
+approval still applies. Manual dispatch becomes available once the workflow is
+registered on the default branch; select the reviewed source ref explicitly:
+
+```sh
+gh workflow run agent-hint.yml --ref <reviewed-source-branch-or-tag>
+```
+
+| Job | Manifest pins, in order | Required methods |
+| --- | --- | --- |
+| Linux Claude | 2.1.296 linux-x64 | 4 |
+| Linux Codex | 0.160.1 then 0.162.0 linux-x64 | 8 |
+| macOS arm64 Claude | 2.1.296 darwin-arm64 | 4 |
+| Windows Claude | 2.1.296 win32-x64 | 4 |
+| Windows Codex | 0.162.0 win32-x64 | 4 |
+
+Every row must report its exact four raw IDs, four passes, zero skips/errors and
+verified owned cleanup. Linux Codex stops before the second pin if the first
+fails. Jobs collect evidence independently; all five must succeed for the
+24-occurrence campaign to qualify. The gate does not publish or release, and
+the full standard CI matrix remains required before merging the product change.
+
+Before any Python interpreter starts, the workflow creates a short private Unix
+`TMPDIR` (at most 24 bytes), with separate fresh private Cargo/rustup caches and
+home. It uses no shared Actions cache, provider credential or signing environment.
+Linux reuses the pinned tmux installer, macOS the existing Homebrew setup, and
+Windows the reviewed ConPTY fetcher and MSVC environment helper. Rust 1.99.1 is
+installed explicitly; preparation uses direct cargo/rustc paths with at most two
+compiler jobs. Public dependency downloads belong to this hosted preparation
+scope and never target an owner's installation.
+
+`scripts/ci/prepare-agent-hint.py` has one original 2400-second preparation end:
+public Cargo/npm fetches share at most 600 seconds, then candidate and pre-feature
+builds each get at most 900 seconds, clamped to that original end. Builds are
+locked and offline after fetching; dependencies must have crates.io checksums.
+Only the selected official npm URLs, filenames and SHA-512 values already in
+`agent-compatibility.json` are fetched (512 MiB maximum per package), without
+latest discovery, redirects, retries or missing-cache fallback. Candidate hgs
+and `session_start_observer` are built together from the candidate; real
+pre-feature hgs is built from exact main
+`ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce` on each OS. Preparation stops on its first
+failure and starts no provider or hgs process.
+
+The retained `build-receipt.json` binds clean pre/post Git commit/tree and lockfile
+hashes, build argv, OS/architecture, direct tool hashes, raw-log hashes, exit codes
+and all three binary hashes. Windows also records selected MSVC/SDK executable
+hashes, versions and include/library search inputs; verbose build logs retain
+compiler/linker invocation details. This associates source with build output;
+it makes no reproducible-build or kernel-isolation claim. The row runner
+independently hashes the binary inputs again.
+
+Preparation and native rows have separate finite bounds. Dependency setup steps
+have 5–10-minute caps, preparation has 45 minutes, each Unix selection 45 minutes,
+and each Windows host step 28 minutes. Every job has a 120-minute whole-job cap,
+including upload. Each native row keeps its original 1200 seconds, including the
+60-second fixture cleanup reserve, original 120-second startup gates and unchanged
+five-second hook timeout.
+
+The Unix hint fixture records the exact private tmux server's socket, PID, birth
+and kernel image before each launch when live, then registers each new run's
+native and supervisor identities before consenting to a startup card. It retains
+observed descendants while their recorded parents are live. The ledger permits
+64 launch intents, 2,048 owned identities and 16 private panes; process snapshots
+permit 16,384 rows and query output is checked against 2 MiB after capture. A
+printable delimiter frames server, socket and pane fields: tmux may render TAB
+control bytes as underscores. Owned socket paths containing that delimiter or
+non-printable characters refuse before the query; malformed rows never qualify.
+A stale or missing socket is insufficient: a zero-byte connection to only that
+reserved Unix stream path must return ENOENT or ECONNREFUSED, all launch custody
+must be complete, and all recorded birth identities must have exited. Unknown
+connectivity, images, partial registration or exhausted bounds retain the runtime
+and fail cleanup. No discovered numeric PID is signalled. Windows first waits
+at most five seconds for the selected host's sessions to drain after pane kills,
+clamped before the original row end's last five seconds, then keeps the same
+pinned-handle exit and executable-release requirements. The 60 seconds is a row
+cleanup reserve. If image lookup becomes unavailable, one passive wait of at
+most five seconds on the same pinned handle may prove exit; the original end is
+checked again afterward. Timeout, unknown status or late completion still fails,
+without a forced stop, image-query retry or process-ID reopen. Cleanup uses
+the existing absolute row end even after an early
+body failure, and these checks do not create a renewed cleanup allowance.
+
+An identity-bound, bounded read-only `startup_terminal_choice` may be observed
+until a supported typed card appears within the same original 120-second gate.
+It grants no answer, prompt or readiness proof. Unknown answerable cards still
+refuse, and a forever read-only panel times out. This does not prove that a native
+provider will expose a typed card; fresh native qualification is required.
+
+Both qualification builds pass the per-command Cargo override
+`--config profile.dev.package.sha2.opt-level=3`. The candidate hgs and observer
+share that dependency profile; the real pre-feature hgs uses it as well. Normal
+Cargo profiles, manifests and dependency pins remain unchanged. Both full
+subject hashes and all stream joins remain required under the same five-second
+hook limit. Incomplete diagnostics cannot distinguish an unfinished stream join
+from an unfinished post-exit subject hash.
+
+Focused helper qualification uses the same override in each command:
+
+```sh
+cargo test --locked --offline --example session_start_observer \
+  --config profile.dev.package.sha2.opt-level=3 -- --nocapture
+cargo clippy --locked --offline --example session_start_observer \
+  --config profile.dev.package.sha2.opt-level=3 -- -D warnings
+cargo build --locked --offline --bin hgs --example session_start_observer \
+  --config profile.dev.package.sha2.opt-level=3
+```
+
+Windows reuses `outside-job.py` unchanged: WMI creation has a 120-second cap,
+followed by a 1320-second monitor cap allowing the 1200-second row and up to 120
+seconds of ordinary host cleanup. A monitor timeout may trigger the launcher's
+separate shared 120-second cleanup allowance (30 seconds per action). Thus the
+launcher permits up to 1560 seconds of bounded waits, apart from filesystem or
+logging stalls, under the 1680-second host-step cap. This outer allowance is
+separate from the row's 60-second reserve. Executable-pattern cleanup is confined
+to these disposable Windows jobs; it cannot establish verified fixture cleanup
+or turn UNKNOWN into PASS.
+
+Three-day artifacts retain raw row logs/IDs and the full hook-output tree
+(stdout and forwarded-stream hashes, exact phase/pre-send gates, known-consent
+receipts and actual cleanup records), source/build receipts and the ConPTY fetch
+log. Failed or unknown runtime roots remain on the disposable host until it is
+discarded. The workflow neither deletes nor uploads those complete roots, build
+targets or dependency caches. A canceled host may prevent artifact upload and
+provides no successful qualification evidence.
+
+The ordinary Windows compatibility matrix takes the release build and ConPTY pair as
 [testing the session host](windows-host-testing.md#real-agents) shows. The
 generated `artifacts/test-results/agent-compatibility/summary.md` and
 `report.json` contain the coverage result and review candidates. Before changing
@@ -921,6 +1160,20 @@ verify input ownership, empty composers and native dialogs, including Codex's
 reset before its deferred SessionStart. Prefer a structured provider protocol
 when it can address the same exact live process/run/conversation. A separate
 app-server process must not be assumed to own an existing terminal session.
+Windows cannot enumerate a process's open files. Deferred Codex fork verification
+instead completes a bounded scan of only the selected account's `sessions`
+directory and uses the existing Restart Manager query for each eligible child
+file. It retains the exact supervised PID/birth, distinct child ID, parent,
+interactive source, launch directory and empty-composer requirements. Links and
+reparse points, missing or unreadable entries, uncertain ownership and multiple
+eligible held histories refuse input. The scan allows at most 16,384 entries,
+eight nested directory levels, 256 KiB per first-line header and 16 MiB of total
+returned header data, within a two-second verification window. Exhaustion is
+unknown; it never selects the newest file or accepts a partial inventory. This
+window does not interrupt an arbitrary filesystem or Restart Manager stall and
+does not extend the original startup, hook or cleanup budgets. Pure adapter
+controls cannot prove that a pinned native Windows fork creates and holds its
+child history before its first turn; that still requires native qualification.
 See [Codex App Server](https://developers.openai.com/codex/app-server) for its
 JSON-RPC protocol and version-specific schema generation. Migration of live
 terminal-backed sessions requires separate ownership/resume verification.

@@ -108,6 +108,8 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     }
     let archive_id = nonempty_env("HGS_ARCHIVE_ID");
     std::env::remove_var("HGS_ARCHIVE_ID");
+    let fork_hint_revision = nonempty_env(agent_hint::FORK_REVISION_ENV);
+    std::env::remove_var(agent_hint::FORK_REVISION_ENV);
     let _signals = crate::platform::ShutdownGuard::install().map_err(|e| e.to_string())?;
     // The session host's channel for pauses and input checks (spec D10, D11).
     #[cfg(windows)]
@@ -161,6 +163,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         }
         std::env::remove_var("HGS_FORK_PARENT_ID");
         std::env::remove_var("HGS_FORK_SOURCE_NAME");
+        agent_hint::inherit_fork(&mut record, fork_hint_revision.as_deref());
         if let Some(expected) = expected {
             let previous = read(&name)?;
             if string(&previous, "conversation_id") != expected
@@ -212,6 +215,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             if let Some(anchor) = previous.get("journal_name") {
                 record["journal_name"] = anchor.clone();
             }
+            agent_hint::carry_resume(&previous, &mut record);
         } else if let Some(requested) = requested {
             // The ID is an explicit request, not proof that the provider has
             // opened it. Only a matching SessionStart confirms the binding.
@@ -548,7 +552,8 @@ fn session_spec(
         ));
     }
     let executable = runner_executable()?;
-    let launch = supervisor_command(record, &executable, argv);
+    let hint_environment = crate::config::agent_hint_environment(string(record, "agent"));
+    let launch = supervisor_command(record, &executable, argv, &hint_environment);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", name.to_owned()),
         ("HGS_AGENT", string(record, "agent").to_owned()),
@@ -583,6 +588,7 @@ fn session_spec(
             .into_iter()
             .map(|(key, value)| format!("{key}={value}"))
             .chain(account_variables(record))
+            .chain(hint_environment)
             .collect(),
         command: launch,
         detached: true,

@@ -575,6 +575,88 @@ class AgentCompatibility(unittest.TestCase):
                 self.assertEqual(Path(probes[key]).parents[1], home)
             self.assertEqual(env['USERPROFILE'], '/fixture-live-profile')
 
+    def test_hint_contract_names_exactly_four_methods_without_changing_default_suites(self):
+        for agent in ('claude', 'codex'):
+            for target in compat.AGENTS[agent]['members']:
+                names = compat.hint_suites(agent, target)
+                self.assertEqual(len(names), 4)
+                self.assertEqual(len(set(names)), 4)
+                self.assertEqual([name.rsplit('.', 1)[1] for name in names], list(compat.HINT_METHODS))
+                self.assertTrue(all('Windows' in name for name in names) if target == compat.WINDOWS
+                                else all('Windows' not in name for name in names))
+            self.assertTrue(all('agent_hint' not in name for name in compat.AGENTS[agent]['suites']))
+        self.assertEqual(compat.PRE_FEATURE_SOURCE, 'ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce')
+
+    def test_hint_source_input_records_bytes_but_never_infers_git_source(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'fixture-input'
+            path.write_bytes(b'public synthetic bytes')
+            value = compat.hint_input(path, 'a' * 40)
+            self.assertEqual(value['source'], 'a' * 40)
+            self.assertEqual(value['sha256'], hashlib.sha256(path.read_bytes()).hexdigest())
+            with self.assertRaises(ValueError): compat.hint_input(path, 'short-source')
+            with patch.object(compat, 'MAX_PACKAGE_BYTES', 2), self.assertRaises(ValueError):
+                compat.hint_input(path, 'a' * 40)
+
+    def test_hint_cached_package_uses_existing_official_pin_without_download(self):
+        import time
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive = root / 'codex-0.162.0-linux-x64.tgz'
+            member = compat.AGENTS['codex']['members']['linux-x64']
+            with tarfile.open(archive, 'w:gz') as tar:
+                item = tarfile.TarInfo(member)
+                item.size = len(b'fixture native bytes')
+                tar.addfile(item, io.BytesIO(b'fixture native bytes'))
+            package = dict(version='0.162.0', target='linux-x64',
+                           url=compat.AGENTS['codex']['tarball'].format(version='0.162.0', target='linux-x64'),
+                           integrity='sha512-' + base64.b64encode(hashlib.sha512(archive.read_bytes()).digest()).decode())
+            with patch.object(compat, 'download', side_effect=AssertionError('no download in hint contract')):
+                native = compat.install_native('codex', package, root / 'output', archive_input=archive,
+                                               deadline=time.monotonic() + 60)
+                self.assertEqual(native.read_bytes(), b'fixture native bytes')
+                with self.assertRaises(TimeoutError):
+                    compat.install_native('codex', package, root / 'expired', archive_input=archive, deadline=0)
+            self.assertTrue(archive.is_file(), 'public cache input remains unchanged')
+
+    def test_hint_runner_keeps_original_absolute_end_after_preparation(self):
+        calls = []
+        def run(argv, **options):
+            calls.append(options)
+            options['stdout'].write(b'ZERUS_NATIVE_RESULT={"tests":4,"skipped":0}\n')
+            return SimpleNamespace(returncode=0)
+        with tempfile.TemporaryDirectory() as folder, patch.object(compat.time, 'monotonic', return_value=100), \
+                patch.object(compat.subprocess, 'run', side_effect=run):
+            root = Path(folder)
+            status, _ = compat.run_suites(['named-fixture'], {}, 1000, root, root / 'result.log', absolute_end=105)
+            self.assertEqual(status, 0)
+            self.assertEqual(calls[0]['timeout'], 5)
+            self.assertEqual(calls[0]['env']['ZERUS_NATIVE_DIAGNOSTIC_DEADLINE'], '105')
+
+    def test_hint_failed_or_timed_out_selection_retains_outer_work_without_finalizer(self):
+        for timeout in (False, True):
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                work = root / 'retained-work'
+                work.mkdir()
+                argv = ['compat', '--contract', 'agent-hint', '--agent', 'claude', '--hgs', str(root / 'hgs'),
+                        '--hgs-source', 'a' * 40, '--pre-feature-hgs', str(root / 'old-hgs'),
+                        '--hook-observer', str(root / 'observer'), '--observer-source', 'b' * 40,
+                        '--native-package-cache', str(root / 'cache'), '--results', str(root / 'results')]
+                failed = dict(agent='claude', version='2.1.296', target='linux-x64', status='failed')
+                with patch.object(compat.sys, 'argv', argv), patch.object(compat, 'host_target', return_value='linux-x64'), \
+                        patch.object(compat, 'hint_input', return_value={}), \
+                        patch.object(compat.tempfile, 'mkdtemp', return_value=str(work)), \
+                        patch.object(compat.tempfile, 'TemporaryDirectory', side_effect=AssertionError('no hint GC finalizer')), \
+                        patch.object(compat, 'qualify', side_effect=TimeoutError('original end') if timeout else None,
+                                     return_value=failed) as qualify, patch.object(compat, 'write_report'):
+                    if timeout:
+                        with self.assertRaises(TimeoutError): compat.main()
+                    else:
+                        self.assertEqual(compat.main(), 1)
+                    self.assertEqual(qualify.call_count, 1)
+                self.assertTrue(work.is_dir(), 'UNKNOWN runtime/cache namespace must remain')
+
     def test_canary_has_no_publication_credentials_or_write_access(self):
         workflow = (ROOT / '.github/workflows/agent-upstream.yml').read_text()
         self.assertIn('contents: read', workflow)

@@ -3,6 +3,7 @@
 //! Version-one manifests and journal rows deliberately remain compatible with
 //! the original helper: an upgrade must never orphan a saved conversation.
 mod answer_channel;
+mod agent_hint;
 mod archive;
 pub(crate) mod archive_catalog;
 mod claude_trust;
