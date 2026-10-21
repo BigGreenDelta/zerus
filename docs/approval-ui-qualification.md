@@ -47,6 +47,18 @@ its original Home/resume boundary exactly once, with the same cache and elapsed 
 focus/question/confirmation-retired/count/disabled assertions; it never performs an additional reset. No production
 visibility, foreground or review clock is set.
 
+Ordinary Home/resume can also initiate the production catalog refresh. The interceptor admits only GET
+`/v1/capabilities` and `/v1/computers` at the exact reserved HTTPS origin, default port, empty userinfo/query/fragment/body,
+and exact existing fixture authorization. Capabilities advertise only protocol1, `inspect`, `answer`, and no features.
+Computers returns one synthetic computer and a synchronized clone of the current synthetic session/card, never an empty
+or stale catalog. Each fixed path has at most64 observations with first/last monotonic timestamps. The original POST
+receipt/answer guards and first-failure refusal remain unchanged; no request is forwarded. The observed prior
+capabilities refusal does not establish the cause of a missing broader dialog. The broader case independently verifies
+its exact selected draft, option2, empty feedback, card/run/conversation and native scope before the original Send.
+Failure-only diagnostics inspect at most4 windows,128 nodes/16 levels and8 fixed labels per owned app window, with
+160-character records. Foreign trees are omitted, unknown/overflow/refresh failures are diagnostic UNKNOWN, and the
+original exception stays primary. No extra ADB subject or diagnostic success can qualify a failed/missing case.
+
 Before dispatch, review this workflow and the SDK-free `tests/test_android_project_ui.py` and
 `tests/test_approval_ui_harness.py` controls. The new app/test are built under a fresh synthetic debug signer; this does
 not establish compatibility with the operator's installed signer. Do not reuse an old private D01/ISO resource grant,
@@ -125,7 +137,7 @@ Both disposable targets import the public Apple `<notify.h>` declarations throug
 header. Its bytes join the exact project source identities. The production application does not reference this header;
 no handwritten C ABI, SDK-header replacement, or new runtime dependency is introduced.
 
-The two fixture-only control modes use Darwin notifications through `notify_register_dispatch`, `notify_post`, and
+The three fixture-only control modes use Darwin notifications through `notify_register_dispatch`, `notify_post`, and
 `notify_cancel` ([Apple API header](https://raw.githubusercontent.com/apple-oss-distributions/Libnotify/main/notify.h),
 [notification semantics](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/notify.3.html)).
 The shared namespace does not authenticate a sender. This channel is confined to the disposable simulator fixture:
@@ -133,6 +145,18 @@ exact names bind a fresh test-launch UUID and a separate random app-generation U
 the chosen mode registered. Each action consumes and cancels its own token once, and the UI must acknowledge its
 action/serial. Posting success alone proves no delivery. Explicit fixture closure checks cancellation before termination;
 a failed registration, acknowledgement, timing precondition, or cleanup cannot pass. No production target uses this API.
+
+Countdown mode additionally starts unavailable, selects the original native option while ordinary card inputs remain
+editable, then admits only its one-time `begin-countdown-review` action. That action sets fixture availability true;
+the exact production eligibility path starts the unchanged review. No Home/activation latency or artificial clock is
+part of this countdown fixture. Feedback and countdown use a fixed reverse notification bound to the launch UUID,
+actual app generation, a separate fresh ACK UUID and a fixed action code. A main-actor UITest receiver registers before
+post, consumes/cancels its exact token once, and acknowledges through an XCTest expectation. Its checked teardown block
+runs even after a failing test. The app commits the original visible ACK before posting the reverse ACK; posting alone
+is not proof. A monotonic timestamp before the original action post is a conservative lower bound for review start.
+The original disabled/zero or real short edit/Return must finish below three seconds measured from that timestamp;
+only afterward is the unchanged visible action/serial/time/generation ACK read. There is no pre-action accessibility
+ACK poll. A late or missing callback, cancellation, visible ACK or timing guard fails without a bypass claim.
 
 Feedback mode seeds only the fixed memory draft prefix and keeps the synthetic card unavailable while the real keyboard
 opens. The one-time `begin-feedback-review` notification makes that card available through its ordinary production
@@ -142,6 +166,18 @@ the fixture without a bypass claim. Replacement mode posts its one-time `replace
 then requires the same native retirement and no-submit assertions. The broad disclosure check expects the entire
 production message, including its description. These controls never set a review clock, foreground flag, native dialog,
 or provider permission. Monotonic phase records and exact ACKs are evidence only; all seven UI tests still have to pass.
+
+Broader cancellation first uses an actual native Cancel when present. If absent, the test requires exactly one actual
+native popover containing Confirm and the full production disclosure, a recognized actual horizontal size class, and
+a hittable passive fixture header whose entire frame is outside that popover and inside the same unique owned app
+window. One physical header-coordinate tap may then dismiss the adaptive presentation. Unknown role/geometry/traits
+fails instead of guessing a screen point or altering presentation. Confirm retirement and zero callbacks are required
+before the original separate Send/Confirm and final option2 payload. This path is source-only until actually qualified.
+
+The configured XCTest default/maximum allowance stays30 seconds. Apple documents that
+[`executionTimeAllowance`](https://developer.apple.com/documentation/xctest/xctestcase/executiontimeallowance) rounds to
+minute granularity; a reported43.737-second case alone does not prove a violation of the configured value. The original
+900-second driver end,60-second cleanup reserve and every command cap remain unchanged.
 
 Retain the source map, raw stdout/stderr, result bundle and actual test inventory before cleanup. Re-hash every source
 entry and the built fixture products. Shut down and delete only the newly returned simulator UUID after matching its

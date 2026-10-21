@@ -61,7 +61,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             screenshot("failure")
-            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n")
+            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n${windowEvidence()}\n")
             finish(Activity.RESULT_CANCELED, result)
         }
     }
@@ -149,6 +149,33 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             bitmap.recycle()
         }
     }
+    private fun windowEvidence(): String = try {
+        val lines = mutableListOf<String>()
+        val windows = uiAutomation.windows
+        check(windows.size in 1..4) { "window-count" }
+        val labels = setOf("Approve once", "Approve for this session", "Reject", "Send answer", "Confirm this option?", "Confirm", "Cancel", "Exact command for this session only")
+        for (window in windows) {
+            val root = window.root ?: error("window-root")
+            if (root.packageName?.toString() != targetContext.packageName) continue // Never log another application's tree.
+            val bounds = Rect(); window.getBoundsInScreen(bounds)
+            lines += "owned-window id=${window.id} type=${window.type} active=${window.isActive} focused=${window.isFocused} bounds=$bounds".take(160)
+            var visited = 0; var matched = 0
+            fun visit(node: AccessibilityNodeInfo?, depth: Int) {
+                check(node != null && depth <= 16 && ++visited <= 128 && node.refresh()) { "window-traversal" }
+                check(node.packageName?.toString() == targetContext.packageName) { "window-package" }
+                val label = sequenceOf(node.text?.toString(), node.contentDescription?.toString()).firstOrNull { it in labels }
+                if (label != null) {
+                    check(++matched <= 8) { "window-label-count" }
+                    val rectangle = Rect(); node.getBoundsInScreen(rectangle)
+                    lines += "owned-node window=${window.id} label=$label visible=${node.isVisibleToUser} enabled=${node.isEnabled} clickable=${node.isClickable} selected=${node.isSelected} bounds=$rectangle".take(160)
+                }
+                for (index in 0 until node.childCount) visit(node.getChild(index), depth + 1)
+            }
+            visit(root, 0)
+        }
+        check(lines.isNotEmpty()) { "owned-window-missing" }
+        lines.joinToString("\n")
+    } catch (error: Throwable) { "owned-window-evidence UNKNOWN ${error.javaClass.simpleName.take(80)}" }
     private fun set(model: ZerusViewModel, name: String, value: Any) {
         model.javaClass.declaredMethods.single { it.name == name }.apply { isAccessible = true }.invoke(model, value)
     }
@@ -161,11 +188,38 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             .put("agent", "kimi").put("pending_questions", JSONArray()).put("events", JSONArray())
         val calls = mutableListOf<JSONObject>()
         val expected = AtomicReference<JSONObject?>(null)
+        val metadataCalls = mutableMapOf<String, Triple<Int, Long, Long>>() // count, first and last monotonic observation, two fixed keys only.
         var pending: JSONObject? = null
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request()
             var guard = "request-scope"
             try {
+                if (request.method == "GET") {
+                    guard = "metadata-origin"
+                    check(request.url.scheme == "https" && request.url.host == "relay.example.test" && request.url.port == 443 &&
+                        request.url.encodedUsername.isEmpty() && request.url.encodedPassword.isEmpty() &&
+                        request.url.encodedQuery == null && request.url.encodedFragment == null && request.body == null &&
+                        request.header("Authorization") == "Bearer fixture-token")
+                    guard = "metadata-path"
+                    check(request.url.encodedPath in setOf("/v1/capabilities", "/v1/computers"))
+                    synchronized(metadataCalls) {
+                        val now = SystemClock.elapsedRealtime()
+                        val previous = metadataCalls[request.url.encodedPath]
+                        val count = (previous?.first ?: 0) + 1
+                        check(count <= 64) { "Metadata observation bound" }
+                        val first = previous?.second ?: now
+                        metadataCalls[request.url.encodedPath] = Triple(count, first, now)
+                        Log.i("ZerusApprovalUI", "metadata ${request.url.encodedPath} count=$count firstMs=$first lastMs=$now")
+                    }
+                    val capabilities = JSONObject().put("protocol_version", 1).put("operations", JSONArray(listOf("inspect", "answer"))).put("features", JSONArray())
+                    val metadata = if (request.url.encodedPath == "/v1/capabilities") capabilities else {
+                        val current = synchronized(raw) { JSONObject(raw.toString()) }
+                        JSONObject().put("computers", JSONArray().put(JSONObject().put("id", target.computerId).put("name", "Fixture computer").put("online", true)
+                            .put("snapshot", JSONObject().put("mobile_capabilities", capabilities).put("sessions", JSONArray().put(current)))))
+                    }
+                    return@addInterceptor Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                        .body(metadata.toString().toResponseBody("application/json".toMediaType())).build()
+                }
                 check(request.url.host == "relay.example.test" && request.url.encodedPath == "/v1/requests" && request.method == "POST")
                 guard = "authorization"
                 check(request.header("Authorization") == "Bearer fixture-token")
@@ -231,6 +285,24 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             phase("open-ready:$name")
         }
         fun reviewed() { await("three real visible review seconds") { button("Send answer").isEnabled } }
+        fun proveBroaderDraft() {
+            main {
+                val question = checkNotNull(model.conversationQuestions.singleOrNull())
+                val offered = checkNotNull(pending)
+                val draft = model.draft(target, question)
+                val answer = JSONArray(draft.answers).objects().single()
+                val selected = answer.getJSONArray("selected_option_ids")
+                check(selected.length() == 1)
+                val ids = setOf(selected.getString(0))
+                val scope = QuestionPolicies.broaderChoice(question, mapOf("approval" to ids))
+                phase("broader-card:id=${question.id}:hash=${question.hash}:runMatches=${question.run == target.run}:conversationMatches=${question.conversation == target.conversation}")
+                phase("broader-draft:status=${draft.status}:ids=${ids.joinToString()}:emptyText=${answer.string("text").isEmpty()}:verified=${model.activityVerified}:answerable=${question.canAnswer}:scope=${scope?.id}")
+                check(model.selected?.target == target && question.id == offered.string("question_id") && question.hash == offered.string("question_hash") &&
+                    question.run == target.run && question.conversation == target.conversation && draft.target == target && draft.questionId == question.id && draft.questionHash == question.hash &&
+                    draft.status == "editing" && answer.string("question_id") == "approval" && ids == setOf("2") && answer.string("text").isEmpty() &&
+                    model.activityVerified && question.canAnswer && scope?.id == "2") { "Broader Send must preserve its exact selected draft and card" }
+            }
+        }
         fun expect(option: String? = null, text: String = "") {
             val q = checkNotNull(pending)
             check(expected.compareAndSet(null, JSONObject().put("id", q.string("question_id")).put("hash", q.string("question_hash"))
@@ -300,13 +372,13 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
 
             boundary("begin", "broader_cancel")
             open("broader-cancel", "claude_tool_approval")
-            reveal("Approve for this session"); tap("Approve for this session"); reviewed(); tap("Send answer")
+            reveal("Approve for this session"); tap("Approve for this session"); reviewed(); proveBroaderDraft(); tap("Send answer")
             node("Confirm this option?"); node("Exact command for this session only"); check(count() == 1)
             tap("Cancel"); await("cancelled confirmation") { visible("Confirm this option?") == null }; check(count() == 1)
             cases += "broader_cancel"
             boundary("complete", "broader_cancel")
             boundary("begin", "broader_confirm")
-            reviewed(); tap("Send answer"); node("Confirm this option?"); expect("2"); tap("Confirm")
+            reviewed(); proveBroaderDraft(); tap("Send answer"); node("Confirm this option?"); expect("2"); tap("Confirm")
             await("broader receipt") { count() == 2 }; cases += "broader_confirm"
             boundary("complete", "broader_confirm")
 

@@ -4,12 +4,18 @@ import ZerusKit
 import Darwin
 import Dispatch
 
-/// Two fixed, payload-free notifications inside this disposable simulator fixture only.
+/// Three fixed, payload-free notifications inside this disposable simulator fixture only.
 /// The random names avoid cross-test collisions; they do not authenticate a sender.
 @MainActor @Observable final class FixtureControls {
-    enum Mode: String { case normal, feedback, replacement }
-    enum Action: String, Hashable, Sendable { case beginFeedbackReview = "begin-feedback-review", replace }
+    enum Mode: String { case normal, countdown, feedback, replacement }
+    enum Action: String, Hashable, Sendable {
+        case beginFeedbackReview = "begin-feedback-review", replace, beginCountdownReview = "begin-countdown-review"
+        var acknowledgementCode: String? {
+            switch self { case .beginCountdownReview: "c"; case .beginFeedbackReview: "f"; case .replace: nil }
+        }
+    }
     let launch: String
+    let acknowledgementNonce: String
     let generation: String
     let mode: Mode
     var serial = 0
@@ -27,15 +33,18 @@ import Dispatch
             precondition(positions.count == 1 && positions[0] + 1 < args.count, "Fixture selection required")
             return args[positions[0] + 1]
         }
-        precondition(args.filter { $0.hasPrefix("--zerus-fixture-") }.sorted() == ["--zerus-fixture-launch", "--zerus-fixture-mode"])
+        precondition(args.filter { $0.hasPrefix("--zerus-fixture-") }.sorted() == ["--zerus-fixture-ack", "--zerus-fixture-launch", "--zerus-fixture-mode"])
         let selectedLaunch = selected("--zerus-fixture-launch")
         precondition(UUID(uuidString: selectedLaunch)?.uuidString.lowercased() == selectedLaunch)
+        let selectedAcknowledgement = selected("--zerus-fixture-ack")
+        precondition(UUID(uuidString: selectedAcknowledgement)?.uuidString.lowercased() == selectedAcknowledgement)
+        precondition(selectedAcknowledgement != selectedLaunch && selectedAcknowledgement != generation.lowercased())
         guard let selectedMode = Mode(rawValue: selected("--zerus-fixture-mode")) else { preconditionFailure("Unknown fixture mode") }
-        launch = selectedLaunch; self.generation = generation; mode = selectedMode
-        available = selectedMode != .feedback
+        launch = selectedLaunch; acknowledgementNonce = selectedAcknowledgement; self.generation = generation; mode = selectedMode
+        available = selectedMode != .feedback && selectedMode != .countdown
     }
     private var actions: [Action] {
-        switch mode { case .normal: []; case .feedback: [.beginFeedbackReview]; case .replacement: [.replace] }
+        switch mode { case .normal: []; case .feedback: [.beginFeedbackReview]; case .replacement: [.replace]; case .countdown: [.beginCountdownReview] }
     }
     private func name(_ action: Action) -> String {
         let value = "test.example.zerus.ui.\(launch).\(generation.lowercased()).\(action.rawValue)"
@@ -68,10 +77,15 @@ import Dispatch
         tokens.removeValue(forKey: action) // A cancellation is attempted once, including an unknown result.
         guard notify_cancel(token) == 0 else { failed("consumption-cancel"); return }
         consumed.insert(action)
-        switch action { case .beginFeedbackReview: available = true; case .replace: serial += 1 }
+        switch action { case .beginFeedbackReview, .beginCountdownReview: available = true; case .replace: serial += 1 }
         let now = ProcessInfo.processInfo.systemUptime
         status = "ack|\(action.rawValue)|\(serial)|\(now)"
         print("FIXTURE-CONTROL \(status) generation=\(generation)")
+        if let code = action.acknowledgementCode {
+            let reverse = "zui.ack.\(launch).\(generation.lowercased()).\(acknowledgementNonce).\(code)"
+            precondition(reverse.utf8.count <= 128)
+            guard reverse.withCString({ notify_post($0) }) == 0 else { failed("reverse-ack-post"); return }
+        }
     }
     func close() {
         closed = true
@@ -141,6 +155,7 @@ import Dispatch
 /// host events so a card can genuinely change while its native confirmation dialog owns the window.
 struct ApprovalFixtureScreen: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var answerable = true
     @State private var shown = true
     @State private var expanded = false
@@ -163,6 +178,8 @@ struct ApprovalFixtureScreen: View {
     var body: some View {
         VStack(spacing: 8) {
             Text("Synthetic UI only — no native delivery").font(.caption)
+                .accessibilityIdentifier("fixture-dismiss-anchor")
+                .accessibilityValue(horizontalSizeClass == .regular ? "regular" : horizontalSizeClass == .compact ? "compact" : "unknown")
             Text("Callbacks: \(app.conversation.callbacks.count)").accessibilityIdentifier("callback-count")
             Text(app.generation).font(.caption2).accessibilityIdentifier("fixture-generation")
             Text(app.controls.status).font(.caption2).lineLimit(1).accessibilityIdentifier("fixture-control-status")

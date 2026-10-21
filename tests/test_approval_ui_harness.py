@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """SDK-free admission/result/project controls; never count these as native UI results."""
 import importlib.util
+import ast
 import hashlib
 import json
 import os
@@ -20,6 +21,16 @@ def module(name, path):
     value = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(value)
     return value
+
+
+def finite_source_predicate(expression, values):
+    """Finite source-expression stand-in only; never Kotlin/Swift compilation or native API evidence."""
+    tree = ast.parse(expression.strip(), mode="eval")
+    allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not, ast.Compare,
+               ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Name, ast.Load, ast.Constant)
+    assert all(isinstance(node, allowed) for node in ast.walk(tree))
+    assert {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} <= values.keys()
+    return eval(compile(tree, "<finite-source-predicate>", "eval"), {"__builtins__": {}}, values)
 
 
 class ApprovalHarnessTests(unittest.TestCase):
@@ -231,7 +242,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn("@MainActor private func launchFixture(_ mode: Mode = .normal)", source)
         self.assertNotIn("override func setUp", source)
         self.assertNotIn("override func tearDown", source)
-        entries = re.findall(r"func (test\w+)\(\) \{\n        defer \{ closeFixture\(\) \}\n        launchFixture\((?:\.(?:feedback|replacement))?\)", source)
+        entries = re.findall(r"func (test\w+)\(\) \{\n        defer \{ closeFixture\(\) \}\n        launchFixture\((?:\.(?:countdown|feedback|replacement))?\)", source)
         self.assertEqual(len(entries), 7)
         self.assertEqual(set(entries), set(ios.CASES))
         self.assertEqual(len(re.findall(r"^        launchFixture\(", source, re.M)), 7)
@@ -254,7 +265,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertLess(wait.index("requireHealthyFixture()"), wait.index("while (!condition())"))
         self.assertGreater(wait.rindex("requireHealthyFixture()"), wait.index("SystemClock.sleep(30)"))
         self.assertEqual(re.findall(r'(?:var guard|guard) = "([a-z-]+)"', source), [
-            "request-scope", "authorization", "request-json", "operation", "answer-admission", "answer-payload",
+            "request-scope", "metadata-origin", "metadata-path", "authorization", "request-json", "operation", "answer-admission", "answer-payload",
             "answer-target", "answer-receipt-identity", "answer-question-identity", "answer-list", "answer-body", "receipt"])
 
     def test_android_native_text_search_keeps_exact_matches_refresh_fallback_and_real_touch(self):
@@ -344,7 +355,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn("notify_post($0)", tests)
         self.assertIn("Owned registration cleanup must be acknowledged", tests)
         self.assertEqual(host.count("test.example.zerus.ui."), 1)
-        self.assertEqual(tests.count("test.example.zerus.ui."), 1)
+        self.assertEqual(tests.count("test.example.zerus.ui."), 2)
 
     def test_ios_feedback_review_and_replacement_handshakes_preserve_real_assertions(self):
         host = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalUIFixtureApp.swift").read_text()
@@ -353,8 +364,8 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('"text": "Use a safer comman"', host)
         self.assertIn('question.id == "fixture-approval" && question.hash == "fixture-hash-0"', host)
         feedback = tests.split("    func testFeedbackKeyboardCannotBypassReview()", 1)[1].split("    func testBackground", 1)[0]
-        for earlier, later in [('field.tap()', 'post("begin-feedback-review")'), ('post("begin-feedback-review")', 'let reviewBegan = ack('),
-                               ('let reviewBegan = ack(', 'field.typeText("d\\n")'), ('field.typeText("d\\n")', 'count(0)'),
+        for earlier, later in [('field.tap()', 'beginReview("begin-feedback-review")'), ('beginReview("begin-feedback-review")', 'field.typeText("d\\n")'),
+                               ('field.typeText("d\\n")', 'let appBegan = ack('), ('let appBegan = ack(', 'count(0)'),
                                ('count(0)', 'reviewed(); field.typeText("\\n")')]:
             self.assertLess(feedback.index(earlier), feedback.index(later))
         self.assertIn("XCTAssertLessThan(earlyElapsed, 3", feedback)
@@ -366,6 +377,107 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('count(0); XCTAssertFalse(send.isEnabled)', replacement)
         self.assertNotIn('Replace in 2 seconds', host + tests)
         self.assertIn("changes the agent's permissions beyond this request.\\n\\nExact command for this session only", tests)
+
+    def test_android_metadata_source_predicate_refuses_every_unbound_origin_and_extra_path(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        metadata = source.split('                if (request.method == "GET") {', 1)[1].split('                check(request.url.host == "relay.example.test"', 1)[0]
+        condition = metadata.split("                    check(", 1)[1].split(')\n                    guard = "metadata-path"', 1)[0]
+        fields = {"request.url.scheme": "scheme", "request.url.host": "host", "request.url.port": "port",
+                  "request.url.encodedUsername": "username", "request.url.encodedPassword": "password",
+                  "request.url.encodedQuery": "query", "request.url.encodedFragment": "fragment", "request.body": "body",
+                  'request.header("Authorization")': "authorization"}
+        for old, new in fields.items():
+            condition = condition.replace(old, new)
+        condition = condition.replace(".isEmpty()", ' == ""').replace("&&", "and").replace("null", "None")
+        condition = " ".join(condition.split())
+        valid = dict(scheme="https", host="relay.example.test", port=443, username="", password="", query=None,
+                     fragment=None, body=None, authorization="Bearer fixture-token")
+        self.assertTrue(finite_source_predicate(condition, valid))
+        for field, value in dict(scheme="http", host="example.test", port=8443, username="user", password="password", query="",
+                                 fragment="", body="", authorization="Bearer other").items():
+            with self.subTest(field=field):
+                self.assertFalse(finite_source_predicate(condition, {**valid, field: value}))
+        paths = re.search(r'encodedPath in setOf\(([^\n]+)\)', metadata)[1]
+        allowed = re.findall(r'"([^"]+)"', paths)
+        self.assertEqual(allowed, ["/v1/capabilities", "/v1/computers"])
+        for path in ("/v1/requests", "/v1/computers/", "/v1/computers/other", "/v1/capabilities/", "/", ""):
+            with self.subTest(path=path):
+                self.assertNotIn(path, allowed)
+        self.assertIn('check(count <= 64)', metadata)
+        self.assertIn('JSONArray(listOf("inspect", "answer"))', metadata)
+        self.assertIn('synchronized(raw) { JSONObject(raw.toString()) }', metadata)
+        self.assertIn('put("sessions", JSONArray().put(current))', metadata)
+        self.assertIn('return@addInterceptor Response.Builder()', metadata)
+        self.assertNotIn("chain.proceed(", source)
+
+    def test_android_broader_proof_and_failure_windows_do_not_rewrite_or_hide_primary_outcome(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        proof = source.split("        fun proveBroaderDraft()", 1)[1].split("        fun expect(", 1)[0]
+        for value in ('model.draft(target, question)', 'QuestionPolicies.broaderChoice(question, mapOf("approval" to ids))',
+                      'ids == setOf("2")', 'answer.string("text").isEmpty()', 'draft.status == "editing"',
+                      'question.run == target.run', 'question.conversation == target.conversation', 'scope?.id == "2"'):
+            self.assertIn(value, proof)
+        for forbidden in ("model.edit(", "set(model", "tap(", "expected.set("):
+            self.assertNotIn(forbidden, proof)
+        diagnostics = source.split("    private fun windowEvidence()", 1)[1].split("    private fun set(", 1)[0]
+        for required in ("windows.size in 1..4", "depth <= 16", "++visited <= 128", "++matched <= 8", ".take(160)",
+                         'root.packageName?.toString() != targetContext.packageName', 'owned-window-evidence UNKNOWN'):
+            self.assertIn(required, diagnostics)
+        for forbidden in ("performAction(", "injectInputEvent(", "request.body", "Authorization"):
+            self.assertNotIn(forbidden, diagnostics)
+        failure = source.split('            result.putString("stream", "Approval choices smoke failed:', 1)[1].split("finish(Activity.RESULT_CANCELED", 1)[0]
+        self.assertLess(failure.index("error.stackTraceToString()"), failure.index("windowEvidence()"))
+
+    def test_ios_reverse_ack_source_token_guard_nonce_order_and_teardown_refuse_unknown(self):
+        source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
+        receiver = source.split("private final class ReviewAcknowledgement", 1)[1].split("/// Native SwiftUI", 1)[0]
+        guard = re.search(r'guard ([^\n]+) else \{ failure = "stale-or-repeated-reverse-ack"', receiver)[1]
+        condition = guard.replace("!consumed", "not consumed").replace(",", " and")
+        self.assertTrue(finite_source_predicate(condition, dict(consumed=False, token=17, received=17)))
+        for values in (dict(consumed=True, token=17, received=17), dict(consumed=False, token=None, received=17),
+                       dict(consumed=False, token=17, received=18)):
+            with self.subTest(values=values):
+                self.assertFalse(finite_source_predicate(condition, values))
+        self.assertLess(receiver.index("token = nil //"), receiver.index("guard notify_cancel(received) == 0"))
+        self.assertLess(receiver.index("guard notify_cancel(received) == 0"), receiver.index("receivedAt ="))
+        self.assertNotIn("@unchecked", receiver)
+        begin = source.split("    private func beginReview(", 1)[1].split("    private func ack(", 1)[0]
+        for earlier, later in [('addTeardownBlock', 'receiver.register(reverse)'), ('receiver.register(reverse)', 'let began ='),
+                               ('let began =', 'notify_post($0)'), ('notify_post($0)', 'receiver.wait()')]:
+            self.assertLess(begin.index(earlier), begin.index(later))
+        self.assertNotIn('staticTexts[', begin.split("let began =", 1)[1])
+        for code in ("c", "f"):
+            name = "zui.ack." + ".".join(["a" * 36, "b" * 36, "c" * 36, code])
+            self.assertLessEqual(len(name), 128)
+        host = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalUIFixtureApp.swift").read_text()
+        self.assertIn('selectedAcknowledgement != selectedLaunch && selectedAcknowledgement != generation.lowercased()', host)
+        self.assertLess(host.index('status = "ack|'), host.index('guard reverse.withCString'))
+        self.assertIn('case .replacement: [.replace]; case .countdown: [.beginCountdownReview]', host)
+        countdown = source.split("    func testRealCountdownAndOneTimeChoice()", 1)[1].split("    func testBroader", 1)[0]
+        for earlier, later in [('launchFixture(.countdown)', 'choice("Approve once").tap()'), ('choice("Approve once").tap()', 'beginReview("begin-countdown-review")'),
+                               ('beginReview("begin-countdown-review")', 'XCTAssertFalse(send.isEnabled); count(0)'),
+                               ('XCTAssertLessThan(earlyElapsed, 3', 'ack("begin-countdown-review", serial: 0)')]:
+            self.assertLess(countdown.index(earlier), countdown.index(later))
+        self.assertNotIn('press(.home)', countdown)
+
+    def test_ios_adaptive_cancel_requires_owned_popover_and_passive_outside_anchor(self):
+        source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
+        cancel = source.split("    private func cancelBroaderConfirmation()", 1)[1].split("    func testRealCountdown", 1)[0]
+        for required in ('if app.buttons["Cancel"].exists', 'XCTAssertEqual(app.popovers.count, 1',
+                         'popover.buttons["Confirm"].exists && popover.staticTexts[disclosure].exists',
+                         'anchor.exists && anchor.isHittable', '["regular", "compact"].contains(',
+                         'XCTAssertEqual(windows.count, 1', '.allSatisfy { $0.isFinite }', '!popup.intersects(frame)',
+                         'anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()',
+                         'XCTWaiter.wait(for: [retired], timeout: 2)'):
+            self.assertIn(required, cancel)
+        self.assertLess(cancel.index('XCTAssertEqual(app.popovers.count, 1'), cancel.index('anchor.coordinate('))
+        for forbidden in ('notify_post(', 'while ', 'try?', 'coordinate(withOffset:', 'broader =', 'available ='):
+            self.assertNotIn(forbidden, cancel)
+        host = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalUIFixtureApp.swift").read_text()
+        anchor = host.split('Text("Synthetic UI only — no native delivery")', 1)[1].split('Text("Callbacks:', 1)[0]
+        self.assertIn('.accessibilityIdentifier("fixture-dismiss-anchor")', anchor)
+        self.assertNotIn("Button(", anchor)
+        self.assertNotIn("onTapGesture", anchor)
 
 
 if __name__ == "__main__":
