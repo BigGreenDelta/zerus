@@ -277,13 +277,13 @@ class HintFixtureControls(unittest.TestCase):
     def test_missing_foreign_and_expired_handles_never_force_stop(self):
         stopped = []
         def stop(handle, code): stopped.append((handle, code)); return 1
-        for handle, image in ((None, '/fixture/home/hgs.exe'), (123, '/fixture/foreign/hgs.exe')):
+        for handle, image in ((None, '/fixture/owned/hgs.exe'), (123, '/fixture/foreign/hgs.exe')):
             with self.assertRaises(AssertionError):
-                fixture.stop_pinned_handle(handle, lambda: image, '/fixture/home', lambda *args: 0x102,
+                fixture.stop_pinned_handle(handle, lambda: image, '/fixture/owned', lambda *args: 0x102,
                                            stop, lambda limit: limit)
         def expired(limit): raise AssertionError('original end')
         with self.assertRaises(AssertionError):
-            fixture.stop_pinned_handle(123, lambda: '/fixture/home/hgs.exe', '/fixture/home',
+            fixture.stop_pinned_handle(123, lambda: '/fixture/owned/hgs.exe', '/fixture/owned',
                                        lambda *args: 0x102, stop, expired)
         self.assertEqual(stopped, [])
 
