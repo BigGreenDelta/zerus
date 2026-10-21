@@ -69,7 +69,7 @@ class HintFixtureControls(unittest.TestCase):
         frozen_os = SimpleNamespace(name='posix', path=posixpath, PathLike=fixture.os.PathLike, fspath=fixture.os.fspath)
         with patch.object(fixture, 'os', frozen_os), patch.object(fixture.sys, 'platform', 'darwin'), \
                 patch.dict(sys.modules, {'test_kimi_native': helper}), \
-                patch.object(fixture.subprocess, 'check_output', return_value=b'Wed Oct 21 07:21:07 2026 claude'):
+                patch.object(fixture.subprocess, 'check_output', return_value='Wed Oct 21 07:21:07 2026 claude'):
             value.native_identity('claude/p/test')
             self.assertEqual(value.checkpoints[-1]['image'], '/fixture/owned/bin/claude')
             for image in (PurePosixPath('claude'), PurePosixPath('/fixture/foreign/claude'), None):
@@ -575,7 +575,11 @@ class HintFixtureControls(unittest.TestCase):
         self.assertFalse(hasattr(kernel, 'OpenProcess'))
 
     def test_cleanup_details_bound_arguments_and_retain_error_source_without_locals(self):
-        def failed(): raise TypeError('missing image', None, 'x' * 2048)
+        sentinel = 'private fixture local value must not be captured'
+        def failed():
+            private_local = sentinel
+            if private_local:
+                raise TypeError('missing image', None, 'x' * 2048)
         try:
             failed()
         except TypeError as error:
@@ -587,7 +591,10 @@ class HintFixtureControls(unittest.TestCase):
         self.assertIs(detail['arguments'][2]['truncated'], True)
         self.assertEqual(detail['frames'][-1]['function'], 'failed')
         self.assertEqual(detail['context'], dict(pid=123))
-        self.assertNotIn('locals', json.dumps(detail))
+        for frame in detail['frames']:
+            self.assertEqual(set(frame), {'file', 'line', 'function'})
+            self.assertNotIn('f_locals', frame)
+        self.assertNotIn(sentinel, json.dumps(detail))
 
     def test_cleanup_detail_overflow_is_explicit_and_never_turns_failed_cleanup_into_success(self):
         with tempfile.TemporaryDirectory() as folder:
