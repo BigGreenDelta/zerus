@@ -60,6 +60,9 @@ impl Config {
                     }
                     let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
                     let Some((key, raw)) = line.split_once('=') else {
+                        // The optional hint reader diagnoses its own keys;
+                        // malformed hint policy must not reject the launch.
+                        if hint_key_without_assignment(line) { continue; }
                         return Err(Error::new(
                             1,
                             format!(
@@ -239,6 +242,15 @@ const HINT_KEYS: [&str; 2] = ["HGS_AGENT_HINT", "HGS_AGENT_HINT_OFF"];
 const HINT_POLICY_DIAGNOSTIC: &str =
     "hgs: optional agent hint disabled: invalid or unreadable hint policy";
 
+fn hint_key_without_assignment(line: &str) -> bool {
+    HINT_KEYS.iter().any(|key| {
+        line == *key
+            || line
+                .strip_prefix(*key)
+                .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    })
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct HintPolicy {
     enabled: bool,
@@ -269,12 +281,7 @@ fn hint_policy(
         let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
         let Some((key, raw)) = line.split_once('=') else {
             // Unrelated configuration keeps its existing validation behavior.
-            if HINT_KEYS.iter().any(|key| {
-                line == *key
-                    || line
-                        .strip_prefix(*key)
-                        .is_some_and(|rest| rest.starts_with(char::is_whitespace))
-            }) {
+            if hint_key_without_assignment(line) {
                 return Err(());
             }
             continue;
@@ -567,6 +574,28 @@ mod tests {
         // A directory in place of the file is an optional-policy read failure.
         fs::create_dir(absent.path().join("config")).unwrap();
         assert!(read_hint_policy(absent.path(), "/home/fixture").is_err());
+    }
+
+    #[test]
+    fn agent_hint_malformed_assignment_is_optional_only_for_the_two_exact_keys() {
+        for line in [
+            "HGS_AGENT_HINT",
+            "HGS_AGENT_HINT 0",
+            "HGS_AGENT_HINT_OFF\twork",
+        ] {
+            // Config::load delegates these malformed optional lines to the
+            // hint reader; that reader refuses them and selects policy off.
+            assert!(hint_key_without_assignment(line));
+            assert!(policy(line, &[]).is_err());
+        }
+        for line in [
+            "HGS_PEERS peer",
+            "HGS_SELF",
+            "HGS_AGENT_HINT_OTHER 0",
+            "unrelated malformed line",
+        ] {
+            assert!(!hint_key_without_assignment(line));
+        }
     }
 
     #[test]
