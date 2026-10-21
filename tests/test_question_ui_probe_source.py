@@ -2,6 +2,7 @@
 """SDK-free preservation checks, not Kotlin compilation or Compose/native evidence."""
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import re
 import unittest
@@ -26,6 +27,7 @@ def original_ui(source):
 
 
 def original_fixture(source):
+    source = strip_send_diagnostics(source)
     source = strip_probe(source, ["fixture-report"])
     flat = r' | ${actionProbeEvidence().replace("\n", " | ")}'
     raw = r'\n${actionProbeEvidence()}'
@@ -36,7 +38,90 @@ def original_fixture(source):
     return hashlib.sha256(source.encode()).hexdigest() == ORIGINAL_FIXTURE
 
 
+def strip_send_diagnostics(source):
+    pattern = re.compile(r"^([ ]*)// BEGIN QUESTION_SEND_DIAGNOSTIC ([a-z-]+)\n[\s\S]*?^\1// END QUESTION_SEND_DIAGNOSTIC \2\n", re.M)
+    if [match[2] for match in pattern.finditer(source)] != ["definition", "model", "post", "operation", "admitted", "recorded"]:
+        raise ValueError("unexpected send diagnostic seams")
+    return pattern.sub("", source)
+
+
+def diagnostic_text_memory(source):
+    """Translate only the exact classifier's literal/empty/prefix predicates and bounded hash format."""
+    body = source.split("    private fun failureText(value: String): String = try {\n", 1)[1].split('    } catch (_: Throwable) { "k=UNKNOWN" }', 1)[0]
+    choices = body.split("        val kind = when {\n", 1)[1].split("        }\n", 1)[0]
+    branches = []
+    for line in choices.splitlines():
+        match = re.fullmatch(r'            (value\.isEmpty\(\)|value == "[^"\n]*"|value\.startsWith\("[^"\n]*"\)|else) -> "([a-z-]+)"', line)
+        assert match
+        branches.append(match.groups())
+    assert branches[-1] == ("else", "unknown")
+    assert 'val prefix = value.take(4096)' in body
+    assert 'java.security.MessageDigest.getInstance("SHA-256").digest(prefix.toByteArray(Charsets.UTF_8))' in body
+    assert body.rstrip().endswith('"k=$kind n=${value.length} p=${prefix.length} sha256Prefix=$digest"')
+    def classify(value):
+        for condition, kind in branches:
+            if condition == "value.isEmpty()": accepted = value == ""
+            elif condition == "else": accepted = True
+            elif condition.startswith("value == "): accepted = value == json.loads(condition[len("value == "):])
+            else: accepted = value.startswith(json.loads(condition[len("value.startsWith("):-1]))
+            if accepted:
+                prefix = value[:4096]
+                return f"k={kind} n={len(value)} p={len(prefix)} sha256Prefix={hashlib.sha256(prefix.encode()).hexdigest()}"
+        raise AssertionError("missing fixed default")
+    return classify, branches
+
+
 class QuestionUiProbeSourceTests(unittest.TestCase):
+    def test_failure_classifiers_and_post_observations_leave_all_original_client_and_ui_code_exact(self):
+        source = (ROOT / FIXTURE).read_text()
+        self.assertEqual(hashlib.sha256(strip_send_diagnostics(source).encode()).hexdigest(),
+            "850970938ba9c3b5767d4c3a1ad64f26bc09f4796a8ce2904561efec272ac34c")
+        model = source.split("    private fun modelEvidence(", 1)[1].split("    private fun set(", 1)[0]
+        self.assertTrue(model.startswith('model: ZerusViewModel, target: Target, activity: MainActivity, offered: JSONObject?): String = main {'))
+        self.assertIn('failureText(model.error)', model)
+        self.assertIn('failureText(model.contextNotice)', model)
+        self.assertNotIn('model.draft(', model)
+        self.assertNotIn('getPreparingTargets', source)
+        self.assertTrue(original_fixture(source))
+
+    def test_error_text_classification_never_emits_unknown_payload_and_hashes_only_a_bounded_prefix(self):
+        source = (ROOT / FIXTURE).read_text()
+        classify, branches = diagnostic_text_memory(source)
+        for condition, kind in branches:
+            if condition.startswith('value == '):
+                value = json.loads(condition[len('value == '):])
+                self.assertTrue(classify(value).startswith('k=' + kind + ' '))
+        for value in ('', 'unknown controlled-fixture error', 'Answer not sent. private-marker-example.test',
+                      'untrusted-marker-example.test\n' + 'x' * 5000):
+            result = classify(value)
+            self.assertLess(len('owned-failure error=' + result), 160)
+            self.assertNotIn('private-marker-example.test', result)
+            self.assertNotIn('untrusted-marker-example.test', result)
+            self.assertNotIn('\n', result)
+            self.assertIn('p=' + str(min(len(value), 4096)), result)
+        self.assertTrue(classify('Answer not sent. private-marker-example.test').startswith('k=answer-failed-unknown '))
+        with self.assertRaises(AssertionError):
+            diagnostic_text_memory(source.replace('"k=$kind n=${value.length} p=${prefix.length} sha256Prefix=$digest"', '"raw=$value"'))
+
+    def test_post_stage_counters_saturate_unknown_without_changing_delegates_or_refusing_actions(self):
+        source = (ROOT / FIXTURE).read_text()
+        definition = source.split('// BEGIN QUESTION_SEND_DIAGNOSTIC definition\n', 1)[1].split('// END QUESTION_SEND_DIAGNOSTIC definition', 1)[0]
+        self.assertIn('AtomicIntegerArray(7)', definition)
+        self.assertIn('postStages.updateAndGet(index) { if (it < 128) it + 1 else 128 } == 128', definition)
+        self.assertIn('catch (_: Throwable) { postStagesUnknown = true }', definition)
+        self.assertNotIn('throw', definition)
+        for index in range(7): self.assertIn(f'postStages.get({index})', definition)
+        current, unknown = 0, False
+        for _ in range(140):
+            current = current + 1 if current < 128 else 128
+            unknown = unknown or current == 128
+        self.assertEqual((current, unknown), (128, True))
+        for marker, call in [('post', 'postStage(0)'), ('admitted', 'postStage(3)'), ('recorded', 'postStage(4)')]:
+            block = source.split('// BEGIN QUESTION_SEND_DIAGNOSTIC ' + marker + '\n', 1)[1].split('// END QUESTION_SEND_DIAGNOSTIC ' + marker, 1)[0]
+            self.assertEqual(block.strip(), call)
+        self.assertIn('postStage(when (input.string("operation")) { "inspect" -> 1; "answer" -> 2; "voice_profiles" -> 5; else -> 6 })', source)
+        self.assertEqual(source.count('synchronized(calls) { calls.add(JSONObject(payload.toString())) }'), 1)
+
     def test_pass_serializer_keeps_multiline_probe_inside_one_field_for_the_actual_parser(self):
         source = (ROOT / FIXTURE).read_text()
         lines = [line for line in source.splitlines() if 'result.putString("stream", "Approval choices smoke passed:' in line]

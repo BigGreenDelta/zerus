@@ -53,6 +53,32 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         }
     }
     // END QUESTION_UI_PROBE fixture-report
+    // BEGIN QUESTION_SEND_DIAGNOSTIC definition
+    private val postStages = java.util.concurrent.atomic.AtomicIntegerArray(7)
+    @Volatile private var postStagesUnknown = false
+    private fun postStage(index: Int) {
+        try { if (postStages.updateAndGet(index) { if (it < 128) it + 1 else 128 } == 128) postStagesUnknown = true }
+        catch (_: Throwable) { postStagesUnknown = true }
+    }
+    private fun postEvidence(): String = try {
+        val status = if (postStagesUnknown) "UNKNOWN" else "observed"
+        "owned-post status=$status scoped=${postStages.get(0)} inspect=${postStages.get(1)} answerEntry=${postStages.get(2)} admitted=${postStages.get(3)} recorded=${postStages.get(4)} voice=${postStages.get(5)} other=${postStages.get(6)}"
+    } catch (_: Throwable) { "owned-post status=UNKNOWN" }
+    private fun failureText(value: String): String = try {
+        val kind = when {
+            value.isEmpty() -> "empty"
+            value == "Answer not sent. The selected question changed before sending." -> "selected-question-changed"
+            value == "Could not save the answer outcome. Its original request remains recoverable." -> "outcome-persist-failed"
+            value == "The prompt cache expired before sending. Review your answer and confirm full context; nothing was sent." -> "cache-expired"
+            value == "Answer delivery is unknown. Check the original receipt; nothing has been retried." -> "delivery-unknown"
+            value.startsWith("Answer not sent. ") -> "answer-failed-unknown"
+            else -> "unknown"
+        }
+        val prefix = value.take(4096)
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(prefix.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        "k=$kind n=${value.length} p=${prefix.length} sha256Prefix=$digest"
+    } catch (_: Throwable) { "k=UNKNOWN" }
+    // END QUESTION_SEND_DIAGNOSTIC definition
     private data class EarlySend(val node: AccessibilityNodeInfo, val window: Int, val current: () -> Boolean)
     private var earlySend: EarlySend? = null
     private data class InterceptorFailure(val guard: String, val type: String, val method: String, val path: String)
@@ -312,6 +338,11 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         val lines = mutableListOf<String>()
         evidenceLine(lines, "owned-model focused=${activity.hasWindowFocus()} lifecycle=${activity.lifecycle.currentState.name} selected=${model.selected?.target == target}")
         evidenceLine(lines, "owned-model verified=${model.activityVerified} detailBusy=${model.detailBusy} pendingConsent=${model.pendingQuestionSend != null}")
+        // BEGIN QUESTION_SEND_DIAGNOSTIC model
+        evidenceLine(lines, "owned-failure error=${failureText(model.error)}")
+        evidenceLine(lines, "owned-failure notice=${failureText(model.contextNotice)}")
+        evidenceLine(lines, postEvidence())
+        // END QUESTION_SEND_DIAGNOSTIC model
         evidenceLine(lines, "owned-card id=${question?.id?.take(48)} current=${question?.id == offered?.string("question_id") && question?.hash == offered?.string("question_hash")} run=${question?.run == target.run} conversation=${question?.conversation == target.conversation}")
         evidenceLine(lines, "owned-draft present=${draft != null} status=${draft?.status?.take(16)} inFlight=${draft?.let(model::answerInFlight)} answerable=${question?.canAnswer}")
         evidenceLine(lines, "owned-answer rows=${saved.size} option=$selected emptyText=${saved["approval"]?.text?.isEmpty()} complete=$complete nativeChoices=${question?.let(QuestionPolicies::nativeChoices)}")
@@ -372,17 +403,26 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                         .body(metadata.toString().toResponseBody("application/json".toMediaType())).build()
                 }
                 check(request.url.host == "relay.example.test" && request.url.encodedPath == "/v1/requests" && request.method == "POST")
+                // BEGIN QUESTION_SEND_DIAGNOSTIC post
+                postStage(0)
+                // END QUESTION_SEND_DIAGNOSTIC post
                 guard = "authorization"
                 check(request.header("Authorization") == "Bearer fixture-token")
                 guard = "request-json"
                 val input = JSONObject(okio.Buffer().also { request.body?.writeTo(it) }.readUtf8())
                 guard = "operation"
+                // BEGIN QUESTION_SEND_DIAGNOSTIC operation
+                postStage(when (input.string("operation")) { "inspect" -> 1; "answer" -> 2; "voice_profiles" -> 5; else -> 6 })
+                // END QUESTION_SEND_DIAGNOSTIC operation
                 val value = when (input.string("operation")) {
                     "inspect" -> synchronized(raw) { JSONObject(raw.toString()) }
                     "voice_profiles" -> JSONObject().put("schema", 1).put("computers", JSONArray())
                     "answer" -> {
                         guard = "answer-admission"
                         val proof = checkNotNull(expected.getAndSet(null)) { "Unadmitted answer" }
+                        // BEGIN QUESTION_SEND_DIAGNOSTIC admitted
+                        postStage(3)
+                        // END QUESTION_SEND_DIAGNOSTIC admitted
                         guard = "answer-payload"
                         val payload = input.getJSONObject("payload")
                         guard = "answer-target"
@@ -398,6 +438,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                         check(answer.string("question_id") == "approval" && answer.getJSONArray("selected_option_ids").toString() == proof.getJSONArray("options").toString() &&
                             answer.string("text") == proof.string("text"))
                         synchronized(calls) { calls.add(JSONObject(payload.toString())) }
+                        // BEGIN QUESTION_SEND_DIAGNOSTIC recorded
+                        postStage(4)
+                        // END QUESTION_SEND_DIAGNOSTIC recorded
                         JSONObject().put("status", "submitted")
                     }
                     else -> error("Unexpected operation ${input.string("operation")}")
