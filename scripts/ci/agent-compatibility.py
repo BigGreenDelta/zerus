@@ -6,6 +6,7 @@ import datetime
 import difflib
 import hashlib
 import http.client
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -41,7 +42,7 @@ AGENTS = {
         # without its sandbox and code mode, so none of them is extracted.
         members={'linux-x64': 'package/vendor/x86_64-unknown-linux-musl/bin/codex',
                  WINDOWS: 'package/vendor/x86_64-pc-windows-msvc/bin/codex.exe'},
-        coverage='clear, draft preservation, identity, resumed clear and pause before SessionStart, async question panels, '
+        coverage='clear, draft preservation, identity, resumed clear and pause before SessionStart, async question panels and their unviewed growth, '
                  'two terminal sizes, animation modes and the session-start task instructions',
         timeout=180,
         suites=['test_clear_context_native.NativeCodexClear', 'test_codex_update.NativeCodexUpdate',
@@ -60,7 +61,9 @@ AGENTS = {
                 'test_claude_trust_native', 'test_claude_resume_native', 'test_claude_usage_limit_native', 'test_clear_context_native.NativeClearContext',
                 'test_compact_context_native', 'test_claude_settings_native', 'test_claude_statusline_native',
                 'test_task_context_native.NativeClaudeTaskContext'],
-        windows=dict(suites=['test_windows_native_agents.NativeWindowsClaude'], timeout=1200, coverage=HOST_COVERAGE)),
+        windows=dict(suites=['test_windows_native_agents.NativeWindowsClaude'], timeout=1200,
+                     coverage=HOST_COVERAGE + '; exec-form answer channel for questions and approvals, Terminal answers, '
+                     'owned hook exit and channel-absent unviewed-pane growth')),
     # OpenCode 2 is accepted at or above a reviewed minimum (the pin); the canary
     # qualifies its newest release without moving the pin. Its x86_64 Linux package
     # without AVX2 requirements is named `baseline` and runs on every x86_64 host.
@@ -82,9 +85,51 @@ AGENTS = {
 # Suite inputs taken from the caller; every other HGS_ variable is dropped.
 FORWARDED = ('HGS_TEST_CONPTY_DIR',)
 NATIVE_RUNNER = '''
-import json, sys, unittest
-suite = unittest.defaultTestLoader.loadTestsFromNames(sys.argv[1:])
-result = unittest.TextTestRunner(verbosity=2).run(suite)
+import faulthandler, json, os, sys, threading, time, unittest
+current = None
+
+def diagnostic(event, **fields):
+    # unittest's verbose prefix has no newline while a test is running.
+    print(file=sys.stderr)
+    print('ZERUS_NATIVE_DIAGNOSTIC=' + json.dumps(dict(event=event, **fields)), file=sys.stderr, flush=True)
+
+class DiagnosticResult(unittest.TextTestResult):
+    def startTest(self, test):
+        global current
+        super().startTest(test)
+        current = dict(id=test.id(), started_monotonic=time.monotonic())
+        diagnostic('start', **current)
+
+    def stopTest(self, test):
+        global current
+        now = time.monotonic()
+        diagnostic('end', id=test.id(), ended_monotonic=now,
+                   elapsed=now - current['started_monotonic'])
+        current = None
+        super().stopTest(test)
+
+def deadline_snapshot():
+    now, case = time.monotonic(), current
+    diagnostic('before-aggregate-timeout', monotonic=now, current=case,
+               case_elapsed=now - case['started_monotonic'] if case else None)
+    # CPython bounds each dump to 100 threads and 100 frames per thread. This
+    # records Python wait sites only; it cannot prove a native child is stuck.
+    faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+
+timer = None
+deadline = os.environ.get('ZERUS_NATIVE_DIAGNOSTIC_DEADLINE')
+if deadline is not None:
+    # Snapshot just before the parent's existing timeout kills this interpreter.
+    # It neither extends that timeout nor changes any test outcome or cleanup.
+    timer = threading.Timer(max(0, float(deadline) - time.monotonic() - 1), deadline_snapshot)
+    timer.daemon = True
+    timer.start()
+try:
+    suite = unittest.defaultTestLoader.loadTestsFromNames(sys.argv[1:])
+    result = unittest.TextTestRunner(verbosity=2, resultclass=DiagnosticResult).run(suite)
+finally:
+    if timer is not None:
+        timer.cancel()
 print('ZERUS_NATIVE_RESULT=' + json.dumps({'tests': result.testsRun, 'skipped': len(result.skipped)}))
 sys.exit(not result.wasSuccessful() or bool(result.skipped) or result.testsRun == 0)
 '''
@@ -309,13 +354,22 @@ def run_suites(suites, env, timeout, scratch, log):
     out, err = scratch / (log.stem + '.stdout'), scratch / (log.stem + '.stderr')
     try:
         with out.open('wb') as stdout, err.open('wb') as stderr:
-            run = subprocess.run([sys.executable, '-c', NATIVE_RUNNER, *suites], cwd=ROOT, env=env,
+            diagnostics_env = dict(env, ZERUS_NATIVE_DIAGNOSTIC_DEADLINE=str(time.monotonic() + timeout))
+            run = subprocess.run([sys.executable, '-c', NATIVE_RUNNER, *suites], cwd=ROOT, env=diagnostics_env,
                                  stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=timeout)
     finally:
         output = out.read_bytes() + err.read_bytes()
         log.write_bytes(output)
         print(output.decode('utf-8', 'replace').replace('\r\n', '\n'), flush=True)
     return run.returncode, out.read_bytes().decode('utf-8', 'replace')
+
+
+def run_macos_claude_suites(suites, env, timeout, scratch, log):
+    """Only this fully private matrix uses two processes under its original end."""
+    spec = importlib.util.spec_from_file_location('native_suite_workers', ROOT / 'scripts/ci/native_suite_workers.py')
+    workers = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(workers)
+    return workers.run_suites(suites, env, timeout, scratch, log)
 
 
 def method_names(value):
@@ -398,8 +452,9 @@ def qualify(agent, package, work, results, hgs):
         for case, settings in cases.items():
             test_env = dict(env, HGS_TEST_BIN=str(hgs), **{spec['variable']: str(native)},
                             **spec.get('environment', {}), **settings)
-            status, stdout = run_suites(spec['suites'], test_env, spec['timeout'], work / agent / version,
-                                        directory / (case + '.log'))
+            runner = run_macos_claude_suites if (agent, target) == ('claude', 'darwin-arm64') else run_suites
+            status, stdout = runner(spec['suites'], test_env, spec['timeout'], work / agent / version,
+                                    directory / (case + '.log'))
             marker = next((line.removeprefix('ZERUS_NATIVE_RESULT=') for line in stdout.splitlines()
                            if line.startswith('ZERUS_NATIVE_RESULT=')), None)
             if marker is not None:

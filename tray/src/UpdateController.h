@@ -54,6 +54,11 @@ public:
     // The winget package identifier when `executable` lies in a WinGet package folder
     // (WinGet\Packages\<identifier>_<source>), else empty: winget installs the portable zip there.
     static QString wingetPackage(const QString &executable);
+    // Whether `data`, read from installation.json next to hgs-tray.exe, is the record the
+    // per-user Windows installer writes (scripts/windows_installer.py): then the
+    // installation's kind is "installer" rather than "portable".
+    static bool installerRecord(const QByteArray &data);
+    static constexpr qint64 installerRecordLimit=4096;
     // Whether the stable release `version` carries the Windows zip: those after 0.42.2 do.
     static bool stableHasWindowsBuild(const QString &version);
     static bool devBuildIsNewer(const DesktopUpdateFeed &feed,qint64 installedBuild,const QString &installedCommit);
@@ -80,6 +85,16 @@ public:
     // Tests only: the deadline of package-manager commands (5 s; 0 restores it), so
     // suites need not wait it out. The application keeps the default.
     static void setCommandTimeoutForTests(int ms);
+    // Whether launchd holds Zerus below ordinary priority: its login item (`service`, from
+    // XPC_SERVICE_NAME) started it without ProcessType Interactive, so no thread can rise
+    // above `maxPriority`: 20 as a daemon, 4 in the background, 63 for an app. Login items
+    // that zerus-setup --autostart wrote through 0.42.2 are one known source.
+    static bool launchedDeprioritized(int maxPriority,const QString &service);
+    // The highest priority the calling thread may reach (Mach thread_info), or -1 off macOS.
+    static int threadMaxPriority();
+    // Tests only: what the startup check of controllers created later reads instead of this
+    // process (-1 restores it).
+    static void setLaunchForTests(int maxPriority,const QString &service={});
     QString channel() const;
     void setChannel(const QString &value);
     void check();
@@ -102,6 +117,14 @@ public:
     // Quits after starting a detached helper that reopens the installed bundle once this
     // process has exited. Drafts are already persisted; agents and tmux are untouched.
     void restartIntoInstalledBundle();
+    // Checked once at startup; nothing changes until the person chooses to update it.
+    bool loginItemDeprioritized() const{return m_loginItemDeprioritized;}
+    // The zerus-setup inside this bundle, or empty, as in a source installation.
+    QString loginItemSetup() const;
+    // Runs `zerus-setup --autostart`, which rewrites only a login item of this bundle and
+    // never reloads it, so it applies at the next login. `done` receives an empty string
+    // on success, else what to tell the person. It neither quits nor restarts Zerus.
+    void updateLoginItem(std::function<void(const QString &)> done);
 signals:
     void changed();
     void requestStarted();
@@ -114,7 +137,8 @@ private:
     void present(const QString &message);
     void completeComparison(bool newer,const QString &message);
     void startCheck(bool automatic);
-    void run(const QString &program,const QStringList &arguments,std::function<void(bool,QString)> done);
+    // `timeoutMs` 0 keeps the 5 s deadline; `withErrors` passes stderr along with stdout.
+    void run(const QString &program,const QStringList &arguments,std::function<void(bool,QString)> done,int timeoutMs=0,bool withErrors=false);
     DesktopInstallation m_installation;
     DesktopUpdateFeed m_feed;
     QString m_message="Updates have not been checked.",m_notice,m_comparison,m_error;
@@ -126,4 +150,5 @@ private:
     quint64 m_checkGeneration=0;
     QString m_executable,m_startedRelease;
     bool m_restartRequired=false;
+    bool m_loginItemDeprioritized=false;
 };

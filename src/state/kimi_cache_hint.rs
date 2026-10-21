@@ -129,9 +129,9 @@ pub(super) fn current(record: &Value) -> Option<Value> {
 pub(super) fn available(record: &Value, question: &Value) -> Result<()> {
     let record = identity(record)?;
     let panel = parse(&capture(&record)?)
-        .ok_or("Kimi's context choice is no longer visible; refresh Activity")?;
+        .ok_or("Kimi's context choice is no longer visible; nothing was sent")?;
     if card(&record, &panel)["question_hash"] != question["question_hash"] {
-        return Err("Kimi's context choice changed; refresh Activity".into());
+        return Err("Kimi's context choice changed; nothing was sent".into());
     }
     Ok(())
 }

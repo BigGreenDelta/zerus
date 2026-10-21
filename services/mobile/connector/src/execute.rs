@@ -161,26 +161,45 @@ impl<N: Native + 'static> Connector<N> {
             Value::Object(request) => request,
             _ => unreachable!(),
         };
-        let routed =
-            if journal_operation == "directory_create" && request.contains_key("gateway_route") {
-                let route = &request["gateway_route"];
-                let matches = route.as_object().is_some_and(|route| {
-                    request.get("computer_id").is_none_or(|computer| {
-                        py_eq(route.get("computer_id").unwrap_or(&Value::Null), computer)
-                    })
-                });
-                if matches {
-                    self.resolve(route).await
-                } else {
-                    Err(Failure::text(
-                        "directory creation computer does not match its immutable route",
-                    ))
-                }
-            } else if let Some(route) = request.get("gateway_route") {
+        let routed = if crate::session_projects::OPERATIONS.contains(&journal_operation.as_str())
+            && request.contains_key("gateway_route")
+        {
+            let route = &request["gateway_route"];
+            let matches = route.as_object().is_some_and(|route| {
+                request.get("computer_id").is_none_or(|computer| {
+                    py_eq(route.get("computer_id").unwrap_or(&Value::Null), computer)
+                }) && route.get("machine_id").is_some_and(|machine| {
+                    request
+                        .get("payload")
+                        .is_some_and(|payload| payload.get("expected_machine_id") == Some(machine))
+                })
+            });
+            if matches {
                 self.resolve(route).await
             } else {
-                Ok(Target::Here(None))
-            };
+                Err(Failure::text(
+                    "project assignment computer does not match its immutable route",
+                ))
+            }
+        } else if journal_operation == "directory_create" && request.contains_key("gateway_route") {
+            let route = &request["gateway_route"];
+            let matches = route.as_object().is_some_and(|route| {
+                request.get("computer_id").is_none_or(|computer| {
+                    py_eq(route.get("computer_id").unwrap_or(&Value::Null), computer)
+                })
+            });
+            if matches {
+                self.resolve(route).await
+            } else {
+                Err(Failure::text(
+                    "directory creation computer does not match its immutable route",
+                ))
+            }
+        } else if let Some(route) = request.get("gateway_route") {
+            self.resolve(route).await
+        } else {
+            Ok(Target::Here(None))
+        };
         let target = match routed {
             Ok(target) => target,
             Err(failure) => {
@@ -237,6 +256,18 @@ impl<N: Native + 'static> Connector<N> {
 
     /// `_execute_claimed`: the receipt of a claimed request.
     async fn execute_claimed(&self, request: &Map<String, Value>, request_id: &str) -> Value {
+        if self.flags.get().windows_gateway
+            && !request
+                .get("operation")
+                .and_then(Value::as_str)
+                .is_some_and(|op| crate::capabilities::WINDOWS_OPERATIONS.contains(&op))
+        {
+            return receipt(
+                "failed",
+                Value::Null,
+                Some("operation is unavailable on a Windows local gateway"),
+            );
+        }
         if crate::media::claims(request) {
             return self.media(request, request_id).await;
         }
@@ -248,7 +279,22 @@ impl<N: Native + 'static> Connector<N> {
                 .validated(request, request_id)
                 .await
                 .map_err(Failure::Connector)?;
-            if self.flags.get().archive {
+            // Refuse this new ABI before even an archive lookup on retained hgs.
+            if validated.operation == "history_projection" && !self.flags.get().history_projection {
+                return Err(Failure::text(
+                    "native history projection ABI is unavailable",
+                ));
+            }
+            if self.flags.get().windows_gateway
+                && !validated.session.is_empty()
+                && !validated
+                    .payload
+                    .as_ref()
+                    .is_some_and(|p| p.get("archive_id").is_some())
+            {
+                self.windows_target(&validated).await?;
+            }
+            if self.flags.get().archive || self.flags.get().windows_gateway {
                 if let Some(payload) = validated
                     .payload
                     .as_ref()
@@ -257,7 +303,11 @@ impl<N: Native + 'static> Connector<N> {
                     self.archive_preflight(&validated.session, payload).await?;
                 }
             }
-            self.gate(&validated.operation, self.flags.get())?;
+            self.gate(
+                &validated.operation,
+                validated.payload.as_ref(),
+                self.flags.get(),
+            )?;
             let result = if crate::mutations::handles(&validated.operation) {
                 self.mutate(&validated, request_id, &mutation_started)
                     .await?
@@ -267,8 +317,24 @@ impl<N: Native + 'static> Connector<N> {
             } else if ["task_send", "task_cancel"].contains(&validated.operation.as_str()) {
                 self.task_action(&validated, &mutation_started).await?
             } else {
-                self.run(&validated, request_id).await?
+                self.run(&validated, request_id, &mutation_started).await?
             };
+            if validated.operation == "analytics_read" {
+                let local = self
+                    .fleet
+                    .as_ref()
+                    .and_then(|fleet| fleet.local_id.borrow().clone());
+                let machine = request
+                    .get("gateway_route")
+                    .and_then(|route| route["machine_id"].as_str())
+                    .or(local.as_deref());
+                protocol::analytics_summary(
+                    &result,
+                    validated.payload.as_ref().expect("validated"),
+                    machine,
+                )
+                .map_err(|_| Failure::text("native analytics summary did not match"))?;
+            }
             Ok((receipt_of(&validated.operation, result), validated))
         }
         .await;
@@ -315,15 +381,19 @@ impl<N: Native + 'static> Connector<N> {
     /// checked natively before anything runs for it.
     async fn archive_preflight(&self, session: &str, payload: &Value) -> Result<(), Failure> {
         let archive = payload["archive_id"].as_str().unwrap_or_default();
-        if self.context().admits(session, archive) {
+        let windows = self.flags.get().windows_gateway;
+        if !windows && self.context().admits(session, archive) {
             return Ok(());
         }
-        let call = Call::new(["archives", "lookup", "--json"])
+        let call = crate::archives::call(true, windows)
             .payload(json!({"name": session, "archive_id": archive}))
             .timeout(5.0);
         let detail = self.call(call).await?;
         if !crate::archives::lookup_matches(&detail, session, archive, payload) {
             return Err(Failure::text(crate::archives::LOOKUP_MISMATCH));
+        }
+        if windows && !crate::capabilities::windows_provider(&detail["cmd"]) {
+            return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
         }
         let now = self.clock();
         crate::archives::remember(
@@ -331,6 +401,35 @@ impl<N: Native + 'static> Connector<N> {
             [(session.to_owned(), archive.to_owned())],
             now,
         );
+        Ok(())
+    }
+
+    /// Snapshot admission never substitutes for an authoritative provider and
+    /// identity check just before dispatch. Duplicate receipts bypass this gate.
+    async fn windows_target(&self, validated: &Validated) -> Result<(), Failure> {
+        let detail = self
+            .call(Call::new([
+                "inspect",
+                &validated.session,
+                "--skip-processes",
+            ]))
+            .await?;
+        if detail["name"].as_str() != Some(&validated.session)
+            || !crate::capabilities::windows_provider(&detail["agent"])
+            || detail.as_object().is_none_or(is_archived)
+        {
+            return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
+        }
+        if let Some(payload) = &validated.payload {
+            for (expected, field) in [
+                ("expected_run_id", "run_id"),
+                ("expected_conversation_id", "conversation_id"),
+            ] {
+                if payload.get(expected).is_some_and(|v| v != &detail[field]) {
+                    return Err(Failure::text("fresh native target identity did not match"));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -367,7 +466,7 @@ impl<N: Native + 'static> Connector<N> {
     /// `hgs archives --json` for one query: a checked page with the project
     /// memberships of its rows and only the projects they use.
     async fn archive_page(&self, payload: &Value, request_id: &str) -> Result<Value, Failure> {
-        let call = Call::new(["archives", "--json"])
+        let call = crate::archives::call(false, self.flags.get().windows_gateway)
             .payload(payload.clone())
             .timeout(30.0);
         let raw = self.call(call).await?;
@@ -375,6 +474,9 @@ impl<N: Native + 'static> Connector<N> {
             crate::archives::PageError::Value(text) => Failure::Connector(text),
             crate::archives::PageError::Other => Failure::Generic,
         })?;
+        if self.flags.get().windows_gateway && !crate::archives::supported_page(&page) {
+            return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
+        }
         let groups = self
             .state
             .borrow()
@@ -424,9 +526,34 @@ impl<N: Native + 'static> Connector<N> {
     }
 
     /// The capability checks of `_execute_claimed`, in Python's order.
-    fn gate(&self, operation: &str, flags: Flags) -> Result<(), Failure> {
+    fn gate(&self, operation: &str, payload: Option<&Value>, flags: Flags) -> Result<(), Failure> {
+        if flags.windows_gateway && !crate::capabilities::WINDOWS_OPERATIONS.contains(&operation) {
+            return Err(Failure::text(
+                "operation is unavailable on a Windows local gateway",
+            ));
+        }
+        if operation == "clear_context"
+            && payload.is_some_and(|payload| payload.get("dismiss_prompt").is_some())
+            && !flags.clear_context_dismiss
+        {
+            return Err(Failure::text(
+                "native clear-context dismiss ABI is unavailable",
+            ));
+        }
+        if operation == crate::git_status::OPERATION && !flags.git_status {
+            return Err(Failure::text(crate::git_status::UNAVAILABLE));
+        }
+        if operation == "analytics_read" && !flags.analytics {
+            return Err(Failure::text("native analytics read ABI is unavailable"));
+        }
         if operation == "archive_list" && !flags.archive {
             return Err(Failure::text(crate::archives::UNAVAILABLE));
+        }
+        if crate::session_projects::OPERATIONS.contains(&operation) && !flags.session_projects {
+            return Err(Failure::text(crate::session_projects::UNAVAILABLE));
+        }
+        if operation == "hooks_status" && !flags.hook_health {
+            return Err(Failure::text(crate::hook_health::UNAVAILABLE));
         }
         if operation == "history" && !flags.history {
             return Err(Failure::text("native public history ABI is unavailable"));
@@ -442,6 +569,11 @@ impl<N: Native + 'static> Connector<N> {
         }
         if crate::capabilities::WORKTREES.contains(&operation) && !flags.worktree {
             return Err(Failure::text("native mobile worktree ABI is unavailable"));
+        }
+        if operation == crate::session_notifications::OPERATION && !flags.session_notifications {
+            return Err(Failure::text(
+                "native shared notification ABI is unavailable",
+            ));
         }
         if operation == "mark_read" && !flags.read {
             return Err(Failure::text("native shared read ABI is unavailable"));
@@ -486,10 +618,34 @@ impl<N: Native + 'static> Connector<N> {
         Ok(self.native(call).await?.json())
     }
 
-    async fn run(&self, validated: &Validated, request_id: &str) -> Result<Value, Failure> {
+    async fn run(
+        &self,
+        validated: &Validated,
+        request_id: &str,
+        mutation_started: &Cell<bool>,
+    ) -> Result<Value, Failure> {
         let session = validated.session.as_str();
         let payload = validated.payload.as_ref();
         match validated.operation.as_str() {
+            crate::git_status::OPERATION => {
+                let payload = payload.expect("validated");
+                let result = self.call(crate::git_status::call(payload)).await?;
+                crate::git_status::project(
+                    &result,
+                    request_id,
+                    payload["path"].as_str().expect("validated"),
+                )
+                .map_err(Failure::text)
+            }
+            "analytics_read" => {
+                let mut payload = payload.expect("validated").clone();
+                payload["action"] = json!("summary");
+                let mut call = Call::new(["analytics", "--json"])
+                    .payload(payload)
+                    .timeout(10.0);
+                call.max_output_bytes = Some(MAX_RESULT);
+                self.call(call).await
+            }
             "archive_list" => {
                 self.archive_page(payload.expect("validated"), request_id)
                     .await
@@ -498,6 +654,22 @@ impl<N: Native + 'static> Connector<N> {
             "process_output" => {
                 self.processes("--output", session, payload.expect("validated"), request_id)
                     .await
+            }
+            "session_notifications" => {
+                let payload = payload.expect("validated");
+                let result = self
+                    .call(
+                        Call::new(["notifications", session, "--json"])
+                            .payload(payload.clone())
+                            .failure_json(),
+                    )
+                    .await?;
+                if !crate::session_notifications::result_valid(&result, payload) {
+                    return Err(Failure::text(
+                        "native notification preference acknowledgement did not match",
+                    ));
+                }
+                Ok(result)
             }
             "mark_read" => {
                 let payload = payload.expect("validated");
@@ -513,8 +685,58 @@ impl<N: Native + 'static> Connector<N> {
                 }
                 Ok(result)
             }
+            "project_assignment" | "project_assign" => {
+                let payload = payload.expect("validated");
+                if validated.operation == "project_assign" {
+                    if self.stopping.is_set() {
+                        return Err(Failure::Stopped);
+                    }
+                    // From the sole native write boundary, a lost/invalid acknowledgement
+                    // is uncertain. The original claimed UUID is never executed again.
+                    mutation_started.set(true);
+                }
+                let result = self
+                    .call(crate::session_projects::call(
+                        &validated.operation,
+                        payload,
+                        session,
+                    ))
+                    .await?;
+                if !crate::session_projects::result_valid(
+                    &validated.operation,
+                    &result,
+                    payload,
+                    session,
+                ) {
+                    return Err(Failure::text(
+                        "native project assignment acknowledgement did not match",
+                    ));
+                }
+                if validated.operation == "project_assign" && result["status"] == "assigned" {
+                    self.state.borrow_mut().project_next_poll = 0.0;
+                }
+                Ok(result)
+            }
+            "hooks_status" => {
+                let payload = payload.expect("validated");
+                let mut call = Call::new(["hooks", session, "--json"])
+                    .payload(payload.clone())
+                    .timeout(5.0);
+                call.max_output_bytes = Some(16 * 1024);
+                let result = self.call(call).await?;
+                if !crate::hook_health::result_valid(&result, payload, session) {
+                    return Err(Failure::text(
+                        "native hook health acknowledgement did not match",
+                    ));
+                }
+                Ok(result)
+            }
             "history" => {
                 self.history(session, payload.expect("validated"), request_id)
+                    .await
+            }
+            "history_projection" => {
+                self.history_projection(session, payload.expect("validated"), request_id)
                     .await
             }
             "catalog" => self.catalog(request_id).await,
@@ -624,7 +846,12 @@ impl<N: Native + 'static> Connector<N> {
         if let Some(after) = field("after") {
             argv.extend(["--after".into(), int_literal(after).unwrap_or_default()]);
         }
-        let result = self.call(Call::new(argv)).await?;
+        let mut result = self.call(Call::new(argv)).await?;
+        if self.flags.get().windows_gateway
+            && !crate::capabilities::windows_provider(&result["agent"])
+        {
+            return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
+        }
         let object = result.as_object();
         if let Some(archive) = archive {
             let matches = object.is_some_and(|result| {
@@ -678,6 +905,7 @@ impl<N: Native + 'static> Connector<N> {
                 ));
             }
         }
+        crate::opencode_privacy::row(&mut result);
         let result = match result {
             Value::Object(result) => result,
             _ => unreachable!(),
@@ -832,6 +1060,27 @@ impl<N: Native + 'static> Connector<N> {
         Ok(result)
     }
 
+    /// Projection reads resolve a fixed range once; they never drive history
+    /// indexing or change the client's snapshot boundary.
+    async fn history_projection(
+        &self,
+        session: &str,
+        payload: &Value,
+        request_id: &str,
+    ) -> Result<Value, Failure> {
+        let mut call = Call::new(["history-projection", session, "--json"])
+            .payload(payload.clone())
+            .timeout(2.0);
+        call.max_output_bytes = Some(MAX_RESULT);
+        let result = self.call(call).await?;
+        if !projection_result(&result, payload, session, request_id) {
+            return Err(Failure::text(
+                "native history projection identity or envelope did not match",
+            ));
+        }
+        Ok(result)
+    }
+
     async fn catalog(&self, request_id: &str) -> Result<Value, Failure> {
         let raw = self.call(Call::new(["account", "ls"]).timeout(5.0)).await?;
         let mut result = crate::accounts::launch_catalog(&raw).map_err(py)?;
@@ -908,6 +1157,194 @@ fn same(value: Option<&Value>, expected: Option<&Value>) -> bool {
         (Some(value), Some(expected)) => py_eq(value, expected),
         (None, None) => true,
         _ => false,
+    }
+}
+
+fn projection_integer(value: Option<&Value>) -> Option<i64> {
+    int_literal(value?)
+        .and_then(|digits| digits.parse::<i64>().ok())
+        .filter(|v| *v >= 0)
+}
+
+fn projection_text(value: Option<&Value>, maximum: usize) -> bool {
+    value.and_then(Value::as_str).is_some_and(|text| {
+        !text.is_empty() && text.len() <= maximum && !text.chars().any(char::is_control)
+    })
+}
+
+fn projection_id(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_str).is_some_and(|id| {
+        id.len() == 64
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+/// Public page rows retain additive metadata. The transport checks their
+/// canonical identity and display body without projecting or rewriting them.
+fn projection_row(row: &Value, payload: &Value) -> bool {
+    let Some(row) = row.as_object() else {
+        return false;
+    };
+    if !projection_id(row.get("history_id"))
+        || !projection_text(row.get("history_cursor"), 8192)
+        || !row
+            .get("history_stream")
+            .and_then(Value::as_str)
+            .is_some_and(|stream| ["journal", "provider", "attachment", "voice"].contains(&stream))
+        || !row.get("type").and_then(Value::as_str).is_some_and(|kind| {
+            [
+                "UserPromptSubmit",
+                "UserPromptQueued",
+                "UserMessage",
+                "TurnStarted",
+                "QuestionAnswered",
+                "AgentMessage",
+                "Stop",
+            ]
+            .contains(&kind)
+        })
+        || row.contains_key("native_match_hash")
+        || !row
+            .get("original_ids")
+            .and_then(Value::as_array)
+            .is_some_and(|ids| {
+                ids.len() <= 8
+                    && ids
+                        .iter()
+                        .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
+            })
+    {
+        return false;
+    }
+    let agent = payload
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .unwrap_or("main");
+    if row.get("agent_id").is_some_and(|value| {
+        !value.is_null()
+            && !value
+                .as_str()
+                .is_some_and(|value| value.is_empty() || value == agent)
+    }) || row
+        .get("incoming_seq")
+        .is_some_and(|value| !value.is_null() && projection_integer(Some(value)).is_none())
+    {
+        return false;
+    }
+    let attachments = match row.get("attachments") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(items)) if items.iter().all(Value::is_object) => !items.is_empty(),
+        Some(_) => return false,
+    };
+    row.get("detail")
+        .and_then(Value::as_str)
+        .is_some_and(|detail| !detail.trim().is_empty())
+        || attachments
+}
+
+/// One intact D4 envelope. `complete` covers the requested range, including
+/// unresolved entries; it is never an acknowledgement of a display prefix.
+fn projection_result(result: &Value, payload: &Value, session: &str, request_id: &str) -> bool {
+    if json::size(result, 880 * 1024).is_err() {
+        return false;
+    }
+    let Some(result) = result.as_object() else {
+        return false;
+    };
+    let empty = json!("");
+    let child = payload.get("agent_id").and_then(Value::as_str);
+    let conversation = payload["expected_conversation_id"]
+        .as_str()
+        .unwrap_or_default();
+    let expected = child.map_or_else(
+        || conversation.to_owned(),
+        |id| format!("{conversation}/{id}"),
+    );
+    let until = projection_integer(payload.get("projection_until")).expect("validated");
+    let mut previous = projection_integer(payload.get("projection_after")).expect("validated");
+    if !is_str(result.get("request_id"), request_id)
+        || !is_str(result.get("name"), session)
+        || !same(result.get("run_id"), payload.get("expected_run_id"))
+        || result.get("archive_id").unwrap_or(&empty) != payload.get("archive_id").unwrap_or(&empty)
+        || result.get("agent_id").unwrap_or(&empty) != payload.get("agent_id").unwrap_or(&empty)
+        || !is_str(result.get("conversation_id"), &expected)
+        || !is_str(
+            Some(result.get("parent_conversation_id").unwrap_or(&empty)),
+            child.map_or("", |_| conversation),
+        )
+        || !same(result.get("history_epoch"), payload.get("history_epoch"))
+        || projection_integer(result.get("projection_generation"))
+            .is_none_or(|generation| generation < until)
+        || !result.get("complete").is_some_and(Value::is_boolean)
+    {
+        return false;
+    }
+    let Some(entries) = result
+        .get("projection_changes")
+        .and_then(Value::as_array)
+        .filter(|v| v.len() <= 256)
+    else {
+        return false;
+    };
+    for entry in entries {
+        let Some(entry) = entry.as_object() else {
+            return false;
+        };
+        let fields = [
+            "generation",
+            "history_id",
+            "change",
+            "resolution",
+            "successor",
+        ];
+        let Some(generation) = projection_integer(entry.get("generation")) else {
+            return false;
+        };
+        let change = entry
+            .get("change")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !fields.iter().all(|key| entry.contains_key(*key))
+            || !entry
+                .keys()
+                .all(|key| fields.contains(&key.as_str()) || key == "reason")
+            || !(previous < generation && generation <= until)
+            || !projection_id(entry.get("history_id"))
+            || !["retired", "refreshed"].contains(&change)
+        {
+            return false;
+        }
+        previous = generation;
+        let successor = &entry["successor"];
+        let valid = match entry.get("resolution").and_then(Value::as_str) {
+            Some("unresolved") => {
+                successor.is_null()
+                    && entry.get("reason").is_none_or(|reason| {
+                        reason.as_str().is_some_and(|reason| {
+                            ["no_successor", "unexpected_successor", "oversize"].contains(&reason)
+                        })
+                    })
+            }
+            Some("resolved") if !entry.contains_key("reason") => {
+                if change == "retired" {
+                    successor.is_null()
+                } else {
+                    projection_row(successor, payload)
+                }
+            }
+            _ => false,
+        };
+        if !valid {
+            return false;
+        }
+    }
+    let next = projection_integer(result.get("next_projection_after"));
+    if result["complete"] == json!(true) {
+        next == Some(until)
+    } else {
+        !entries.is_empty() && previous < until && next == Some(previous)
     }
 }
 

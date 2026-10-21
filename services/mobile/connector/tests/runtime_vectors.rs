@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! The runtime against the golden vectors: `validation/*.jsonl`, the
 //! `Connector.execute` runs, the heartbeat snapshot and the pure projections
 //! of `projections.jsonl`, the bounded inspections and receipt limits of
@@ -179,7 +180,14 @@ fn parse(text: &str) -> Value {
 fn validation_matches_the_python_connector_for_implemented_operations() {
     let mut checked = 0;
     let mut refused = 0;
-    for family in ["control", "conversation", "envelope", "launch", "speech"] {
+    for family in [
+        "control",
+        "conversation",
+        "envelope",
+        "launch",
+        "project",
+        "speech",
+    ] {
         let rows = records(&format!("validation/{family}.jsonl"));
         let base = rows.iter().find(|row| row["kind"] == "context").unwrap()["context"].clone();
         for case in rows.iter().filter(|row| row["kind"] == "case") {
@@ -252,7 +260,8 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
             checked += 1;
         }
     }
-    assert_eq!((checked, refused), (243, 2));
+    // The common Python vectors include both hook health and analytics reads.
+    assert_eq!((checked, refused), (277, 2));
 }
 
 /// Python's `capable(node)`: every flag, the vectors' sessions and archive.
@@ -351,6 +360,8 @@ async fn executions_match_the_python_connector() {
             "pause-native-failed",
             "process-output",
             "process-output-too-large",
+            "project_assign-confirmed",
+            "project_assignment-confirmed",
             "restore-archive",
             "send-completed",
             "send-native-crash",
@@ -747,6 +758,41 @@ fn ported_operations_name_what_this_build_implements() {
     assert_eq!(listed, implemented);
 }
 
+/// The connector-only table equals the shared one the relay tests and the
+/// black-box suites read, and a gate named after a frozen marker is that
+/// marker.
+#[test]
+fn connector_only_operations_match_the_shared_table() {
+    let raw = std::fs::read(vectors().join("../tests/rust-only-operations.json")).unwrap();
+    let shared: Value = serde_json::from_slice(&raw).unwrap();
+    let rows: Vec<Value> = capabilities::CONNECTOR_ONLY
+        .iter()
+        .map(|row| {
+            let class = match row.class {
+                capabilities::Class::Read => "read",
+                capabilities::Class::Mutation => "mutation",
+            };
+            json!({"operation": row.operation, "marker": row.gate.name(), "class": class})
+        })
+        .collect();
+    assert_eq!(json!(rows), shared["operations"]);
+    let operations = document("operations.json");
+    let markers = operations["capabilities"]["markers"].as_array().unwrap();
+    for row in capabilities::CONNECTOR_ONLY {
+        let frozen = markers
+            .iter()
+            .find(|marker| marker["name"] == row.gate.name());
+        match frozen {
+            Some(marker) => assert_eq!(marker["help_line"], row.gate.help_line(), "{row:?}"),
+            None => assert_eq!(
+                shared["markers"][row.gate.name()],
+                row.gate.help_line(),
+                "{row:?}"
+            ),
+        }
+    }
+}
+
 #[test]
 fn capability_markers_match_the_python_connector() {
     let operations = document("operations.json");
@@ -774,10 +820,28 @@ fn capability_markers_match_the_python_connector() {
         let advertised = flags.advertised(one_hop);
         assert_eq!(advertised["reasons"], wanted["reasons"], "{name}");
         for operation in advertised["operations"].as_array().unwrap() {
-            assert!(capabilities::implemented(operation.as_str().unwrap()));
+            let operation = operation.as_str().unwrap();
+            assert!(capabilities::implemented(operation));
             assert!(
-                wanted["operations"].as_array().unwrap().contains(operation),
-                "{name}"
+                wanted["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|wanted| wanted == operation)
+                    || capabilities::connector_only(operation),
+                "{name} {operation}"
+            );
+        }
+        // A connector-only operation comes exactly with its own native gate.
+        for row in capabilities::CONNECTOR_ONLY {
+            assert_eq!(
+                advertised["operations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|advertised| advertised == row.operation),
+                row.gate.open(flags),
+                "{name} {row:?}"
             );
         }
     }
@@ -1124,4 +1188,46 @@ async fn voice_refusal_and_explicit_retry_keep_separate_operation_and_native_rec
         &upload["payload"]
     )
     .unwrap());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn hook_health_runs_only_the_read_once_and_refuses_scope_or_write_extensions() {
+    let harness = harness("hook-health-read");
+    let connector = &harness.connector;
+    capable(connector);
+    let mut flags = connector.flags.get();
+    flags.hook_health = true;
+    connector.flags.set(flags);
+    let id = "11111111-1111-4111-8111-111111111111";
+    let mut request = json!({"request_id":id,"operation":"hooks_status","session":"codex/example/session","payload":{"request_id":id,"expected_run_id":"run","expected_conversation_id":"conversation"}});
+    let response = json!({"schema":1,"provider":"codex","account_id":"native-codex","configuration":{"state":"missing","compatibility":{"state":"unknown"}},"effective":{"state":"unknown","reason":"Not verified"},"trust":{"state":"unknown","reason":"Not verified"},"observed":{"state":"unknown","events":[]},"running_agents_retrofitted":false,"request_id":id,"name":"codex/example/session","run_id":"run","conversation_id":"conversation"});
+    connector.native.answer(
+        vec![
+            "hooks".into(),
+            "codex/example/session".into(),
+            "--json".into(),
+        ],
+        response.clone(),
+    );
+    let Outcome::Finished(receipt) = connector.execute(request.clone()).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(receipt["state"], "completed");
+    assert_eq!(receipt["result"], response);
+    assert_eq!(
+        connector.execute(request.clone()).await.unwrap(),
+        Outcome::Replayed
+    );
+    assert_eq!(connector.native.calls.borrow().len(), 1);
+    let call = connector.native.calls.borrow()[0].clone();
+    assert_eq!(call["payload"], request["payload"]);
+    assert_eq!(call["options"]["timeout"], 5.0);
+    request["request_id"] = json!("22222222-2222-4222-8222-222222222222");
+    request["payload"]["request_id"] = request["request_id"].clone();
+    request["payload"]["action"] = json!("repair");
+    let Outcome::Finished(receipt) = connector.execute(request).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(receipt["state"], "failed");
+    assert_eq!(connector.native.calls.borrow().len(), 1);
 }

@@ -261,6 +261,12 @@ fn validate(request: &LocalRequest) -> Result<()> {
         Ok(())
     };
     match op {
+        "analytics" => {
+            ensure!(rest == ["--json"], "analytics requires its fixed JSON ABI");
+            let payload = request.payload.as_ref().context("analytics payload is required")?;
+            ensure!(payload["action"] == "summary", "mobile analytics only permits summary reads");
+            crate::analytics::validate_request(payload).map_err(anyhow::Error::msg)?;
+        }
         "voice" => {
             ensure!(rest.len() == 2 && session(&rest[0]) && rest[1] == "--json", "voice requires a session and its fixed JSON ABI");
             crate::state::voice::validate_request(request.payload.as_ref().context("voice payload is required")?)
@@ -289,7 +295,12 @@ fn validate(request: &LocalRequest) -> Result<()> {
             }
         }
         "swarm" => {
-            if rest == ["assign-launch", "--json"] {
+            if rest == ["session-project", "--json"] || rest == ["assign-session", "--json"] {
+                let payload = request.payload.as_ref().context("project assignment request required")?;
+                crate::swarm::validate_session_project(payload, rest[0] == "assign-session")?;
+                ensure!(payload["expected_machine_id"] == request.target_machine_id, "project assignment target computer changed");
+                ensure!(payload["name"].as_str().is_some_and(session), "invalid native session");
+            } else if rest == ["assign-launch", "--json"] {
                 scoped(&request.payload)?;
                 ensure!(
                     request
@@ -357,6 +368,20 @@ fn validate(request: &LocalRequest) -> Result<()> {
             }
             _ => bail!("native operation is not allowed"),
         },
+        "git-status" => {
+            no_payload()?;
+            let values = options(rest, &["--json"], &["--path"])?;
+            ensure!(
+                values.len() == 2 && values.contains_key("--json"),
+                "Git status requires its exact path and JSON options"
+            );
+            ensure!(
+                values.get("--path").is_some_and(|path| {
+                    text(path, 4096, false) && std::path::Path::new(path).is_absolute()
+                }),
+                "Git status path must be absolute"
+            );
+        }
         "worktrees" => {
             no_payload()?;
             let create = rest.first().is_some_and(|v| v == "create");
@@ -451,7 +476,32 @@ fn validate(request: &LocalRequest) -> Result<()> {
             );
             read_mark(&request.payload)?;
         }
-        "history" | "terminal" | "session-action" | "send" | "send-now" | "settings" | "answer"
+        "notifications" => {
+            ensure!(
+                rest.len() == 2 && session(&rest[0]) && rest[1] == "--json",
+                "native notifications requires scoped JSON"
+            );
+            let value = request.payload.as_ref().context("notification preference payload is required")?;
+            let object = value.as_object().context("native payload must be an object")?;
+            ensure!(
+                object.len() == 4 && ["run_id", "conversation_id", "muted", "expected_revision"]
+                    .iter().all(|key| object.contains_key(*key)),
+                "invalid notification preference fields"
+            );
+            ensure!(
+                value["run_id"].as_str().is_some_and(|v| text(v, 128, false) && v.len() <= 128)
+                    && value["conversation_id"].as_str().is_some_and(|v| text(v, 256, false) && v.len() <= 256)
+                    && value["muted"].is_boolean()
+                    && value["expected_revision"].as_i64().is_some_and(|r| r >= 0),
+                "invalid notification preference identity or revision"
+            );
+        }
+        "hooks" => {
+            ensure!(rest.len()==2 && session(&rest[0]) && rest[1]=="--json", "hook health requires scoped JSON");
+            scoped(&request.payload)?;
+            ensure!(request.payload.as_ref().and_then(Value::as_object).is_some_and(|object| object.len()==3 && object.keys().all(|key| ["request_id","expected_run_id","expected_conversation_id"].contains(&key.as_str()))), "hook health is read-only");
+        }
+        "history" | "history-projection" | "terminal" | "session-action" | "send" | "send-now" | "settings" | "answer"
         | "interrupt" | "clear-context" | "compact-context" | "effort" | "file-read" => {
             ensure!(
                 rest.len() == 2 && session(&rest[0]) && rest[1] == "--json",
@@ -1099,12 +1149,15 @@ fn execute(config: &Config, args: &[String]) -> Result<i32> {
                 direct(config, &request.via),
                 "mobile route is not an enabled direct peer"
             );
+            let max_output = if local.argv.first().is_some_and(|op| op == "analytics" || op == "history-projection") {
+                1024 * 1024
+            } else { MAX_BYTES };
             let output = transport(
                 &request.via,
                 Helper::Local,
                 Some(local),
                 deadline,
-                MAX_BYTES,
+                max_output,
             )?;
             std::io::stdout().write_all(&output.stdout)?;
             std::io::stderr().write_all(&output.stderr)?;
@@ -1134,6 +1187,46 @@ mod tests {
 
     fn scope() -> Value {
         json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation"})
+    }
+
+    #[test]
+    fn peer_fixed_projection_shape_preserves_the_exact_scope() {
+        let mut payload = scope();
+        payload["history_epoch"] = json!("epoch");
+        payload["projection_after"] = json!(0);
+        payload["projection_until"] = json!(7);
+        let argv = ["history-projection", "codex/project", "--json"];
+        assert!(validate(&request(&argv, Some(payload.clone()))).is_ok());
+        for argv in [vec!["history-projection"], vec!["history-projection", "codex/project"],
+            vec!["history-projection", "codex/project", "--json", "--clear"],
+            vec!["history-projection", "@next", "--json"]] {
+            assert!(validate(&request(&argv, Some(payload.clone()))).is_err());
+        }
+        for payload in [None, Some(json!({})), Some(Value::Null)] {
+            assert!(validate(&request(&argv, payload)).is_err());
+        }
+        let mut wrong = request(&argv, Some(payload));
+        wrong.target_machine_id = "not-a-machine-uuid".into();
+        assert!(validate(&wrong).is_err());
+    }
+
+    #[test]
+    fn analytics_peer_reads_cannot_enable_purge_or_extend_the_range() {
+        let argv = ["analytics", "--json"];
+        let payload = json!({"schema":1,"action":"summary","from":"2026-01-01","through":"2026-03-31"});
+        assert!(validate(&request(&argv, Some(payload.clone()))).is_ok());
+        for (key, value) in [("action", json!("purge")), ("action", json!("configure")),
+            ("enabled", json!(true)), ("through", json!("2026-04-01")),
+            ("schema", json!(true)), ("path", json!("/fixture/private"))] {
+            let mut bad = payload.clone();
+            bad[key] = value;
+            assert!(validate(&request(&argv, Some(bad))).is_err());
+        }
+        for argv in [vec!["analytics"], vec!["analytics", "--json", "@next"],
+            vec!["analytics", "--json", "--purge"]] {
+            assert!(validate(&request(&argv, Some(payload.clone()))).is_err());
+        }
+        assert!(validate(&request(&["analytics", "--json"], None)).is_err());
     }
 
     #[test]
@@ -1320,6 +1413,21 @@ mod tests {
     }
 
     #[test]
+    fn project_grouping_peer_calls_keep_exact_fixed_commands_and_machine() {
+        for command in ["session-project","assign-session"] {
+            let argv=["swarm",command,"--json"];
+            let mut payload=scope();payload["name"]=json!("codex/example/task");payload["expected_machine_id"]=json!(ID);
+            if command=="assign-session" { payload["swarm_id"]=json!(ID);payload["project_id"]=json!("logical");payload["membership_token"]=json!("a".repeat(64));payload["catalog_epoch"]=json!("b".repeat(64)); }
+            assert!(validate(&request(&argv,Some(payload.clone()))).is_ok());
+            for (field,value) in [("directory",json!("/unexpected")),("organization",json!({})),("name",json!("@peer")),("expected_machine_id",json!("22222222-2222-4222-8222-222222222222"))] {
+                let mut bad=payload.clone();bad[field]=value;assert!(validate(&request(&argv,Some(bad))).is_err());
+            }
+            assert!(validate(&request(&["swarm",command,"--json","@next"],Some(payload))).is_err());
+            assert!(validate(&request(&argv,None)).is_err());
+        }
+    }
+
+    #[test]
     fn voice_peer_calls_cannot_start_workers_or_use_client_routes() {
         let mut value=scope();value["action"]=json!("profiles");
         assert!(validate(&request(&["voice","codex/project","--json"],Some(value.clone()))).is_ok());
@@ -1342,6 +1450,80 @@ mod tests {
             vec!["swarm", "preference", "set", "theme", "away", "--json"],
             vec!["swarm", "preference", "set", "mobile_delivery", "away"],
             vec!["swarm", "preference", "get", "--json"],
+        ] {
+            assert!(validate(&request(&argv, None)).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn git_status_admits_only_an_absolute_bounded_native_path() {
+        let prefix = if cfg!(windows) {
+            "C:\\fixture\\"
+        } else {
+            "/fixture/"
+        };
+        let path = format!("{prefix}checkout ' проект");
+        for argv in [
+            vec!["git-status", "--path", path.as_str(), "--json"],
+            vec!["git-status", "--json", "--path", path.as_str()],
+        ] {
+            assert!(validate(&request(&argv, None)).is_ok(), "{argv:?}");
+        }
+        let mut longest = format!("{prefix}{}", "é".repeat((4096 - prefix.len()) / 2));
+        if longest.len() < 4096 {
+            longest.push('a');
+        }
+        assert_eq!(longest.len(), 4096);
+        assert!(validate(&request(
+            &["git-status", "--path", &longest, "--json"],
+            None
+        ))
+        .is_ok());
+        longest.push('é');
+        assert!(longest.chars().count() < 4096);
+        assert!(validate(&request(
+            &["git-status", "--path", &longest, "--json"],
+            None
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn git_status_refuses_payloads_relative_paths_and_extra_options() {
+        let path = if cfg!(windows) {
+            "C:\\fixture\\checkout"
+        } else {
+            "/fixture/checkout"
+        };
+        let read = ["git-status", "--path", path, "--json"];
+        for payload in [scope(), json!({}), Value::Null] {
+            assert!(validate(&request(&read, Some(payload))).is_err());
+        }
+        for invalid in [
+            "",
+            "relative",
+            "~/checkout",
+            "@peer",
+            "-option",
+            "/fixture/bad\npath",
+            "/fixture/bad\tpath",
+            "/fixture/bad\u{85}path",
+        ] {
+            assert!(
+                validate(&request(&["git-status", "--path", invalid, "--json"], None)).is_err(),
+                "{invalid:?}"
+            );
+        }
+        for argv in [
+            vec!["git-status"],
+            vec!["git-status", "--json"],
+            vec!["git-status", "--path", path],
+            vec!["git-status", "--path"],
+            vec!["git-status", "--path", path, "--json", "--json"],
+            vec!["git-status", "--path", path, "--json", "--path", path],
+            vec!["git-status", "--path", path, "--json", "--refresh"],
+            vec!["git-status", "--path", path, "--json", "--git-dir", path],
+            vec!["git-status", "--path", path, "--json", "extra"],
         ] {
             assert!(validate(&request(&argv, None)).is_err(), "{argv:?}");
         }
@@ -1456,6 +1638,24 @@ mod tests {
         let mut empty = mark;
         empty["run_id"] = json!("");
         assert!(validate(&request(&["read", "codex/project", "--json"], Some(empty))).is_err());
+    }
+
+    #[test]
+    fn notifications_require_exact_non_read_payload_before_peer_dispatch() {
+        let preference = json!({"run_id":"run","conversation_id":"conversation","muted":true,"expected_revision":0});
+        let argv = ["notifications", "codex/project", "--json"];
+        assert!(validate(&request(&argv, Some(preference.clone()))).is_ok());
+        for args in [vec!["notifications", "codex/project"], vec!["notifications", "@peer", "--json"],
+            vec!["notifications", "codex/project", "--json", "--archive", ID]] {
+            assert!(validate(&request(&args, Some(preference.clone()))).is_err());
+        }
+        assert!(validate(&request(&argv, None)).is_err());
+        for (key, value) in [("muted", json!(1)), ("expected_revision", json!(true)),
+            ("expected_revision", json!(-1)), ("expected_revision", json!(0.0)),
+            ("run_id", json!("é".repeat(65))), ("conversation_id", json!("")), ("request_id", json!(ID))] {
+            let mut bad = preference.clone(); bad[key] = value;
+            assert!(validate(&request(&argv, Some(bad))).is_err());
+        }
     }
 
     fn fixture_config(dir: &std::path::Path) -> Config {

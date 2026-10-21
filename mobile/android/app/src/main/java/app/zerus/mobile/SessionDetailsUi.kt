@@ -1,5 +1,8 @@
 package app.zerus.mobile
 
+import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.NotificationsActive
+
 import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -10,6 +13,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Terminal
@@ -72,15 +76,19 @@ import org.json.JSONObject
     var menu by remember(target.key) { mutableStateOf(false) }
     var request by remember(target.key) { mutableStateOf<String?>(null) }
     var terminal by remember(target.key) { mutableStateOf(false) }
+    var projectPicker by remember(target.key) { mutableStateOf(false) }
     var search by remember(target.key) { mutableStateOf(false) }
     var readEvidence by remember(target.key) { mutableStateOf<ReadAttentionEvidence?>(null) }
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val canReadAll = target.archiveId.isBlank() && !model.demo && model.canReadAll(target)
     val sessionReference = remember(target,model.machines) { SessionReference.resolve(target,model.machines) }
+    val notificationPreference = SessionNotificationPreferences.parse(model.activity ?: session.raw,target)
+    fun openTerminal() { model.prepareTerminal(target);terminal = true }
+    fun closeTerminal() { model.cancelTerminalAvailability();terminal = false }
     // A Sessions long-press action opened this session; confirm it here against fresh native details.
     LaunchedEffect(model.sessionMenuRequest,target.key) {
-        model.takeSessionMenuRequest(target)?.let { operation -> if(operation == "terminal") terminal = true else request = operation }
+        model.takeSessionMenuRequest(target)?.let { operation -> when(operation) { "terminal" -> openTerminal();SessionProjectProtocol.assign -> projectPicker=true;else -> request=operation } }
     }
     // Tasks belong to catalogued projects; the badge counts the tasks In review.
     val taskProject = remember(target.key, model.projects) { model.taskProject(session) }
@@ -88,7 +96,7 @@ import org.json.JSONObject
     val tasksOpen = model.tasksKey != null
     // Tasks opens over this conversation and closes with it.
     DisposableEffect(target.key) { onDispose { model.closeTasks() } }
-    if(details || settingsOpen || menu || request != null || terminal || search || tasksOpen) ObscureConversation()
+    if(details || settingsOpen || menu || request != null || terminal || search || projectPicker || tasksOpen) ObscureConversation()
     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { if (target.agentId.isBlank()) settingsOpen = true else if (onDetails != null) onDetails() else details = true },
             modifier = Modifier.weight(1f),contentPadding = PaddingValues(start = 8.dp,end = 4.dp)) {
@@ -112,7 +120,8 @@ import org.json.JSONObject
                 else if (!model.readAllPending(target)) "Read all unavailable. Nothing in this conversation is unread on this phone"
                 else "Read all unavailable. This conversation needs verified history or loaded replies on this phone"
         }) { Icon(Icons.Default.DoneAll,null,Modifier.size(20.dp)) }
-        IconButton(onClick = { terminal = true }) { Icon(Icons.Default.Terminal, "Terminal",Modifier.size(20.dp)) }
+        if(notificationPreference?.muted == true) Icon(Icons.Default.NotificationsOff,"Notifications muted on all devices",Modifier.size(18.dp))
+        IconButton(onClick = { openTerminal() }) { Icon(Icons.Default.Terminal, "Terminal",Modifier.size(20.dp)) }
         if (taskProject != null && target.agentId.isBlank() && target.archiveId.isBlank() && !model.demo) {
             val review = model.reviewCounts[taskProject] ?: 0
             IconButton(onClick = { model.openTasks(session) }, modifier = Modifier.semantics {
@@ -128,6 +137,14 @@ import org.json.JSONObject
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false },modifier = Modifier.heightIn(max = 480.dp)) {
                 DropdownMenuItem(text = { Text("Search loaded messages") },leadingIcon = { Icon(Icons.Default.Search,null) },
                     onClick = { menu = false;search = true })
+                val notificationReason = model.actionReason(target,SessionNotificationPreferences.operation)
+                DropdownMenuItem(text = { Column {
+                    Text(SessionNotificationPreferences.label(notificationPreference))
+                    if(notificationReason.isNotBlank()) Text(notificationReason,style=MaterialTheme.typography.bodySmall)
+                } },
+                    leadingIcon = { Icon(if(notificationPreference?.muted == true) Icons.Default.NotificationsActive else Icons.Default.NotificationsOff,null) },
+                    enabled = notificationReason.isBlank(),
+                    onClick = { menu = false;request = SessionNotificationPreferences.operation })
                 readEvidence?.let { evidence ->
                     val emptyReminder = model.reviewLater(target) && !evidence.authoritative && evidence.loadedIds.isEmpty()
                     DropdownMenuItem(text = { Text(if(emptyReminder) "Clear review reminder" else if(evidence.authoritative) "Mark read on this phone" else "Mark loaded replies read") },
@@ -144,6 +161,11 @@ import org.json.JSONObject
                     onClick = { menu = false;sessionReference.uri?.let { clipboard.setText(AnnotatedString(it)) } })
                 val folder = model.activity?.string("cwd").orEmpty()
                 if(folder.isNotBlank()) DropdownMenuItem(text = { Text("Copy folder") },onClick = { menu = false;clipboard.setText(AnnotatedString(folder)) })
+                if(target.agentId.isBlank() && target.archiveId.isBlank()) {
+                    val reason=model.projectAssignmentReason(target)
+                    DropdownMenuItem(text={ Column { Text("Move to project…");if(reason.isNotBlank()) Text(reason,style=MaterialTheme.typography.bodySmall) } },
+                        leadingIcon={ Icon(Icons.Default.Folder,null) },enabled=reason.isBlank(),onClick={ menu=false;projectPicker=true })
+                }
                 if (target.agentId.isBlank()) {
                     HorizontalDivider()
                     val operations = if (target.archiveId.isNotBlank()) listOf("restore","rename","fork","forget")
@@ -170,12 +192,15 @@ import org.json.JSONObject
         }
     }
     NativeRecoveryCard(model,target)
+    if(projectPicker) SessionProjectDialog(model.sessionProjects,target) { projectPicker=false }
     if(search) ConversationSearchDialog(model,session,onJump) { search = false }
     if(terminal) {
         val reason = model.terminalOpenReason(target)
-        if(reason.isBlank()) TerminalDialog(model,session) { terminal = false }
-        else ZerusAlertDialog(onDismissRequest = { terminal = false },title = { Text("Terminal unavailable") },text = { Text(reason) },
-            confirmButton = { TextButton(onClick = { terminal = false }) { Text("Close") } })
+        if(reason.isBlank()) TerminalDialog(model,session) { closeTerminal() }
+        else ZerusAlertDialog(onDismissRequest = { closeTerminal() },
+            title = { Text(if(model.terminalAvailabilityChecking(target)) "Checking Terminal availability" else "Terminal unavailable") },text = { Text(reason) },
+            confirmButton = { if(!model.terminalAvailabilityChecking(target)) TextButton(onClick = { model.prepareTerminal(target) }) { Text("Refresh") } },
+            dismissButton = { TextButton(onClick = { closeTerminal() }) { Text("Close") } })
     }
     if (details) SessionDetailsSheet(model,session) { details = false }
     if (tasksOpen) TasksScreen(model)
@@ -353,8 +378,14 @@ import org.json.JSONObject
 @Composable internal fun SessionActionDialog(model: ZerusViewModel, session: Session, operation: String, onDismiss: () -> Unit) {
     val target = session.target
     var tag by remember(target,operation) { mutableStateOf(if(operation == "rename" && target.session.split('/').size == 3) target.session.substringAfterLast('/') else "") }
+    var notificationPreference by remember(target,operation) { mutableStateOf<SessionNotificationPreference?>(null) }
+    LaunchedEffect(model.activity,model.activityVerified,target,operation) {
+        if(notificationPreference == null && model.activityVerified) notificationPreference = SessionNotificationPreferences.parse(model.activity,target)
+    }
+    val label = if(operation == SessionNotificationPreferences.operation) SessionNotificationPreferences.label(notificationPreference) else actionLabel(operation,target)
     val computer = remember(target) { model.machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.name ?: "selected machine" }
     val args = when(operation) {
+        SessionNotificationPreferences.operation -> JSONObject().put("muted",notificationPreference?.muted != true).put("expected_revision",notificationPreference?.revision ?: -1)
         "rename" -> JSONObject().put("new_name",target.session.split('/').take(2).joinToString("/") + "/" + tag)
         "fork" -> JSONObject().put("tag",tag)
         else -> JSONObject()
@@ -362,10 +393,11 @@ import org.json.JSONObject
     val reason = model.actionReason(target,operation).ifBlank { SessionControlPresentation.reason(target,operation,model.activity) }.ifBlank {
         runCatching { SessionActionPolicies.arguments(operation,args); SessionActionPolicies.inspectReason(target,operation,args,model.activity ?: JSONObject()) }.getOrElse { it.message ?: "Enter a valid name." }
     }
-    ZerusAlertDialog(onDismissRequest = onDismiss, title = { Text(actionLabel(operation,target) + " " + session.title + "?") },
+    ZerusAlertDialog(onDismissRequest = onDismiss, title = { Text(if(operation == SessionNotificationPreferences.operation) label + " / " + session.title else label + " " + session.title + "?") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("${target.session} on $computer")
             when(operation) {
+                SessionNotificationPreferences.operation -> Text("Applies to this conversation on all devices. Unread replies and pending requests stay unchanged. Unmuting does not replay earlier notifications.")
                 "pause" -> Text("Pause keeps the exact native conversation for Resume. Open network connections, child processes and unsent terminal input are not kept.")
                 "resume" -> Text("Start the agent again with its saved native conversation.")
                 "archive" -> Text("Move this saved session to Archive. Your private drafts stay on this phone.")
@@ -378,7 +410,7 @@ import org.json.JSONObject
             }
             if(reason.isNotBlank()) Text(reason, style = MaterialTheme.typography.bodySmall)
         } },
-        confirmButton = { TextButton(onClick = { model.flushDrafts(); model.sessionAction(target,operation,args); onDismiss() }, enabled = reason.isBlank()) { Text(actionLabel(operation,target)) } },
+        confirmButton = { TextButton(onClick = { model.flushDrafts(); model.sessionAction(target,operation,args); onDismiss() }, enabled = reason.isBlank()) { Text(label) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
@@ -438,9 +470,10 @@ import org.json.JSONObject
 }
 
 internal fun actionLabel(operation: String,target: Target? = null) = when(operation) {
+    SessionNotificationPreferences.operation -> "Shared notification settings"
     "pause" -> "Pause"; "resume" -> "Resume"; "archive" -> "Archive"; "rename" -> "Rename"; "fork" -> "Fork"
     "terminate" -> "Terminate"; "restore" -> "Restore"; "forget" -> if(target?.archiveId?.isNotBlank() == true) "Forget archived version" else "Forget session"; "send_now" -> "Send queued message"
-    "directory_create" -> "Create folder"; "set_mobile_delivery" -> "Phone notification timing"; "settings" -> "Change settings"; "process_stop" -> "Stop process"; "recovery_action" -> "Recovery action"; else -> "Native action"
+    "project_assign" -> "Move to project"; "directory_create" -> "Create folder"; "set_mobile_delivery" -> "Phone notification timing"; "settings" -> "Change settings"; "process_stop" -> "Stop process"; "recovery_action" -> "Recovery action"; else -> "Native action"
 }
 /** Computer-scoped actions such as set_mobile_delivery have no session, so the operation names the card. */
 internal fun sessionActionTitle(action: SessionAction) =

@@ -19,7 +19,7 @@ DownloadCacheSettings::DownloadCacheSettings(QWidget *parent) : QWidget(parent)
     setObjectName("downloadCacheSettings"); setMaximumWidth(850);
     auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 12, 0); layout->setSpacing(18);
     auto *title = new QLabel(tr("Files")); title->setObjectName("heading"); layout->addWidget(title);
-    auto *description = new QLabel(tr("Download and open saves a copy here and opens it immediately. Download… lets you choose where to save. Existing files are preserved; repeated names get a numbered suffix."));
+    auto *description = new QLabel(tr("Download and open reuses a verified saved copy from the same machine and path. Show file selects it in your file manager. Download again gets a fresh copy; Download… lets you choose where to save. Existing files are preserved."));
     description->setWordWrap(true); layout->addWidget(description);
     auto *form = new QFormLayout; form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     auto *path = new QLineEdit(QDir::toNativeSeparators(DownloadCache::directory())); path->setReadOnly(true); path->setObjectName("downloadCacheFolder");
@@ -33,7 +33,7 @@ DownloadCacheSettings::DownloadCacheSettings(QWidget *parent) : QWidget(parent)
     m_size->setButtonSymbols(QAbstractSpinBox::NoButtons); m_size->setMinimumWidth(160);
     m_size->setValue(DownloadCache::limitBytes() ? double(DownloadCache::limitBytes()) / GiB : 1.0);
     form->addRow(tr("Maximum size"), m_size); layout->addLayout(form);
-    auto *hint = new QLabel(tr("Never clear is the default. With a limit, Zerus removes its oldest downloaded copies first. Files you add or edit are kept. Downloads in progress and copies downloaded in the last minute are protected, so usage can briefly exceed the limit. This setting applies to this computer."));
+    auto *hint = new QLabel(tr("Never clear is the default. With a limit, Zerus removes its least recently used downloaded copies first. Files you add or edit are kept. Downloads in progress and copies used in the last minute are protected, so usage can briefly exceed the limit. This setting applies to this computer."));
     hint->setWordWrap(true); layout->addWidget(hint);
     m_usage = new QLabel; m_usage->setObjectName("downloadCacheUsage"); m_usage->setWordWrap(true);
     m_usage->setTextFormat(Qt::PlainText); layout->addWidget(m_usage);

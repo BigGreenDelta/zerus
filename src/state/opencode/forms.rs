@@ -126,10 +126,25 @@ fn permission_item(native: &Value) -> Value {
         .filter_map(Value::as_str)
         .collect();
     let prompt = format!("{}\n{}", string(native, "action"), resources.join("\n"));
+    // What Always allow saves: OpenCode stops asking for these patterns.
+    let saved: Vec<&str> = native["save"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let always = if saved.is_empty() {
+        "Allows matching requests without asking again".to_owned()
+    } else {
+        format!("Allows without asking again: {}", saved.join(", "))
+    };
     json!({"id":"permission","header":"Permission","prompt":prompt,"question":prompt,
         "allow_multiple":false,"multi_select":false,"required":true,"allow_other":false,
-        "options":[{"id":"once","label":"Allow once"},{"id":"always","label":"Always allow"},
-            {"id":"reject","label":"Reject","description":"Rejects every pending request in this session"}]})
+        // `broader` grants more than this one request: clients confirm it
+        // separately. Reject grants nothing.
+        "options":[{"id":"once","label":"Allow once","scope":"once"},
+            {"id":"always","label":"Always allow","description":always,"scope":"broader"},
+            {"id":"reject","label":"Reject","description":"Rejects every pending request in this session","scope":"once"}]})
 }
 /// The pending cards of this session's forms and permission requests.
 pub(super) fn cards(record: &Value, forms: &Value, permissions: &Value) -> Vec<Value> {
@@ -169,6 +184,9 @@ pub(super) fn cards(record: &Value, forms: &Value, permissions: &Value) -> Vec<V
                 "conversation_id":record["conversation_id"],"kind":format!("opencode_{kind}"),"status":"pending",
                 "answerable":answerable,"can_answer":answerable,"approval":kind=="permission",
                 "answer_transport":"native_opencode","agent_id":"main","questions":items,"source":"opencode_native"});
+            if kind == "permission" {
+                card["approval_choices"] = json!(true);
+            }
             if kind == "form" && !string(native, "title").is_empty() {
                 card["title"] = native["title"].clone();
             }
@@ -319,11 +337,11 @@ mod tests {
             .iter()
             .map(|c| c["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 17);
         for case in contract["cases"].as_array().unwrap() {
             let record = json!({"run_id": "run", "conversation_id": "ses_A"});
             let name = case["name"].as_str().unwrap();
-            let permission = name == "permission";
+            let permission = case["card"]["kind"] == "opencode_permission";
             let (forms, permissions) = if permission {
                 (json!([]), json!([case["form"]]))
             } else {
@@ -367,6 +385,25 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn always_allow_names_the_patterns_it_saves() {
+        let record = json!({"run_id": "run", "conversation_id": "ses_A"});
+        let always = |native: Value| {
+            let cards = cards(&record, &json!([]), &json!([native]));
+            cards[0]["questions"][0]["options"][1].clone()
+        };
+        let native = json!({"id":"per_1","sessionID":"ses_A","action":"shell",
+            "resources":["git push origin main"],"save":["git push *","git fetch *"]});
+        assert_eq!(
+            always(native.clone())["description"],
+            "Allows without asking again: git push *, git fetch *"
+        );
+        let mut unsaved = native;
+        unsaved.as_object_mut().unwrap().remove("save");
+        let option = always(unsaved);
+        assert_eq!((option["id"].as_str(), option["scope"].as_str()), (Some("always"), Some("broader")));
+        assert_eq!(option["description"], "Allows matching requests without asking again");
     }
     #[test]
     fn unanswerable_forms_refuse_answers_and_other_sessions_are_skipped() {

@@ -1,9 +1,14 @@
 //! Kimi's startup trust panel precedes SessionStart and has no conversation ID.
 //! Only a complete panel in a supervised startup run can be answered. Its path
-//! and full MCP disclosure are part of the identity, never an implicit approval.
+//! and full disclosure are part of the identity, never an implicit approval.
 //! The frame must match; the disclosure is shown verbatim, so new wording stays visible.
 //! On Windows Kimi prints the full drive path (`C:\Users\…`, never `~\…`),
 //! compared with the launch directory without case (`shown_path`).
+//!
+//! Kimi 2.2 rewrote the panel: two plain choices below a fixed footer, and a
+//! disclosure that pages, or asks for a larger terminal, when the pane is short.
+//! A page shows only part of the disclosure, so only an unpaged panel counts;
+//! a listing grows a pane no client views until Kimi draws it in one page.
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -14,66 +19,181 @@ const DESCRIPTIONS: [&str; 2] = [
     "Enable project MCP servers. Remembered for this folder.",
     "Exit Kimi Code. Asked again next launch.",
 ];
+/// Kimi 2.2's panel.
+const PAGED_LABELS: [&str; 2] = ["Trust and continue", "Exit"];
+const FOOTER: &str = "Trust is remembered for this folder, including future project config \
+changes. Tool approvals follow your permission settings.";
+const ENLARGE: &str = "Enlarge terminal to review sources. Esc exit.";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Layout {
+    /// Kimi 2.1: described choices below the whole disclosure.
+    Described,
+    /// Kimi 2.2: plain choices below FOOTER, with a paged disclosure.
+    Paged,
+}
+
+impl Layout {
+    fn labels(self) -> [&'static str; 2] {
+        match self {
+            Layout::Described => LABELS,
+            Layout::Paged => PAGED_LABELS,
+        }
+    }
+    fn descriptions(self) -> [&'static str; 2] {
+        match self {
+            Layout::Described => DESCRIPTIONS,
+            Layout::Paged => ["", ""],
+        }
+    }
+}
 
 struct Panel {
+    layout: Layout,
     folder: String,
     disclosure: String,
     selected: usize,
+}
+
+/// What a screen shows of the trust panel.
+enum Shown {
+    Complete(Panel),
+    /// Its top scrolled off, or Kimi shows a page of it or asks for a larger
+    /// terminal: never answerable as shown, but a taller pane shows it all.
+    Clipped,
 }
 
 fn border(row: &str) -> bool {
     row.chars().count() >= 40 && row.chars().all(|c| c == '─')
 }
 
-fn parse(screen: &str) -> Option<Panel> {
+/// A selected choice row and whether `label` ends it; a row selects one choice.
+fn choice(row: &str, label: &str, selected: &mut Option<usize>, index: usize) -> bool {
+    match row.strip_prefix("❯ ") {
+        Some(shown) => shown == label && selected.replace(index).is_none(),
+        None => row == label,
+    }
+}
+
+fn page_row(row: &str) -> bool {
+    row.strip_prefix("←→ page · ")
+        .and_then(|page| page.split_once(" / "))
+        .is_some_and(|(page, count)| {
+            [page, count]
+                .iter()
+                .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+}
+
+fn read(screen: &str) -> Option<Shown> {
     let all: Vec<_> = screen.trim().lines().map(str::trim).collect();
+    if let [notices @ .., title, enlarge] = all.as_slice() {
+        if *title == TITLE
+            && *enlarge == ENLARGE
+            && (notices.is_empty() || kimi_tui_choice::launcher_notices(notices, "kimi"))
+        {
+            return Some(Shown::Clipped);
+        }
+    }
+    // Kimi 2.1 keeps no scrollback for a panel taller than its pane: only its
+    // described choices show, never its title.
+    let scrolled = || (described_bottom(&all) && !all.contains(&TITLE)).then_some(Shown::Clipped);
     let divider = all.iter().position(|row| border(row))?;
     if divider > 0 && !kimi_tui_choice::launcher_notices(&all[..divider], "kimi") {
-        return None;
+        return scrolled();
     }
     let rows = &all[divider..];
-    if rows.len() < 15
+    if rows.len() < 10
         || !border(rows.last()?)
         || rows[1] != TITLE
         || rows[2] != HINT
         || !rows[3].is_empty()
         || !shown_path::absolute(rows[4])
-        || !rows[5].is_empty()
+    {
+        return scrolled();
+    }
+    let (layout, disclosure, selected) = described(rows).or_else(|| paged(rows))?;
+    let Some(disclosure) = disclosure else {
+        return Some(Shown::Clipped);
+    };
+    // Kimi asks for every untrusted folder and lists targets only when the
+    // project's MCP configuration gates some. A clipped list is incomplete.
+    if !rows[5].is_empty() || disclosure.is_empty() || disclosure.contains('…') {
+        return None;
+    }
+    Some(Shown::Complete(Panel {
+        layout,
+        folder: rows[4].into(),
+        disclosure,
+        selected,
+    }))
+}
+
+/// Kimi 2.1's described choices end the screen: the panel's bottom.
+fn described_bottom(rows: &[&str]) -> bool {
+    let Some(start) = rows.len().checked_sub(7) else {
+        return false;
+    };
+    let mut selected = None;
+    border(rows[rows.len() - 1])
+        && (0..2).all(|i| {
+            choice(rows[start + i * 3], LABELS[i], &mut selected, i)
+                && rows[start + i * 3 + 1] == DESCRIPTIONS[i]
+                && rows[start + i * 3 + 2].is_empty()
+        })
+        && selected.is_some()
+}
+
+/// Kimi 2.1: the disclosure and described choices, the selected one.
+fn described(rows: &[&str]) -> Option<(Layout, Option<String>, usize)> {
+    // The complete, fixed choice footer prevents interpreting a clipped prompt
+    // or a quoted transcript as the active dialog. No choice is preselected in UI.
+    if rows.len() < 15 || !described_bottom(rows) {
+        return None;
+    }
+    let options = rows.len() - 7;
+    let selected = (0..2).find(|i| rows[options + i * 3].starts_with("❯ "))?;
+    let disclosure = rows[6..options].join("\n").trim().to_owned();
+    Some((Layout::Described, Some(disclosure), selected))
+}
+
+/// Kimi 2.2: the disclosure above FOOTER and plain choices, or None for the
+/// disclosure when only a page of it shows.
+fn paged(rows: &[&str]) -> Option<(Layout, Option<String>, usize)> {
+    let n = rows.len();
+    let mut selected = None;
+    if !(0..2).all(|i| choice(rows[n - 3 + i], PAGED_LABELS[i], &mut selected, i))
+        || !rows[n - 4].is_empty()
     {
         return None;
     }
-    // The complete, fixed choice footer prevents interpreting a clipped prompt
-    // or a quoted transcript as the active dialog. No choice is preselected in UI.
-    let options = rows.len().checked_sub(7)?;
-    let mut selected = None;
-    for i in 0..2 {
-        let row = rows[options + i * 3];
-        let label = if let Some(label) = row.strip_prefix("❯ ") {
-            if selected.replace(i).is_some() {
-                return None;
-            }
-            label
-        } else {
-            row
-        };
-        if label != LABELS[i]
-            || rows[options + i * 3 + 1] != DESCRIPTIONS[i]
-            || !rows[options + i * 3 + 2].is_empty()
-        {
-            return None;
-        }
-    }
-    // Kimi asks for every untrusted folder and lists targets only when the
-    // project's MCP configuration gates some. A clipped list is incomplete.
-    let disclosure = rows[6..options].join("\n").trim().to_owned();
-    if disclosure.is_empty() || disclosure.contains('…') {
+    // FOOTER wraps on a narrow pane; its rows follow a blank or the page row.
+    let footer = rows[5..n - 4]
+        .iter()
+        .rposition(|row| row.is_empty() || page_row(row))?
+        + 6;
+    if rows[footer..n - 4].join(" ") != FOOTER {
         return None;
     }
-    Some(Panel {
-        folder: rows[4].into(),
-        disclosure,
-        selected: selected?,
-    })
+    let disclosure =
+        (!page_row(rows[footer - 1])).then(|| rows[6..footer].join("\n").trim().to_owned());
+    Some((Layout::Paged, disclosure, selected?))
+}
+
+fn parse(screen: &str) -> Option<Panel> {
+    match read(screen)? {
+        Shown::Complete(panel) => Some(panel),
+        Shown::Clipped => None,
+    }
+}
+
+/// A trust panel that a taller pane would show completely.
+fn clipped(screen: &str) -> bool {
+    matches!(read(screen), Some(Shown::Clipped))
+}
+
+fn complete(screen: &str) -> bool {
+    parse(screen).is_some()
 }
 
 fn eligible(record: &Value) -> bool {
@@ -93,31 +213,43 @@ fn card(record: &Value, panel: &Panel) -> Option<Value> {
     if !eligible(record) || !shown_path::same(&panel.folder, string(record, "launch_dir")) {
         return None;
     }
-    let hash = format!(
-        "{:x}",
-        Sha256::digest(
-            json!([
-                record["run_id"],
-                record["pane"],
-                record["pid"],
-                record["process_start"],
-                record["expected_id"],
-                panel.folder,
-                panel.disclosure,
-                LABELS,
-                DESCRIPTIONS
-            ])
-            .to_string()
-        )
-    );
+    let (labels, descriptions) = (panel.layout.labels(), panel.layout.descriptions());
+    let mut identity = json!([
+        record["run_id"],
+        record["pane"],
+        record["pid"],
+        record["process_start"],
+        record["expected_id"],
+        panel.folder,
+        panel.disclosure,
+        labels,
+        descriptions
+    ]);
+    let mut body = format!("{}\n\n{}", panel.folder, panel.disclosure);
+    if panel.layout == Layout::Paged {
+        identity.as_array_mut()?.push(json!(FOOTER));
+        body = format!("{body}\n\n{FOOTER}");
+    }
+    let hash = format!("{:x}", Sha256::digest(identity.to_string()));
+    let options: Vec<_> = labels
+        .iter()
+        .zip(descriptions)
+        .enumerate()
+        .map(|(i, (label, description))| {
+            let mut option = json!({"id":format!("trust_{i}"),"label":label});
+            if !description.is_empty() {
+                option["description"] = json!(description);
+            }
+            option
+        })
+        .collect();
     Some(
         json!({"question_id":format!("kimi-trust:{hash}"),"question_hash":hash,
         "tool_call_id":"kimi_folder_trust","agent_id":"main","run_id":record["run_id"],
         "conversation_id":record["conversation_id"],"created_at":0,"source":"kimi_folder_trust",
         "can_answer":true,"answer_transport":"kimi_tui","answer_unavailable_reason":"",
         "questions":[{"id":"trust","header":"Folder trust","question":TITLE,
-            "body":format!("{}\n\n{}",panel.folder,panel.disclosure),"multi_select":false,"allow_other":false,
-            "options":LABELS.iter().enumerate().map(|(i,label)|json!({"id":format!("trust_{i}"),"label":label,"description":DESCRIPTIONS[i]})).collect::<Vec<_>>()}]}),
+            "body":body,"multi_select":false,"allow_other":false,"options":options}]}),
     )
 }
 
@@ -127,6 +259,27 @@ fn snapshot(record: &Value, screen: &str) -> Option<(Value, usize)> {
         card(record, &panel)?["question_hash"].clone(),
         panel.selected,
     ))
+}
+
+/// Grow the pane no client views until the clipped or paged trust panel of
+/// this startup run shows completely in one page (`fit_unviewed`); the exact
+/// match in `current` still decides. Only a question listing calls it.
+pub(super) fn fit(record: &Value) {
+    if !eligible(record) {
+        return;
+    }
+    let Ok(current) = kimi_tui_choice::identity(record) else {
+        return;
+    };
+    if let Ok(screen) = kimi_tui_choice::capture(&current) {
+        question_terminal::fit_unviewed(
+            &current,
+            screen,
+            kimi_tui_choice::capture,
+            clipped,
+            complete,
+        );
+    }
 }
 
 pub(super) fn current(record: &Value) -> Option<Value> {
@@ -145,7 +298,7 @@ pub(super) fn available(record: &Value, question: &Value) -> Result<()> {
     let record = kimi_tui_choice::identity(record)?;
     let screen = kimi_tui_choice::capture(&record)?;
     if snapshot(&record, &screen).map(|s| s.0) != Some(question["question_hash"].clone()) {
-        return Err("Kimi's folder trust request changed; refresh Activity".into());
+        return Err("Kimi's folder trust request changed; nothing was sent".into());
     }
     Ok(())
 }
@@ -160,7 +313,7 @@ pub(super) fn answer(record: &Value, question: &Value, answers: &Value) -> Resul
         record,
         question,
         chosen,
-        LABELS.len(),
+        2,
         snapshot,
         |screen| !screen.trim().is_empty() && !screen.contains(TITLE) && !screen.contains(HINT),
         chosen == 1,
@@ -289,5 +442,78 @@ mod tests {
         )
         .is_none());
         assert!(card(&json!({"conversation_id":"old"}), &parse(SCREEN).unwrap()).is_none());
+    }
+    #[test]
+    fn kimi_2_2_panel_needs_its_whole_disclosure_on_one_page() {
+        const FULL: &str = include_str!("../../tests/fixtures/kimi-folder-trust-2.2.txt");
+        const NARROW: &str =
+            include_str!("../../tests/fixtures/kimi-folder-trust-2.2-narrow-50x30.txt");
+        const PLAIN: &str = include_str!("../../tests/fixtures/kimi-folder-trust-2.2-plain.txt");
+        let record = json!({"agent":"kimi","run_id":"run","run_identity_version":1,
+            "supervisor":{},"launch_dir":"/work/example"});
+        let panel = parse(FULL).unwrap();
+        assert_eq!(
+            (panel.layout, panel.selected, panel.folder.as_str()),
+            (Layout::Paged, 0, "/work/example")
+        );
+        assert_eq!(
+            panel.disclosure,
+            "Start 4 MCP servers automatically\nConfig: .kimi-code/mcp.json, .mcp.json\n\n\
+             Load project instructions\nCheck: AGENTS.md · .kimi-code/skills/"
+        );
+        assert!(complete(FULL) && !clipped(FULL));
+        let question = card(&record, &panel).unwrap();
+        let item = &question["questions"][0];
+        assert_eq!(
+            item["options"],
+            json!([{"id":"trust_0","label":"Trust and continue"},{"id":"trust_1","label":"Exit"}])
+        );
+        assert_eq!(
+            item["body"],
+            format!("/work/example\n\n{}\n\n{FOOTER}", panel.disclosure)
+        );
+        // A narrow pane wraps the footer; the request is the same.
+        assert_eq!(card(&record, &parse(NARROW).unwrap()).unwrap(), question);
+        assert_eq!(
+            parse(PLAIN).unwrap().disclosure,
+            "No project integrations or instructions to activate."
+        );
+        let moved = FULL
+            .replace("❯ Trust and continue", "  Trust and continue")
+            .replace("     Exit", "   ❯ Exit");
+        let moved = parse(&moved).unwrap();
+        assert_eq!(moved.selected, 1);
+        assert_eq!(
+            card(&record, &moved).unwrap()["question_hash"],
+            question["question_hash"]
+        );
+        // A page or a too short pane shows part of it: grow, never answer.
+        for screen in [
+            include_str!("../../tests/fixtures/kimi-folder-trust-2.2-page-80x16.txt"),
+            include_str!("../../tests/fixtures/kimi-folder-trust-2.2-page-80x12.txt"),
+            include_str!("../../tests/fixtures/kimi-folder-trust-2.2-enlarge-80x8.txt"),
+        ] {
+            assert!(parse(screen).is_none() && clipped(screen), "{screen}");
+        }
+        for invalid in [
+            FULL.replace("Tool approvals follow", "Tools follow"),
+            FULL.replace("     Exit", "     Leave"),
+            FULL.replace("     Exit", "   ❯ Exit"),
+            FULL.replace("mcp.json\n", "mcp.json…\n"),
+            format!("agent said:\n{FULL}"),
+            format!("{FULL}\n > composer"),
+        ] {
+            assert!(parse(&invalid).is_none() && !clipped(&invalid), "{invalid}");
+        }
+    }
+    #[test]
+    fn kimi_2_1_panel_taller_than_its_pane_is_clipped() {
+        const CLIPPED: &str =
+            include_str!("../../tests/fixtures/kimi-folder-trust-2.1-clipped-80x24.txt");
+        assert!(parse(CLIPPED).is_none() && clipped(CLIPPED) && !complete(CLIPPED));
+        assert!(complete(SCREEN) && !clipped(SCREEN));
+        // Its title shows, so a quoted panel is not a clipped one.
+        assert!(!clipped(&format!("agent said:\n{SCREEN}")));
+        assert!(!clipped(&CLIPPED.replace("Don't trust", "Leave")));
     }
 }

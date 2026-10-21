@@ -1,0 +1,78 @@
+name: Stable Android candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Committed Android stable version (without a Dev suffix)
+        required: true
+        type: string
+      version_code:
+        description: Committed VERSION_CODE, after public and private distribution floor review
+        required: true
+        type: string
+      source_commit:
+        description: Exact reviewed main SHA (must equal this workflow revision)
+        required: true
+        type: string
+      ci_run_id:
+        description: Successful full main-push ci.yml run for this exact SHA
+        required: true
+        type: string
+      signing_cert_sha256:
+        description: Previously reviewed existing Android signer certificate SHA-256
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+cache-mode: none
+
+concurrency:
+  group: stable-android-candidate
+  cancel-in-progress: false
+
+jobs:
+  android:
+    if: >-
+      !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment: release
+    env:
+      REQUESTED_VERSION: ${{ inputs.version }}
+      REQUESTED_VERSION_CODE: ${{ inputs.version_code }}
+      REQUESTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
+      REQUESTED_CI_RUN_ID: ${{ inputs.ci_run_id }}
+      REQUESTED_SIGNING_CERT_SHA256: ${{ inputs.signing_cert_sha256 }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Admit exact stable source and completed full main CI before signing inputs
+        id: admission
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/android-stable-candidate.py admit
+      - name: Build and seal one isolated stable candidate with the existing signer
+        timeout-minutes: 30
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_GOOGLE_SERVICES_JSON: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON }}
+        run: python3 -B scripts/android-stable-candidate.py build
+      - name: Verify or finish private cleanup without publishing on uncertainty
+        if: always() && steps.admission.outcome == 'success'
+        run: python3 -B scripts/android-stable-candidate.py cleanup
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-${{ inputs.version }}-candidate
+          path: ${{ runner.temp }}/zerus-stable-android-${{ github.run_id }}-${{ github.run_attempt }}/candidate
+          retention-days: 14
+          if-no-files-found: error

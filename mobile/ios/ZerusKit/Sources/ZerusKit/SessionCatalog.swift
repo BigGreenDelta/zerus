@@ -10,7 +10,7 @@ public struct SessionCatalog: Sendable {
 }
 
 public enum SessionCatalogParser {
-    public static func parse(_ connection: Connection, _ computers: [JSONObject]) -> SessionCatalog {
+    public static func parse(_ connection: Connection, _ computers: [JSONObject], retained: [Session] = [], actions: [SessionAction] = []) -> SessionCatalog {
         var operations: [MachineKey: Set<String>] = [:]
         var features: [MachineKey: Set<String>] = [:]
         var machines: [Machine] = []
@@ -23,7 +23,10 @@ public enum SessionCatalogParser {
             machines.append(machine)
             valid.append(raw)
         }
-        let sessions = valid.flatMap { NativeSessions.sessions(connection, $0) }
+        let known = SessionNotificationPreferences.known(retained,actions:actions)
+        let sessions = valid.flatMap { NativeSessions.sessions(connection, $0) }.map { row in
+            var copy = row;copy.raw = SessionNotificationPreferences.merge(row.raw,row.target,known);return copy
+        }
         return SessionCatalog(machines: machines, accounts: valid.map { AccountSnapshots.parse(connection.id, $0) },
                               projects: ProjectParser.parse(connection, valid, sessions), operations: operations, features: features)
     }

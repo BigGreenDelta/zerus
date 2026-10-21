@@ -32,7 +32,11 @@ q=dict(approval=True,can_answer=True,approval_choices=True,source='claude_tool_a
  options=[dict(id='yes',label='Yes',scope='once'),dict(id='always',label='Always allow',scope='broader'),dict(id='no',label='No',scope='once')])])
 if mode=='opencode':
  q.update(source='opencode_native',answer_transport='native_opencode',kind='opencode_permission')
- q['questions'][0].update(id='permission',options=[dict(id='once',label='Allow once'),dict(id='always',label='Always allow')])
+ # The permission card of tests/fixtures/opencode-form-contract.json.
+ prompt='shell\nprintf native-tool-output';q['questions'][0].pop('body')
+ q['questions'][0].update(id='permission',header='Permission',prompt=prompt,question=prompt,multi_select=False,required=True,
+  options=[dict(id='once',label='Allow once',scope='once'),dict(id='always',label='Always allow',scope='broader'),
+  dict(id='reject',label='Reject',description='Rejects every pending request in this session',scope='once')])
 if mode=='dsh':
  q.update(source='dsh_native',answer_transport='native_dsh')
  q['questions'][0].update(id='decision',options=[dict(id='allow',label='Allow once'),dict(id='deny',label='Reject')])

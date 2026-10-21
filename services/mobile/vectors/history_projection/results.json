@@ -1,0 +1,1013 @@
+{
+  "schema": 1,
+  "payload": {
+    "request_id": "10000000-0000-4000-8000-000000000001",
+    "expected_run_id": "run-one",
+    "expected_conversation_id": "conversation-one",
+    "history_epoch": "epoch-one",
+    "projection_after": 0,
+    "projection_until": 7
+  },
+  "result": {
+    "request_id": "10000000-0000-4000-8000-000000000001",
+    "name": "codex/example/mobile",
+    "run_id": "run-one",
+    "conversation_id": "conversation-one",
+    "history_epoch": "epoch-one",
+    "projection_generation": 9,
+    "projection_changes": [
+      {
+        "generation": 1,
+        "history_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "change": "retired",
+        "resolution": "resolved",
+        "successor": null
+      },
+      {
+        "generation": 2,
+        "history_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "change": "refreshed",
+        "resolution": "resolved",
+        "successor": {
+          "history_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "history_cursor": "opaque-canonical-cursor",
+          "history_stream": "provider",
+          "type": "AgentMessage",
+          "detail": "server canonical body",
+          "original_ids": [
+            "native-one",
+            "history:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ],
+          "incoming_seq": 2,
+          "at": 1760000000.25,
+          "request_id": "20000000-0000-4000-8000-000000000002",
+          "voice": {
+            "state": "submitted",
+            "message_id": "30000000-0000-4000-8000-000000000003"
+          },
+          "extra_public_metadata": {
+            "kept": true
+          }
+        }
+      },
+      {
+        "generation": 3,
+        "history_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "change": "retired",
+        "resolution": "unresolved",
+        "successor": null,
+        "reason": "unexpected_successor"
+      },
+      {
+        "generation": 4,
+        "history_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "change": "refreshed",
+        "resolution": "unresolved",
+        "successor": null,
+        "reason": "no_successor"
+      }
+    ],
+    "next_projection_after": 7,
+    "complete": true
+  },
+  "cases": [
+    {
+      "id": "three-disjoint-shapes-with-both-unresolved-kinds",
+      "accept": true,
+      "set": [],
+      "remove": []
+    },
+    {
+      "id": "unresolved-oversize",
+      "accept": true,
+      "set": [
+        [
+          [
+            "projection_changes",
+            3,
+            "reason"
+          ],
+          "oversize"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "unresolved-reason-optional",
+      "accept": true,
+      "set": [],
+      "remove": [
+        [
+          "projection_changes",
+          3,
+          "reason"
+        ]
+      ]
+    },
+    {
+      "id": "incomplete-advances-to-last-entry",
+      "accept": true,
+      "set": [
+        [
+          [
+            "complete"
+          ],
+          false
+        ],
+        [
+          [
+            "next_projection_after"
+          ],
+          4
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "empty-complete-fixed-until",
+      "accept": true,
+      "set": [
+        [
+          [
+            "projection_changes"
+          ],
+          []
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "archive-identity",
+      "accept": true,
+      "set": [
+        [
+          [
+            "archive_id"
+          ],
+          "20000000-0000-4000-8000-000000000002"
+        ]
+      ],
+      "remove": [],
+      "payload_set": {
+        "archive_id": "20000000-0000-4000-8000-000000000002"
+      }
+    },
+    {
+      "id": "child-identity",
+      "accept": true,
+      "set": [
+        [
+          [
+            "agent_id"
+          ],
+          "child-one"
+        ],
+        [
+          [
+            "parent_conversation_id"
+          ],
+          "conversation-one"
+        ],
+        [
+          [
+            "conversation_id"
+          ],
+          "conversation-one/child-one"
+        ],
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "agent_id"
+          ],
+          "child-one"
+        ]
+      ],
+      "remove": [],
+      "payload_set": {
+        "agent_id": "child-one"
+      }
+    },
+    {
+      "id": "wrong-request_id-30000000",
+      "accept": false,
+      "set": [
+        [
+          [
+            "request_id"
+          ],
+          "30000000-0000-4000-8000-000000000003"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-name-other",
+      "accept": false,
+      "set": [
+        [
+          [
+            "name"
+          ],
+          "other"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-run_id-other",
+      "accept": false,
+      "set": [
+        [
+          [
+            "run_id"
+          ],
+          "other"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-conversation_id-other",
+      "accept": false,
+      "set": [
+        [
+          [
+            "conversation_id"
+          ],
+          "other"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-history_epoch-other",
+      "accept": false,
+      "set": [
+        [
+          [
+            "history_epoch"
+          ],
+          "other"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-archive_id-20000000",
+      "accept": false,
+      "set": [
+        [
+          [
+            "archive_id"
+          ],
+          "20000000-0000-4000-8000-000000000002"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-agent_id-other",
+      "accept": false,
+      "set": [
+        [
+          [
+            "agent_id"
+          ],
+          "other"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-parent_conversation_id-other",
+      "accept": false,
+      "set": [
+        [
+          [
+            "parent_conversation_id"
+          ],
+          "other"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-projection_generation-6",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_generation"
+          ],
+          6
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-projection_generation-True",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_generation"
+          ],
+          true
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-complete-1",
+      "accept": false,
+      "set": [
+        [
+          [
+            "complete"
+          ],
+          1
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-next_projection_after-True",
+      "accept": false,
+      "set": [
+        [
+          [
+            "next_projection_after"
+          ],
+          true
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-next_projection_after-6",
+      "accept": false,
+      "set": [
+        [
+          [
+            "next_projection_after"
+          ],
+          6
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "wrong-projection_changes-{}",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes"
+          ],
+          {}
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "retired-history_id-AAAAAAAA",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            0,
+            "history_id"
+          ],
+          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "retired-generation-True",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            0,
+            "generation"
+          ],
+          true
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "retired-generation-0",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            0,
+            "generation"
+          ],
+          0
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "retired-generation-8",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            0,
+            "generation"
+          ],
+          8
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "retired-change-other",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            0,
+            "change"
+          ],
+          "other"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "retired-resolution-other",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            0,
+            "resolution"
+          ],
+          "other"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "retired-successor-{'histor",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            0,
+            "successor"
+          ],
+          {
+            "history_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "history_cursor": "opaque-canonical-cursor",
+            "history_stream": "provider",
+            "type": "AgentMessage",
+            "detail": "server canonical body",
+            "original_ids": [
+              "native-one",
+              "history:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "incoming_seq": 2,
+            "at": 1760000000.25,
+            "request_id": "20000000-0000-4000-8000-000000000002",
+            "voice": {
+              "state": "submitted",
+              "message_id": "30000000-0000-4000-8000-000000000003"
+            },
+            "extra_public_metadata": {
+              "kept": true
+            }
+          }
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "retired-unknown-True",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            0,
+            "unknown"
+          ],
+          true
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "retired-reason-no_succe",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            0,
+            "reason"
+          ],
+          "no_successor"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "nonascending-generation",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "generation"
+          ],
+          1
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "refreshed-null",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor"
+          ],
+          null
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "unresolved-nonnull",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            3,
+            "successor"
+          ],
+          {
+            "history_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "history_cursor": "opaque-canonical-cursor",
+            "history_stream": "provider",
+            "type": "AgentMessage",
+            "detail": "server canonical body",
+            "original_ids": [
+              "native-one",
+              "history:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "incoming_seq": 2,
+            "at": 1760000000.25,
+            "request_id": "20000000-0000-4000-8000-000000000002",
+            "voice": {
+              "state": "submitted",
+              "message_id": "30000000-0000-4000-8000-000000000003"
+            },
+            "extra_public_metadata": {
+              "kept": true
+            }
+          }
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "unresolved-unknown-reason",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            3,
+            "reason"
+          ],
+          "invented"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "incomplete-empty",
+      "accept": false,
+      "set": [
+        [
+          [
+            "complete"
+          ],
+          false
+        ],
+        [
+          [
+            "projection_changes"
+          ],
+          []
+        ],
+        [
+          [
+            "next_projection_after"
+          ],
+          0
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "incomplete-no-progress",
+      "accept": false,
+      "set": [
+        [
+          [
+            "complete"
+          ],
+          false
+        ],
+        [
+          [
+            "next_projection_after"
+          ],
+          0
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-history_id-bad",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "history_id"
+          ],
+          "bad"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-history_cursor-",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "history_cursor"
+          ],
+          ""
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-history_stream-private",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "history_stream"
+          ],
+          "private"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-type-Permissi",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "type"
+          ],
+          "PermissionRequest"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-type-[]",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "type"
+          ],
+          []
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-original_ids-['alias'",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "original_ids"
+          ],
+          [
+            "alias",
+            "alias",
+            "alias",
+            "alias",
+            "alias",
+            "alias",
+            "alias",
+            "alias",
+            "alias"
+          ]
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-original_ids-[None]",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "original_ids"
+          ],
+          [
+            null
+          ]
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-native_match_hash-private",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "native_match_hash"
+          ],
+          "private"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-incoming_seq-1.0",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "incoming_seq"
+          ],
+          1.0
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-incoming_seq--1",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "incoming_seq"
+          ],
+          -1
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-agent_id-sibling",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "agent_id"
+          ],
+          "sibling"
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-attachments-[1]",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "attachments"
+          ],
+          [
+            1
+          ]
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "row-detail-",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "detail"
+          ],
+          ""
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "missing-entry-successor",
+      "accept": false,
+      "set": [],
+      "remove": [
+        [
+          "projection_changes",
+          0,
+          "successor"
+        ]
+      ]
+    },
+    {
+      "id": "public-attachments-without-text",
+      "accept": true,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "detail"
+          ],
+          ""
+        ],
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "attachments"
+          ],
+          [
+            {
+              "name": "synthetic.txt",
+              "index": 0
+            }
+          ]
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "null-incoming-is-not-inferred",
+      "accept": true,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "incoming_seq"
+          ],
+          null
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "float-generation",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_generation"
+          ],
+          9.0
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "float-entry-generation",
+      "accept": false,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "generation"
+          ],
+          2.0
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "float-next-position",
+      "accept": false,
+      "set": [
+        [
+          [
+            "next_projection_after"
+          ],
+          7.0
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "null-attachment-metadata-with-public-text",
+      "accept": true,
+      "set": [
+        [
+          [
+            "projection_changes",
+            1,
+            "successor",
+            "attachments"
+          ],
+          null
+        ]
+      ],
+      "remove": []
+    },
+    {
+      "id": "incomplete-at-until",
+      "accept": false,
+      "payload_set": {
+        "projection_until": 4
+      },
+      "set": [
+        [
+          [
+            "complete"
+          ],
+          false
+        ],
+        [
+          [
+            "next_projection_after"
+          ],
+          4
+        ]
+      ],
+      "remove": []
+    }
+  ]
+}

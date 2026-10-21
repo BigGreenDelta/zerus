@@ -15,13 +15,14 @@ data class SessionDetailsView(val fields: List<ContextDetail>, val goal: List<Co
     val processes: List<DetailProcess>, val processNotes: List<String>, val processComplete: Boolean,
     val generation: String, val recorded: Boolean)
 /** [effortLabels] maps native effort IDs to labels the computer reported (OpenCode variants). */
-data class NativeModelChoice(val id: String, val label: String, val efforts: List<String>, val effortLabels: Map<String, String> = emptyMap())
+data class NativeModelChoice(val id: String, val label: String, val efforts: List<String>, val effortLabels: Map<String, String> = emptyMap(),
+    val provider:String="",val providerLabel:String="",val free:Boolean=false,val favorite:Boolean=false,val isDefault:Boolean=false)
 data class NativeSettings(val model: String, val effort: String, val models: List<NativeModelChoice>, val efforts: List<String>,
     val pendingModel: String, val pendingEffort: String, val pendingId: String, val applyWhen: String,
-    val supported: Boolean, val reason: String, val notice: String = "") {
+    val supported: Boolean, val reason: String, val notice: String = "",val modelsTruncated:Boolean=false) {
     /** Relevant semantic fields only; timestamps and unrelated history polls do not invalidate a dialog. */
-    val signature get() = JSONArray(listOf(model, effort, models.map { listOf(it.id, it.label, it.efforts, it.effortLabels.entries.map { entry -> listOf(entry.key, entry.value) }) }, efforts,
-        pendingModel, pendingEffort, pendingId, applyWhen, supported, reason, notice)).toString()
+    val signature get() = JSONArray(listOf(model, effort, models.map { listOf(it.id, it.label, it.efforts, it.effortLabels.entries.map { entry -> listOf(entry.key, entry.value) },it.provider,it.providerLabel,it.free,it.favorite,it.isDefault) }, efforts,
+        pendingModel, pendingEffort, pendingId, applyWhen, supported, reason, notice,modelsTruncated)).toString()
 }
 
 object SessionDetailsPresentation {
@@ -29,13 +30,26 @@ object SessionDetailsPresentation {
         it.isFinite() && it >= 0 && it <= 9_007_199_254_740_991.0
     }?.toLong()
     private fun strings(raw: JSONArray?): List<String> = raw?.let { values -> (0 until values.length()).mapNotNull { values.opt(it) as? String } }.orEmpty()
-    fun settings(raw: JSONObject?) = NativeSettings(raw?.string("settings_model").orEmpty().ifBlank { raw?.string("model").orEmpty() }, raw?.string("effort").orEmpty(),
-        raw?.optJSONArray("model_options")?.objects().orEmpty().map { option -> NativeEfforts.parse(option).let { efforts ->
+    fun settings(raw: JSONObject?): NativeSettings {
+        val options = raw?.optJSONArray("model_options")
+        // Older inspections may omit agent but still report the new per-model provider fields.
+        val openCode = raw?.string("agent") == "opencode" || options?.objects().orEmpty().any {
+            (it.opt("provider") as? String)?.isNotBlank() == true
+        }
+        val models = if (openCode) OpenCodeCatalog.models(options).map { model ->
+            NativeModelChoice(model.value, model.label, model.efforts.map { it.value },
+                model.efforts.mapNotNull { effort -> effort.label?.let { effort.value to it } }.toMap(),
+                model.provider, model.providerLabel, model.free, model.favorite, model.isDefault)
+        } else options?.objects().orEmpty().map { option -> NativeEfforts.parse(option).let { efforts ->
             NativeModelChoice(option.string("id"), option.string("label").ifBlank { option.string("id") }, efforts.map { it.value },
-                efforts.mapNotNull { effort -> effort.label?.let { effort.value to it } }.toMap()) } },
-        NativeEfforts.parse(raw).map { it.value }, raw?.string("pending_model").orEmpty(), raw?.string("pending_effort").orEmpty(),
-        raw?.string("pending_settings_id").orEmpty(), raw?.string("settings_apply_when").orEmpty(), raw?.optBoolean("settings_change_supported") == true,
-        raw?.string("settings_change_reason").orEmpty(), raw?.string("settings_change_notice").orEmpty())
+                efforts.mapNotNull { effort -> effort.label?.let { effort.value to it } }.toMap())
+        } }
+        return NativeSettings(raw?.string("settings_model").orEmpty().ifBlank { raw?.string("model").orEmpty() }, raw?.string("effort").orEmpty(), models,
+            NativeEfforts.parse(raw).map { it.value }, raw?.string("pending_model").orEmpty(), raw?.string("pending_effort").orEmpty(),
+            raw?.string("pending_settings_id").orEmpty(), raw?.string("settings_apply_when").orEmpty(), raw?.optBoolean("settings_change_supported") == true,
+            raw?.string("settings_change_reason").orEmpty(), raw?.string("settings_change_notice").orEmpty(),
+            openCode && (raw?.opt("model_options_truncated") == true || (options?.length() ?: 0) > OpenCodeCatalog.MAX_MODELS))
+    }
 
     /**
      * Effort page rows for [model]: Default first, then that model's own options, else the session's list.

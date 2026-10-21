@@ -93,6 +93,7 @@ private val Amber = Color(0xFFFFCB7D)
     var account by rememberSaveable(form) { mutableStateOf("") }
     var selectedModel by rememberSaveable(form) { mutableStateOf("") }
     var selectedEffort by rememberSaveable(form) { mutableStateOf("") }
+    var choosingModel by remember(form) { mutableStateOf(false) }
     var projectId by rememberSaveable(form) { mutableStateOf("") }
     var folder by rememberSaveable(form) { mutableStateOf("") }
     var browsedFolder by rememberSaveable(form) { mutableStateOf("") }
@@ -318,9 +319,11 @@ private val Amber = Color(0xFFFFCB7D)
                     }
                     if(provider=="opencode") LaunchSection("Model") {
                         val chosen=modelOptions.find { it.value==selectedModel }
-                        LaunchMenuField("Model",chosen?.label ?: "Native default model",!busy,
-                            listOf("" to "Native default model") + modelOptions.map { it.value to it.label },selectedModel,
-                            { selectedModel=it;edited=true },supporting=chosen?.value,choiceSupporting={ it },choiceSupportingMaxLines=3)
+                        OutlinedButton(onClick={ choosingModel=true },enabled=!busy,modifier=Modifier.fillMaxWidth()) {
+                            Text(chosen?.label ?: "Native default model",Modifier.weight(1f))
+                            Icon(Icons.Default.ArrowDropDown,null)
+                        }
+                        LaunchPresentation.catalogNotice(catalog,provider,account).takeIf(String::isNotBlank)?.let { LaunchHint(it) }
                         if(effortOptions.isNotEmpty()) LaunchMenuField("Effort",effortOptions.find { it.value==effort }?.label ?: "Model default",!busy,
                             listOf("" to "Model default") + effortOptions.map { it.value to it.label },effort,{ selectedEffort=it;edited=true })
                         LaunchHint("Models configured on $computer. Native default uses OpenCode's configuration.")
@@ -334,6 +337,12 @@ private val Amber = Color(0xFFFFCB7D)
                 }
             }
         }
+    }
+    if(choosingModel) ModalBottomSheet(onDismissRequest={ choosingModel=false }) {
+        val options=modelOptions.map { OpenCodeModel(it.value,it.label,it.provider,it.providerLabel,it.free,it.favorite,it.isDefault,
+            it.efforts.map { effort -> NativeEffort(effort.value,effort.label) }) }
+        OpenCodeModelList(options,selectedModel,{ selectedModel=it;edited=true;choosingModel=false },
+            Modifier.fillMaxWidth().heightIn(max=560.dp).padding(16.dp),nativeDefault="Native default model")
     }
     if(choosingProject) ProjectPickerDialog(projects,projectId,{ chosen ->
         choosingProject = false

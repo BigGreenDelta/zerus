@@ -96,6 +96,8 @@ impl Event {
 #[derive(Default)]
 pub struct State {
     pub sessions: HashSet<String>,
+    /// Provider identities from the current listing, scoped to this machine.
+    pub opencode_sessions: HashSet<String>,
     pub archives: HashSet<(String, String)>,
     pub snapshot_seen_at: Option<f64>,
     pub attention: HashMap<(String, String, String), Value>,
@@ -197,7 +199,7 @@ impl<N: Native + 'static> Connector<N> {
             native,
             journal: Rc::new(journal),
             settings,
-            flags: Cell::new(Flags::default()),
+            flags: Cell::new(Flags::default().for_native_platform()),
             state: RefCell::new(State::fresh()),
             snapshot_ready: Event::default(),
             probed: Event::default(),
@@ -312,7 +314,8 @@ impl<N: Native + 'static> Connector<N> {
     }
 
     /// `probe_capabilities`: at most every 300 s; a failed probe keeps the
-    /// previous flags (a).
+    /// previous legacy flags (a). Projection alone is revoked while a due probe
+    /// is in flight, and stays unavailable after failure or non-text help.
     pub async fn probe_capabilities(&self) {
         {
             let mut state = self.state.borrow_mut();
@@ -321,11 +324,15 @@ impl<N: Native + 'static> Connector<N> {
             }
             state.capabilities_next_poll = self.clock() + REPROBE_SECONDS;
         }
+        let mut flags = self.flags.get();
+        flags.history_projection = false;
+        self.flags.set(flags);
         if let Ok(Output::Text(help)) = self
             .native(Call::new(["--help"]).timeout(PROBE_TIMEOUT).text())
             .await
         {
-            self.flags.set(Flags::from_help(&help));
+            self.flags
+                .set(Flags::from_help(&help).for_native_platform());
         }
         self.probed.set();
     }
@@ -361,6 +368,9 @@ impl<N: Native + 'static> Connector<N> {
             sessions.extend(state.archive_preview.iter().cloned());
             snapshot.insert("mobile_archive".into(), state.archive_preview_meta.clone());
         }
+        if self.flags.get().windows_gateway {
+            sessions.retain(|row| crate::capabilities::windows_provider(&row["cmd"]));
+        }
         // Native SSH aliases and the peer-of-peer inventory stay local.
         snapshot.remove("peers");
         // Ended launches carry the last screen lines of failed starts for the
@@ -386,6 +396,12 @@ impl<N: Native + 'static> Connector<N> {
                 .filter_map(|row| row.get("name").and_then(Value::as_str))
                 .map(str::to_owned)
                 .collect();
+            state.opencode_sessions = sessions
+                .iter()
+                .filter(|row| row.get("cmd").and_then(Value::as_str) == Some("opencode"))
+                .filter_map(|row| row.get("name").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
             state.archives = sessions
                 .iter()
                 .filter_map(Value::as_object)
@@ -403,6 +419,9 @@ impl<N: Native + 'static> Connector<N> {
         let ((), projects) =
             future::join(self.read_attention(&sessions), self.read_projects(host)).await;
         self.apply_attention(&mut sessions);
+        for row in &mut sessions {
+            crate::opencode_privacy::row(row);
+        }
         let mut projects =
             projects.unwrap_or_else(|| projects::unavailable(&self.settings.binding));
         projects::apply_memberships(&mut sessions, &projects);
@@ -447,11 +466,19 @@ impl<N: Native + 'static> Connector<N> {
             state.archive_preview.clear();
             state.archive_preview_meta = crate::archives::unavailable();
         }
-        let call = Call::new(["archives", "--json"])
+        let windows = self.flags.get().windows_gateway;
+        let call = crate::archives::call(false, windows)
             .payload(json!({}))
             .timeout(5.0);
         let preview = match self.native(call).await {
-            Ok(output) => crate::archives::preview(&output.json()).ok(),
+            Ok(output) => {
+                let page = output.json();
+                if windows && !crate::archives::supported_page(&page) {
+                    None
+                } else {
+                    crate::archives::preview(&page).ok()
+                }
+            }
             Err(_) => None,
         };
         let mut state = self.state.borrow_mut();

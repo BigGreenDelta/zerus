@@ -8,7 +8,7 @@ url='https://github.com/ufna/zerus'
 license=('MIT')
 depends=('qt6-base' 'qt6-multimedia' 'qt6-svg' 'kstatusnotifieritem' 'kwindowsystem' 'kidletime'
          'tmux>=3.7' 'openssh' 'python' 'curl' 'procps-ng' 'libgcc' 'libstdc++' 'glibc' 'hicolor-icon-theme' 'bash' 'tar')
-makedepends=('git' 'rust' 'cmake' 'ninja' 'qt6-webengine')
+makedepends=('git' 'rust' 'cmake' 'ninja' 'qt6-tools' 'qt6-webengine')
 optdepends=('konsole: external KDE terminal integration'
             'qt6-webengine: embedded DeepSeek Native UI'
             'wl-clipboard: clipboard transfers on Wayland'

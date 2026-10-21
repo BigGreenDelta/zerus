@@ -148,6 +148,179 @@ event("SessionEnd")
 '''
 
 
+def direct_signal_agent():
+    """Opt-in diagnostics for Archive's one Linux Codex signal case only.
+
+    Keep AGENT itself unchanged: all other cases still write its exact bytes.
+    A failed diagnostic append must never change the fake's signal behavior.
+    """
+    trace = r'''
+def signal_phase(phase):
+    try:
+        row = {"phase": phase, "pid": os.getpid(), "run": os.environ.get("HGS_RUN_ID", "")[:128],
+               "conversation": sid[:128], "at_ns": time.monotonic_ns()}
+        data = (json.dumps(row, separators=(",", ":")) + "\n").encode()
+        fd = os.open(home / "direct-signal-agent.jsonl",
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            if os.fstat(fd).st_size <= 8192 and len(data) <= 512:
+                os.write(fd, data)  # A short write remains an explicitly incomplete diagnostic.
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+'''
+    replacements = (
+        ('def stop(*args):', trace + '\ndef stop(*args):\n    signal_phase("handler_enter")'),
+        ('    event("SessionEnd", reason="exit" if agent == "kimi" else "other")',
+         '    signal_phase("SessionEnd_begin")\n'
+         '    event("SessionEnd", reason="exit" if agent == "kimi" else "other")\n'
+         '    signal_phase("SessionEnd_end")'),
+        ('    sys.exit(143)', '    signal_phase("handler_exit_143")\n    sys.exit(143)'),
+        ('signal.signal(signal.SIGTERM, stop)',
+         'signal.signal(signal.SIGTERM, stop)\nsignal_phase("handler_registered")'),
+        ('event("SessionStart")\nfor line in sys.stdin:',
+         'signal_phase("SessionStart_begin")\nevent("SessionStart")\n'
+         'signal_phase("SessionStart_end")\nfor line in sys.stdin:'),
+    )
+    source = AGENT
+    for before, after in replacements:
+        if source.count(before) != 1:
+            raise AssertionError("direct signal diagnostic source no longer matches AGENT")
+        source = source.replace(before, after, 1)
+    return source
+
+
+class DirectSignalTrace:
+    """Content-free samples for one already-selected synthetic child; no signalling.
+
+    This never gates success or adopts a replacement PID. Linux kernel metadata
+    is sampled only for the exact target and supervisor from the captured binding.
+    Every read is bounded; unknown evidence stays unknown, not a readiness proof.
+    """
+    def __init__(self, root):
+        self.root, self.samples = root, []
+
+    @staticmethod
+    def process(pid, expected=None):
+        if type(pid) is not int or pid <= 0:
+            return {"unknown": "invalid PID"}
+        try:
+            def identity():
+                with open(f"/proc/{pid}/stat", "rb") as file:
+                    data = file.read(4097)
+                if len(data) > 4096:
+                    raise ValueError("oversized stat")
+                fields = data.decode().rsplit(")", 1)[1].split()
+                return {"pid": pid, "ppid": int(fields[1]), "birth": int(fields[19])}
+            before = identity()
+            if expected is not None and before != expected:
+                return {"unknown": "identity changed"}
+            with open(f"/proc/{pid}/status", "rb") as file:
+                status = file.read(8193)
+            if len(status) > 8192:
+                raise ValueError("oversized status")
+            masks = {}
+            for line in status.decode().splitlines():
+                key, _, value = line.partition(":")
+                if key in ("SigBlk", "SigIgn", "SigCgt") and re.fullmatch(r"[0-9a-fA-F]{1,32}", value.strip()):
+                    masks[key] = value.strip()
+            if identity() != before:
+                return {"unknown": "identity changed during sample"}
+            return {"identity": before, "masks": masks}
+        except Exception as error:
+            return {"unknown": type(error).__name__}
+
+    def capture(self, phase, record, before=None):
+        # Capture once, then signal that same numeric target exactly as before.
+        # A different later binding is evidence, never permission to resend.
+        def field(value):
+            if value is None or type(value) is int and -(2 ** 63) <= value < 2 ** 63:
+                return value
+            if isinstance(value, str) and len(value) <= 128 and not any(ord(char) < 32 for char in value):
+                return value
+            return {"unknown": "invalid or oversized binding field"}
+
+        def process(pid, kind):
+            expected = (before or {}).get(kind, {}).get("identity")
+            if before is not None and expected is None:
+                return {"unknown": "no pre-signal identity"}
+            return self.process(pid, expected)
+
+        try:
+            supervisor = record.get("supervisor") or {}
+            # Sample the target last, immediately before returning to os.kill.
+            parent = process(supervisor.get("pid"), "supervisor")
+            child = process(record.get("pid"), "child")
+            sample = {"phase": phase, "at_ns": time.monotonic_ns(), "run": field(record.get("run_id")),
+                      "conversation": field(record.get("conversation_id")), "pane": field(record.get("pane")),
+                      "saved_pid": field(record.get("pid")), "saved_start": field(record.get("process_start")),
+                      "saved_supervisor": {key: field(supervisor.get(key)) for key in ("pid", "start")},
+                      "child": child, "supervisor": parent}
+        except Exception as error:
+            sample = {"phase": phase, "unknown": type(error).__name__}
+        self.samples.append(sample)
+        return sample
+
+    def failure(self):
+        """Retain before the usual fixture cleanup, without replacing its failure."""
+        try:
+            raw, trace_error = b"", None
+            try:
+                with open(self.root / "direct-signal-agent.jsonl", "rb") as file:
+                    raw = file.read(8705)
+            except Exception as error:
+                trace_error = type(error).__name__
+            phases, malformed = [], 0
+            lines = raw[:8704].split(b"\n")
+            for line in lines[:32]:
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    if (len(line) > 512 or not isinstance(row, dict)
+                            or set(row) != {"phase", "pid", "run", "conversation", "at_ns"}
+                            or row["phase"] not in ("handler_enter", "SessionEnd_begin", "SessionEnd_end",
+                                                     "handler_exit_143", "handler_registered",
+                                                     "SessionStart_begin", "SessionStart_end")
+                            or type(row["pid"]) is not int or row["pid"] <= 0
+                            or type(row["at_ns"]) is not int or row["at_ns"] < 0
+                            or any(not isinstance(row[key], str) or len(row[key]) > 128
+                                   or any(ord(char) < 32 for char in row[key]) for key in ("run", "conversation"))):
+                        raise ValueError("unexpected phase fields")
+                    phases.append(row)
+                except (ValueError, TypeError):
+                    malformed += 1
+            data = {"schema": 1, "samples": self.samples, "agent_phases": phases,
+                    "agent_trace_sha256": hashlib.sha256(raw).hexdigest(),
+                    "agent_trace_error": trace_error, "rows_omitted": max(0, len(lines) - 32),
+                    "malformed_or_incomplete_rows": malformed, "trace_truncated": len(raw) > 8704}
+            encoded = (json.dumps(data, sort_keys=True) + "\n").encode()
+            if len(encoded) > 24576:
+                raise ValueError("oversized signal diagnostic")
+            artifact, durable = None, "unknown"
+            try:
+                folder = REPO / "artifacts/test-results/python"
+                folder.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(prefix="direct-signal-", suffix=".json", dir=folder, delete=False) as file:
+                    artifact = Path(file.name).relative_to(REPO)
+                    file.write(encoded)
+                    file.flush()
+                    os.fsync(file.fileno())
+                fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                durable = "file and parent synced"
+            except Exception as error:
+                durable = "unknown: " + type(error).__name__
+            return (f"Direct signal diagnostics: artifact={artifact}, persistence={durable}\n"
+                    + encoded.decode()[:8000])
+        except Exception as error:
+            return "Direct signal diagnostics unavailable: " + type(error).__name__
+
+
 @unittest.skipUnless(TMUX, "tmux is required")
 class Harness(unittest.TestCase):
     def setUp(self):
@@ -249,7 +422,8 @@ class Harness(unittest.TestCase):
     def stop_report(self):
         """What still runs once a stop has missed its deadline, and where: the
         saved stop evidence, each process of the private panes, the fake
-        agents' Python stacks and, natively, what each process waits in.
+        agents' Python stacks, the host's load and, natively, what each
+        process waits in.
 
         Collection is bounded: each command has a timeout, the whole report a
         deadline and a size, and a step that fails says so instead of
@@ -399,6 +573,12 @@ class Harness(unittest.TestCase):
                 else:
                     lines.append(f"python in {pane[1]}: no stack on its terminal")
 
+        def host():
+            # How loaded the computer is as the native stacks are taken: a slow
+            # sample there is the collector's limit, not a lifecycle fault.
+            load = " ".join(f"{value:.2f}" for value in os.getloadavg())
+            lines.append(f"host: load {load} (1, 5, 15 min) on {os.cpu_count()} CPUs")
+
         def native(row):
             if not verified(row):
                 lines.append(f"native {row['pid']}: omitted, its process identity or pane changed")
@@ -421,6 +601,7 @@ class Harness(unittest.TestCase):
             step("processes", processes)
             step("signals", signal_agents)
             step("python stacks", python_stacks)
+            step("host", host)
             # Only the private panes' own processes: a listed path match is never sampled.
             for row in [row for row in state["owned"] if row["pid"] in state.get("descendants", ())][:STOP_REPORT_NATIVE]:
                 step(f"native stack {row['pid']}", lambda row=row: native(row))
@@ -1328,7 +1509,15 @@ exit $status
         self.assertIn("Stop diagnostics:", message)
         self.assertRegex(message, r"(?m)^process: " + pid + r" \d+ ")
         self.assertRegex(message, r"(?m)^python in %\d+: (Current thread|Thread) 0x.*line \d+ in <module>")
-        self.assertRegex(message, r"(?m)^stack " + pid + " " if sys.platform == "darwin" else r"(?m)^wchan " + pid + ": ")
+        self.assertRegex(message, r"(?m)^host: load \d+\.\d\d \d+\.\d\d \d+\.\d\d \(1, 5, 15 min\) on \d+ CPUs$")
+        if sys.platform != "darwin":
+            self.assertRegex(message, r"(?m)^wchan " + pid + ": ")
+            return
+        # The agent's native stack, or explicit evidence that Apple's sample did
+        # not finish within its own limit: a loaded runner can keep it longer.
+        # Neither replaces the failure; StopReportControls checks both exactly.
+        sampled = f"Command '['sample', '{pid}', '1', '-mayDie', '-file', '/dev/stdout']' timed out after 5 seconds"
+        self.assertRegex(message, rf"(?m)^(stack {pid} |unavailable: native stack {pid}: TimeoutExpired: {re.escape(sampled)}$)")
 
     def test_abandoned_pause_does_not_block_future_work(self):
         name = self.start()
@@ -2385,17 +2574,34 @@ class Archive(Harness):
     def test_pause_and_agent_signal_remain_saved(self):
         for agent in ("claude", "codex", "kimi"):
             with self.subTest(agent=agent):
-                name = self.start(agent)
-                sid = self.binding(name)["conversation_id"]
-                self.hgs("pause", name)
-                self.assertEqual(self.archived(name), [])
-                self.assertEqual(self.rows(name)[0]["state"], "paused")
-                self.resume(name)
-                os.kill(self.binding(name)["pid"], signal.SIGTERM)
-                self.wait_stopped(name)
-                self.assertEqual(self.archived(name), [])
-                self.assertEqual(self.rows(name)[0]["state"], "stopped")
-                self.assertEqual(self.binding(name)["conversation_id"], sid)
+                trace = DirectSignalTrace(self.root) if agent == "codex" and sys.platform == "linux" else None
+                if trace:
+                    self.script(agent, direct_signal_agent())
+                try:
+                    name = self.start(agent)
+                    sid = self.binding(name)["conversation_id"]
+                    self.hgs("pause", name)
+                    self.assertEqual(self.archived(name), [])
+                    self.assertEqual(self.rows(name)[0]["state"], "paused")
+                    self.resume(name)
+                    record = self.binding(name)
+                    before = trace.capture("before_SIGTERM", record) if trace else None
+                    try:
+                        os.kill(record["pid"], signal.SIGTERM)
+                    except Exception as error:
+                        if trace:
+                            trace.capture("SIGTERM_raised_" + type(error).__name__, record, before)
+                        raise
+                    if trace:
+                        trace.capture("after_SIGTERM_returned", record, before)
+                    self.wait_stopped(name)
+                    self.assertEqual(self.archived(name), [])
+                    self.assertEqual(self.rows(name)[0]["state"], "stopped")
+                    self.assertEqual(self.binding(name)["conversation_id"], sid)
+                except Exception as error:
+                    if trace:
+                        error.add_note(trace.failure())
+                    raise
 
     def test_supervisor_signal_reaches_real_child_without_archiving(self):
         name = self.start("kimi")
@@ -3313,6 +3519,32 @@ class Migration(Harness):
 
 
 
+# What Apple's sample writes for a stopped Python agent, in its own layout: a
+# main and a second thread, each deeper than the six frames a report keeps.
+SAMPLED = """Sampling process 501 for 1 second with 1 millisecond of run time between samples
+Call graph:
+    868 Thread_54085961   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 868 start  (in dyld) + 6688  [0x1841ebe80]
+    +   868 Py_BytesMain  (in Python) + 40  [0x10398bdd8]
+    +     868 Py_RunMain  (in Python) + 524  [0x10398a2a4]
+    +       868 PyEval_EvalCode  (in Python) + 132  [0x1038a81f8]
+    +         868 _PyEval_EvalFrameDefault  (in Python) + 58912  [0x1038b8d1c]
+    +           868 time_sleep  (in Python) + 184  [0x103a046b4]
+    +             868 nanosleep  (in libsystem_c.dylib) + 220  [0x184457054]
+    +               868 __semwait_signal  (in libsystem_kernel.dylib) + 8,16  [0x184580308,0x184580310]
+    868 Thread_54085962
+      868 thread_start  (in libsystem_pthread.dylib) + 8  [0x1845bccec]
+        868 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1845c1d00]
+          868 pythread_wrapper  (in Python) + 48  [0x1039754b4]
+            868 thread_run  (in Python) + 160  [0x103a02f3c]
+              868 lock_PyThread_acquire_lock  (in Python) + 60  [0x103a00f0c]
+                868 _PySemaphore_Wait  (in Python) + 108  [0x1039475e8]
+                  868 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18458050c]
+
+Total number in stack (recursion counted multiple times):
+"""
+
+
 class StopReportControls(unittest.TestCase):
     """The stop report against mocked commands, each a small real child that
     prints what the command would: the report stays within its deadline and
@@ -3346,6 +3578,7 @@ class StopReportControls(unittest.TestCase):
                       "999": ("1", f"{python} {self.bin / 'claude'}")}
         self.executables = {"501": sorted(self.interpreters)[0], "504": "/synthetic/notpython"}
         self.identity, self.flood, self.pane_gone, self.kills, self.commands, self.children = {}, False, False, [], [], []
+        self.slow_sample = None
         real_kill = os.kill
         # Signals reach only the report's own command children; any other is recorded, not sent.
         def kill_child_or_record(pid, number):
@@ -3372,7 +3605,7 @@ class StopReportControls(unittest.TestCase):
         if argv[0] == str(self.bin / "tmux") and argv[1] == "capture-pane":
             return 'Current thread 0x1 (most recent call first):\n  File "claude", line 73 in <module>\n'
         if argv[0] == "sample":
-            return "Call graph:\n    9 Thread_1   DispatchQueue_1: fixture\n      9 frame  (in fixture) + 8\nTotal number in stack\n"
+            return SAMPLED
         return ""
 
     def spawn(self, argv, **options):
@@ -3381,7 +3614,7 @@ class StopReportControls(unittest.TestCase):
         if argv[0] == str(HGS):
             code = ["import sys; sys.stderr.write(sys.argv[1]); sys.exit(1)",
                     "hgs: claude/p/one: agent did not exit after SIGTERM (no forced kill was sent)\n"]
-        elif self.hang:
+        elif self.hang or argv[0] == "sample" and argv[1] == self.slow_sample:
             code = ["import time; time.sleep(60)"]
         elif argv[0] == "sample" and self.flood:
             block = "".join(f"    9 Thread_{index}   DispatchQueue_1: fixture\n" + "      9 frame  (in fixture) + 8\n" * 40
@@ -3409,7 +3642,8 @@ class StopReportControls(unittest.TestCase):
             return real_realpath(path, *args, **options)
         with mock.patch.object(subprocess, "Popen", side_effect=self.spawn), mock.patch.object(sys, "platform", platform), \
                 mock.patch("builtins.open", side_effect=proc_open), mock.patch.object(os.path, "realpath", side_effect=proc_realpath), \
-                mock.patch.object(time, "sleep"):
+                mock.patch.object(time, "sleep"), mock.patch.object(os, "getloadavg", return_value=(5.5, 4.25, 3.0)), \
+                mock.patch.object(os, "cpu_count", return_value=3):
             return self.stop_report()
 
     def sampled(self):
@@ -3457,6 +3691,39 @@ class StopReportControls(unittest.TestCase):
         self.assertIn("/proc/500/wchan", self.proc)
         self.assertIn("python 504: not signalled, it does not run the fixture's Python", report)
         self.assertEqual(self.kills, [])
+
+    def test_a_sample_past_its_limit_stays_explicit_bounded_evidence(self):
+        # The agent's sample outlasts its limit, as on a loaded runner: the report
+        # says so, stops that sampler and still stacks every other process.
+        self.slow_sample = "501"
+        started = time.monotonic()
+        report = self.report()
+        self.assertGreaterEqual(time.monotonic() - started, 5)
+        # The host's load comes before the stacks it explains.
+        self.assertIn("\nhost: load 5.50 4.25 3.00 (1, 5, 15 min) on 3 CPUs\nstack 500 ", report)
+        self.assertIn("unavailable: native stack 501: TimeoutExpired: Command '['sample', '501', '1', '-mayDie', "
+                      "'-file', '/dev/stdout']' timed out after 5 seconds", report)
+        self.assertNotRegex(report, r"(?m)^stack 501 ")
+        for pid in ("500", "502", "503", "504"):
+            # The innermost six frames of each thread, innermost first.
+            self.assertIn(f"stack {pid} 868 Thread_54085961   DispatchQueue_1: com.apple.main-thread: "
+                          "+               868 __semwait_signal  (in libsystem_kernel.dylib) + 8,16  [0x184580308,0x184580310]"
+                          " <- +             868 nanosleep  (in libsystem_c.dylib) + 220  [0x184457054]"
+                          " <- +           868 time_sleep  (in Python) + 184  [0x103a046b4]"
+                          " <- +         868 _PyEval_EvalFrameDefault  (in Python) + 58912  [0x1038b8d1c]"
+                          " <- +       868 PyEval_EvalCode  (in Python) + 132  [0x1038a81f8]"
+                          " <- +     868 Py_RunMain  (in Python) + 524  [0x10398a2a4]\n", report)
+            self.assertIn(f"stack {pid} 868 Thread_54085962: 868 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18458050c]"
+                          " <- 868 _PySemaphore_Wait  (in Python) + 108  [0x1039475e8]"
+                          " <- 868 lock_PyThread_acquire_lock  (in Python) + 60  [0x103a00f0c]"
+                          " <- 868 thread_run  (in Python) + 160  [0x103a02f3c]"
+                          " <- 868 pythread_wrapper  (in Python) + 48  [0x1039754b4]"
+                          " <- 868 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x1845c1d00]", report)
+        self.assertNotIn("<- 868 thread_start", report)
+        self.assertIn("python in %0: Current thread 0x1", report)
+        slow = [child for argv, child in zip(self.commands, self.children) if argv[:2] == ["sample", "501"]]
+        self.assertEqual([child.wait(timeout=5) for child in slow], [-signal.SIGKILL])
+        self.assertEqual(self.kills, [(501, signal.SIGUSR1)])
 
     def test_a_closed_pane_stops_signals_and_stacks(self):
         self.pane_gone = True

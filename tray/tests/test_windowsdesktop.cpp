@@ -51,8 +51,16 @@ public:
         titles << title;
         clicked = std::move(callback);
     }
+    void showClickableIconMessage(const QString &title, const QString &, const QIcon &icon, int,
+                                  std::function<void()> callback) override
+    {
+        titles << title;
+        pictures << icon;
+        clicked = std::move(callback);
+    }
     void show() override {}
     QStringList titles;
+    QList<QIcon> pictures;
     std::function<void()> clicked;
 };
 
@@ -406,6 +414,10 @@ void TestWindowsDesktop::notificationClicksReachOnlyCurrentAttention()
         return;
     }
     QCOMPARE(tray.titles, QStringList{"Needs input"});
+    // The toast shows the program's own icon, not the generic Information glyph.
+    QCOMPARE(tray.pictures.size(), 1);
+    QVERIFY(tray.pictures[0].availableSizes().contains(QSize(256, 256)));
+    QVERIFY(!tray.pictures[0].pixmap(QSize(48, 48)).isNull());
     QVERIFY(tray.clicked);
     tray.clicked();
     QCOMPARE(activated.size(), 1);

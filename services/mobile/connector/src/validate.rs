@@ -15,9 +15,10 @@ pub const ARCHIVE_SNAPSHOT_TTL: f64 = 45.0;
 pub const MAX_PAYLOAD: usize = crate::native::MAX_PAYLOAD;
 const IDENTITY_FIELDS: [&str; 3] = ["request_id", "expected_run_id", "expected_conversation_id"];
 /// Operations that may name an archive in their payload besides inspect.
-const ARCHIVED_OUTPUT: [&str; 8] = [
+const ARCHIVED_OUTPUT: [&str; 9] = [
     "process_output",
     "history",
+    "history_projection",
     "restore",
     "forget",
     "rename",
@@ -232,6 +233,25 @@ pub fn validate_history(payload: &Value, request_id: &str) -> Result<(), String>
     Ok(())
 }
 
+/// Projection requests retain the same outer UUID and target admission as history.
+/// The shared relay validator checks only this new ABI, including UTF-8 byte limits.
+pub fn validate_history_projection(payload: &Value, request_id: &str) -> Result<(), String> {
+    identity_fields(
+        payload,
+        request_id,
+        &[
+            "archive_id",
+            "agent_id",
+            "history_epoch",
+            "projection_after",
+            "projection_until",
+        ],
+        "invalid history projection request",
+    )?;
+    zerus_relay::protocol::history_projection(payload)
+        .map_err(|_| error("invalid history projection request"))
+}
+
 /// `context.validate_mark_read(payload)`.
 pub fn validate_mark_read(payload: &Value) -> Result<(), String> {
     let fields = [
@@ -354,6 +374,21 @@ pub fn validate(
         session: session.into(),
         payload,
     };
+    if operation == crate::git_status::OPERATION {
+        if request.get("session").and_then(Value::as_str) != Some("") {
+            return Err(error("Git status uses no session target"));
+        }
+        crate::git_status::validate(request.get("payload").unwrap_or(&Value::Null), request_id)?;
+        return Ok(validated("", request.get("payload").cloned()));
+    }
+    if operation == "analytics_read" {
+        if request.get("session").and_then(Value::as_str) != Some("") {
+            return Err(error("analytics reads use no session target"));
+        }
+        zerus_relay::protocol::analytics_read(request.get("payload").unwrap_or(&Value::Null))
+            .map_err(|_| error("invalid analytics read fields or UTC range"))?;
+        return Ok(validated("", request.get("payload").cloned()));
+    }
     if operation == "archive_list" {
         if request.get("session").and_then(Value::as_str) != Some("") {
             return Err(error("archive browsing uses no session target"));
@@ -387,6 +422,14 @@ pub fn validate(
     let session = valid_session(request.get("session")).ok_or_else(|| error(SESSION))?;
     if request.contains_key("archive_id") {
         return Err(error("archive identity belongs only in inspect payload"));
+    }
+    if operation == crate::session_notifications::OPERATION {
+        if !context.sessions.contains(session) {
+            return Err(error(NONARCHIVED));
+        }
+        let payload = request.get("payload").unwrap_or(&Value::Null);
+        crate::session_notifications::validate(payload).map_err(error)?;
+        return Ok(validated(session, Some(payload.clone())));
     }
     if operation == "mark_read" {
         if !context.sessions.contains(session) {
@@ -449,6 +492,13 @@ pub fn validate(
     let payload = payload.expect("checked");
     match operation {
         "history" => validate_history(payload, request_id)?,
+        "history_projection" => validate_history_projection(payload, request_id)?,
+        "project_assignment" | "project_assign" => {
+            crate::session_projects::validate(operation, payload, request_id)?
+        }
+        "hooks_status" => {
+            crate::mutations::validate_for_session("clear_context", session, payload, request_id)?
+        }
         "process_output" => validate_process_output(payload, request_id)?,
         _ => crate::mutations::validate_for_session(operation, session, payload, request_id)?,
     }

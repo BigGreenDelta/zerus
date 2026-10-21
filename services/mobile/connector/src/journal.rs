@@ -2,7 +2,8 @@
 //! exactly as the Python `Journal` (`connector.py:104-249`) opens it: the same
 //! file checks and lock, DDL text, legacy upgrade, restart recovery, pragmas,
 //! retention and caps. While a rollback to Python is supported the schema is
-//! frozen: `user_version` 0, a rollback journal (never WAL), no other objects.
+//! table-compatible: `user_version` 0 and a rollback journal (never WAL).
+//! Additive read indexes are mirrored by the Python connector.
 //!
 //! Each Python `with self.db:` block is one explicit DEFERRED transaction
 //! here, and the clock is a parameter so tests can fix it.
@@ -42,8 +43,10 @@ pub const ADDED_COLUMNS: [(&str, &str); 5] = [
     ("delivered_at", "REAL"),
     ("response_expired", "INTEGER NOT NULL DEFAULT 0"),
 ];
-pub const INDEXES: [(&str, &str); 8] = [
+pub const INDEXES: [(&str, &str); 10] = [
     ("delivered_history", "CREATE INDEX IF NOT EXISTS delivered_history ON requests(delivered,delivered_at)"),
+    ("project_assignment_delivered_v1", "CREATE INDEX IF NOT EXISTS project_assignment_delivered_v1 ON requests(delivered_at) WHERE operation='project_assignment' AND delivered=1 AND state!='running'"),
+    ("analytics_delivered_reads", "CREATE INDEX IF NOT EXISTS analytics_delivered_reads ON requests(delivered_at) WHERE operation='analytics_read' AND delivered=1 AND state!='running'"),
     ("terminal_delivered_reads", "CREATE INDEX IF NOT EXISTS terminal_delivered_reads ON requests(delivered_at) WHERE operation='terminal_snapshot' AND delivered=1 AND state!='running'"),
     ("archive_delivered_reads", "CREATE INDEX IF NOT EXISTS archive_delivered_reads ON requests(delivered_at) WHERE operation='archive_list' AND delivered=1 AND state!='running'"),
     ("file_delivered_reads", "CREATE INDEX IF NOT EXISTS file_delivered_reads ON requests(delivered_at) WHERE operation='file_read' AND delivered=1 AND state!='running'"),
@@ -54,17 +57,20 @@ pub const INDEXES: [(&str, &str); 8] = [
 ];
 
 // The Python connector's frozen predicates (operations.json `sql`).
-pub const READ_CLASS_SQL: &str = "('archive_list','attachment_read','catalog','dirs','file_read','history','inspect','mark_read','process_output','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
+pub const READ_CLASS_SQL: &str = "('analytics_read','archive_list','attachment_read','catalog','dirs','file_read','history','history_projection','hooks_status','inspect','mark_read','process_output','project_assignment','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
 pub const READ_SQL: &str = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')";
 pub const SPEECH_READ_SQL: &str = "('speech_profiles','speech_stats','speech_status')";
 pub const SPEECH_CONFIG_READ_SQL: &str = "('speech_config','speech_config_status')";
 pub const VOICE_READ_SQL: &str = "('voice_profiles','voice_status')";
-/// The phone's task exchange: a short read only this connector runs, outside
-/// the frozen Python predicates above.
-pub const TASK_READ_SQL: &str = "('task_exchange','task_done')";
 /// Delivered exchanges older than the short-read window, found by their
 /// operation: the age index would walk every delivered mutation tombstone.
 pub const TASK_READ_PRUNE: &str = "DELETE FROM requests INDEXED BY journal_operation WHERE operation IN ('task_exchange','task_done') AND delivered=1 AND state!='running' AND delivered_at<?";
+
+/// Additive Rust-only reads stay outside the frozen Python class predicate:
+/// Git status, and the phone's task exchange and Done list.
+pub const GIT_STATUS_COUNT_SQL: &str =
+    "SELECT count(*) FROM requests WHERE operation IN ('git_status','task_exchange','task_done')";
+pub const GIT_STATUS_PRUNE_SQL: &str = "DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation='git_status' AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)";
 
 /// Delivered short-lived reads go after two minutes, other reads after an
 /// hour; a delivered mutation becomes a tombstone after seven days.
@@ -129,21 +135,19 @@ fn refused(text: &str) -> JournalError {
 }
 
 /// `operation in MUTATIONS`: a known operation that is not a read. Unknown
-/// operations recover as failed reads do, as in Python. Operations only this
-/// connector implements (`remove_queued`, not in the relay's operation set)
-/// are mutations too, so an in-flight one recovers as uncertain.
+/// operations recover as failed reads do, as in Python. The relay's set
+/// includes the operations only this connector executes (`remove_queued`),
+/// so an in-flight one recovers as uncertain too.
 pub fn is_mutation(operation: &str) -> bool {
-    (OPERATIONS.contains(&operation) || CONNECTOR_MUTATIONS.contains(&operation))
-        && !READS.contains(&operation)
+    OPERATIONS.contains(&operation) && !READS.contains(&operation)
 }
-
-/// Mutations the connector executes that the relay crate does not list.
-const CONNECTOR_MUTATIONS: &[&str] = &["remove_queued"];
 
 pub struct Journal {
     // Declared first, so the connection closes before the lock is released.
     db: Connection,
     _lock: File,
+    #[cfg(windows)]
+    _directory: zerus_windows_private::DirectoryGuard,
 }
 
 impl Journal {
@@ -152,6 +156,9 @@ impl Journal {
     pub fn open(directory: &Path, binding: &str, now: f64) -> Result<Self> {
         fsguard::create_directory(directory).map_err(JournalError::Io)?;
         fsguard::check_private_directory(directory)?;
+        #[cfg(windows)]
+        let directory_guard =
+            zerus_windows_private::directory(directory, false).map_err(JournalError::Io)?;
         let lock = fsguard::private_file(&directory.join(LOCK), true)?
             .ok_or_else(|| refused(UNSAFE_FILE))?;
         fsguard::lock_exclusive(&lock)?;
@@ -237,7 +244,12 @@ impl Journal {
         for (_, ddl) in INDEXES {
             db.execute_batch(ddl)?;
         }
-        let journal = Journal { db, _lock: lock };
+        let journal = Journal {
+            db,
+            _lock: lock,
+            #[cfg(windows)]
+            _directory: directory_guard,
+        };
         journal.prune(now)?;
         Ok(journal)
     }
@@ -251,7 +263,14 @@ impl Journal {
             &format!("DELETE FROM requests WHERE operation='terminal_snapshot' AND {delivered}"),
             [short],
         )?;
-        for set in [SPEECH_CONFIG_READ_SQL, SPEECH_READ_SQL, VOICE_READ_SQL] {
+        for set in [
+            "('analytics_read')",
+            SPEECH_CONFIG_READ_SQL,
+            SPEECH_READ_SQL,
+            VOICE_READ_SQL,
+            "('hooks_status')",
+            "('project_assignment')",
+        ] {
             tx.execute(
                 &format!("DELETE FROM requests WHERE operation IN {set} AND {delivered}"),
                 [short],
@@ -273,6 +292,11 @@ impl Journal {
         )?;
         tx.execute(&format!("DELETE FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND {delivered}"),
                    [now - READ_SECONDS])?;
+        // Projection reads share the read cap and expire through the operation index.
+        tx.execute("DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation='history_projection' AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)", [now - READ_SECONDS])?;
+        // This class shares the read cap, but must expire before the unchanged
+        // legacy NOT-IN mutation tombstone selector can see it.
+        tx.execute(GIT_STATUS_PRUNE_SQL, [now - READ_SECONDS])?;
         let expired: Vec<(String, String)> = tx
             .prepare(&format!("SELECT request_id,state FROM requests WHERE operation NOT IN {READ_CLASS_SQL} AND {delivered} AND response IS NOT NULL AND response_expired=0"))?
             .query_map([now - MUTATION_SECONDS], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -323,10 +347,18 @@ impl Journal {
         }
         let reads = READS.contains(&operation);
         let count: i64 = tx.query_row(
-            &format!("SELECT count(*) FROM requests WHERE (operation IN {READ_CLASS_SQL} OR operation IN {TASK_READ_SQL})=?"),
+            &format!("SELECT count(*) FROM requests WHERE (operation IN {READ_CLASS_SQL})=?"),
             [reads as i64],
             |row| row.get(0),
         )?;
+        // The legacy NOT-IN count includes new Rust-only reads. Correct only
+        // this additive class, in the same transaction as admission.
+        let git_reads: i64 = tx.query_row(GIT_STATUS_COUNT_SQL, [], |row| row.get(0))?;
+        let count = if reads {
+            count + git_reads
+        } else {
+            count - git_reads
+        };
         if count >= if reads { READ_CAP } else { MUTATION_CAP } {
             return Err(refused(RETAINED_LIMIT));
         }

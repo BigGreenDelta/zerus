@@ -266,7 +266,7 @@ final class SessionNotifications {
                 operations += 1
                 try Task.checkCancellation()
                 guard connected(connection) else { return false }
-                let catalog = NotificationCatalogParser.parse(connection, records: raw, aliases: app.messageState.machineAliases)
+                let catalog = NotificationCatalogParser.parse(connection, records: raw, aliases: app.messageState.machineAliases, actions: app.messageState.sessionActions)
                 let active = Set(await cards().compactMap { $0.request.content.userInfo["zerus_slot"] as? String })
                 let plan = NotificationPolicy.plan(NotificationPolicy.clockGuard(state, elapsed: Self.elapsed()), current: catalog.sessions,
                                                    events: state.pending.compactMap { catalog.resolve(connection.id, $0) }, preferences: preferences,
@@ -352,7 +352,8 @@ final class SessionNotifications {
             if existing == nil && record?.postedFingerprint == notice.fingerprint && !recovering && !restore && !notice.fresh { continue }
             if existing != nil && !changed && !recovering && !notice.fresh { continue }
             await pace()
-            guard preferences.allows(notice.kind), connected(connection) else { continue }
+            guard preferences.allows(notice.kind), connected(connection),
+                  SessionNotificationPreferences.deliveryAllowed(notice.current,actions:app.messageState.sessionActions) else { continue }
             var admitted = existing != nil || active.count < 24
             if !admitted && notice.kind.overflows {
                 // A need replaces a finished turn first, then an optional question.
@@ -374,7 +375,8 @@ final class SessionNotifications {
             // Evidence is saved before delivery; an interrupted post resumes silently.
             states[connection.id] = state
             save()
-            guard preferences.allows(notice.kind), connected(connection) else { continue }
+            guard preferences.allows(notice.kind), connected(connection),
+                  SessionNotificationPreferences.deliveryAllowed(notice.current,actions:app.messageState.sessionActions) else { continue }
             do {
                 try await center.add(request(notice, audible: audible))
                 lastPost = ProcessInfo.processInfo.systemUptime

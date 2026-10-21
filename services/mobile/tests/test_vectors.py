@@ -113,15 +113,24 @@ class GoldenVectorTests(unittest.TestCase):
     def test_operation_tables_have_the_reviewed_sizes(self):
         counts = json.loads(self.files["operations.json"])["counts"]
         self.assertEqual((counts["OPERATIONS"], counts["READ_OPERATIONS"], counts["MUTATIONS"], counts["CONTEXT_KEYS"]),
-                         (47, 18, 29, 23))
+                         (53, 22, 31, 23))
+        operations = set(json.loads(self.files["operations.json"])["sets"]["OPERATIONS"])
+        self.assertTrue({"hooks_status", "analytics_read", "history_projection", "project_assignment", "project_assign"} <= operations)
+        self.assertNotIn("remove_queued", operations)  # Rust-only table, never Python's.
+        self.assertNotIn("git_status", operations)  # Its separate read marker is Rust-only too.
 
     def test_every_operation_has_a_valid_case_and_an_envelope(self):
         operations = set(json.loads(self.files["operations.json"])["sets"]["OPERATIONS"])
         valid = {row["id"].split("/", 1)[1] for row in self.cases() if row["id"].startswith("valid/")}
         envelopes = {row["id"].removeprefix("envelope-") for row in records(".jsonl", self.files["request_envelopes.jsonl"])
                      if row["id"].startswith("envelope-")}
-        self.assertEqual(valid, operations)
-        self.assertEqual(envelopes, operations)
+        # The additive projection ABI has its own strict 28-request corpus and
+        # connector/relay controls in test_mobile_history_projection.py.
+        projection = json.loads((VECTORS / "history_projection" / "envelope.json").read_text())
+        self.assertEqual(projection["operation"], "history_projection")
+        self.assertEqual(relay_oracle.decision(projection), {"decision": "accept"})
+        self.assertEqual(valid | {projection["operation"]}, operations)
+        self.assertEqual(envelopes | {projection["operation"]}, operations)
 
     def test_a_changed_submission_never_reuses_its_frozen_oracle_decision(self):
         frozen = self.capture.frozen_oracle(VECTORS)

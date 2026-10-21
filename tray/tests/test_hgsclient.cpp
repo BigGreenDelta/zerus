@@ -8,6 +8,7 @@
 #include <QJsonObject>
 #include <QSettings>
 #include <QThread>
+#include <QPointer>
 #include <QUuid>
 #include <atomic>
 #include <memory>
@@ -35,6 +36,9 @@ private slots:
     }
     void parsesBox();
     void parsesSharedReadState();
+    void parsesSharedNotificationsAndRejectsMalformedPreferences();
+    void notificationsUseStdinAndRequireExactCasConfirmation();
+    void notificationsRequireLocalCapabilityEvenForANewPeer();
     void readMarksUseStdinAndAcceptOnlyHostAnswers();
     void taskCommandsUseStdinAndReportFailures();
     void sendsAndCancelsWaitForAnotherComputer();
@@ -89,9 +93,13 @@ private slots:
     void nativeLaunchReportsProcessResult();
     void nativeApiSessionsRetainExactCapabilities();
     void openCodeQueuedRemovalUsesScopedSessionAction();
+    void openCodeQueuedMessageIdsFollowSharedRule();
     void attachmentsUseCapturedIdentityAndValidateResponses();
     void downloadsRequireExactSavedFileReceipts();
     void cachedDownloadsPreserveRequestIdentityAndCleanFailures();
+    void repeatedCachedDownloadUsesOnePersistentSnapshot();
+    void cachedDownloadReuseCoalescesAndForceKeepsPriorCopy();
+    void cachedDownloadFanoutStopsWhenOwnerIsDestroyed();
     void gitStatusReadsAreSharedAndScopedToMachineAndFolder();
     void pollsLaunchOffTheGuiThreadAndReportOnIt();
     void destroyedClientKillsItsPolls();
@@ -172,6 +180,149 @@ print(json.dumps(dict(host=host,path=path,local_path=target,bytes=999 if path.en
     settings.setValue("downloads/folder", blocked);
     const auto prepFailed = client.downloadFileToCache("one", "/remote/same.txt");
     QTRY_COMPARE(failed.size(), 3); QCOMPARE(failed.last()[0].toULongLong(), prepFailed); QVERIFY(ready.isEmpty());
+}
+
+void TestHgsClient::repeatedCachedDownloadUsesOnePersistentSnapshot()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto fixture = dir.filePath("hgs"), root = dir.filePath("cache");
+    QSettings settings; const auto oldFolder = settings.value("downloads/folder"), oldLimit = settings.value("downloads/cacheBytes");
+    const auto restore = qScopeGuard([&] {
+        if (oldFolder.isValid()) settings.setValue("downloads/folder", oldFolder); else settings.remove("downloads/folder");
+        if (oldLimit.isValid()) settings.setValue("downloads/cacheBytes", oldLimit); else settings.remove("downloads/cacheBytes");
+    });
+    settings.setValue("downloads/folder", root); settings.setValue("downloads/cacheBytes", 0);
+    QVERIFY(FakeCli::install(fixture, R"PY(#!/usr/bin/env python3
+import sys,json,pathlib
+a=sys.argv[1:];host=a[0][1:];path=a[a.index('--path')+1];target=a[a.index('--output')+1]
+with open(__file__+'.calls','a') as f:f.write('transfer\n')
+pathlib.Path(target).write_bytes(b'snapshot')
+print(json.dumps(dict(host=host,path=path,local_path=target,bytes=8)))
+)PY"));
+    QString local;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        HgsClient client(FakeCli::program(fixture));
+        QSignalSpy ready(&client, &HgsClient::fileDownloaded), failed(&client, &HgsClient::fileDownloadFailed);
+        const auto id = client.downloadFileToCache("remote", "/remote/same.txt");
+        QTRY_COMPARE(ready.size(), 1); QVERIFY(failed.isEmpty()); QCOMPARE(ready[0][0].toULongLong(), id);
+        QFile calls(fixture + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
+        QCOMPARE(calls.readAll().count('\n'), 1);
+        if (attempt == 0) local = ready[0][1].toString();
+        else QCOMPARE(ready[0][1].toString(), local);
+    }
+}
+
+void TestHgsClient::cachedDownloadReuseCoalescesAndForceKeepsPriorCopy()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto root = dir.filePath("cache"), fixture = dir.filePath("hgs");
+    QSettings settings; const auto oldFolder = settings.value("downloads/folder"), oldLimit = settings.value("downloads/cacheBytes");
+    const auto restore = qScopeGuard([&] {
+        if (oldFolder.isValid()) settings.setValue("downloads/folder", oldFolder); else settings.remove("downloads/folder");
+        if (oldLimit.isValid()) settings.setValue("downloads/cacheBytes", oldLimit); else settings.remove("downloads/cacheBytes");
+    });
+    settings.setValue("downloads/folder", root); settings.setValue("downloads/cacheBytes", 0);
+    const auto write = [](const QString &path, const QByteArray &bytes) { QFile f(path); return f.open(QIODevice::WriteOnly) && f.write(bytes) == bytes.size(); };
+    const auto read = [](const QString &path) { QFile f(path); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); };
+    QVERIFY(write(fixture + ".payload", "first snapshot"));
+    QVERIFY(FakeCli::install(fixture, R"PY(#!/usr/bin/env python3
+import sys,json,pathlib,time
+a=sys.argv[1:];host=a[0][1:];path=a[a.index('--path')+1];target=a[a.index('--output')+1]
+with open(__file__+'.calls','a') as f:f.write(json.dumps([host,path,target])+'\n')
+pathlib.Path(__file__+'.started').touch()
+deadline=time.monotonic()+10
+while not pathlib.Path(__file__+'.release').exists():
+ if time.monotonic()>=deadline:sys.exit(8)
+ time.sleep(.01)
+data=pathlib.Path(__file__+'.payload').read_bytes();pathlib.Path(target).write_bytes(data)
+print(json.dumps(dict(host=host,path=path,local_path=target,bytes=len(data))))
+)PY"));
+    HgsClient client(FakeCli::program(fixture));
+    const auto release = qScopeGuard([&] { write(fixture + ".release", "release"); });
+    QSignalSpy ready(&client, &HgsClient::fileDownloaded), failed(&client, &HgsClient::fileDownloadFailed), checked(&client, &HgsClient::fileCacheChecked);
+    const auto missing = client.findCachedFile("remote", "/remote/same.txt");
+    QVERIFY(checked.isEmpty()); // Never signal inline, before callers can save the ID.
+    QTRY_COMPARE(checked.size(), 1); QCOMPARE(checked[0][0].toULongLong(), missing);
+    QVERIFY(checked[0][1].toString().isEmpty()); QVERIFY(checked[0][2].toString().isEmpty());
+    const auto one = client.downloadFileToCache("remote", "/remote/same.txt");
+    QTRY_VERIFY(QFileInfo::exists(fixture + ".started"));
+    const auto two = client.downloadFileToCache("remote", "/remote/same.txt"); QVERIFY(one != two);
+    QVERIFY(write(fixture + ".release", "release"));
+    QTRY_COMPARE(ready.size(), 2); QVERIFY(failed.isEmpty());
+    QCOMPARE((QSet<quint64>{ready[0][0].toULongLong(), ready[1][0].toULongLong()}), (QSet<quint64>{one, two}));
+    const auto first = ready[0][1].toString(); QCOMPARE(ready[1][1].toString(), first);
+    QCOMPARE(read(first), QByteArray("first snapshot"));
+    QCOMPARE(read(fixture + ".calls").count('\n'), 1);
+    ready.clear();
+    const auto again = client.downloadFileToCache("remote", "/remote/same.txt");
+    QTRY_COMPARE(ready.size(), 1); QCOMPARE(ready[0][0].toULongLong(), again); QCOMPARE(ready[0][1].toString(), first);
+    QCOMPARE(read(fixture + ".calls").count('\n'), 1);
+    checked.clear(); const auto local = client.findCachedFile("remote", "/remote/same.txt");
+    QTRY_COMPARE(checked.size(), 1); QCOMPARE(checked[0][0].toULongLong(), local); QCOMPARE(checked[0][1].toString(), first);
+    QVERIFY(checked[0][2].toString().isEmpty()); QCOMPARE(read(fixture + ".calls").count('\n'), 1);
+    // A new client has no process-local request/cache state to reuse.
+    { HgsClient restarted(FakeCli::program(fixture)); QSignalSpy restored(&restarted, &HgsClient::fileDownloaded);
+      const auto id = restarted.downloadFileToCache("remote", "/remote/same.txt"); QTRY_COMPARE(restored.size(), 1);
+      QCOMPARE(restored[0][0].toULongLong(), id); QCOMPARE(restored[0][1].toString(), first); }
+    QCOMPARE(read(fixture + ".calls").count('\n'), 1);
+    QVERIFY(write(fixture + ".payload", "new remote snapshot")); ready.clear();
+    const auto cachedThenRefresh = client.downloadFileToCache("remote", "/remote/same.txt");
+    const auto fresh = client.downloadFileToCache("remote", "/remote/same.txt", true);
+    QTRY_COMPARE(ready.size(), 2);
+    QCOMPARE((QSet<quint64>{ready[0][0].toULongLong(), ready[1][0].toULongLong()}), (QSet<quint64>{cachedThenRefresh, fresh}));
+    const auto second = ready[0][1].toString(); QVERIFY(first != second);
+    QCOMPARE(ready[1][1].toString(), second);
+    QCOMPARE(read(first), QByteArray("first snapshot")); QCOMPARE(read(second), QByteArray("new remote snapshot"));
+    QCOMPARE(read(fixture + ".calls").count('\n'), 2);
+    // Save As always transfers, even with a valid cached snapshot.
+    ready.clear(); const auto explicitPath = dir.filePath("explicit.txt");
+    const auto explicitId = client.downloadFile("remote", "/remote/same.txt", explicitPath);
+    QTRY_COMPARE(ready.size(), 1); QCOMPARE(ready[0][0].toULongLong(), explicitId); QCOMPARE(ready[0][1].toString(), explicitPath);
+    QCOMPARE(read(fixture + ".calls").count('\n'), 3); QCOMPARE(read(explicitPath), QByteArray("new remote snapshot"));
+    // An unreadable index never starts another payload, including explicit refresh.
+    QVERIFY(write(QDir(root).filePath(".zerus-files.json"), "invalid index")); checked.clear();
+    const auto corrupt = client.findCachedFile("remote", "/remote/same.txt");
+    QTRY_COMPARE(checked.size(), 1); QCOMPARE(checked[0][0].toULongLong(), corrupt); QVERIFY(!checked[0][2].toString().isEmpty());
+    ready.clear(); const auto blocked = client.downloadFileToCache("remote", "/remote/same.txt");
+    const auto forced = client.downloadFileToCache("remote", "/remote/same.txt", true);
+    QTRY_COMPARE(failed.size(), 2); QVERIFY(ready.isEmpty());
+    QCOMPARE((QSet<quint64>{failed[0][0].toULongLong(), failed[1][0].toULongLong()}), (QSet<quint64>{blocked, forced}));
+    QCOMPARE(read(fixture + ".calls").count('\n'), 3);
+    QCOMPARE(read(first), QByteArray("first snapshot")); QCOMPARE(read(second), QByteArray("new remote snapshot"));
+    failed.clear(); const auto forcedAlone = client.downloadFileToCache("remote", "/remote/same.txt", true);
+    QTRY_COMPARE(failed.size(), 1); QCOMPARE(failed[0][0].toULongLong(), forcedAlone);
+    QCOMPARE(read(fixture + ".calls").count('\n'), 3);
+}
+
+void TestHgsClient::cachedDownloadFanoutStopsWhenOwnerIsDestroyed()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid()); const auto fixture = dir.filePath("hgs");
+    QSettings settings; const auto oldFolder = settings.value("downloads/folder"), oldLimit = settings.value("downloads/cacheBytes");
+    const auto restore = qScopeGuard([&] {
+        if (oldFolder.isValid()) settings.setValue("downloads/folder", oldFolder); else settings.remove("downloads/folder");
+        if (oldLimit.isValid()) settings.setValue("downloads/cacheBytes", oldLimit); else settings.remove("downloads/cacheBytes");
+    });
+    settings.setValue("downloads/folder", dir.filePath("cache")); settings.setValue("downloads/cacheBytes", 0);
+    QVERIFY(FakeCli::install(fixture, R"PY(#!/usr/bin/env python3
+import sys,json,pathlib
+a=sys.argv[1:];host=a[0][1:];path=a[a.index('--path')+1];target=a[a.index('--output')+1]
+with open(__file__+'.calls','a') as f:f.write('transfer\n')
+pathlib.Path(target).write_bytes(b'snapshot')
+print(json.dumps(dict(host=host,path=path,local_path=target,bytes=8)))
+)PY"));
+    QPointer<HgsClient> client = new HgsClient(FakeCli::program(fixture));
+    const auto cleanup = qScopeGuard([&] { delete client.data(); });
+    QList<quint64> delivered; int failures = 0, warnings = 0;
+    connect(client.data(), &HgsClient::fileDownloadFailed, this, [&](quint64, const QString &) { ++failures; });
+    connect(client.data(), &HgsClient::downloadCacheWarning, this, [&](const QString &) { ++warnings; });
+    connect(client.data(), &HgsClient::fileDownloaded, this, [&](quint64 id, const QString &) {
+        delivered.append(id); delete client.data();
+    });
+    const auto first = client->downloadFileToCache("remote", "/remote/same.txt");
+    const auto second = client->downloadFileToCache("remote", "/remote/same.txt"); QVERIFY(first != second);
+    QTRY_VERIFY(client.isNull()); QCOMPARE(delivered, (QList<quint64>{first}));
+    QCOMPARE(failures, 0); QCOMPARE(warnings, 0);
+    QFile calls(fixture + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly)); QCOMPARE(calls.readAll().count('\n'), 1);
 }
 
 void TestHgsClient::cliVersionUsesConfiguredExecutableAndRefreshes()
@@ -628,6 +779,38 @@ void TestHgsClient::openCodeQueuedRemovalUsesScopedSessionAction()
     QTRY_COMPARE(finished.size(),1);QVERIFY(finished[0][1].toBool());
     sent=call();QCOMPARE(sent["args"].toArray(),QJsonArray({"interrupt",name,"--json"}));
     QVERIFY(!sent["payload"].toObject().contains("action"));QVERIFY(!sent["payload"].toObject().contains("message_id"));
+}
+
+// The shared message ID shape (tests/fixtures/opencode-queued-message-ids.json),
+// which hgs, the mobile connector and the relay check too.
+void TestHgsClient::openCodeQueuedMessageIdsFollowSharedRule()
+{
+    QFile file(QStringLiteral(ZERUS_OPENCODE_QUEUED_MESSAGE_IDS));QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto fixture=QJsonDocument::fromJson(file.readAll()).object();
+    const auto accept=fixture.value("accept").toArray(),reject=fixture.value("reject").toArray();QVERIFY(accept.size()>=7);QVERIFY(reject.size()>=23);
+    QTemporaryDir directory;const auto program=directory.filePath("hgs");
+    QVERIFY(FakeCli::install(program,"#!/usr/bin/env python3\nimport json,sys\n"
+        "p=json.load(sys.stdin);a=sys.argv[1:]\n"
+        "open(__file__+'.call','w').write(json.dumps({'args':a,'payload':p}))\n"
+        "print(json.dumps({'request_id':p['request_id'],'name':a[-2],'run_id':p['expected_run_id'],"
+        "'conversation_id':p['expected_conversation_id'],'status':'completed'}))\n"));
+    HgsClient client(FakeCli::program(program));QSignalSpy finished(&client,&HgsClient::sessionActionFinished);
+    const QString name="opencode/project/local";
+    for(const auto &value:reject) {
+        const auto id=value.toString();finished.clear();
+        const auto request=client.requestRemoveQueued({},name,"run-one","ses_conversation",id);
+        QTRY_COMPARE(finished.size(),1);QCOMPARE(finished[0][0].toULongLong(),request);QVERIFY2(!finished[0][1].toBool(),qPrintable(id));
+        QCOMPARE(finished[0][3].toString(),QString("Choose the exact queued OpenCode message."));
+    }
+    QTest::qWait(100);QVERIFY(!QFile::exists(program+".call"));
+    for(const auto &value:accept) {
+        const auto id=value.toString();finished.clear();
+        const auto request=client.requestRemoveQueued({},name,"run-one","ses_conversation",id);
+        QTRY_COMPARE(finished.size(),1);QCOMPARE(finished[0][0].toULongLong(),request);QVERIFY2(finished[0][1].toBool(),qPrintable(id));
+        QFile call(program+".call");QVERIFY(call.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(call.readAll()).object()["payload"].toObject()["message_id"].toString(),id);
+        call.close();QVERIFY(QFile::remove(program+".call"));
+    }
 }
 
 void TestHgsClient::settingsUseStdinAndPinnedIdentityReceipt()
@@ -1664,6 +1847,166 @@ void TestHgsClient::rejectsGarbageProjects()
     const QList<ProjectInfo> ps = HgsClient::parseProjects(QByteArray("не json"), &err);
     QVERIFY(!err.isEmpty());
     QVERIFY(ps.isEmpty());
+}
+
+namespace {
+QJsonObject notificationValue(const QString &conversation, bool muted, qint64 revision) {
+    return {{"conversation_id",conversation},{"muted",muted},{"revision",revision},{"suppressed",QJsonObject{
+        {"reply_id",QJsonValue()},{"attention_signature",QJsonValue()},{"optional_question_ids",QJsonArray()},
+        {"main_attention",QJsonValue()},{"child_attention",QJsonObject()}}}};
+}
+}
+
+void TestHgsClient::parsesSharedNotificationsAndRejectsMalformedPreferences()
+{
+    const auto good=notificationValue("conversation",true,4);
+    const auto parse=[](const QJsonValue &preferences) {
+        QJsonObject session{{"name","codex/project/session"},{"run_id","run"},{"conversation_id","conversation"}};
+        if(!preferences.isUndefined())session["notification_preferences"]=preferences;
+        return HgsClient::parseBox(QJsonDocument(QJsonObject{{"host","arch"},{"ok",true},{"sessions",QJsonArray{session}}}).toJson(),nullptr).sessions.first();
+    };
+    const auto current=parse(good); QVERIFY(current.sharedNotifications); QVERIFY(current.muted); QCOMPARE(current.notificationPreferences,good);
+    QList<QJsonValue> invalid{QJsonValue(QJsonValue::Undefined),QJsonValue(),QJsonArray()};
+    for(const auto &field:{"conversation_id","muted","revision","suppressed"}) { auto value=good;value.remove(field);invalid<<value; }
+    for(const auto &wrong:QList<QJsonValue>{-1,1.5,true,"4"}) { auto value=good;value["revision"]=wrong;invalid<<value; }
+    auto wrong=good;wrong["conversation_id"]="another";invalid<<wrong;
+    wrong=good;wrong["conversation_id"]=QString("conversation\n");invalid<<wrong;
+    wrong=good;wrong["muted"]="true";invalid<<wrong;
+    const auto changeBaseline=[&](const QString &field,const QJsonValue &value) {
+        auto changed=good;auto baseline=changed["suppressed"].toObject();baseline[field]=value;changed["suppressed"]=baseline;invalid<<changed;
+    };
+    changeBaseline("reply_id",QString()); changeBaseline("attention_signature",QString(64,'A'));
+    changeBaseline("reply_id",QString("reply\x7f"));changeBaseline("reply_id",QString(257,'r'));
+    changeBaseline("optional_question_ids",QJsonArray{"question\n"});
+    changeBaseline("optional_question_ids",QJsonArray{"b","a"}); changeBaseline("optional_question_ids",QJsonArray{"a","a"});
+    QJsonArray excessive;for(int i=0;i<65;++i)excessive.append(QString::number(i).rightJustified(3,'0'));
+    changeBaseline("optional_question_ids",excessive);
+    changeBaseline("main_attention",QJsonObject{{"run_id","run"},{"phase","approval"},{"request_id","id"},{"started_at",0}});
+    changeBaseline("main_attention",QJsonObject{{"run_id","run"},{"phase","approval"},{"request_id",""},{"started_at",QJsonValue()}});
+    changeBaseline("child_attention",QJsonObject{{"child",QJsonObject{{"phase","input"},{"request_id",""},{"started_at",QJsonValue()}}}});
+    changeBaseline("main_attention",QJsonObject{{"run_id","run\n"},{"phase","approval"},{"request_id","id"},{"started_at",QJsonValue()}});
+    changeBaseline("main_attention",QJsonObject{{"run_id","run"},{"phase","approval\n"},{"request_id","id"},{"started_at",QJsonValue()}});
+    changeBaseline("main_attention",QJsonObject{{"run_id","run"},{"phase","approval"},{"request_id","id\t"},{"started_at",QJsonValue()}});
+    changeBaseline("main_attention",QJsonObject{{"run_id","run"},{"phase","approval"},{"request_id",QString(65537,'r')},{"started_at",QJsonValue()}});
+    changeBaseline("main_attention",QJsonObject{{"run_id","run"},{"phase",QString(257,'p')},{"request_id","id"},{"started_at",QJsonValue()}});
+    changeBaseline("child_attention",QJsonObject{{"child\n",QJsonObject{{"phase","input"},{"request_id","id"},{"started_at",QJsonValue()}}}});
+    changeBaseline("child_attention",QJsonObject{{"child",QJsonObject{{"phase","working"},{"request_id","id"},{"started_at",QJsonValue()}}}});
+    QJsonObject many;for(int i=0;i<257;++i)many[QString::number(i)]=QJsonObject{{"phase","input"},{"request_id","id"},{"started_at",QJsonValue()}};
+    changeBaseline("child_attention",many);
+    for(const auto &value:invalid) { const auto session=parse(value);QVERIFY(!session.sharedNotifications);QVERIFY(!session.muted);QVERIFY(session.notificationPreferences.isEmpty()); }
+    // Every supported host explicitly reports revision-zero/unmuted too.
+    const auto initial=parse(notificationValue("conversation",false,0));QVERIFY(initial.sharedNotifications);QVERIFY(!initial.muted);
+    auto dsh=good;auto baseline=dsh["suppressed"].toObject();
+    baseline["main_attention"]=QJsonObject{{"run_id","run"},{"phase","input"},{"request_id","request-a\nrequest-b"},{"started_at",QJsonValue()}};
+    dsh["suppressed"]=baseline;const auto multiline=parse(dsh);QVERIFY(multiline.sharedNotifications);
+    QCOMPARE(multiline.notificationPreferences["suppressed"].toObject()["main_attention"].toObject()["request_id"].toString(),QString("request-a\nrequest-b"));
+    // All fields individually fit, but their complete escaped baseline is bounded.
+    QJsonObject huge;for(int i=0;i<8;++i)huge[QString::number(i)]=QJsonObject{{"phase","input"},{"request_id",QString(65536,'r')},{"started_at",QJsonValue()}};
+    baseline=good["suppressed"].toObject();baseline["child_attention"]=huge;dsh=good;dsh["suppressed"]=baseline;QVERIFY(!parse(dsh).sharedNotifications);
+}
+
+void TestHgsClient::notificationsUseStdinAndRequireExactCasConfirmation()
+{
+    QTemporaryDir dir;QVERIFY(dir.isValid());const auto path=dir.filePath("hgs");
+    QVERIFY(FakeCli::install(path,R"PY(#!/usr/bin/env python3
+import json,pathlib,sys
+root=pathlib.Path(__file__).parent
+if sys.argv[1:]==['--help']:
+ print('session-notifications-v1')
+ sys.exit(0)
+payload=json.load(sys.stdin)
+with (root/'calls.jsonl').open('a') as output:output.write(json.dumps({'argv':sys.argv[1:],'payload':payload})+'\n')
+reply=json.loads((root/'reply.json').read_text())
+if reply.get('oversize'):print('x'*524289)
+else:print(json.dumps(reply['body']))
+sys.exit(reply['code'])
+)PY"));
+    const auto response=[](bool applied,qint64 revision) { return QJsonObject{{"ok",true},{"applied",applied},{"run_id","run"},
+        {"conversation_id","conversation"},{"preferences",notificationValue("conversation",true,revision)}}; };
+    const auto write=[&](const QJsonObject &body,int code=0,bool oversize=false) {
+        QFile file(dir.filePath("reply.json"));if(!file.open(QIODevice::WriteOnly|QIODevice::Truncate))return false;
+        return file.write(QJsonDocument(QJsonObject{{"body",body},{"code",code},{"oversize",oversize}}).toJson())>0;
+    };
+    HgsClient client(FakeCli::program(path));QSignalSpy done(&client,&HgsClient::notificationsFinished);
+    const QJsonObject payload{{"run_id","run"},{"conversation_id","conversation"},{"muted",true},{"expected_revision",3}};
+    const QString name="codex/project '$HOME' `literal`";
+    QVERIFY(write(response(true,4)));const auto id=client.requestNotifications("mac",name,payload);
+    QTRY_COMPARE(done.size(),1);QCOMPARE(done.last()[0].toULongLong(),id);QVERIFY(done.last()[1].toBool());
+    QFile calls(dir.filePath("calls.jsonl"));QVERIFY(calls.open(QIODevice::ReadOnly));
+    const auto first=QJsonDocument::fromJson(calls.readLine()).object();calls.close();
+    QCOMPARE(first.value("argv").toArray(),(QJsonArray{"@mac","notifications",name,"--json"}));QCOMPARE(first.value("payload").toObject(),payload);
+    QVERIFY(write(response(false,3)));client.requestNotifications({},name,payload);QTRY_COMPARE(done.size(),2);QVERIFY(done.last()[1].toBool());
+    QList<QJsonObject> invalid;
+    for(const auto &field:{"ok","applied","run_id","conversation_id","preferences"}) { auto value=response(true,4);value.remove(field);invalid<<value; }
+    for(const auto &field:{"run_id","conversation_id"}) { auto value=response(true,4);value[field]="other";invalid<<value; }
+    auto wrong=response(true,4);wrong["applied"]="true";invalid<<wrong;
+    wrong=response(true,3);invalid<<wrong;wrong=response(false,4);invalid<<wrong;
+    wrong=response(true,4);auto pref=wrong["preferences"].toObject();pref["muted"]=false;wrong["preferences"]=pref;invalid<<wrong;
+    invalid<<QJsonObject{{"ok",false},{"error","stale"}}<<QJsonObject{{"ok",false},{"error","not_found"}};
+    for(const auto &value:invalid) { QVERIFY(write(value));const int before=done.size();client.requestNotifications({},name,payload);QTRY_COMPARE(done.size(),before+1);QVERIFY(!done.last()[1].toBool());QVERIFY(!done.last()[3].toString().isEmpty()); }
+    QVERIFY(write(response(true,4),1));int before=done.size();client.requestNotifications({},name,payload);QTRY_COMPARE(done.size(),before+1);QVERIFY(!done.last()[1].toBool());
+    QVERIFY(write({},0,true));before=done.size();client.requestNotifications({},name,payload);QTRY_COMPARE(done.size(),before+1);QVERIFY(!done.last()[1].toBool());
+    QVERIFY(calls.open(QIODevice::ReadOnly));const auto recorded=calls.readAll();calls.close();
+    for(const auto &field:{"expected_revision","run_id","conversation_id"}) {
+        auto bad=payload;bad[field]=QString(field)=="expected_revision"?QJsonValue(-1):QJsonValue("bad\nidentity");
+        before=done.size();client.requestNotifications({},name,bad);QTRY_COMPARE(done.size(),before+1);QVERIFY(!done.last()[1].toBool());
+    }
+    QVERIFY(calls.open(QIODevice::ReadOnly));QCOMPARE(calls.readAll(),recorded); // Invalid admission never invokes a helper; no automatic replay.
+}
+
+void TestHgsClient::notificationsRequireLocalCapabilityEvenForANewPeer()
+{
+    QTemporaryDir dir;QVERIFY(dir.isValid());const auto path=dir.filePath("hgs");
+    QVERIFY(FakeCli::install(path,R"PY(#!/usr/bin/env python3
+import json,pathlib,sys
+root=pathlib.Path(__file__).parent
+args=sys.argv[1:]
+with (root/'invocations.jsonl').open('a') as output:output.write(json.dumps(args)+'\n')
+if args==['--help']:
+ config=json.loads((root/'help.json').read_text())
+ sys.stdout.write(config['stdout'])
+ sys.stderr.write(config['stderr'])
+ sys.exit(config['code'])
+if args==['@peer','ls','--json','--no-archives']:
+ print((root/'listing.json').read_text())
+ sys.exit(0)
+(root/'mutation-dispatched').write_text(json.dumps(args))
+print((root/'reply.json').read_text())
+)PY"));
+    const auto write=[&](const QString &name,const QJsonObject &value){return FakeCli::replace(dir.filePath(name),QJsonDocument(value).toJson());};
+    const auto pref=notificationValue("conversation",false,0);
+    QVERIFY(write("listing.json",QJsonObject{{"host","peer"},{"ok",true},{"sessions",QJsonArray{QJsonObject{
+        {"name","codex/project/session"},{"cmd","codex"},{"run_id","run"},{"conversation_id","conversation"},{"notification_preferences",pref}}}}}));
+    HgsClient client(FakeCli::program(path));QList<BoxState> peers;
+    connect(&client,&HgsClient::peerReady,this,[&](const BoxState &box){peers<<box;});
+    client.requestPeer("peer");QTRY_COMPARE(peers.size(),1);
+    QVERIFY(peers.first().sessions.first().sharedNotifications); // An old local CLI can forward a new peer's preferences.
+    QSignalSpy done(&client,&HgsClient::notificationsFinished);
+    const QJsonObject payload{{"run_id","run"},{"conversation_id","conversation"},{"muted",true},{"expected_revision",0}};
+    const QList<QJsonObject> refused{
+        {{"stdout","old help\n"},{"stderr",""},{"code",0}},
+        {{"stdout","notifications (session-notifications-v1)\n"},{"stderr",""},{"code",0}},
+        {{"stdout"," session-notifications-v1\n"},{"stderr",""},{"code",0}},
+        {{"stdout","session-notifications-v1-extra\n"},{"stderr",""},{"code",0}},
+        {{"stdout",""},{"stderr","session-notifications-v1\n"},{"code",0}},
+        {{"stdout","session-notifications-v1\n"},{"stderr",""},{"code",1}},
+        {{"stdout",QString(256*1024+1,'x')},{"stderr",""},{"code",0}}};
+    for(const auto &help:refused) {
+        QVERIFY(write("help.json",help));const int before=done.size();
+        client.requestNotifications("peer","codex/project/session",payload);QTRY_COMPARE(done.size(),before+1);
+        QVERIFY(!done.last()[1].toBool());QVERIFY(!done.last()[3].toString().isEmpty());
+        QVERIFY(!QFileInfo::exists(dir.filePath("mutation-dispatched")));
+    }
+    QFile calls(dir.filePath("invocations.jsonl"));QVERIFY(calls.open(QIODevice::ReadOnly));
+    const auto rows=calls.readAll().trimmed().split('\n');calls.close();QCOMPARE(rows.size(),refused.size()+1);
+    for(int i=1;i<rows.size();++i)QCOMPARE(QJsonDocument::fromJson(rows[i]).array(),QJsonArray{"--help"});
+    QVERIFY(write("help.json",{{"stdout","help\r\nsession-notifications-v1\r\n"},{"stderr",""},{"code",0}}));
+    QVERIFY(write("reply.json",{{"ok",true},{"applied",true},{"run_id","run"},{"conversation_id","conversation"},
+        {"preferences",notificationValue("conversation",true,1)}}));
+    const int before=done.size();client.requestNotifications("peer","codex/project/session",payload);
+    QTRY_COMPARE(done.size(),before+1);QVERIFY(done.last()[1].toBool());
+    QFile mutation(dir.filePath("mutation-dispatched"));QVERIFY(mutation.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(mutation.readAll()).array(),(QJsonArray{"@peer","notifications","codex/project/session","--json"}));
 }
 
 void TestHgsClient::parsesSharedReadState()

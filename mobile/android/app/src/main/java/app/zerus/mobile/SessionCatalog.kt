@@ -7,7 +7,7 @@ data class SessionCatalog(val machines: List<Machine>, val accounts: List<Accoun
     val projects: ProjectCatalog, val operations: Map<MachineKey, Set<String>>, val features: Map<MachineKey, Set<String>>)
 
 object SessionCatalogParser {
-    fun parse(connection: Connection, computers: List<JSONObject>): SessionCatalog {
+    fun parse(connection: Connection, computers: List<JSONObject>, retained: List<Session> = emptyList(), actions: List<SessionAction> = emptyList()): SessionCatalog {
         val operations = mutableMapOf<MachineKey, Set<String>>()
         val features = mutableMapOf<MachineKey, Set<String>>()
         val machines = computers.map { raw ->
@@ -16,11 +16,12 @@ object SessionCatalogParser {
             fun values(name: String) = capabilities?.optJSONArray(name)?.let { array ->
                 (0 until array.length()).map { array.optString(it) }.toSet()
             }.orEmpty()
-            operations[key] = if (capabilities?.optInt("protocol_version") == 1) values("operations") else emptySet()
+            OperationCapabilities.parse(capabilities)?.let { operations[key] = it }
             features[key] = values("features")
             MachineCatalog.parse(connection.id, raw)
         }
-        val sessions = computers.flatMap { NativeParser.sessions(connection, it) }
+        val known=SessionNotificationPreferences.known(retained,actions)
+        val sessions = computers.flatMap { NativeParser.sessions(connection, it) }.map { it.copy(raw=SessionNotificationPreferences.merge(it.raw,it.target,known)) }
         return SessionCatalog(machines, computers.map { AccountSnapshots.parse(connection.id, it) },
             ProjectParser.parse(connection, computers, sessions), operations, features)
     }

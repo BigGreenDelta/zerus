@@ -155,6 +155,25 @@ final class ReadStateTests: XCTestCase {
         ["conversation_id": .string(conversation), "reply_id": reply.map(JSON.string) ?? .null, "attention_signature": attention.map(JSON.string) ?? .null, "at": 1.0]
     }
 
+    /// Ported from Android SharedReadTest (0082fff0).
+    func testOnlyAppliedMarksCountAsSharedAndUnappliedOnesWaitBeforeAnotherTry() {
+        let payload = SharedReadPolicies.payload(row(), freshHead: true, localUnread: 0)!
+        func receipt(_ reply: Bool, _ attention: Bool, state: String = "completed") -> JSONObject {
+            ["request_id": "r", "state": .string(state),
+             "result": ["ok": true, "applied": ["reply_id": .bool(reply), "attention_signature": .bool(attention)], "read": .null]]
+        }
+        XCTAssertTrue(SharedReadPolicies.applied(receipt(true, true), payload: payload))
+        // Completed without applying: the request is no longer current, or the computer's question index is not ready.
+        XCTAssertFalse(SharedReadPolicies.applied(receipt(true, false), payload: payload))
+        XCTAssertFalse(SharedReadPolicies.applied(receipt(false, false), payload: payload))
+        XCTAssertFalse(SharedReadPolicies.applied(receipt(true, true, state: "failed"), payload: payload))
+        XCTAssertFalse(SharedReadPolicies.applied(["state": "completed", "result": ["ok": false, "error": "not_found"]], payload: payload))
+        XCTAssertFalse(SharedReadPolicies.applied(["state": "completed", "result": ["ok": true]], payload: payload))
+        // A field this phone did not send need not be applied.
+        XCTAssertTrue(SharedReadPolicies.applied(receipt(true, false), payload: SharedReadPolicies.payload(row(), freshHead: true, localUnread: 0, acknowledge: false)!))
+        XCTAssertEqual((0...4).map(SharedReadPolicies.retryDelay), [.seconds(120), .seconds(240), .seconds(480), .seconds(960), .seconds(960)])
+    }
+
     func testSharedReadPayloadAndMarks() {
         let payload = SharedReadPolicies.payload(row(), freshHead: true, localUnread: 0)!
         XCTAssertEqual(Set(payload.keys), ["run_id", "conversation_id", "reply_id", "attention_signature"])

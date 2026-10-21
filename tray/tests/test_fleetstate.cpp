@@ -41,11 +41,13 @@ private slots:
     void tooltipAgeIsMinuteGrained();
     void sharedReadComesFromTheSessionHost();
     void sharedMarksApplyAtOnceAndSettleFromSnapshots();
+    void unknownOptionalQuestionsKeepAttentionMarks();
     void queuedMarksNeverHideNewerRepliesOrRequests();
     void legacyMarksMigrateOnlyCurrentValues();
     void olderHostsKeepLocalReadStateAndQueueNothing();
     void recoveryAttentionWithoutSignatureStaysLocal();
     void controlOnlyComputerHasNoLocalCount();
+    void tooltipCountsUseSingularForOne();
     void idleShellWorkKeepsActiveAndPreservesInputAndAttention();
     void processInspectionUpdatesWithoutNewHookAndRejectsOtherRuns();
     void intermediateRepliesStayUnreadUntilWorkFinishes();
@@ -337,6 +339,23 @@ void TestFleetState::sharedMarksApplyAtOnceAndSettleFromSnapshots()
     QVERIFY(!f.local().sessions[0].needsAttention());
 }
 
+void TestFleetState::unknownOptionalQuestionsKeepAttentionMarks()
+{
+    // optional_questions is null both for an index still catching up and for
+    // one that cannot be read, whose signature hgs read acknowledges. The
+    // desktop cannot tell them apart and never drops the acknowledgement.
+    const QString signature(64, 'a');
+    BoxState local = box("arch", true, 0); local.sessions = {shared("7:100.5", signature)};
+    local.sessions[0].optionalQuestionsReported = true; local.sessions[0].optionalQuestions = -1;
+    FleetState f; f.setLocal(local, 1000);
+    QVERIFY(f.markSessionRead({}, f.local().sessions[0]));
+    const ReadMark key{{}, local.sessions[0].name, {}, local.sessions[0].conversationId, {}, {}};
+    QCOMPARE(ReadMark::fromJson(f.pendingReads().value(key.key()).toObject()).attentionSignature, signature);
+    QVERIFY(f.local().sessions[0].attentionAcknowledged);
+    local.sessions[0].readReplyId = "7:100.5"; local.sessions[0].readAttentionSignature = signature; f.setLocal(local, 2000);
+    QCOMPARE(f.takeSettledReadMarks().size(), 1); QVERIFY(f.local().sessions[0].attentionAcknowledged);
+}
+
 void TestFleetState::queuedMarksNeverHideNewerRepliesOrRequests()
 {
     const QString first(64, 'a'), second(64, 'b');
@@ -404,10 +423,23 @@ void TestFleetState::controlOnlyComputerHasNoLocalCount()
     FleetState state; state.setLocal(local, 1000); state.registerPeer("mac"); state.setPeer(mac, 1000);
     const auto lines = state.tooltip(1000).split('\n');
     QCOMPARE(lines.size(), 2);
-    QCOMPARE(lines[0], QString("0 need attention, 1 sessions total"));
+    QCOMPARE(lines[0], QString("0 need attention, 1 session total"));
     QCOMPARE(lines[1], QString("1 on mac (just now)"));
     local.localSessions = true; state.setLocal(local, 1000);
     QVERIFY(state.tooltip(1000).contains("0 here"));
+}
+
+void TestFleetState::tooltipCountsUseSingularForOne()
+{
+    BoxState local = box("arch", true, 0);
+    SessionInfo waiting = shared("7:100.5", "approval-1"); waiting.name = "codex/a";
+    local.sessions = {waiting};
+    FleetState state; state.setLocal(local, 1000);
+    QCOMPARE(state.attentionSessions(1000), 1);
+    QCOMPARE(state.tooltip(1000).section('\n', 0, 0), QString("1 needs attention, 1 session total"));
+    SessionInfo other; other.name = "codex/b";
+    local.sessions = {waiting, other}; state.setLocal(local, 2000);
+    QCOMPARE(state.tooltip(2000).section('\n', 0, 0), QString("1 needs attention, 2 sessions total"));
 }
 
 QTEST_APPLESS_MAIN(TestFleetState)

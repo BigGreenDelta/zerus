@@ -140,6 +140,7 @@ pub async fn gateway(
         if let Some(row) = mapped {
             revoked |= i(&row, "revoked") != 0;
             if row["id"] != computer && i(&own, "exposed") == 0 {
+                crate::notification_highwater::merge(db, t, w, &computer, s(&row, "id")).await?;
                 computer = s(&row, "id").into();
                 alias(t, w, n, &computer).await?;
             }
@@ -284,7 +285,8 @@ fn order(r: &Value) -> (bool, bool, &str, &str) {
         s(r, "route_id"),
     )
 }
-async fn snapshot(t: &mut Tx, r: &Value) -> Result<Value> {
+/// The stored snapshot text of one route row.
+pub async fn snapshot(t: &mut Tx, r: &Value) -> Result<Value> {
     t.one("SELECT CASE WHEN r.local=1 THEN n.snapshot ELSE r.snapshot END AS snapshot FROM computer_routes r JOIN nodes n ON n.id=r.gateway_id WHERE r.gateway_id=? AND r.route_id=?",args![&r["gateway_id"],&r["route_id"]]).await?.map(|r|r["snapshot"].clone()).ok_or(Error::CONFLICT)
 }
 pub async fn select(t: &mut Tx, w: &str, a: &str) -> Result<Option<Value>> {
@@ -298,8 +300,23 @@ pub async fn select(t: &mut Tx, w: &str, a: &str) -> Result<Option<Value>> {
         return Ok(None);
     }
     let mut r = rows.remove(0);
-    r["snapshot"] = snapshot(t, &r).await?;
+    let stored = snapshot(t, &r).await?;
+    if let Some(encoded) = stored.as_str() {
+        let mut value = crate::json::parse(encoded.as_bytes(), 32, 50000)?;
+        crate::notification_highwater::overlay(t, &c, &mut value).await?;
+        r["snapshot"] = json!(canonical(&value)?);
+    } else {
+        r["snapshot"] = stored;
+    }
     Ok(Some(r))
+}
+/// The route the catalog shows for one computer: available before stale,
+/// local before a gateway, then a stable order. `None` without an active route.
+pub async fn shown(t: &mut Tx, w: &str, computer: &str) -> Result<Option<Value>> {
+    Ok(candidates(t, w, Some(computer))
+        .await?
+        .into_iter()
+        .min_by(|a, b| order(a).cmp(&order(b))))
 }
 pub async fn frozen(t: &mut Tx, r: &Value, allow: bool) -> Result<bool> {
     if !r["target_machine_id"].is_null() && !allow {
@@ -386,16 +403,23 @@ pub async fn catalog(t: &mut Tx, w: &str, maximum: usize, online_timeout: u64) -
             .push(a["alias"].take());
     }
     let mut result = Vec::with_capacity(selected.len());
+    let mut projected_bytes = 16usize;
     for r in &selected {
         let snap = snapshots
             .remove(&(s(r, "gateway_id").to_owned(), s(r, "route_id").to_owned()))
             .ok_or(Error::CONFLICT)?;
-        let parsed = if let Some(s) = snap.as_str() {
+        let mut parsed = if let Some(s) = snap.as_str() {
             crate::json::parse(s.as_bytes(), 32, 50000)?
         } else {
             Value::Null
         };
-        result.push(json!({"id":r["id"],"name":r["name"],"online":available(r)&&!r["last_seen"].is_null()&&now()-f(r,"last_seen")<online_timeout as f64,"last_seen_at":r["last_seen_at"],"snapshot":parsed,"machine_id":r["machine_id"],"aliases":aliases_by_computer.remove(s(r,"id")).unwrap_or_default(),"via":if i(r,"local")!=0{Value::Null}else{json!({"gateway_id":r["gateway_id"],"gateway_name":r["gateway_name"]})}}));
+        crate::notification_highwater::overlay(t, s(r, "id"), &mut parsed).await?;
+        let item = json!({"id":r["id"],"name":r["name"],"online":available(r)&&!r["last_seen"].is_null()&&now()-f(r,"last_seen")<online_timeout as f64,"last_seen_at":r["last_seen_at"],"snapshot":parsed,"machine_id":r["machine_id"],"aliases":aliases_by_computer.remove(s(r,"id")).unwrap_or_default(),"via":if i(r,"local")!=0{Value::Null}else{json!({"gateway_id":r["gateway_id"],"gateway_name":r["gateway_name"]})}});
+        projected_bytes += canonical(&item)?.len() + 1;
+        if projected_bytes > maximum {
+            return Err(Error::LARGE);
+        }
+        result.push(item);
     }
     let unexposed: Vec<_> = selected
         .iter()
@@ -412,7 +436,11 @@ pub async fn catalog(t: &mut Tx, w: &str, maximum: usize, online_timeout: u64) -
         )
         .await?;
     }
-    Ok(json!({"computers":result}))
+    let result = json!({"computers":result});
+    if canonical(&result)?.len() > maximum {
+        return Err(Error::LARGE);
+    }
+    Ok(result)
 }
 pub async fn revoke_computer(db: &Db, t: &mut Tx, c: &Value) -> Result<()> {
     let rows = if c["machine_id"].is_null() {
@@ -447,6 +475,47 @@ pub(crate) fn explicit_wait(v: &Value) -> bool {
         && w["run_id"] == v["run_id"]
         && w["conversation_id"] == v["conversation_id"]
 }
+
+/// An older listing may finish after a successful preference mutation. Reject
+/// that heartbeat so its next fresh listing cannot roll back shared Mute.
+pub fn notification_revisions_current(previous: Option<&str>, snapshot: &Value) -> Result<bool> {
+    let Some(previous) = previous else {
+        return Ok(true);
+    };
+    let previous = crate::json::parse(previous.as_bytes(), 32, 50000)?;
+    let empty = vec![];
+    let mut known = BTreeMap::new();
+    for before in previous["sessions"].as_array().unwrap_or(&empty) {
+        if let Some(preference) = crate::alerts::notification_preferences(before) {
+            let key = (
+                s(before, "name").split('/').next().unwrap_or_default(),
+                s(before, "conversation_id"),
+            );
+            let entry = known.entry(key).or_insert(preference);
+            if preference["revision"].as_i64() > entry["revision"].as_i64() {
+                *entry = preference;
+            }
+        }
+    }
+    for row in snapshot["sessions"].as_array().unwrap_or(&empty) {
+        let key = (
+            s(row, "name").split('/').next().unwrap_or_default(),
+            s(row, "conversation_id"),
+        );
+        if let Some(known) = known.get(&key) {
+            let Some(incoming) = crate::alerts::notification_preferences(row) else {
+                return Ok(false);
+            };
+            let old_revision = known["revision"].as_i64().unwrap();
+            let revision = incoming["revision"].as_i64().unwrap();
+            if revision < old_revision || (revision == old_revision && incoming != *known) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 pub fn event_changes(previous: Option<&str>, snapshot: &Value) -> Result<Vec<(String, String)>> {
     let Some(previous) = previous else {
         return Ok(vec![]);
@@ -484,6 +553,11 @@ pub fn event_changes(previous: Option<&str>, snapshot: &Value) -> Result<Vec<(St
             .iter()
             .find(|b| b["name"] == v["name"] && !archived(b))
             .unwrap_or(&Value::Null);
+        if v["notification_preferences"] != before["notification_preferences"] {
+            // Plain refresh event: withdraw existing notices on every online
+            // client, without inventing a new attention/completion edge.
+            events.push((s(v, "name").into(), "notification_preferences".into()));
+        }
         let p = pending(v)?;
         let b = pending(before)?;
         let phase = s(v, "phase");

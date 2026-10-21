@@ -48,6 +48,11 @@ final class ConversationFrame: @unchecked Sendable {
         ConversationFrame(target: target, raw: raw, events: events, questions: questions, observedAt: observedAt, bytes: bytes, truncated: truncated,
                           window: window, indexComplete: indexComplete, indexing: indexing, unreadBoundary: unreadBoundary, inspectedEvents: inspectedEvents)
     }
+    func with(raw: JSONObject) -> ConversationFrame {
+        let copy = ConversationFrame(target:target,raw:raw,events:events,questions:questions,observedAt:observedAt,bytes:bytes,truncated:truncated,
+                                     window:window,indexComplete:indexComplete,indexing:indexing,unreadBoundary:unreadBoundary,inspectedEvents:inspectedEvents)
+        copy.presentation = presentation;return copy
+    }
 }
 
 /// A small access-ordered map for retained frames and history windows.
@@ -132,6 +137,7 @@ final class ConversationModel {
     // MARK: Delivery
 
     var receiptFlights: Set<String> = []
+    @ObservationIgnored var outgoingReceiptProbe = OutgoingReceiptProbe()
     var answerFlights: [String: String] = [:]
     var preparingTargets: Set<String> = []
     var attachmentPreparing = false
@@ -192,6 +198,8 @@ final class ConversationModel {
     @ObservationIgnored var activeFrame: ConversationFrame?
     @ObservationIgnored var activeFrameVerified = false
     @ObservationIgnored var historyWindows = RecentMap<HistoryWindow>()
+    @ObservationIgnored var projectionHeads: [String: (epoch: String, generation: Int64)] = [:]
+    @ObservationIgnored var projectionTasks: [String: (target: Target, token: UUID, task: Task<Void, Never>)] = [:]
     @ObservationIgnored var inspections: [String: (target: Target, task: Task<ConversationFrame, Error>)] = [:]
     @ObservationIgnored var historyFlights: [String: (target: Target, task: Task<HistoryPage, Error>)] = [:]
     @ObservationIgnored let detailGate = LoadingGate(now: { ProcessInfo.processInfo.systemUptime })
@@ -212,6 +220,10 @@ final class ConversationModel {
     @ObservationIgnored var historySnapshotHints: [String: String] = [:]
     @ObservationIgnored let historyHeadScheduler = HistoryHeadScheduler()
     @ObservationIgnored var sharedReadsSent: Set<String> = []
+    /// Marks completed without being applied wait in one bounded table, released by one owned timer.
+    @ObservationIgnored var sharedReadRetries = SharedReadRetries()
+    @ObservationIgnored var sharedReadRetryTimer: Task<Void, Never>?
+    @ObservationIgnored let sharedReadClock = ContinuousClock.now
     @ObservationIgnored var readAllShares: Task<Void, Never>?
     @ObservationIgnored var readWriter: OrderedStatePersistence<ConversationReadState>?
     @ObservationIgnored var emptyDrafts: [String: Draft] = [:]
@@ -467,7 +479,7 @@ final class ConversationModel {
                 let incoming = NativeEvents.events(raw)
                 let retained = RollingConversationHistory.merge(target: resolved, previousTarget: previousTarget, previous: previousEvents, incoming: incoming,
                                                                 inspection: true)
-                let window = currentWindow.flatMap { $0.atHead ? $0.inspection(incoming, previous: previousInspected) : nil }
+                let window = currentWindow.flatMap { $0.atHead ? $0.inspection(incoming, previous: previousInspected, scope: resolved) : nil }
                 let rows = window?.events ?? retained.events
                 let unknown = currentWindow.map { HistoryInspection.changed($0, incoming, previousInspected) } ?? false
                 let bytes = JSON.object(raw).compact.utf8.count + rows.reduce(0) { $0 + $1.approximateBytes }
@@ -481,7 +493,7 @@ final class ConversationModel {
             // A history page can publish while parsing. Rebase on the latest window so it is never erased.
             let latest = self.historyWindows[resolved.key]
             if latest != currentWindow || (latest != nil && frame.window == nil) {
-                let guarded = latest.map { HistoryInspection.retain($0, nil, frame.inspectedEvents, previousInspected) }
+                let guarded = latest.map { HistoryInspection.retain($0, nil, frame.inspectedEvents, previousInspected, scope: frame.target) }
                 let changed = latest.map { HistoryInspection.changed($0, frame.inspectedEvents, previousInspected) } ?? false
                 frame = frame.with(events: guarded?.events ?? frame.events, truncated: frame.truncated, window: guarded,
                                    indexComplete: self.historyComplete && !changed, indexing: self.historyIndexing)
@@ -514,13 +526,18 @@ final class ConversationModel {
         frames.trim { map in map.count > 20 || map.values.values.reduce(0) { $0 + $1.bytes } > 20 * 1024 * 1024 }
     }
 
-    func installFrame(_ incoming: ConversationFrame, verified: Bool) {
+    func installFrame(_ source: ConversationFrame, verified: Bool) {
+        let retained = [activeFrame.flatMap { SessionNotificationPreferences.sameConversation($0.target,source.target) ? $0.raw : nil },
+                        selected.flatMap { SessionNotificationPreferences.sameConversation($0.target,source.target) ? $0.raw : nil },
+                        app.catalogRows.first { SessionNotificationPreferences.sameConversation($0.target,source.target) }?.raw].compactMap { $0 }
+        let raw = SessionNotificationPreferences.mergeDetail(source.raw,source.target,retained:retained,actions:messageState.sessionActions)
+        let incoming = raw == source.raw ? source : source.with(raw:raw)
         let key = incoming.target.key
         let window = historyWindows[key]
         let priorInspection = activeFrame.flatMap { $0.target == incoming.target ? $0.inspectedEvents : nil } ?? []
         let changed = window.map { incoming.window != $0 && HistoryInspection.changed($0, incoming.inspectedEvents, priorInspection) } ?? false
         if changed { currentHistoryHeads.remove(ConversationReadPolicies.key(incoming.target)) }
-        let guarded = window.map { HistoryInspection.retain($0, incoming.window, incoming.inspectedEvents, priorInspection) }
+        let guarded = window.map { HistoryInspection.retain($0, incoming.window, incoming.inspectedEvents, priorInspection, scope: incoming.target) }
         var frame = incoming
         if let guarded, incoming.window != guarded || incoming.events != guarded.events {
             frame = incoming.with(events: guarded.events, truncated: incoming.truncated || guarded.hasBefore || guarded.hasAfter, window: guarded,
@@ -546,6 +563,15 @@ final class ConversationModel {
             captureUnreadBoundary(frame.target, prepared.events)
         }
         preparePresentation()
+    }
+
+    func confirmNotificationPreference(_ action: SessionAction) {
+        if let row = selected {
+            var copy = row
+            copy.raw = SessionNotificationPreferences.mergeDetail(row.raw,row.target,retained:[],actions:messageState.sessionActions + [action])
+            selected = copy
+        }
+        if let frame = activeFrame { installFrame(frame,verified:activeFrameVerified) }
     }
 
     func publishPagingMetadata(_ frame: ConversationFrame) {
@@ -610,17 +636,13 @@ final class ConversationModel {
             }
             if messages.contains(where: { merged.recordedRequestIds.contains($0.requestId) && $0.status != "recorded" }) {
                 let recorded = merged.recordedRequestIds
-                self.app.editMessages { state in
-                    var copy = state
-                    copy.outgoing = state.outgoing.map { message in
-                        guard recorded.contains(message.requestId), message.status != "reviewed" else { return message }
-                        var updated = message
-                        updated.status = "recorded"
-                        updated.error = ""
-                        return updated
-                    }
-                    return copy
-                }
+                self.app.editMessages { MessageChanges.recorded($0, recorded) }
+            }
+            // One status-only receipt read per navigation for the newest unconfirmed message; it never resends.
+            if let message = messages.last(where: { $0.status == "uncertain" && !merged.recordedRequestIds.contains($0.requestId) }),
+               self.outgoingReceiptProbe.claim(target, navigation: self.navigationId, message: message,
+                                               busy: self.deliveryFlights.contains(message.requestId) || self.receiptFlights.contains("outgoing:\(message.requestId)")) {
+                Task { await self.checkOutgoing(message, automatic: true) }
             }
             // Last: opening a child replaces this parent presentation.
             self.openPendingAgent()
@@ -731,6 +753,8 @@ final class ConversationModel {
     // MARK: Workspace removal
 
     func forget(connection: String) async {
+        sharedReadRetries.forget(connection: connection)
+        scheduleSharedReadRetries()
         for (_, flight) in inspections where flight.target.connectionId == connection { flight.task.cancel() }
         inspections = inspections.filter { $0.value.target.connectionId != connection }
         frames.removeAll { $0.target.connectionId == connection }
@@ -740,6 +764,9 @@ final class ConversationModel {
             copy.records = state.records.filter { $0.target.connectionId != connection }
             return copy
         }
+        for (_, flight) in projectionTasks where flight.target.connectionId == connection { flight.task.cancel() }
+        projectionTasks = projectionTasks.filter { $0.value.target.connectionId != connection }
+        projectionHeads = projectionHeads.filter { historyWindows[$0.key]?.target.connectionId != connection }
         historyWindows.removeAll { $0.target.connectionId == connection }
         historySnapshotHints = historySnapshotHints.filter { !removed.contains($0.key) }
         currentHistoryHeads.subtract(removed)

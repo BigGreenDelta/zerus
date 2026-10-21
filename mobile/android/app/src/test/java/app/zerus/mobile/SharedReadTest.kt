@@ -41,6 +41,37 @@ class SharedReadTest {
         // Only a request is pending: Read all leaves it for the person to view.
         assertNull(SharedReadPolicies.payload(row(mark("7:100.5",null)),true,0,acknowledge=false))
     }
+    @Test fun selectedNewReplyCannotBorrowTheFleetPreviousReplyMark() {
+        val fleet=row(mark("R1",signature),reply="R1")
+        val selected=row(reply="R2")
+        val before=ConversationReadState(listOf(ConversationReadRecord(target,epoch="epoch",readThrough=1,
+            headIncoming=2,headTotal=2,headComplete=true,reviewLater=true)))
+        val proof=ReadAttentionEvidence(target,"fresh-selected-R2","epoch",2,true,emptySet(),null)
+        // The unrelated head callback must not adopt R1's mark over R2's authoritative head.
+        val captures=if(SharedReadPolicies.canAdoptReply(fleet,target,selected.raw,true)) listOf(ReadAllCapture(target,proof)) else emptyList()
+        val after=ReadAllPolicies.apply(before,captures,captures).state
+        assertEquals(1L,after.record(target)!!.readThrough)
+        assertTrue(after.record(target)!!.reviewLater)
+        assertEquals(signature,selected.raw.string("attention_signature"))
+    }
+    @Test fun selectedAdoptionRequiresVerifiedExactRunConversationAndReply() {
+        val fleet=row(mark("R2",signature),reply="R2")
+        val selected=row(reply="R2")
+        assertTrue(SharedReadPolicies.canAdoptReply(fleet,target,selected.raw,true))
+        assertFalse(SharedReadPolicies.canAdoptReply(fleet,target,selected.raw,false))
+        assertFalse(SharedReadPolicies.canAdoptReply(fleet,target,null,true))
+        for(field in listOf("run_id","conversation_id","reply_id")) {
+            val changed=JSONObject(selected.raw.toString()).put(field,"different")
+            assertFalse(field,SharedReadPolicies.canAdoptReply(fleet,target,changed,true))
+            changed.remove(field)
+            assertFalse("missing $field",SharedReadPolicies.canAdoptReply(fleet,target,changed,true))
+        }
+        assertFalse(SharedReadPolicies.canAdoptReply(fleet,target.copy(run="new-run"),selected.raw,true))
+        assertFalse(SharedReadPolicies.canAdoptReply(row(mark("R1",signature),reply="R2"),target,selected.raw,true))
+        // Matching fleet hints do not independently bind a nonselected canonical prefix.
+        assertFalse(SharedReadPolicies.canAdoptReply(fleet,target.copy(session="other"),null,false))
+        assertFalse(SharedReadPolicies.canAdoptReply(fleet,null,null,false))
+    }
     @Test fun readAllSendsOneMarkAtATimeAndSkipsTargetsThatNoLongerQualify() = runBlocking {
         val qualifying=mutableSetOf("a","b","c")
         val prepared=mutableListOf<String>();val sent=mutableListOf<String>()
@@ -55,6 +86,20 @@ class SharedReadTest {
         assertEquals(1,most)
         assertEquals(listOf("a","b","c"),prepared)
         assertEquals(listOf("a","c"),sent)
+    }
+    @Test fun onlyAppliedMarksCountAsSharedAndUnappliedOnesWaitBeforeAnotherTry() {
+        val payload=SharedReadPolicies.payload(row(),true,0)!!
+        fun receipt(reply:Boolean,attention:Boolean,state:String="completed")=JSONObject().put("request_id","r").put("state",state)
+            .put("result",JSONObject().put("ok",true).put("applied",JSONObject().put("reply_id",reply).put("attention_signature",attention)).put("read",JSONObject.NULL))
+        assertTrue(SharedReadPolicies.applied(receipt(true,true),payload))
+        // Completed without applying: the request is no longer current, or the computer's question index is not ready.
+        assertFalse(SharedReadPolicies.applied(receipt(true,false),payload))
+        assertFalse(SharedReadPolicies.applied(receipt(false,false),payload))
+        assertFalse(SharedReadPolicies.applied(receipt(true,true,"failed"),payload))
+        assertFalse(SharedReadPolicies.applied(JSONObject().put("state","completed").put("result",JSONObject().put("ok",false).put("error","not_found")),payload))
+        // A field this phone did not send need not be applied.
+        assertTrue(SharedReadPolicies.applied(receipt(true,false),SharedReadPolicies.payload(row(),true,0,acknowledge=false)!!))
+        assertEquals(listOf(120_000L,240_000L,480_000L,960_000L,960_000L),(0..4).map(SharedReadPolicies::retryDelayMs))
     }
     @Test fun childArchivedOrChangedRowsAreNeverMarked() {
         assertNull(SharedReadPolicies.payload(row(t=target.copy(agentId="child",parentConversation="conversation")),true,0))

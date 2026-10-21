@@ -81,7 +81,28 @@ counter; `default_option_ids` start selected, and length and `min_items`/`max_it
 bounds are checked before Send; an item that is not `required` may stay empty.
 A card with `can_answer: false` is read-only and shows its `unavailable_reason`,
 such as **Answer this form in OpenCode**, and no Send, also when the computer
-omitted its items.
+omitted its items. Form text may start with `/` or `!`: the computer sends it
+through the OpenCode form reply, never to a terminal. Other cards, approvals
+included, still ask for such answers on the computer.
+An OpenCode permission card offers **Reject**, which rejects every pending
+request in that session, and **Allow once** after the approval review. When the
+request offers it, **Always allow…** follows the same review and then asks for a
+separate confirmation, which shows what it saves when the computer describes it
+(for example `Allows without asking again: printf *`). The confirmation sends
+nothing and closes if the request changed, can no longer be answered, or the app
+left the foreground meanwhile; opening it again needs a fresh review.
+An approval marked `approval_choices`, such as a Claude terminal panel or a
+Kimi tool approval, lists the agent's own options verbatim, in its order, and
+sends the chosen one with **Send** once the approval review finishes, a
+rejection included, as on the desktop. An option with `scope: "broader"`, such
+as Kimi's **Approve for this session**, says that it applies beyond the request
+and then asks for a separate confirmation that shows the agent's description of
+it; the confirmation closes without sending if the request or the chosen option
+changed, the request can no longer be answered, or the app left the foreground.
+When the card offers an Other answer, such as Kimi's **Reject with feedback**,
+its one-line text is sent instead of an option. A card the computer cannot
+answer shows its options read-only with its reason. Other approvals without
+Allow and Deny remain answerable only on the computer.
 
 Conversation messages use 16 sp text and a 20 sp baseline; the editor uses 18 sp
 text and a 22 sp baseline. Both keep natural character spacing. Compact Markdown
@@ -114,7 +135,10 @@ A message waiting in the agent's native queue appears as one compact expandable
 card. Expand it to read and select the full text. Send now remains a manual
 action, available only when the current agent and queued message allow it.
 An OpenCode message in the session inbox is a user bubble labelled **Queued**;
-after Stop it is labelled **Not delivered**. Inbox rows are not history: with
+after Stop it is labelled **Not delivered**. OpenCode dates a queued message by
+its delivery, so a phone message matches the OpenCode row that names its exact
+request UUID, queued, delivered or in paged history; a row naming another request never matches,
+and rows that name none keep the text/time rule. Inbox rows are not history: with
 paged history they follow the newest loaded message while the inspection reports
 them and never become a page, cursor or unread reply. Phones do not remove
 undelivered messages.
@@ -258,6 +282,24 @@ while hgs cannot read its question index), the chip counts the connector's
 optional attention items once per question. It is hidden for saved, archived,
 exited and offline sessions; open the session to answer or skip the questions.
 
+Visible live-parent cards also show read-only Git publication marks when both
+the gateway and that exact computer advertise `git_status`: changed/new files,
+outgoing/incoming commits, unknown publication, or verified clean/synced. Counts
+above 99 display `99+`; accessibility keeps the full counts and verification
+description. Ordinary non-Git folders and archives have no Git marks. Reading
+status never initializes a repository, fetches, pushes or changes the checkout.
+
+Git reads run only for cards intersecting the Sessions list viewport while the
+list is resumed and focused, with no action or machine dialog. They stop on
+navigation, backgrounding and loss of focus. Each exact computer/original folder
+gets at most one read per 15 seconds, with at most two calls outstanding, 64
+visible registrations and a 128-entry process-local cache. Connection, native
+computer, route, checkout or capability changes invalidate current proof. Local
+status expires 30 seconds after the original request starts; remote verification
+also needs the computer's reported remote age plus that elapsed time below 60
+seconds. Offline, expired or unverified results stay muted, never synced. No Git
+status is restored from disk, and Windows gateways do not advertise this read.
+
 Long-pressing a session card, or using its accessibility long-press action,
 opens its actions in the desktop context menu order: Open terminal, Mark as read
 or Review later, Pause, Resume or Restore, Rename, Fork, Move to archive for
@@ -362,7 +404,12 @@ When the computer advertises `mark_read`, reaching the newest reply (a fresh
 complete head read through on this phone), Mark read and Read all also send the
 exact run, conversation, reply and attention signature to the session's
 computer, which shares them with every desktop and phone. A reply or request read
-elsewhere is shown as read here. Review later stays on this phone.
+elsewhere can be adopted here for the exact verified selected reply. Automatic
+adoption for a nonselected conversation is deferred: fleet hints do not prove
+which canonical incoming prefix belongs to that shared reply. Its unread indicator
+may stay stale until a verified selection or explicit Mark read / Read all.
+Review later stays on this phone. This interim guard does not add native prefix
+proof or change explicit reading and Read all.
 Bounded background metadata probes can prepare canonical heads for live sessions
 with reported reply evidence, without opening their conversations or fetching
 full history. Previously unvisited sessions with unknown evidence are not
@@ -376,12 +423,25 @@ confirmation and preserves unsent text and files. Confirmed rename and resume
 can move an ordinary editing draft only to their verified same-conversation
 result. Saved drafts offers explicit recovery if that destination was unavailable.
 
+When both routes advertise `clear_context_dismiss` and the selected fresh native
+inspection explicitly permits it, context details offer **Dismiss and clear…**
+with a separate named confirmation. Its mode stays fixed while the dialog is
+open and is checked again after the durable request is saved. Ordinary clear
+continues omitting `dismiss_prompt`; the explicit mode saves and sends `true`
+with the original request identity. Check result and recovery never repeat it.
+Missing capabilities, cached evidence or a changed target cannot authorize it;
+unsent composer text, files and question drafts stay intact.
+
 Native controls are enabled only when both gateway and computer advertise them
 and a fresh inspection permits the action. These include session lifecycle,
 queue Send now, model and effort changes, process output and Stop requested,
 scoped recovery controls, and exact child history. Scheduled model settings have
 one durable authorized apply attempt when native readiness is observed, including
-when another session is open. Uncertain actions expose their original receipt;
+when another session is open. If that attempt is confirmed as scheduled again,
+a later fresh NotReady → Ready transition in the same app process can authorize
+one new attempt, pinned to the exact pending ID, model and effort. Repeated Ready,
+restoration and checking an old receipt never grant that authority; unknown
+results are checked using their original request. Uncertain actions expose their original receipt;
 they are never retried automatically.
 
 Model and effort opens a sheet with a scrolling native model list and a pinned
@@ -403,6 +463,14 @@ Claude uses the account catalog's `name` and retains its array order. Kimi
 retains configuration order, and DeepSeek retains native group/model order.
 OpenCode retains the service's model order. Desktop consumes
 the same catalog, deduplicates model IDs and prepends the current model when absent.
+
+OpenCode launch and session model pickers group the computer's short list by
+provider and offer search when more than eight models are reported. Default,
+Favorite and Free marks are read-only. A shortened list points to the desktop
+for other models; opening the picker never starts the service or fetches a full
+catalog. Accounts shows bounded provider details and the last known catalog
+state, including offline or stopped-service reports. Provider credentials and
+favorite changes remain managed on the computer.
 
 Terminal uses a separate saved input buffer and a fresh exact native binding.
 Snapshots poll adaptively while visible; input sends literal text or fixed keys,
@@ -507,8 +575,10 @@ or sends automatically. The conversation must have a confirmed run and conversat
 identity before recording.
 The composer preview scrolls within a bounded area while the software keyboard is
 open, keeping the typed draft visible and editable after capture stops.
-With a narrow screen, large system text and an expanded editor, you may need to
-close the keyboard to reach the preview controls.
+The retained preview and expanded editor share that available height; when two
+stacked controls cannot fit, Collapse moves beside Attach with its 48 dp target.
+The 280 dp / 180% system-text native fixture reaches playback, seeking, Discard
+and Send with the IME open, preserving the editor object, text and selection.
 
 Video mode records up to 60 seconds and 10 MiB with CameraX, with an owned circular
 preview and a camera switch. The phone extracts mono 16 kHz speech audio on a
@@ -656,6 +726,25 @@ checksum. Dependencies come from Google Maven and Maven Central. The debug APK
 uses the local Android debug signing key; public distribution requires an
 owner-controlled release key. Generated APKs and local configuration are ignored.
 
+Third-party notices list every library of the published Firebase release build.
+After a dependency change, regenerate them from that configuration (a synthetic
+`google-services.json` like CI's is enough) and commit the changed assets:
+
+```sh
+./gradlew -q --init-script ../../scripts/android-resolved-artifacts.gradle -PzerusFirebase=true :app:zerusResolvedNotices
+python3 ../../scripts/android-notices.py
+```
+
+The init script only records the resolved `releaseRuntimeClasspath`, with the exact
+artifact files Gradle resolved, in `app/build/zerus-notices/resolved.json`; it
+changes no build setting. `--check` compares instead of writing; CI runs it after
+the unit tests and release lint. The script
+writes nothing when a shipped library has no artifact, when a library declares no
+recognized license or needs a license text that has not been reviewed into
+`app/src/main/assets/licenses`.
+`ThirdPartyNoticesTest` also fails locally when a declared library or platform
+version is missing from the generated list.
+
 For distribution and device performance validation, run
 `./gradlew assembleRelease lintRelease`. It produces
 `app/build/outputs/apk/release/app-release.apk` with R8 and resource shrinking,
@@ -674,7 +763,9 @@ The main toolbar places New session, Refresh and Settings in that order.
 Settings opens a full screen with Privacy, About Zerus and Updates, including
 before pairing. About shows the installed version and build beside its heading,
 wrapping onto the next line when needed, and a GitHub-marked `ufna/zerus` link.
-Offline bundled Third-party notices include selectable license text.
+Offline bundled Third-party notices include selectable license text, every
+shipped library by license and, in Firebase builds, the open source notices
+that Google Play services and Firebase embed; long texts open on request.
 Back returns to the same app content; notification and push controls stay in Machines.
 Anonymous checks follow the selected channel: Dev uses
 `https://zerus.dev/updates/v2/android/dev.json` with a fifteen-minute interval;
@@ -841,6 +932,39 @@ against the APK's embedded R8 marker and records APK/mapping hashes and signing
 identity in private metadata. Do not publish mapping files or configuration.
 
 ## Local validation
+
+Settings > Computer analytics reads private, content-free agent summaries through
+the capability-gated `analytics_read` operation and the existing authorized
+computer route. It requests 7, 30 or 90 inclusive UTC days; each reply is limited
+to 1 MiB and 1,080 daily buckets. The page retains at most 32 computers and tries
+at most three configured routes per computer, with two reads in flight. Extra
+computers are explicitly excluded. Reads and parsing run away from the UI thread;
+daily rows use a lazy list. Leaving the page cancels pending reads. The bounded
+cache is memory-only and disappears with the application process.
+
+Stable computer UUIDs deduplicate multiple gateway routes. Newer source snapshots
+replace earlier revisions, including an epoch reset after purge; repeated reads
+never add the same totals. Each computer shows freshness, coverage gaps,
+unsupported measures and collection state. Offline or rejected reads retain
+explicitly marked last-known data for the same range. Unknown measures stay
+unknown. Main and child turns have separate filters. Known work/wait durations
+are distinct from elapsed session age, and token counts do not imply costs.
+Collection enablement, retention and purge remain local computer controls.
+
+Voice statistics use the existing `speech_stats` read separately, filtered to the
+same UTC interval and replaced once per processing computer. Profile identifiers
+are discarded. Accepted audio minutes, job outcomes and recorded queue/processing
+totals stay separate from agent turns; the phone does not count a recording a
+second time. The existing speech contract provides neither full coverage nor
+latency percentiles, so the page does not claim either.
+
+Review diagnostics builds a separate allowlisted report of the Android build
+number, date range, fixed read states and coverage codes. It excludes machine
+names/IDs, connection addresses, account details, source epochs, aggregate usage
+values, prompts, code, paths, recordings and transcripts. The user must review
+the exact report and tap Share reviewed report before Android's share chooser
+opens. Nothing is automatically written or uploaded, and these features do not
+change the independent Firebase Usage analytics or Crash reports controls.
 
 Unit tests cover exact destination identity, interrupted-delivery recovery,
 HTTPS validation, one mutation attempt on a dropped connection, read-only receipt

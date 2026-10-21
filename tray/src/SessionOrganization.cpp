@@ -4,6 +4,8 @@
 #include <QUuid>
 #include <QColor>
 #include <QDir>
+#include <algorithm>
+#include <utility>
 
 namespace {
 // Stored folders keep the form of their machine: local Windows folders are drive or
@@ -47,6 +49,7 @@ SessionOrganization::SessionOrganization(const QJsonObject &data)
     }
     if (m_groups.isEmpty() || (!data.contains("default_project") && !ids.contains("ungrouped")))
         m_groups.append({"ungrouped", "General", false, {}, "#8d9baa", {}});
+    indexGroups(); indexSessions();
     m_default = data.value("default_project").toString("ungrouped");
     if (!group(m_default) || m_default == "pinned") {
         for (const auto &g : m_groups) if (g.id != "pinned") { m_default = g.id; break; }
@@ -63,6 +66,7 @@ SessionOrganization::SessionOrganization(const QJsonObject &data)
     // before discarding that presentation bucket; every session keeps one owner.
     QStringList pinned;
     for (int i = m_groups.size() - 1; i >= 0; --i) if (m_groups[i].id == "pinned") pinned = m_groups.takeAt(i).sessions;
+    indexGroups(); indexSessions();
     for (const auto &session : pinned) {
         const auto previous = beforePin.value(session).toString();
         moveSession(session, group(previous) ? previous : m_default);
@@ -72,14 +76,54 @@ SessionOrganization::SessionOrganization(const QJsonObject &data)
 
 const SessionOrganization::Group *SessionOrganization::group(const QString &id) const
 {
-    for (const auto &g : m_groups) if (g.id == id) return &g;
-    return nullptr;
+    const auto found = m_groupIndexes.constFind(id);
+    return found == m_groupIndexes.cend() ? nullptr : &m_groups[*found];
 }
 
 QString SessionOrganization::groupFor(const QString &session) const
 {
-    for (const auto &g : m_groups) if (g.sessions.contains(session)) return g.id;
-    return m_default;
+    return m_sessionGroups.value(session, m_default);
+}
+
+void SessionOrganization::indexGroups()
+{
+    m_groupIndexes.clear();
+    for (int i = 0; i < m_groups.size(); ++i) m_groupIndexes.insert(m_groups[i].id, i);
+}
+
+void SessionOrganization::indexSessions()
+{
+    m_sessionGroups.clear();
+    for (const auto &g : std::as_const(m_groups))
+        for (const auto &session : g.sessions)
+            if (!m_sessionGroups.contains(session)) m_sessionGroups.insert(session, g.id);
+}
+
+void SessionOrganization::appendSession(const QString &session, const QString &id)
+{
+    const auto found = m_groupIndexes.constFind(id);
+    if (found == m_groupIndexes.cend()) return;
+    m_groups[*found].sessions.append(session);
+    m_sessionGroups.insert(session, id);
+}
+
+QHash<QString, QList<int>> SessionOrganization::orderedMembers(const QStringList &sessions) const
+{
+    QHash<QString, int> positions;
+    positions.reserve(m_sessionGroups.size());
+    for (const auto &g : m_groups)
+        for (int i = 0; i < g.sessions.size(); ++i)
+            if (!positions.contains(g.sessions[i])) positions.insert(g.sessions[i], i);
+    QHash<QString, QList<int>> result;
+    QList<int> ranks;
+    ranks.reserve(sessions.size());
+    for (int i = 0; i < sessions.size(); ++i) {
+        result[groupFor(sessions[i])].append(i);
+        ranks.append(positions.value(sessions[i], -1));
+    }
+    for (auto &members : result)
+        std::stable_sort(members.begin(), members.end(), [&](int a, int b) { return ranks[a] < ranks[b]; });
+    return result;
 }
 
 QString SessionOrganization::createGroup(const QString &name)
@@ -90,6 +134,7 @@ QString SessionOrganization::createGroup(const QString &name)
     int position = 0;
     while (position < m_groups.size() && m_groups[position].id != "ungrouped") ++position;
     m_groups.insert(position, {id, title, false, {}, "#64b5f6", {}});
+    indexGroups();
     return id;
 }
 
@@ -105,6 +150,8 @@ bool SessionOrganization::removeGroup(const QString &id, const QString &destinat
     if (id == target || !group(id) || !group(target)) return false;
     QStringList displaced;
     for (int i=0;i<m_groups.size();++i) if (m_groups[i].id==id) {displaced=m_groups.takeAt(i).sessions;break;}
+    indexGroups();
+    for (const auto &session : displaced) m_sessionGroups.remove(session);
     if (m_default==id) m_default=target;
     for (const auto &session:displaced) moveSession(session,target);
     return true;
@@ -125,6 +172,7 @@ void SessionOrganization::moveGroup(const QString &id, const QString &before)
     int to = 0;
     while (to < m_groups.size() && m_groups[to].id != before) ++to;
     m_groups.insert(to, g);
+    indexGroups();
 }
 
 void SessionOrganization::moveSession(const QString &session, const QString &id, const QString &before)
@@ -134,22 +182,20 @@ void SessionOrganization::moveSession(const QString &session, const QString &id,
 
     m_unassigned.remove(session);
     if(m_currentRun.contains(session))m_runGroups[m_currentRun.value(session)]=id;
-    for (auto &g : m_groups) g.sessions.removeAll(session);
-    for (auto &g : m_groups) if (g.id == id) {
-        const int position = g.sessions.indexOf(before);
-        g.sessions.insert(position < 0 ? g.sessions.size() : position, session);
-    }
+    const auto previous = m_sessionGroups.constFind(session);
+    if (previous != m_sessionGroups.cend()) m_groups[m_groupIndexes.value(*previous)].sessions.removeAll(session);
+    auto &ordered = m_groups[m_groupIndexes.value(id)].sessions;
+    const int position = before.isEmpty() ? -1 : ordered.indexOf(before);
+    ordered.insert(position < 0 ? ordered.size() : position, session);
+    m_sessionGroups.insert(session, id);
 }
 
 void SessionOrganization::renameSession(const QString &oldId, const QString &newId)
 {
     if (oldId == newId || oldId.isEmpty() || newId.isEmpty()) return;
-    bool exists = false;
-    for (const auto &g : m_groups) exists |= g.sessions.contains(oldId);
-    if (!exists) return;
+    if (!m_sessionGroups.contains(oldId)) return;
     const bool implicit = m_unassigned.remove(oldId);
-    bool assignedTarget = false;
-    for (const auto &g : m_groups) assignedTarget |= g.sessions.contains(newId) && !m_unassigned.contains(newId);
+    const bool assignedTarget = m_sessionGroups.contains(newId) && !m_unassigned.contains(newId);
     if (implicit && assignedTarget) {
         // A remote assignment for the new name outranks our old fallback row.
         for (auto &g : m_groups) g.sessions.removeAll(oldId);
@@ -161,6 +207,7 @@ void SessionOrganization::renameSession(const QString &oldId, const QString &new
     }
     for (auto it = m_runs.begin(); it != m_runs.end(); ++it) if (it.value().toString() == oldId) it.value() = newId;
     if(m_currentRun.contains(oldId))m_currentRun[newId]=m_currentRun.take(oldId);
+    indexSessions();
 }
 
 QString SessionOrganization::observe(const QString &machine, const QString &name, const QString &run, const QString &archive)
@@ -173,12 +220,10 @@ QString SessionOrganization::observe(const QString &machine, const QString &name
         m_runs.insert(token, id);
         m_currentRun[id]=token;
     }
-    bool known = false;
-    for (const auto &g : m_groups) known |= g.sessions.contains(id);
-    if (!known) {
+    if (!m_sessionGroups.contains(id)) {
         const auto prior=archive.isEmpty()?QString():m_runGroups.value(machine+'\n'+run).toString();
-        if(!prior.isEmpty()&&group(prior))moveSession(id,prior);
-        else {moveSession(id,m_default);m_unassigned.insert(id);}
+        if(!prior.isEmpty()&&group(prior))appendSession(id,prior);
+        else {appendSession(id,m_default);m_unassigned.insert(id);}
     }
     if(archive.isEmpty()&&!run.isEmpty()){const auto token=machine+'\n'+run;if(m_unassigned.contains(id))m_runGroups.remove(token);else m_runGroups[token]=groupFor(id);}
     return id;

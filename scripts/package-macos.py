@@ -15,12 +15,13 @@ import re
 import shutil
 import subprocess
 
+from macos_notices import QT_NOTICES, copy_notices, ffmpeg_findings, ffmpeg_provenance, ffmpeg_source_note
+
 ROOT = Path(__file__).resolve().parents[1]
 MINIMUM_SYSTEM = "14.0"
 # Installers zerus-setup runs from Contents/Resources/setup, with the local modules they import.
 SETUP_SCRIPTS = ("install-macos-session-service.py", "install-recovery-service.py",
                  "install-swarm-service.py", "launchd_agent.py", "install-mobile-connector-service.py")
-QT_NOTICES = ("qtbase", "qtsvg", "qtmultimedia")
 SOURCE_NOTE = """# Qt in Zerus.app
 
 Zerus.app contains unmodified Qt {version} frameworks and plugins from the official
@@ -37,6 +38,11 @@ Exact corresponding Qt sources:
 Per-module licenses, including their third-party components, are listed in the
 SPDX documents next to this file. Zerus' own sources are at
 https://github.com/ufna/zerus.
+
+Standard license and exception texts named by those documents are also included
+as `<SPDX-ID>.txt`; custom LicenseRef texts remain in the SPDX documents. This
+conservative set includes license alternatives and optional components described
+by Qt's module metadata, without asserting that each component is compiled.
 """
 
 
@@ -90,6 +96,7 @@ def main():
     qt = json.loads((args.qt / "zerus-qt.json").read_text())["qt_version"]
     if qt != json.loads((ROOT / "packaging/macos/qt.json").read_text())["qt_version"]:
         parser.error("the Qt prefix does not match packaging/macos/qt.json")
+    provenance = ffmpeg_provenance(ROOT)
     if not (args.licenses / "inventory.json").is_file():
         parser.error("collect Cargo dependency notices first")
     if args.output.exists() and any(args.output.iterdir()):
@@ -103,12 +110,13 @@ def main():
 
     info_path = staged / "Contents/Info.plist"
     info = plistlib.loads(info_path.read_bytes())
-    if info.get("CFBundleShortVersionString") != args.version or info.get("CFBundleIdentifier") != "com.hgdev.hgs-tray":
+    if (info.get("CFBundleShortVersionString") != args.version
+            or info.get("CFBundleIdentifier") not in ("com.hgdev.hgs-tray.local", "com.hgdev.hgs-tray")):
         parser.error("the GUI build does not match this version and bundle identifier")
     # LaunchServices needs CFBundleExecutable once the bundle is no longer named hgs-tray.app.
     # Terminal integration runs osascript; under the hardened runtime TCC attributes its
     # Apple Events to Zerus, which therefore declares their purpose.
-    info.update(CFBundleName="Zerus", CFBundleDisplayName="Zerus", CFBundleExecutable="hgs-tray",
+    info.update(CFBundleIdentifier="com.hgdev.hgs-tray", CFBundleName="Zerus", CFBundleDisplayName="Zerus", CFBundleExecutable="hgs-tray",
                 LSMinimumSystemVersion=MINIMUM_SYSTEM, ZerusReleaseVersion=args.release or args.version,
                 NSAppleEventsUsageDescription="Zerus opens your agent sessions in Terminal.")
     info_path.write_bytes(plistlib.dumps(info))
@@ -137,15 +145,16 @@ def main():
     install(ROOT / "tray/vendor/qrcodegen/LICENSE", licenses / "qrcodegen-LICENSE")
     install(ROOT / "docs/licenses/codex-LICENSE.txt", licenses / "codex-LICENSE.txt")
     shutil.copytree(args.licenses, licenses / "rust")
-    for name in ("LGPL-3.0.txt", "GPL-3.0.txt"):
-        install(ROOT / "packaging/macos/licenses" / name, licenses / "qt" / name)
-    for module in QT_NOTICES:
-        install(args.qt / "sbom" / f"{module}-{qt}.spdx.json", licenses / "qt" / f"{module}.spdx.json")
+    copy_notices(ROOT, args.qt, qt, licenses / "qt")
     series = ".".join(qt.split(".")[:2])
-    (licenses / "qt/SOURCE.md").write_text(SOURCE_NOTE.format(version=qt, series=series))
+    (licenses / "qt/SOURCE.md").write_text(SOURCE_NOTE.format(version=qt, series=series)
+                                          + ffmpeg_source_note(provenance))
+    install(ROOT / "packaging/macos/ffmpeg.json", licenses / "qt/FFMPEG-SOURCE.json")
 
     # The official Qt frameworks are universal; ship Apple Silicon code only.
     thin_to_arm64(staged)
+    if findings := ffmpeg_findings(staged, provenance):
+        raise ValueError("\n".join(findings))
     bundle = args.output / "Zerus.app"
     run("ditto", staged, bundle)
     shutil.rmtree(work)

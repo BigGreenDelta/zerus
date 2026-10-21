@@ -172,6 +172,19 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   a completed row 5 seconds after the phone has read its terminal receipt
   (`result_read`) or 60 seconds after completion, so file bytes are carried,
   not kept. Submission requires the computer to advertise the operation.
+  `remove_queued` (OpenCode) is a session mutation with a durable request
+  identity, like `forget`: exact `expected_run_id`, nonempty
+  `expected_conversation_id` and one `message_id`, `msg_` followed by 1–124
+  ASCII letters, digits, `_` or `-`
+  ([shared with hgs, the desktop and the connector](../../../tests/fixtures/opencode-queued-message-ids.json));
+  any other field is rejected. Submission requires the computer to advertise
+  it, which only the Rust connector does, with the scoped session-action ABI.
+  An older hgs prints that marker too and refuses the request (an uncertain
+  receipt, nothing removed), so the session's `allowed_actions` listing
+  `remove_queued` is what shows that its hgs can remove a message; phones
+  require both. The golden vectors freeze the Python connector's tables, so
+  `tests/vectors.rs` names the operations they lack from
+  [`rust-only-operations.json`](../tests/rust-only-operations.json).
 - `json.rs` bounds depth and lexical structure before object materialization.
   Canonical ASCII escaping, key ordering, arbitrary integer precision and Python
   float formatting preserve API v1 request identities. A deterministic 20,000
@@ -208,8 +221,27 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
   UUID was never observed on the route) for display only: availability counts a
   peer route's time only while it stores a snapshot accepted since it was last
   marked online, and gateway heartbeats never refresh it.
+- Shared session notification revisions belong to the physical computer, provider
+  and conversation, independently of gateway routes. The additive
+  `computer_notification_preferences` table retains complete confirmed preferences
+  with no expiry or LRU eviction. A computer may retain at most 4,096 scopes and
+  1 MiB of canonical JSON (also bounded to 32 levels and 50,000 JSON values).
+  Its exact encoded bytes and workspace/computer key bytes count toward the
+  configured workspace and sharded global retained-payload quotas. Capacity or a
+  conflicting/older revision rolls back the heartbeat and ledger together; it
+  never removes an older highwater to make room. Unexposed computer identity
+  consolidation merges the maps and returns the retired row's quota charge.
+  Catalogs, command route selection and alert evaluation overlay these preferences
+  on the selected route's same-provider/conversation rows. Native state, run IDs,
+  read marks and route freshness remain the selected route's evidence. Projected
+  snapshot and catalog bytes are checked before returning; one computer ledger
+  is loaded at a time. A new higher revision does not require the old route to
+  remain online or registered. This new table records observations accepted by
+  this implementation; it cannot recover a preference never received by it.
 - `store/snapshots.rs` separates liveness and event-free snapshot changes from
-  shared payload accounting. Event publication and wake jobs have transactional
+  shared payload accounting when no shared preference is present. Preference-bearing
+  snapshots use global event locks when needed, then the payload shard, sorted
+  workspaces, credential and route. Event publication and wake jobs have transactional
   caps. Lock order is global event accounting, payload shard when needed,
   workspace, credential, then route/request; multi-workspace locks are sorted.
   Heartbeats may carry `presence` beside the snapshot. The relay remembers each
@@ -225,18 +257,26 @@ device submitted the voice message. See [the contract](../../../docs/voice-messa
 - `store/candidates.rs` holds at most one alert candidate per computer, session
   and kind (1,000 per workspace, 24-hour expiry). Ordinary events refresh phone
   state only. Changed snapshots and new presence evaluate candidates on the
-  worker that received the heartbeat. An elected maintenance pass evaluates the
-  due candidates of at most 32 workspaces, most overdue first, and drops the
-  oldest expired candidates of any workspace. Waiting candidates are rechecked
+  worker that received the heartbeat. Candidates resolve against the snapshot
+  of the route the catalog shows for their computer (available before stale,
+  local before a gateway); a snapshot from another, possibly lagging, route of
+  that computer never resolves or keeps them. The maintenance pass first drops
+  the oldest expired candidates of any workspace in its own elected transaction,
+  so no failing plan or delivery stops the storage bound. It then evaluates the
+  due candidates of at most 32 workspaces, most overdue first, each in a short
+  transaction elected for that workspace; one workspace's failure leaves the
+  others' turns intact. A plan without deliveries takes no event locks. Plans
+  that deliver run after the others, one workspace per transaction, so the
+  global event row is held for at most one workspace's candidates. Waiting
+  candidates are rechecked
   within 15 seconds while at most 32 × 15 / `maintenance_interval` workspaces
   wait (480 at the 1-second default); beyond that, rechecks slow down
   proportionally, still most overdue first. Plans come from unlocked reads, so
   several workers may evaluate the same candidate. Deleting the candidate row
   in the transaction that appends the `alert` event and coalesces device wakes
   is the cross-worker single-delivery claim. Candidate rows are locked last,
-  after any event, credential and route/node locks, in ascending id;
-  maintenance visits workspaces in sorted order and folds expired rows into
-  that order.
+  after any event, credential and route/node locks, in ascending id; expiry
+  locks only candidate rows, in ascending id.
 - `store/background.rs` owns bounded indexed maintenance batches and durable
   poll/push leases. PostgreSQL advisory locks elect maintenance transactions;
   PostgreSQL startup never retires another worker's claims. A failing alert
@@ -344,6 +384,12 @@ requests table once, briefly blocking writes on PostgreSQL. Phones use the
 operation only when both relay capabilities and the computer snapshot list it,
 so the relay, connector and app can be deployed in any order; replace all
 PostgreSQL workers together so every worker accepts and expires the operation.
+
+Queue removal (`remove_queued`) adds no table, column or index: it is an
+ordinary mutation with permanent request identity. Phones use it only when both
+relay capabilities and the computer snapshot list it, so the relay, connector
+and app can be deployed in any order; replace all PostgreSQL workers together so
+every worker accepts it.
 
 Stop the sole SQLite server before local administration or a runtime replacement;
 Rust refuses a second owner of that file. Never run Python and Rust SQLite
@@ -573,3 +619,42 @@ computer whose heartbeat lists it (409 otherwise), with an empty session:
   its document through the exchange, with that task in the inventory.
 
 Apply the additive index with the normal coordinated runtime replacement.
+### Git checkout status reads
+
+`git_status` is a sessionless computer read offered by the Rust connector only
+when the native help contains `Mobile Git status ABI: git-status-v1`. A request
+has an empty session and exactly `{request_id,path}` as its payload; no
+run, conversation, agent or archive identity is accepted. The path must be an
+absolute POSIX path with a leading slash, control-free and at most 4096 UTF-8
+bytes, matching the existing mobile folder contract. Windows Git transport is
+unsupported and unqualified in v1. Normal verified
+local and one-hop routes apply; the read grants no forwarding or mutation
+authority. Exact duplicate receipts retain their existing identities.
+
+The operation shares the 5000-row workspace read quota and has a separate
+`git_status_history_v1` partial index for bounded terminal-row maintenance,
+with a retention ceiling of one hour. Existing `READ_SQL`, `read_history_v3`,
+other index definitions and mutation retention predicates remain unchanged.
+Deploy the additive index through the normal root-coordinated rollout; source
+qualification does not switch any existing gateway to the Rust connector.
+
+### Explicit prompt dismissal with context clear
+
+`clear_context` accepts the optional strict Boolean `dismiss_prompt` when both
+the relay and selected computer advertise `clear_context_dismiss`. Any presence,
+including `false`, requires that feature after exact duplicate receipt lookup.
+Omitting the field retains the ordinary request body/hash and validation;
+`compact_context` rejects it. The connector separately verifies the native HELP
+marker `Mobile clear-context ABI: dismiss-prompt-v1`. A `true` request requires
+fresh exact native identity, an unarchived session and actual Boolean
+`clear_context_dismiss: true`; the relay does not infer prompt eligibility.
+An uncertain receipt retains its original identity and never permits replay.
+
+### Session project grouping
+
+The additive session-scoped `project_assignment` read and `project_assign`
+mutation change only logical project membership. Both native command markers
+and `session_project_assignment_v1` gate clients; older peers stay disabled.
+The separate `project_assignment_history_v1` index is created on upgrade without
+changing legacy read-index predicates or mutation UUID tombstones. See
+[the exact scope, bounded paging and no-replay contract](../../../docs/mobile-session-projects.md).

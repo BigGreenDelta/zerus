@@ -84,12 +84,17 @@ matched identifier and expose its complete value in the tooltip.
 
 The desktop session header keeps frequent actions as icons: open the session
 folder, open a shell there, **Copy session ID** and **Clear session**. Its **⋯**
-menu holds **Rename…**, **Fork session…**, **Copy connect command** (**Open
-externally** without clipboard mode, or the native DeepSeek UI), **Pause
+menu names the same actions (**Open folder**, **Open shell in session folder**,
+**Copy session ID** and **Clear session…**, each available exactly when its icon
+is) and also holds **Rename…**, **Fork session…**, **Copy connect command**
+(**Open externally** without clipboard mode, or the native DeepSeek UI), **Pause
 session** or **Resume session**, **Start fresh…**, **Move to archive** and
 **Terminate session…**. A stopped session hides the Clear session icon and offers
 **Start fresh…** in the menu; an archived session shows **Restore session** in its
-place.
+place. The session list context menu offers **Clear session…** for a live session
+where a stopped one offers **Start fresh…**. For a session that is not open, it
+becomes available once that session's own inspection confirms the conversation
+listed for it; choosing it opens the session and asks the same confirmation.
 
 Identifiers such as `zerus-ab12` are Beads task numbers, not session IDs. Desktop
 message search finds their public mentions; Android session search finds mentions
@@ -168,6 +173,51 @@ Repeat the same command without `--fresh`; the diagnostic attempt is preserved i
 paused: launch the intended conversation with its explicit native ID to bind it.
 
 ### Tracking and durable state
+
+`hgs hooks --account native-claude --json` inspects the account's hook
+registration without running the agent. Use another exact account ID for an
+isolated profile. The report contains provider/account identifiers, configuration
+and path fingerprints, expected/present/missing/duplicate event names and cached version
+compatibility, never settings, commands, prompts or credentials. DeepSeek and
+OpenCode report `not_applicable`: they use their native APIs instead of tracking
+hooks. An unavailable or changed executable-version cache means compatibility
+`unknown`; inspection never runs `--version` or refreshes that cache.
+
+`hgs hooks SESSION --json` accepts a JSON object on stdin containing
+`request_id`, `expected_run_id` and `expected_conversation_id`. Only that exact
+bound conversation is inspected. Its `observed` field counts known main-agent
+callbacks recorded after this feature was enabled in that run/conversation;
+older bindings or silence report `unknown`, not broken hooks. The summary is
+bounded by the known event names and never scans native history. Registration,
+observed callbacks and provider-effective settings/trust are different evidence:
+`effective` and `trust` remain explicitly `unknown` in a file inspection. Project
+settings, policy, native trust or a running agent's already-loaded settings can
+make its effective hooks differ. Attaching does not retrofit them.
+
+Explicit configuration repair is native-only:
+`hgs hooks --account ID --repair --json`. Its stdin must contain a fresh UUID
+`request_id`, `expected_provider`, `expected_account_id`,
+`expected_config_sha256` and `expected_path_id` copied from the inspected account
+report. Repair refuses changed content, account/path/symlink identity, malformed
+or oversized files and unknown/incompatible native-version evidence. It merges
+only missing HGS tracking registrations under the existing hook lock and atomic backup
+rules, preserving personal settings/hooks and trusted legacy commands. It never
+trusts hooks, enables/widens answer channels, changes permissions, restarts a provider or retrofits running
+agents. If compatibility is unknown, explicit repair is unavailable. The current cache is
+normally populated for Claude's version-qualified hooks; Codex and Kimi can remain
+unknown even after launch. Their normal supervised launch retains the existing
+hook installer, but this diagnostic never invents version evidence. Review the returned configuration
+and any conditional matchers rather than treating a successful file edit as
+proof that hooks are effective. Existing partial Kimi blocks require manual review
+or a supervised launch: explicit repair refuses to rewrite them lossily.
+
+The additive mobile operation `hooks_status` exposes only the exact-session
+read, and only when the selected CLI advertises `hooks-health-v1`. Both outbound
+connectors preserve the request/run/conversation identity. The relay and gateway
+refuse account-wide, repair, archive and child extensions; no mobile hook write
+operation or client repair UI is advertised. Diagnostic receipts have short
+read-only retention and never authorize replay of a mutation.
+
 
 At launch, `hgs` adds handlers to Claude `settings.json`, Codex `hooks.json` and
 Kimi `config.toml`, preserving other hooks and making a `.pre-hgs` backup before the
@@ -389,6 +439,27 @@ input, approvals, errors and unread main-agent replies. An offline host retains
 its last total but adds no live attention requests; a dot marks incomplete data.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
+The session menu's **Mute** disables notifications for that conversation on all
+devices and removes it from their notification counters and bells. The session's
+host stores the preference; other desktops and phones receive it in their next
+host snapshot. A crossed-out bell and neutral gray or white attention and unread
+badges identify a muted session. The preference survives restart, rename and
+resume of the same conversation. Muting preserves the agent's actual state,
+unread replies, questions, approvals and review reminders. The menu requires an
+online host with shared notification preferences and a configured local `hgs`
+that advertises `session-notifications-v1`; older hosts show an explanation
+instead of a separate local-only preference. A pending or failed change never
+replaces the last confirmed host value.
+If a host later becomes unavailable or stops reporting this feature, its last
+confirmed muted display is retained and labelled as such; it does not enable a
+new change. Concurrent changes use the host's revision and require a fresh
+snapshot after a conflict. Unmute records the host's current notification
+identities, so a device that missed the muted interval does not announce those
+old events when it reconnects. This does not mark the underlying work as read.
+**Unmute** restores future notifications without replaying events seen while
+muted or acknowledging pending work. Muted sessions remain available in the
+Needs attention filter.
+
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until
@@ -398,8 +469,8 @@ unread in Activity but show no new-reply badge or reply-only attention count on
 desktop or Android. The pending reply becomes visible when work finishes; this
 never marks it as read. Explicit questions, approvals, errors and review reminders
 remain actionable. Optional Codex questions, which the agent continues without,
-are not attention: on the desktop and Android they change neither the session's
-status nor the Needs attention filter, counters or badges. Listings report them separately
+are not attention: on the desktop, Android and iOS they change neither the
+session's status nor the Needs attention filter, counters or badges. Listings report them separately
 as [`optional_questions`](#optional-questions-in-listings). Settings → Sessions →
 **Notify about optional questions**, off by default, adds an *Optional question*
 banner once for each new question. Questions already pending when it is turned on,
@@ -504,8 +575,10 @@ Clients recover interrupted requests by the original message UUID without blindl
 uploading or sending again. Hiding the composer stops unsubmitted capture.
 See [persistent voice messages](voice-messages.md) for storage and delivery details.
 Voice settings also show the selected computer's
-90-day counters; [analytics](analytics.md) documents their meaning and the planned
-cross-computer agent statistics.
+90-day counters. Desktop Settings > Private analytics and Android Settings > Computer analytics
+show bounded per-computer and fleet summaries with explicit coverage. Agent collection
+starts disabled; local desktop controls distinguish enablement, retention and purge.
+See [analytics](analytics.md) for the private storage and read contracts.
 
 If microphone access is denied, Voice shows a permission explanation with
 **Open microphone settings** on macOS and Windows. On macOS this opens
@@ -514,6 +587,13 @@ the conversation and press **Voice** again; opening settings does not start a
 recording. If settings cannot open, the dialog keeps the manual navigation path.
 
 Session rows show provider, machine, current action, model, effort and Git context.
+Right-click a session and choose **Compact session row** to show only its name,
+status and agent type. The expand icon or the Right key restores the full row;
+the row remains selectable and keeps its normal context actions. This device
+remembers the preference for that conversation across restarts. **Expand all
+collapsed** in the Sessions menu restores every compact row, including sessions
+hidden by the current filters. Row density never compacts the agent's context
+or changes its runtime state. A muted session keeps its mute icon in either size.
 The folder/branch line also shows native outline Git badges: a diff with the
 number of changed/new files, upload/download with outgoing/incoming commit counts,
 and a green cloud check for a clean checkout matching its verified upstream.
@@ -669,6 +749,11 @@ notification is withdrawn; it survives rename and resume. Hosts with an older
 as read** clears the current reminder without answering the agent; **Mark needs
 attention** creates a local review reminder.
 Opening the conversation does not clear an explicit review reminder.
+**Mark all as read** (right-click the Sessions icon in the rail, the icon beside
+Saved drafts, or the project and machine action menus) marks current replies on
+every machine as read, including hidden sessions. Sessions marked as needing
+attention keep their reply unread; pending approvals, questions and errors stay
+highlighted.
 
 Ctrl/Command-click selects multiple sessions while preserving the open conversation
 and draft. Batch actions include read/review later, pause, resume, archive, project
@@ -829,6 +914,18 @@ sessions, even if the original attachment file is gone. Storage is a private
 directory next to the desktop's Qt settings file (`<settings-file>.drafts`),
 outside P2P configuration sync.
 
+Use **Reference an existing file** (the link button beside Attach, or its Files
+menu in a narrow column) when the file
+already exists on the agent's computer, including very large files. Locally,
+choose a file or enter its absolute path. For a remote session, enter an absolute
+path (including Windows drive or UNC paths) or `~/` path on the named remote
+computer; a file on your desktop is not uploaded
+or made accessible to that computer. Zerus inserts an editable, quoted path into
+the draft and saves it as ordinary message text. Review it and press Send when
+ready. This action does not read, copy or Base64-encode the file and has no file
+size limit. It refers to the existing file, whose contents may change; the agent
+decides how to use it. Ordinary attachment uploads retain their existing limits.
+
 Session refresh, connection and recovery errors appear on one line beside the
 attachment button, with the complete diagnostic in its tooltip and an explicit
 session refresh action. They do not move the Activity or Terminal tabs. A blocking
@@ -976,8 +1073,16 @@ Windows computer with backslashes (`C:\work\a.cpp`); remote machines keep their
 references identify the host and offer **Download…**, **Download and open** and
 an SSH terminal. **Download…** asks where to save. **Download and open** saves
 automatically in the local Downloads folder under `Zerus Files`, then opens that
-copy. Each request downloads a fresh copy; existing names are preserved with
-numbered suffixes such as `report (1).pdf`, including simultaneous downloads.
+copy. A completed, unchanged copy recorded for that exact machine and remote path
+is reused without another transfer, including after restarting Zerus. The dialog
+then offers **Open local copy** and **Show file** (selected in Finder or the file
+manager), even when the remote machine is offline. **Download again** explicitly
+fetches an updated copy; opening a saved copy does not check whether the remote
+original has changed. Missing or edited cached files are not reused. Files saved
+by older versions without a recorded source are not guessed from their names.
+Fresh downloads preserve existing names with numbered suffixes such as
+`report (1).pdf`; simultaneous requests for the same source in one window share
+one transfer.
 Downloads use that machine's configured SSH profile and SFTP, stream directly to
 disk and publish the destination only after a successful transfer. Errors remain
 in the dialog; a saved copy can be opened with **Open local copy**. Offline or
@@ -987,12 +1092,12 @@ an explicitly requested open still happens after successful saving. The
 120-second transfer deadline leaves an existing destination unchanged on failure.
 
 **Settings → Files** controls the local downloaded-copy cache. **Never clear** is
-the default. An optional size limit removes the oldest completed copies created
-by **Download and open**, without touching manual downloads, unrelated files or
+the default. An optional size limit removes the least recently used completed
+copies created by **Download and open**, without touching manual downloads, unrelated files or
 copies whose contents were edited. An internal index tracks ownership; files
 that have been moved or whose contents changed are no longer cleanup candidates.
-Transfers in progress and newly completed copies are protected for one minute so the default
-application can consume them. Usage may briefly exceed the limit, including a
+Transfers in progress and recently used or completed copies are protected for
+one minute so the default application can consume them. Usage may briefly exceed the limit, including a
 single oversized file; periodic cleanup runs while Zerus is open and on its next
 start. Enabling or reducing a limit requires confirmation. Cleanup and inventory
 run outside the UI thread.
@@ -1056,9 +1161,10 @@ Polling and inspection never edit native drafts. The exact form payload and
 matching native acknowledgement determine delivery; uncertain attempts are
 never replayed automatically.
 
-With Claude Code 2.1.296 or later on Linux and macOS, hgs also registers its
-own `PermissionRequest` hook for AskUserQuestion, `hgs __state answer-channel`,
-beside its usual hooks.
+With Claude Code 2.1.296 or later on Linux, macOS and Windows, hgs also
+registers its own `PermissionRequest` hook for AskUserQuestion and tool approvals,
+`hgs __state answer-channel`, beside its usual hooks. The entry an earlier hgs
+registered for AskUserQuestion alone is widened in place.
 - It waits next to Claude's question panel and is bound to the one exact
   pending question. **Submit** hands the answer to Claude through this hook
   instead of the terminal, so the question can be answered at any terminal
@@ -1072,8 +1178,10 @@ beside its usual hooks.
   further answers are refused until the question is resolved in Terminal.
 - An answer, decline or cancellation in Terminal ends the hook, and so do a run
   change and its one-day deadline.
-- Sessions started before the hook was registered, Windows and other agents keep
-  Terminal delivery.
+- Sessions started before the hook was registered and other agents keep
+  Terminal delivery. On Windows the hook runs only in Claude Code's exec form;
+  settings that still use the shell form, written for an older Claude Code,
+  keep Terminal delivery. Tool approvals through this hook are described below.
 
 A disabled **Submit** always shows why, including while a saved answer is still
 loading.
@@ -1105,14 +1213,20 @@ larger Terminal.
 
 Claude keeps no scrollback for a question or approval panel taller than its
 pane, so a long question or command can lose its title and beginning
-everywhere. A session no client views keeps tmux's default 80x24 size. While a
+everywhere. Kimi question dialogs and Kimi 2.1's startup folder trust prompt
+can lose their title the same way when their disclosure is long. Kimi 2.2
+pages its trust disclosure, or asks for a larger terminal, when its pane is
+short; Zerus offers the trust choice only once the whole disclosure shows on
+one page, and never chooses for you. A session no client views keeps tmux's
+default 80x24 size, and so does a pane of the Windows session host. While a
 recorded question or permission request waits and such a pane shows a clipped
 panel, Zerus makes that pane taller, doubling its height up to 192 rows without
-changing its width, until Claude redraws the complete panel. The exact request match still decides; the next
-client that attaches sets the size again. A pane a client views keeps that
-client's size, so its clipped panel stays in Terminal. Only a question listing,
-such as `hgs inspect`, grows a pane, and never while an answer to that run
-drives it: both hold the run's answer lock.
+changing its width, until the agent redraws the complete panel. The exact
+request match still decides; the next client that attaches sets the size
+again. A pane a client views keeps that client's size, so its clipped panel
+stays in Terminal, as it does under a Windows session host older than this
+behavior. Only a question listing, such as `hgs inspect`, grows a pane, and
+never while an answer to that run drives it: both hold the run's answer lock.
 
 Claude tool approvals keep the session at **Needs approval** and appear in
 Activity while Claude shows its chooser. When the complete panel matches the
@@ -1131,12 +1245,52 @@ shows either, and for an approved tool that is not a Bash command, the session
 stays at **Needs approval** until Claude's next event. Only a session waiting
 for such a request reads its terminal for this.
 
+While hgs's `PermissionRequest` hook waits beside a main-agent approval, the
+card answers through it, so a clipped panel no longer needs a larger Terminal.
+- The hook is bound to one exact request: the saved conversation, and the one
+  active tool call whose tool and input equal the request when the hook
+  starts. Without exactly one such call, the request is answered on screen as
+  above; a later identical call is another request.
+- A paused session, a provider error, or a terminal that no longer belongs to
+  the agent never lets a decision go through the hook.
+- Claude sends the hook no signal for an answer in Terminal, so the card and
+  the hook act only while Terminal still shows a chooser. A complete panel must
+  be this request.
+- The card always shows the whole request the hook answers: the Bash command,
+  its description and any other field, or the whole input of another tool.
+- Claude's own options appear only when a complete panel shows exactly that
+  operation. That means the main agent's Bash command, with its description if
+  any and no other field, and no other active Bash call. A file name or host
+  proves too little. For example, a Read of another file with the same name may
+  be queued in front of this one.
+- Any other complete panel is answered on the screen as above, acting on what
+  it shows. A clipped panel gives **Yes** and **No**. An unreadable terminal
+  gives no hook card.
+- A visible safety warning of any kind must belong to this request's command,
+  through a proven panel or the visible end of the command in a clipped one.
+  Otherwise there is no hook card.
+- **Yes** allows this one tool call without changing any permission setting.
+  **No** ends Claude's turn as in Terminal. **Tell Claude what to do instead**
+  denies the call with your message, and Claude continues without it.
+- Options that reach beyond this request go only through the verified panel,
+  with the second **Confirm**. A **Yes** or **No** that the hook does not take
+  within three seconds also goes through a verified panel; feedback it does not
+  take is not sent.
+- A decision the hook has taken is never sent again. Until Claude confirms it,
+  the card stays locked and is answered in Terminal.
+- `hgs answer` receipts report `transport` `claude_hook` or `claude_tui`.
+- Automatic approvals use the hook only for a card whose complete Bash panel
+  shows exactly that operation, with the same one-time choice.
+- Subagent and workflow requests keep the screen path. Claude 2.1.296 runs
+  subagents in the background and shows their requests outside the main screen.
+
 Claude's Bash safety confirmations, including warnings about possibly empty
 paths in `rm` commands, also appear in Activity with the native warning text.
 A visible safety confirmation makes the session **Needs approval** even if
 its permission hook was not recorded, and ordinary message sending waits for
 the decision. Without a matching permission request, or when the full command
-stays clipped, the card offers **Open Terminal**. With a complete matching request,
+stays clipped and no permission hook waits for it, the card offers **Open
+Terminal**. With a complete matching request,
 Activity can submit the native **Yes** or **No** choice. Claude's unattended
 denial countdown stays visible without replacing the request as it ticks.
 Desktop keeps the card's scroll, chosen option and review delay through these
@@ -1165,6 +1319,27 @@ only while Terminal shows exactly that chooser, using its number key and, for
 Revise, pasting the feedback before Enter; Kimi's recorded decision, including
 the exact feedback, confirms delivery. A clipped or different chooser, or one
 already in Revise feedback mode, stays read-only with **Open Terminal**.
+
+Other Kimi tool approvals also appear in Activity, with the complete request from
+Kimi's wire. Kimi's hooks cannot approve, so Zerus answers only in Kimi's own
+panel, and only for a Bash command: the panel must draw that exact command,
+working directory, description and danger warning row by row, wrapped as Kimi
+wraps it, and the complete history of every agent of the conversation may hold
+no other unresolved Kimi request, however old: nothing proves that Kimi no
+longer shows one. A history longer than 8 MiB (4 MiB for another agent), a
+record Kimi is still writing, a line that is not a JSON object with one string
+type, an interaction record without its ID or of a kind Kimi does not write,
+or a repeated request ID keeps the approval read-only. Types and IDs are
+compared as decoded JSON. Every key and pasted feedback line first finds the same
+unresolved request, with its active tool call, in the same run, process and
+pane. The
+choices are Kimi's: **Approve once**, **Approve for this session**, **Reject** and
+**Reject with feedback**. The session choice asks for confirmation: Kimi then
+stops asking about that exact command and also approves every other request
+already waiting with the same action, which shows only a command's first 50
+characters. Kimi's recorded decision confirms delivery. Other tools, commands
+Zerus cannot draw exactly, a narrow or clipped panel, and an unverifiable history
+stay read-only with **Open Terminal**. Automatic approvals never answer Kimi.
 
 Claude Code can also ask its own questions without an agent tool call, such as
 whether to switch models after a safeguard stop. Activity shows the question and
@@ -1240,7 +1415,12 @@ Terminal.
 Optional Codex questions preserve the regular composer and support **Skip**.
 When Codex's own question panel is open, Zerus answers or skips there. Codex's
 animated working status above the panel does not block an answer; any change
-to the panel itself does.
+to the panel itself does. An open panel taller than its pane keeps its title
+and scrolls the answers, naming the visible row in its key hints (`option 1/6`).
+In a pane no client views, a question listing grows the pane as it does for
+Claude until the whole list shows; a title taller than the pane stays in
+Terminal. A long answer wraps in Codex's Other field, and Zerus compares that
+field, wrapped rows joined, with the text it pasted.
 Queue arrows navigate optional requests from newest to oldest while retaining
 answers and the current multipart section. A required approval temporarily takes
 priority. Confirmed answers appear as **You (answer)** in Activity. Codex optional
@@ -1265,7 +1445,11 @@ can allow selection without creating a conversation. Startup prompts, drafts,
 unconfirmed resume and an already submitted first message block that operation.
 Unverified states fall back to Terminal with an explanation.
 A choice that the agent's status line already shows is confirmed without typing
-anything into Terminal.
+anything into Terminal. A change that fails after the agent visibly read every
+typed key and returned to its empty prompt leaves nothing unconfirmed, so another
+change or a message can follow, including a new session's first message. When the
+agent has not reacted to a typed key, further changes and messages wait for its
+next native event: finish or cancel the change in Terminal and send a message there.
 
 Codex model choices use the selected account's `models_cache.json` and sort by
 ascending signed 32-bit `priority`, preserving source order for ties, as in
@@ -1329,7 +1513,11 @@ confirmation: Zerus presses Esc once, as in Terminal, so an approval is denied a
 a question stays unanswered. It runs `/clear` only after the chooser closed and the
 empty native prompt is verified, and never repeats an uncertain attempt. Startup
 choices such as resume, permission mode and folder trust are answered in Activity
-instead. DeepSeek context reset is unavailable until
+instead. Claude reports no hook when **Stop** ends its turn, so the session stays
+**Interrupted** until its next message. **Clear session** is available there once
+no tool or subagent still works and the empty native prompt is verified, as for
+that message; a native draft keeps it unavailable and is named as the reason.
+Compaction still waits for Ready. DeepSeek context reset is unavailable until
 its native Session Controller provides the supported operation. A confirmed clear
 adds an amber **Session cleared** boundary to Activity and keeps the earlier local
 timeline above it: the agent no longer sees that history, but you can still read
@@ -1477,7 +1665,7 @@ and remote folders, including ordinary non-Git directories. The desktop folder
 browser offers **New folder** on the selected remote computer. Enter only the
 child folder name directly in the list and press **Create** or Enter; Escape
 cancels the inline entry. The list context menu and Ctrl+Shift+N (Command+Shift+N
-on macOS) open the same entry. The arrow beside **New folder** offers a separate
+on macOS) open the same entry. The **Dialog…** button beside **New folder** opens a separate
 name-only dialog with the parent shown above it. A missing path entered in the
 browser supplies that form's parent and initial name; the parent must already
 exist. Once
@@ -1837,9 +2025,14 @@ not ownership evidence. Automatic cleanup has bounded checks and never changes
 a successful archive into a failed termination. A lost removal acknowledgement
 is reported as unconfirmed, with no automatic replay.
 
-The desktop reports successful automatic cleanup, or keeps **Review remaining
-worktree…** with the reason for keeping it after Terminate/Archive. This action
-does not expire after a minute. Archives keep the exact branch/head needed to
+The desktop reports successful automatic cleanup, or keeps **Review worktree:
+<folder>** after Terminate/Archive (**Check worktree:** when the outcome is
+unconfirmed). This global reminder names the retained checkout; its tooltip and
+accessible description identify the source session, computer, full folder and
+reason. It can remain while another session is selected and does not expire
+after a minute. The action is hidden while another known session or a new run
+uses the folder. Review still checks the current files and requires explicit
+confirmation before removal. Archives keep the exact branch/head needed to
 recreate an automatically removed checkout on explicit **Restore**; a changed
 branch or occupied destination is refused. Browsing and dry runs never recreate
 a folder. Plain Pause never cleans up.
@@ -1989,6 +2182,12 @@ or revoke for another relay or workspace, and a code for another workspace is
 never shown. A revocation that fails or cannot be confirmed stays reported until
 **Refresh**; it is never retried automatically.
 
+On Windows, these phone-management commands pass a nonempty `CURL_CA_BUNDLE`
+path explicitly to curl's `--cacert`, so Schannel verifies the relay using that
+PEM CA bundle. If the variable is absent or empty, curl keeps its default
+trust behavior. An invalid bundle or failed certificate verification refuses
+the request; there is no fallback to an unverified connection.
+
 Multiple machine filters narrow both sessions and content search. Label color,
 Bright/Soft mode and appearance previews are local. Color pickers cancel on an
 outside click or Escape; only explicit confirmation saves a color. Project
@@ -2134,6 +2333,10 @@ running, and `hgs [@host] account start native-opencode` starts it explicitly
 official user install, `~/.opencode/bin`, is discoverable from GUI, service and
 SSH launches; an `opencode` found earlier on PATH keeps precedence.
 
+`hgs [@host] account favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID` stars a model on that computer (at most 64; stored in `opencode-favorites.json` beside the account catalog). A retried request identity returns its first change, with today's favorites list.
+
+`hgs [@host] account models native-opencode [--location DIR] --json` lists every available model of that computer and folder (connected providers only, at most 10,000 models and 4 MiB; `models_truncated` reports a cut). It never starts OpenCode; with the service stopped it reports `not_running` and, for the home folder, the last known short list.
+
 <a id="deepseek"></a>
 
 ## Official DeepSeek Harness
@@ -2269,7 +2472,10 @@ episode returns to **Recovery in progress** with the same attempt count: nothing
 further is scheduled or delivered while it works, and its answer completes the
 episode. An account has one recovery request in flight at a time, until the agent
 accepts the continuation and makes progress, so a long working turn does not hold
-the account's other sessions at **Waiting to retry**.
+the account's other sessions at **Waiting to retry**. From that progress the job
+records `resumed_at`, and desktop and mobile show the turn as ordinary work rather
+than **Recovery in progress**. The episode stays open until the turn ends, so a
+further provider failure in that turn reschedules on the same attempt budget.
 
 Provider failures replace Working or Compacting with a specific state such as
 **Usage limit reached**, **Model at capacity** or **Sign-in failed** and appear
@@ -2575,6 +2781,9 @@ starts a daemon and clamps all its threads below ordinary CPU load, niced load
 included: a busy machine then starves the whole window until the main-thread
 watchdog aborts it, and no QoS request from inside the process lifts the clamp.
 `launchctl print "gui/$(id -u)/com.hgdev.hgs-tray"` shows `spawn type = interactive`.
+At startup the GUI reads the highest priority its main thread may reach: a login item
+(`XPC_SERVICE_NAME` `com.hgdev.hgs-tray`) limited below 31 offers **Fix login item**,
+which runs the bundled `zerus-setup --autostart` only after confirmation.
 Finder, the Dock and Spotlight start the bundle without the LaunchAgent's `--hgs`
 and with PATH `/usr/bin:/bin:/usr/sbin:/sbin`; the desktop then finds the CLI in
 the standard install directories listed under **Desktop option** below.
@@ -2731,11 +2940,12 @@ checks take longer than half a second. Settings are in
 `%APPDATA%\hgdev\hgs-tray.ini`, with drafts beside it, and one instance runs per
 user. When the local box reports `local_sessions: false`, the app offers remote
 machines only: in New session, Overview, the tray menu, Accounts, Projects and
-search. The Machines page lists this computer as a control console without SSH
-settings, with **Enable local sessions** (`hgs.exe session-host install`, after a
-confirmation), and shows the session host's state, PID, ConPTY, integrity level
-and Windows session in both modes. Without remote machines, New session, Accounts
-and automatic recovery send you to Machines: to add a remote machine and, where
+search. The Machines page lists this computer as a control console with
+**Enable local sessions** (`hgs.exe session-host install`, after a
+confirmation). In both modes, this computer's page has no SSH settings or
+actions; it shows the session host's state, PID, ConPTY, integrity level and
+Windows session. Without remote machines, New session, Accounts and automatic
+recovery send you to Machines: to add a remote machine and, where
 Machines offers **Enable local sessions**, to enable them. New session then has
 **Open Machines**, which only selects this computer there. Automatic recovery
 settings of a control console are saved to the first reachable remote machine, and
@@ -2743,9 +2953,16 @@ it is listed at most once every 15 seconds. With local sessions enabled, New
 session and Accounts offer this computer without DeepSeek and OpenCode, the shell
 entry is **Run PowerShell**, voice messages to its sessions are disabled with the
 reason as the tooltip, and it is listed at most once every 5 seconds. In both modes,
-Settings → Mobile connection is hidden and no desktop presence is recorded.
-Attention notices are tray notifications with a taskbar badge. A start without
-options opens the workspace, because Windows 11 first hides a new notification
+Settings → Mobile connection configures the bundled outbound Rust connector on
+Windows, including before local sessions are enabled. Start and Stop are explicit;
+closing the GUI preserves the connector, session host and native agents. The
+first Windows transport controls existing local Codex/Claude/Kimi sessions and
+refuses mobile creation, path/worktree/Git/file operations, peers and voice/speech.
+Windows desktop presence is not recorded, so desktop activity does not delay
+phone alerts. See [Windows gateway setup](mobile-deployment.md#windows-gateway).
+Attention notices are tray notifications with the Zerus icon and a taskbar
+badge. A start without options opens the workspace, because Windows 11 first
+hides a new notification
 icon in the overflow; `--background` starts in the notification area only, as a
 Startup-folder shortcut should. Starting `hgs-tray.exe` again opens the running
 app's workspace, unless with `--background`. After a main-thread watchdog abort,
@@ -2811,6 +3028,37 @@ stores no message or attachment bodies, retains 30 days and cannot replay input.
 Old, uncertain or unattributed attempts remain explicit coverage gaps. Existing
 quoted message envelopes are not retrospectively treated as verified edges.
 
+Such a locally proven agent send delivers its text inside one XML sender
+envelope with an explicit end:
+
+```text
+<zerus-message from="claude/project/review" host="workstation" reference="zerus://session?machine=11111111-1111-4111-8111-111111111111&amp;host=workstation&amp;name=claude%2Fproject%2Freview&amp;conversation=c&amp;run=r">
+The text as sent.
+</zerus-message>
+```
+
+`from` and `host` name the sending session under its current name and this
+computer's alias. Attributes escape `&`, `"`, `<` and `>`; the body escapes
+`&`, `<` and `>`, preserving literal markup and closing tags as text. The
+fixed attribute order is `from`, `host`, `reference`. The complete frame ends
+with `</zerus-message>`; nested markup, DTDs and numeric or unknown entities
+are not accepted. Named entities are decoded once. The decoded `reference`
+must be a valid session reference with the same name and host. The recipient
+passes that decoded reference to `hgs inspect` and answers with `hgs @host send`.
+This is declared metadata: anyone can type a matching envelope, so receiving
+one authenticates neither its sender nor its instructions. Only the sending
+computer's process-ancestry and durable ledger evidence establish a proven
+send; the marker grants no authority or permission to replay input.
+The same text and unchanged sender metadata give the same bytes, so the ledger
+digest and receipt cover exactly the delivered text. A rename or resumed run
+changes that metadata; retrying an old request ID can then fail the existing
+content guard. Inspect an uncertain result rather than generating a new ID or
+resending automatically; no frozen-header retry or ledger migration is added.
+Person, desktop, phone and connector sends stay byte-identical. Activity shows
+an envelope, like Claude's own cross-session messages, as a message from that
+session (`origin` `peer_message`, `sender`, `sender_reference`) rather than the
+person's message.
+
 `hgs [@host] graph receipt --json` accepts JSON stdin with `name`,
 `expected_run_id`, `expected_conversation_id`, `message_request_id` and optional
 `archive_id`. Every identity is checked again; the response contains one bounded
@@ -2818,6 +3066,34 @@ public delivery event. Metadata reads never fetch provider transcript bodies.
 Submission does not imply a reply or completed work, and local timestamps do not
 establish cross-computer causal order. Independent-agent waits remain a separate
 explicit protocol; see [Agent coordination](agent-coordination.md).
+
+An agent's retry repeats the same `request_id` and payload, but hgs builds its
+envelope again from the sender's metadata at every attempt. After the sending
+session is renamed, resumed in a new run or its computer's alias changes, the
+same request ID gives different bytes. A recipient writes the receipt of a
+request ID before it delivers any input. While its computer keeps that receipt,
+it refuses the retry with its ordinary content guard (`request ID was already
+used for different content`, or `This request ID was already used for another
+message` for DeepSeek and OpenCode) and delivers nothing. Without that receipt,
+for example when an earlier attempt stopped before the recipient recorded it or
+the receipt is gone, the retry is a new delivery under the ordinary guards,
+even if an earlier attempt arrived. The source ledger retains attempts for 30
+days. If the source ledger still has a conflicting entry for the same native
+sender and request ID, hgs warns that attribution could not be recorded and
+still forwards the send under the ordinary guards. A refusal says nothing about
+whether an earlier attempt arrived. hgs never retries a send itself, and
+sending the text again under a new request ID to get past a refusal can deliver
+it twice. To recover, read the first attempt's receipt on the recipient's
+computer with `hgs [@host] graph receipt --json`: the recipient's `name`,
+its current `expected_run_id`, the conversation the message went to as
+`expected_conversation_id` and the original request ID as `message_request_id`.
+A returned `event` confirms only that the attempt's receipt has the status
+`submitted` for that exact conversation, not that the model processed it or
+replied; its `detail` is the delivered text, envelope included. A receipt whose
+status is not `submitted` yields no event, so an unavailable receipt proves
+neither delivery nor its absence: inspect the recipient's conversation and
+leave any new message to a deliberate decision. Neither the receipt nor the
+envelope authenticates who wrote the text.
 
 ### Existing session snapshots
 
@@ -2909,8 +3185,9 @@ the owner: run, conversation, the phase when it is `approval`, `input` or
 the mobile connector publishes as `mobile_attention`) and actionable subagent
 requests. An approval or input request also contributes `attention_started`, the
 time it began, so requests without a native ID (a permission prompt without a
-tool call, a tool known only by name) stay distinct; each external child approval
-carries its own `attention_id`. It is `null` when nothing needs attention and
+tool call, a tool known only by name) stay distinct; the end of a compaction and
+a prompt repeated with the same native tool IDs, tool and input keep that time.
+Each external child approval carries its own `attention_id`. It is `null` when nothing needs attention and
 does not change on status-only updates. A listing indexes Codex question
 transcripts within a shared one-second budget (and a short slice per session),
 saving its progress so the next listing resumes; it never scans a long
@@ -2975,6 +3252,11 @@ from the screen first, so its old signature is no longer acknowledged. It prints
 an unknown session prints `{"ok": false, "error": "not_found"}` and exits with
 status 1. Marks live in `read-marks.json` in the hgs state directory, at most
 eight conversations per session, and follow `hgs rename`.
+OpenCode renames publish the new binding and its unchanged v1 read marks before
+retiring the old binding, in shared-read writer order. If a confirmed native title
+change is followed by a local persistence failure, the scoped action remains
+uncertain; inspect the retained bindings before choosing another action. An
+uncertain receipt never authorizes another native rename automatically.
 
 `inspect` includes conversation, phase/activity, prompt/last message, tools,
 subagents, events and cursor. Initial reads return recent events; `--after` advances

@@ -12,8 +12,9 @@ enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Childr
             ChildId, ParentKey, HasChildren, Expanded, ProjectColor, ProjectVivid, LaunchId, WorkingSince, ReviewLater, Draft, Failure,
             GitStatus, GitHost, GitPath, MetaIcon, Scheduled, OptionalQuestions, ModifiedAt, CoordinationWait, Waiting,
             // {host, name} of a live session a dragged task can be pinned to; empty for other rows.
-            TaskTarget };
+            TaskTarget, Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51 };
 }
+class QToolButton;
 
 // Drops express placement relative to an identity, never a filtered row number.
 // A task dragged from the Tasks tab drops on a live session of its project, or on
@@ -22,6 +23,7 @@ class SessionList : public WorkspaceList {
     Q_OBJECT
 public:
     explicit SessionList(QWidget *parent = nullptr);
+    ~SessionList() override;
     void setActivityAnimationEnabled(bool enabled);
     void syncActivityAnimation();
     bool activityAnimationRunning() const { return m_activityTimer.isActive(); }
@@ -31,12 +33,14 @@ public:
     bool bulkSelecting() const { return m_bulkSelecting; }
     void clearBulkSelection();
     void setSelectionBar(QWidget *bar, bool visible);
+    void syncRowExpandButtons();
     static QString childrenLabel(const QModelIndex &index);
     static QRect childrenControlRect(const QRect &row, const QModelIndex &index, QFont font);
 signals:
     void bulkSelectionChanged();
     void groupToggled(const QString &group);
     void childrenToggled(const QString &parentKey);
+    void rowExpanded(const QString &key);
     void sessionMoved(const QString &identity, const QString &group, const QString &before);
     void groupMoved(const QString &group, const QString &before);
     void dragFinished();
@@ -60,7 +64,12 @@ protected:
     void hideEvent(QHideEvent *) override;
     void resizeEvent(QResizeEvent *) override;
     bool viewportEvent(QEvent *) override;
+    bool event(QEvent *) override;
 private:
+    void scheduleRowExpandButtons();
+    QHash<QPersistentModelIndex, QToolButton *> m_rowExpandButtons;
+    bool m_rowExpandButtonsPending = false;
+    bool m_rowFullLayout = true;
     QRect childrenControlRect(const QListWidgetItem *item) const;
     QStyleOptionViewItem animationOption(const QModelIndex &index) const;
     QList<QPersistentModelIndex> m_visibleWorkingRows;

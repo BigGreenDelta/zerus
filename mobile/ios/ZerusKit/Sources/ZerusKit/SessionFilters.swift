@@ -238,7 +238,7 @@ public enum SessionFilters {
         default: break
         }
         if recovery == "waiting" { return "Waiting to retry" }
-        if recovery == "dispatching" || recovery == "retrying" { return "Retrying" }
+        if recovery == "dispatching" || (recovery == "retrying" && !RecoveryPresentation.resumed(raw.object("recovery"))) { return "Retrying" }
         switch raw.string("phase") {
         case "error": return "Error"
         case "interrupted": return "Interrupted"
@@ -369,6 +369,7 @@ public enum DesktopSessionPalette {
         else if SessionFilters.scheduled(session, online) { kind = .scheduled }
         else if online && SessionFilters.state(session) == "paused" && !SessionFilters.archived(session) { kind = .paused }
         else { kind = .neutral }
+        let displayKind: DesktopBadgeKind = SessionNotificationPreferences.muted(session) && [.attention,.unread].contains(kind) ? .neutral : kind
         let caption: String
         if working { caption = raw.string("phase") == "compacting" ? "Compacting" : (SessionFilters.backgroundIdle(session) ? "Background" : "Working") }
         else if kind == .waiting { caption = SessionFilters.waitingLabel(session, includeProducer: false, compact: true) }
@@ -376,7 +377,7 @@ public enum DesktopSessionPalette {
         else if online && !SessionFilters.archived(session) && !["paused", "stopped"].contains(SessionFilters.state(session)) &&
             raw.string("process_state") != "exited" && !raw.bool("tracked") && raw.string("activity").isEmpty { caption = "Untracked" }
         else { caption = state }
-        return DesktopSessionBadge(caption: caption, kind: kind, additionalUnread: unread && (working || attention))
+        return DesktopSessionBadge(caption: caption, kind: displayKind, additionalUnread: unread && (working || attention))
     }
 
     static func childAttention(_ session: Session, _ online: Bool) -> Bool {
@@ -408,7 +409,8 @@ public enum DesktopSessionPalette {
         if SessionFilters.state(session) == "stopped" || raw.string("process_state") == "exited" { return .neutral }
         if !raw.bool("tracked") && raw.string("activity").isEmpty { return .neutral }
         if ["approval", "input"].contains(phase) { return .attention }
-        if ["waiting", "dispatching", "retrying"].contains(raw.object("recovery")?.string("state") ?? "") { return .neutral }
+        if ["waiting", "dispatching", "retrying"].contains(raw.object("recovery")?.string("state") ?? ""),
+           !RecoveryPresentation.resumed(raw.object("recovery")) { return .neutral }
         if phase == "error" { return .error }
         if ["interrupted", "starting"].contains(phase) { return .neutral }
         if ["compacting", "tool"].contains(phase) || raw.string("activity") == "busy" { return .working }

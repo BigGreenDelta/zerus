@@ -102,6 +102,8 @@ private val Amber = Color(0xFFFFCB7D)
 private val Background = Color(0xFF101517)
 private val Surface = Color(0xFF1A2225)
 private val Muted = Color(0xFF9AACB2)
+/** Desktop's notice violet. */
+private val Notice = Color(0xFFC5A8F5)
 private val Scheme = darkColorScheme(primary = Mint, onPrimary = Background, secondary = Amber,
     background = Background, surface = Surface, surfaceContainer = Surface, onSurface = Color(0xFFE9F0F2),
     onSurfaceVariant = Muted, outline = Color(0xFF354449))
@@ -409,7 +411,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         if (badge.additionalUnread) {
-            val unread = DesktopSessionPalette.colors(DesktopBadgeKind.Unread, dark)
+            val unread = DesktopSessionPalette.colors(if(SessionNotificationPreferences.muted(session)) DesktopBadgeKind.Neutral else DesktopBadgeKind.Unread,dark)
             Surface(color = Color(unread.background), shape = RoundedCornerShape(5.dp)) {
                 Icon(Icons.Default.MarkEmailUnread, "New reply", Modifier.padding(4.dp).size(12.dp), tint = Color(unread.foreground))
             }
@@ -602,6 +604,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val context = LocalContext.current
     var sessionActions by remember { mutableStateOf<Session?>(null) }
     val listState = rememberLazyListState(model.sessionListIndex, model.sessionListOffset)
+    var machineDialog by remember { mutableStateOf(false) }
+    val gitViewport = rememberGitViewport(model.gitStatus, listState,
+        model.storageReady && !model.demo && filter != SessionFilter.Archive && sessionActions == null && !machineDialog)
     val scrollReset = model.sessionScrollReset
     val scrollScope = project?.key?.key.orEmpty()
     var appliedReset by remember { mutableLongStateOf(scrollReset) }
@@ -609,7 +614,6 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         if (appliedReset != scrollReset) { appliedReset = scrollReset; listState.scrollToItem(model.sessionListIndex, model.sessionListOffset) }
     }
     DisposableEffect(listState, scrollScope, scrollReset) { onDispose { model.saveSessionScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, scrollScope, scrollReset) } }
-    var machineDialog by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Column {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -628,7 +632,9 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             }
         } }
         item { OutlinedTextField(model.sessionQuery, { model.changeSessionQuery(it) }, Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text(if(model.sessionFilter==SessionFilter.Archive) "Search archive names and IDs" else "Search sessions and IDs") },
-            leadingIcon = { Icon(Icons.Default.Search, "Search sessions") }, shape = RoundedCornerShape(14.dp)) }
+            leadingIcon = { Icon(Icons.Default.Search, "Search sessions") },
+            trailingIcon = { if (model.sessionQuery.isNotEmpty()) IconButton(onClick = { model.changeSessionQuery("") }) { Icon(Icons.Default.Close, "Clear search") } },
+            shape = RoundedCornerShape(14.dp)) }
         item { Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             SessionFilter.entries.forEach { filter ->
                 val selected = model.sessionFilter == filter
@@ -669,17 +675,21 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             if (!collapsed) items(group.sessions, key = { "session:${it.target.key}" }) { session ->
                 val online = SessionFilters.online(session, model.machines)
                 val machine = model.machines.find { it.connectionId == session.target.connectionId && it.id == session.target.computerId }
+                val gitBadge = rememberGitBadge(model.gitStatus, GitStatusAccessPolicies.candidate(session),
+                    "session:${session.target.key}" in gitViewport)
                 Card(Modifier.sessionCardGestures(RoundedCornerShape(14.dp), onOpen = { model.open(session, preserveProject = true) }, onActions = { sessionActions = session }),
                     colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             ProviderBadge(session.agent, Modifier.size(24.dp))
                             Text(SessionFilters.label(session), Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if(SessionNotificationPreferences.muted(session)) Icon(Icons.Default.NotificationsOff,"Notifications muted on all devices",tint=Muted,modifier=Modifier.size(18.dp))
                             // A reply read on another device needs no badge here.
                             (if (SharedReadPolicies.replyRead(session) || SessionFilters.replyInProgress(session, online)) null else UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
                                 SessionFilters.visibleUnreadReply(session, online)))?.let { unread ->
-                                Surface(color = Mint, shape = CircleShape, modifier = Modifier.semantics { contentDescription = unread.description }) {
-                                    Text(unread.text, Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Background,
+                                val muted = SessionNotificationPreferences.muted(session)
+                                Surface(color = if(muted) Color(0xFF2B343E) else Mint, shape = CircleShape, modifier = Modifier.semantics { contentDescription = unread.description }) {
+                                    Text(unread.text, Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = if(muted) Muted else Background,
                                         style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                                 }
                             }
@@ -690,7 +700,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             Box(Modifier.weight(1f)) { MachineLabel(machine?.name ?: session.target.computerId,colorHex = model.machineColor(MachineKey(session.target.connectionId,session.target.computerId))) }
                             SessionSubagentCounter(model, session, online)
                         }
-                        SessionCheckoutLine(session)
+                        SessionCheckoutLine(session, gitBadge)
                         SessionFilters.archiveDate(session).takeIf { it.isNotBlank() }?.let { archivedDate ->
                             Text("Archived $archivedDate", color = Muted, style = MaterialTheme.typography.labelSmall)
                         }
@@ -886,7 +896,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     LaunchedEffect(target.key, events, questions, ownSendId, model.activityVerified, warning, boundedNotice,
         queueVisible, unreadBoundary, readReady, model.hasNewer, model.olderLoading) {
         if (events.isEmpty() && questions.isEmpty() && raw == null && !model.demo) return@LaunchedEffect
-        val own = events.lastOrNull { it.outgoingId == ownSendId || it.requestId == ownSendId }
+        val own = ConversationViewport.own(events, ownSendId)
         // With no cards below the message, align its bottom to the composer.
         val ownKey = if (own == null) null else if (questions.isEmpty() && !queueVisible) "history:tail" else "event:" + own.id
         val explicitSend = ownSendId.isNotBlank() && ownSendId != follow.ownSendId && ownKey != null
@@ -975,7 +985,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(unread?.let { "${it.text} unread" }.orEmpty(), Modifier.weight(1f),
-                    color = if (unread != null) Mint else Muted, style = MaterialTheme.typography.bodySmall)
+                    color = if (unread != null && SessionNotificationPreferences.parse(raw ?: session.raw,target)?.muted != true) Mint else Muted, style = MaterialTheme.typography.bodySmall)
                 if (offeredQuestionCount > 0) TextButton(onClick = {
                     if (!questionDisplay.expanded) questionQueue.selected?.let { question -> updateQuestionDisplay { it.open(question) } }
                 }) { Text("Questions ($offeredQuestionCount)") }
@@ -1080,6 +1090,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
 
 @Composable internal fun ConversationMessage(target: Target, event: Event, agent: String, outgoing: OutgoingMessage?,
     model: ZerusViewModel, onReview: (OutgoingMessage) -> Unit) {
+    if (event.role == ActivityNotices.ROLE) return ActivityNotice(target, event, model)
     val own = QuestionReplyPresentation.isOwnRole(event.role)
     val parsedReply by produceState<Pair<String, List<PresentedQuestionReply>?>>(event.text to null, event.text, own) {
         value = event.text to if (own) withContext(Dispatchers.Default) { QuestionReplyPresentation.parse(event.text) } else null
@@ -1147,6 +1158,35 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     }
 }
 
+
+/** A message the person did not write, framed like desktop's notice cards (ActivityNotices). */
+@Composable private fun ActivityNotice(target: Target, event: Event, model: ZerusViewModel) {
+    val label = ActivityNotices.label(event.origin, event.sender)
+    var expanded by rememberSaveable(event.id) { mutableStateOf(false) }
+    val files: (ComputerFileReference) -> Unit = { reference ->
+        model.computerFiles.show(target, reference, model.machines.find {
+            it.connectionId == target.connectionId && it.id == target.computerId
+        }?.name.orEmpty().ifBlank { "computer" })
+    }
+    Surface(color = Surface, shape = RoundedCornerShape(17.dp), border = BorderStroke(1.dp, Notice.copy(alpha = .45f)),
+        modifier = Modifier.fillMaxWidth().semantics { contentDescription = label }) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(label, color = Notice, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+            ProvideTextStyle(conversationTextStyle()) { MarkdownText(event.text, fileScope = target.key, onFileReference = files) }
+            if (event.report.isNotBlank()) {
+                TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Hide report" else "Show report") }
+                if (expanded) ProvideTextStyle(conversationTextStyle()) {
+                    MarkdownText(event.report, fileScope = target.key, onFileReference = files)
+                }
+            }
+            AttachmentRows(event.attachments, target, model)
+            if (event.detailTruncated) Text("Message text shortened", color = Amber, style = MaterialTheme.typography.labelSmall)
+            if (event.at > 0) Text(java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date((event.at * 1000).toLong())), color = Muted, style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.align(Alignment.End))
+        }
+    }
+}
 @Composable private fun MessageComposer(model: ZerusViewModel, session: Session, online: Boolean,
     onReview: (Draft) -> Unit, onAttach: (Target) -> Unit, onReviewOutgoing: (OutgoingMessage) -> Unit) {
     val target = session.target
@@ -1216,10 +1256,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         model.sendingBlocked(target) -> "Preparing your message. You can write the next message."
         else -> ""
     }
+    val retainedPreview = !recording && !model.speech.savingRecording && model.speech.draft != null
     Column(Modifier.fillMaxWidth().background(Background).padding(horizontal = 4.dp, vertical = 4.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        // Measure the editor and its controls first. A voice preview uses only the
-        // remaining height, with its controls reachable by scrolling.
+        // A retained preview shares the constrained height with the editor instead
+        // of receiving only what the expanded editor leaves below the open IME.
         if (model.speech.recording && (!model.speech.touchRecording || model.speech.videoRecorder != null) || model.speech.savingRecording || model.speech.draft != null) {
             Box(Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 280.dp)
                 .verticalScroll(rememberScrollState())) { SpeechComposerStatus(model) }
@@ -1249,6 +1290,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             "outgoing:${previous.requestId}" in model.receiptFlights,
             { model.checkOutgoing(previous) }, { onReviewOutgoing(previous) })
         CompactMessageInput(state = editor, placeholder = "Message",
+            modifier = if (retainedPreview) Modifier.weight(1f, fill = false) else Modifier,
+            sharedPreviewSpace = retainedPreview,
             recordingContent = if (recording) ({ SpeechRecordingRow(model.speech) }) else null,
             // Keep an already-open IME session in place during capture. The hidden
             // editor remains locked by the synchronous text-and-selection filter.

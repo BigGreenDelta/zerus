@@ -1,5 +1,6 @@
 #include "UpdateController.h"
 #include "UpdatesWidget.h"
+#include "WindowsUpdateTrust.h"
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
@@ -278,6 +279,67 @@ private slots:
         UpdateController restarted(nullptr,executable.fileName(),fetch);QTRY_COMPARE(restarted.installation().kind,QString("portable"));QCOMPARE(restarted.channel(),QString("nightly"));
 #else
         QSKIP("Only Windows builds are portable");
+#endif
+    }
+    void installerBuildsStayLinkOnly(){
+        // installation.json as scripts/windows_installer.py writes it.
+        const QByteArray record="{\n  \"schema\": 1,\n  \"kind\": \"installer\",\n  \"product\": \"Zerus\",\n  \"version\": \"0.45.0\",\n"
+                                "  \"product_version\": \"0.45.0\",\n  \"source_commit\": \"cccccccccccccccccccccccccccccccccccccccc\"\n}\n";
+        QVERIFY(UpdateController::installerRecord(record));
+        for(const QByteArray &other:{QByteArray(),QByteArray("[]"),QByteArray("{\"schema\":2,\"kind\":\"installer\",\"product\":\"Zerus\"}"),
+                                     QByteArray("{\"schema\":1,\"kind\":\"portable\",\"product\":\"Zerus\"}"),QByteArray("{\"schema\":1,\"kind\":\"installer\",\"product\":\"Other\"}"),
+                                     QByteArray("{\"schema\":\"1\",\"kind\":\"installer\",\"product\":\"Zerus\"}"),record.left(record.size()-3),
+                                     QByteArray("{\"schema\":1,\"kind\":\"installer\",\"product\":\"Zerus\",\"pad\":\"")+QByteArray(UpdateController::installerRecordLimit,'x')+"\"}"})
+            QVERIFY2(!UpdateController::installerRecord(other),other.left(80).constData());
+        auto stable=UpdateController::parseFeed(QJsonDocument(stableRaw("0.42.3")).toJson(),"stable");QVERIFY(stable.valid);
+        auto nightly=UpdateController::parseFeed(QJsonDocument(nightlyRaw("0.43.0.r10.gaaaaaaa.n5")).toJson(),"nightly");QVERIFY(nightly.valid);
+        DesktopUpdateFeed dev;dev.valid=true;dev.buildNumber=50;dev.version="0.42.0 (dev 50)";
+        const DesktopInstallation installer{"installer",{},{}};
+        // Like the portable zip: release page links only, no command, no download, no Dev builds.
+        auto guide=UpdateController::installationGuide(installer,"stable",stable);
+        QVERIFY(guide.ownership.contains("installed for this user by the Zerus installer"));QVERIFY(guide.ownership.contains("does not update itself yet"));
+        QVERIFY(guide.command.isEmpty());QVERIFY(guide.copyName.isEmpty());QVERIFY(guide.instructions.isEmpty());
+        QVERIFY(UpdateController::updateCommand(installer,"stable").isEmpty());QVERIFY(UpdateController::downloadUrl(installer,stable,"windows").isEmpty());
+        QCOMPARE(UpdateController::comparisonMessage(installer,stable,"0.42.2",0,false),QString("Zerus 0.42.3 is available. Download its Windows zip from the release page."));
+        QCOMPARE(UpdateController::comparisonMessage(installer,stable,"0.42.3",0,false),QString("This Windows build does not update itself yet, and no newer stable release is published."));
+        QVERIFY(UpdateController::comparisonMessage(installer,nightly,"0.42.3",0,false).contains("Download its Windows zip"));
+        QVERIFY(UpdateController::comparisonMessage(installer,dev,"0.42.0",0,false).contains("stable or nightly channel"));
+#ifdef Q_OS_WIN
+        // The installed folder: the zip's files and installation.json.
+        QTemporaryDir dir;QVERIFY(dir.isValid());
+        for(const char *file:{"hgs-tray.exe","build-info.json"}){QFile created(dir.filePath(file));QVERIFY(created.open(QIODevice::WriteOnly));}
+        {QFile written(dir.filePath("installation.json"));QVERIFY(written.open(QIODevice::WriteOnly));written.write(record);}
+        UpdateController installed(nullptr,dir.filePath("hgs-tray.exe"),[](const QNetworkRequest &){return new FixtureReply;});
+        QTRY_COMPARE(installed.installation().kind,QString("installer"));QVERIFY(installed.installation().package.isEmpty());QCOMPARE(installed.channel(),QString("stable"));
+        // Any other record leaves the folder a portable build.
+        {QFile written(dir.filePath("installation.json"));QVERIFY(written.open(QIODevice::WriteOnly|QIODevice::Truncate));written.write("{\"schema\":1,\"kind\":\"portable\",\"product\":\"Zerus\"}");}
+        UpdateController other(nullptr,dir.filePath("hgs-tray.exe"),[](const QNetworkRequest &){return new FixtureReply;});
+        QTRY_COMPARE(other.installation().kind,QString("portable"));
+#endif
+    }
+    void windowsUpdateTrustIsDormantAndStrict(){
+        // No build carries trust anchors until the owner creates them: nothing it downloads ever runs.
+        QVERIFY(WindowsUpdateTrust::manifestKey().isEmpty());QVERIFY(WindowsUpdateTrust::expectedPublisher().isEmpty());
+        QVERIFY(!WindowsUpdateTrust::selfUpdateConfigured());
+        // A test key and its ECDSA P-256 SHA-256 signature (r, s) of the exact bytes below.
+        const QByteArray key=QByteArray::fromBase64("rGUNrSAoldAjUhZby9kLyh4p6ZKsQgleulLuuTlcnfspM5Rom5AN3xh6a+CdKq5tMNXhHkbqk55OgqRD0pyhKQ==");
+        const QByteArray signature=QByteArray::fromBase64("0xylcsDMKZ7jNOvjMdpzCzfDmPA+udnjx93wk4BAEbswyZuqkCVdqbByrYkBQODoHBH8ulWjKnwf7Ff/gDRdRA==");
+        const QByteArray data=R"({"schema":1,"product":"zerus","platform":"windows","channel":"stable","version":"0.45.0"})";
+        QCOMPARE(key.size(),64);QCOMPARE(signature.size(),64);
+        QByteArray tampered=data;tampered.replace("0.45.0","0.45.1");
+        QByteArray forged=signature;forged[63]=char(forged[63]^1);
+        QByteArray otherKey=key;otherKey[10]=char(otherKey[10]^1);
+        QVERIFY(!WindowsUpdateTrust::verifyManifest(tampered,signature,key));QVERIFY(!WindowsUpdateTrust::verifyManifest(data,forged,key));
+        QVERIFY(!WindowsUpdateTrust::verifyManifest(data,signature,otherKey));QVERIFY(!WindowsUpdateTrust::verifyManifest(data,signature.left(63),key));
+        QVERIFY(!WindowsUpdateTrust::verifyManifest(data,signature,key.left(32)));QVERIFY(!WindowsUpdateTrust::verifyManifest(data,{},{}));
+        // An unsigned file, such as this suite, and a missing one have no publisher.
+        QVERIFY(WindowsUpdateTrust::authenticodePublisher(QCoreApplication::applicationFilePath()).isEmpty());
+        QVERIFY(WindowsUpdateTrust::authenticodePublisher(QDir::temp().filePath("zerus-missing-installer.exe")).isEmpty());
+#ifdef Q_OS_WIN
+        QVERIFY(WindowsUpdateTrust::verifyManifest(data,signature,key));
+#else
+        // CNG exists on Windows only; elsewhere nothing verifies.
+        QVERIFY(!WindowsUpdateTrust::verifyManifest(data,signature,key));
 #endif
     }
     void portableBuildsNeverTakeDevBuilds(){
@@ -582,6 +644,54 @@ private slots:
         QVERIFY(parentPid>0);QVERIFY(parentPid!=pid);
         const auto open=descriptors(dir.path()+"/fds");const auto shown=QDebug::toString(open).toLatin1();
         QVERIFY2(open.contains(1),shown.constData());for(int fd:creating.ends)QVERIFY2(!open.contains(fd),shown.constData());
+#endif
+    }
+    void oldLoginItemIsRecognizedByItsPriorityLimit(){
+        const QString label="com.hgdev.hgs-tray";
+        // Measured under launchd: no ProcessType (or Standard) stops every thread at 20,
+        // Background and Adaptive at 4; Interactive, like an app started by Finder, at 63.
+        QVERIFY(UpdateController::launchedDeprioritized(20,label));
+        QVERIFY(UpdateController::launchedDeprioritized(4,label));
+        QVERIFY(!UpdateController::launchedDeprioritized(63,label));
+        QVERIFY(!UpdateController::launchedDeprioritized(31,label));
+        QVERIFY(!UpdateController::launchedDeprioritized(-1,label));
+        // Only Zerus's own login item: LaunchServices names apps "application.<id>.<n>.<n>".
+        QVERIFY(!UpdateController::launchedDeprioritized(20,"application.com.hgdev.hgs-tray.1234.5678"));
+        QVERIFY(!UpdateController::launchedDeprioritized(20,{}));
+#ifdef Q_OS_MACOS
+        QVERIFY(UpdateController::threadMaxPriority()>0);
+        QTemporaryDir dir;QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        const auto restore=qScopeGuard([]{UpdateController::setLaunchForTests(-1);});
+        const QString executable=dir.path()+"/Zerus.app/Contents/MacOS/hgs-tray";
+        UpdateController::setLaunchForTests(20,label);
+        UpdateController clamped(nullptr,executable);QVERIFY(clamped.loginItemDeprioritized());
+        UpdateController::setLaunchForTests(63,label);
+        UpdateController interactive(nullptr,executable);QVERIFY(!interactive.loginItemDeprioritized());
+#else
+        QCOMPARE(UpdateController::threadMaxPriority(),-1);
+#endif
+    }
+    void loginItemUpdateOnlyRunsTheBundledSetup(){
+#ifndef Q_OS_UNIX
+        QSKIP("zerus-setup is part of the macOS bundle");
+#else
+        QTemporaryDir dir;QVERIFY(dir.isValid());QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.path());QSettings().clear();QSettings().setValue("updates/automatic",false);
+        const QString contents=dir.path()+"/Zerus.app/Contents",setup=contents+"/Resources/bin/zerus-setup";
+        QVERIFY(QDir().mkpath(contents+"/MacOS"));QVERIFY(QDir().mkpath(contents+"/Resources/bin"));
+        UpdateController controller(nullptr,contents+"/MacOS/hgs-tray");
+        // A source installation has no zerus-setup: say what to run instead.
+        QVERIFY(controller.loginItemSetup().isEmpty());
+        QString result=QStringLiteral("pending");controller.updateLoginItem([&](const QString &error){result=error;});
+        QVERIFY2(result.contains("tray/install.sh"),qPrintable(result));
+        tool(setup,"#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/arguments\"\n");
+        QCOMPARE(controller.loginItemSetup(),setup);
+        result=QStringLiteral("pending");controller.updateLoginItem([&](const QString &error){result=error;});
+        QTRY_COMPARE(result,QString());
+        QFile arguments(contents+"/Resources/bin/arguments");QVERIFY(arguments.open(QIODevice::ReadOnly));QCOMPARE(arguments.readAll(),QByteArray("--autostart\n"));
+        // A refusal reaches the person in zerus-setup's own words, from its stderr.
+        QVERIFY(QFile::remove(setup));tool(setup,"#!/bin/sh\necho 'zerus-setup: the login item belongs to another installation' >&2\nexit 2\n");
+        result=QStringLiteral("pending");controller.updateLoginItem([&](const QString &error){result=error;});
+        QTRY_VERIFY(result!="pending");QVERIFY2(result.contains("belongs to another installation"),qPrintable(result));
 #endif
     }
     void canonicalOwnershipAsync(){

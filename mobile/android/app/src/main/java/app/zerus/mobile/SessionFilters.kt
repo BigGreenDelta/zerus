@@ -154,7 +154,8 @@ object SessionFilters {
             raw.string("phase") == "approval" -> "Needs approval"
             raw.string("phase") == "input" -> "Needs input"
             raw.optJSONObject("recovery")?.string("state") == "waiting" -> "Waiting to retry"
-            raw.optJSONObject("recovery")?.string("state") in listOf("dispatching", "retrying") -> "Retrying"
+            raw.optJSONObject("recovery")?.string("state") in listOf("dispatching", "retrying") &&
+                !RecoveryPresentation.resumed(raw.optJSONObject("recovery")) -> "Retrying"
             raw.string("phase") == "error" -> "Error"
             raw.string("phase") == "interrupted" -> "Interrupted"
             raw.string("phase") == "compacting" -> "Compacting"

@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Session mutations where no golden vector or black-box test reaches:
 //! Python's KeyError and TypeError paths, which become the generic receipt,
 //! the stop rule of divergence h for a write that never started, and the
@@ -262,6 +263,28 @@ async fn remove_queued_is_a_journaled_session_action_with_exact_identity() {
     let result = harness.run("remove_queued", bad, payload).await;
     assert_eq!(result["state"], "failed", "{result}");
     assert_eq!(harness.calls().len(), before);
+}
+
+/// The `remove_queued` message ID shape every layer shares with hgs.
+const QUEUED_MESSAGE_IDS: &str =
+    include_str!("../../../../tests/fixtures/opencode-queued-message-ids.json");
+
+#[test]
+fn the_shared_fixture_decides_every_queued_message_id_shape() {
+    let fixture: Value = serde_json::from_str(QUEUED_MESSAGE_IDS).unwrap();
+    let accepts = |id: &Value| {
+        let mut payload = identity();
+        payload["request_id"] = json!("r");
+        payload["message_id"] = id.clone();
+        validate_for_session("remove_queued", "opencode/p/t", &payload, "r").is_ok()
+    };
+    for (kind, valid) in [("accept", true), ("reject", false)] {
+        let ids = fixture[kind].as_array().unwrap();
+        assert!(!ids.is_empty(), "{kind}");
+        for id in ids {
+            assert_eq!(accepts(id), valid, "{id}");
+        }
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -9,12 +9,13 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+
+from tray_update_fixture import OwnedChildren, StartControl, cleanup
 
 REPO = Path(__file__).resolve().parents[1]
 UPDATER = REPO / 'tray/update-installed.py'
@@ -52,31 +53,50 @@ except FileNotFoundError:
 server.bind(path)
 server.listen()
 with (root / 'started').open('a') as log:
-    log.write(f'{{VARIANT}} {{os.getpid()}}\n')
+    log.write(f'{{VARIANT}} {{os.getpid()}} {{os.environ["TRAY_LAUNCH_TOKEN"]}}\n')
 while True:
     connection, _ = server.accept()
     with (root / 'activations').open('a') as log:
         log.write(connection.recv(64).decode())
     connection.close()
 '''
-SYSTEMCTL = r'''#!/bin/sh
-echo "$*" >> "$TRAY_FIXTURE/systemctl"
-case "$*" in
-  "--user start hgs-tray.service") setsid "$HOME/.local/bin/hgs-tray" </dev/null >/dev/null 2>&1 & ;;
-  # The installer test runs an enabled, active unit.
-  "--user is-active hgs-tray.service") echo active ;;
-  "--user is-enabled hgs-tray.service") echo enabled ;;
-esac
-exit 0
+SYSTEMCTL = r'''#!{python}
+import os, pathlib, socket, sys, time
+with (pathlib.Path(os.environ['TRAY_FIXTURE']) / 'systemctl').open('a') as log:
+    log.write(' '.join(sys.argv[1:]) + '\n')
+if sys.argv[1:] == ['--user', 'start', 'hgs-tray.service']:
+    end = time.monotonic() + 3
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(3)
+        client.connect(str(pathlib.Path(os.environ['TRAY_FIXTURE']) / 'start.sock'))
+        client.sendall(b'start\n')
+        client.shutdown(socket.SHUT_WR)
+        reply = b''
+        while len(reply) < 3:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('fake service reply expired')
+            client.settimeout(remaining)
+            part = client.recv(3 - len(reply))
+            if not part:
+                raise RuntimeError('fake service reply is incomplete')
+            reply += part
+        if reply != b'ok\n':
+            raise RuntimeError('fake service start refused')
+elif sys.argv[1:] in (['--user', 'is-active', 'hgs-tray.service'],
+                      ['--user', 'is-enabled', 'hgs-tray.service']):
+    print('active' if sys.argv[2] == 'is-active' else 'enabled')
 '''
 
 
 @unittest.skipUnless(sys.platform.startswith('linux'), 'the fake GUI is identified through /proc')
 class TrayUpdate(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='zerus-tray-update-')
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Short even with macOS's canonical /private/tmp Unix socket prefix.
+        self.root = Path(tempfile.mkdtemp(prefix='ztu-', dir='/tmp'))
+        self.owned = self.control = None
+        self.addCleanup(self.stop_all)
+        self.root = self.root.resolve()
         self.home = self.root / 'home'
         self.bin = self.root / 'bin'
         self.builds = self.root / 'builds'
@@ -84,14 +104,16 @@ class TrayUpdate(unittest.TestCase):
             path.mkdir(parents=True)
         self.installed = self.home / '.local/bin/hgs-tray'
         self.drafts = self.home / '.config/hgdev/hgs-tray.conf.drafts'
-        self.script(self.bin / 'systemctl', SYSTEMCTL)
+        self.script(self.bin / 'systemctl', SYSTEMCTL.format(python=sys.executable))
         for tool in ('qdbus6', 'busctl'):
             self.script(self.bin / tool, '#!/bin/sh\nexit 1\n')
         self.env = dict(os.environ, HOME=str(self.home), TMPDIR=str(self.root / 'tmp'),
                         XDG_CONFIG_HOME=str(self.home / '.config'), TRAY_FIXTURE=str(self.root),
                         PATH=f'{self.bin}{os.pathsep}{os.environ["PATH"]}',
                         HGS_TRAY_QUIT_TIMEOUT='10', HGS_TRAY_START_TIMEOUT='4')
-        self.addCleanup(self.stop_all)
+        self.owned = OwnedChildren(self.env)
+        self.control = StartControl(self.root / 'start.sock', lambda: self.owned.start(self.installed))
+        self.control.open()
 
     def script(self, path, text):
         path.write_text(text)
@@ -109,22 +131,12 @@ class TrayUpdate(unittest.TestCase):
 
     def running(self):
         """The variant and pid of the live fake GUI, if any."""
-        alive = []
-        for variant, pid in self.started():
-            try:
-                os.kill(int(pid), 0)
-                cmdline = Path(f'/proc/{pid}/cmdline').read_bytes()
-            except (ProcessLookupError, FileNotFoundError):
-                continue
-            if str(self.installed).encode() in cmdline:
-                alive.append((variant, int(pid)))
-        return alive
+        return self.owned.running(self.installed, self.started())
 
     def launch(self, variant):
         self.build(variant, self.installed)
-        # Detached like a service: init, not this test, reaps it when it quits.
-        subprocess.run(['sh', '-c', 'setsid "$0" </dev/null >/dev/null 2>&1 &', str(self.installed)],
-                       env=self.env, check=True)
+        # The fake service's children remain owned and reapable by this test.
+        self.owned.start(self.installed)
         self.wait(lambda: self.running() and (Path(self.env['TMPDIR']) / 'hgs-tray').exists())
         return self.running()[0][1]
 
@@ -137,11 +149,7 @@ class TrayUpdate(unittest.TestCase):
         self.fail('condition not reached')
 
     def stop_all(self):
-        for _, pid in self.started():
-            try:
-                os.kill(int(pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        cleanup(self.root, self.control, self.owned, shutil.rmtree)
 
     def draft(self, name, text):
         folder = self.drafts / name
@@ -177,7 +185,8 @@ class TrayUpdate(unittest.TestCase):
         self.assertEqual(list((self.home / '.local/state/hgs/desktop-update').iterdir()), [])
         self.assertIn('2 nonempty drafts kept', result.stdout)
         # The next update keeps exactly one rollback copy: the GUI it replaced.
-        self.assertEqual(self.update(self.build('third')).returncode, 0)
+        result = self.update(self.build('third'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([p.name for p in previous.parent.iterdir()], ['hgs-tray'])
         self.assertIn("'second'", previous.read_text())
         self.assertEqual([variant for variant, _ in self.running()], ['third'])
@@ -231,19 +240,10 @@ class TrayUpdate(unittest.TestCase):
         kept = [leftover('.zerus-notes', ['notes.txt']), leftover('.zerus-recent', age=0),
                 leftover('.zerus-deep', ['a/b/hgs-tray']), leftover('.other-stage')]
         running = leftover('.zerus-running', ['hgs-tray'])
-        self.script(running / 'hgs-tray', '#!/bin/sh\nsleep 60\n')
+        self.script(running / 'hgs-tray', f'#!{sys.executable}\nimport time\ntime.sleep(60)\n')
         os.utime(running, (time.time() - 7200,) * 2)
-        # The shell keeps the folder in use; its sleep child must not hold the runner's pipes open.
-        process = subprocess.Popen([str(running / 'hgs-tray')], start_new_session=True, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        def stop():
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
-        self.addCleanup(stop)
+        # One direct child keeps the folder in use without an unowned sleep descendant.
+        self.owned.start(running / 'hgs-tray')
         (folder / '.zerus-link').symlink_to(self.root)
         self.build('first', self.installed)
         result = self.update(self.build('second'))

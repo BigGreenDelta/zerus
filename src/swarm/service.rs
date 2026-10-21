@@ -218,9 +218,12 @@ pub struct Executable {
 impl Executable {
     pub fn current() -> Option<Self> {
         let path = std::env::current_exe().ok()?;
-        // Linux still reaches a replaced image through /proc and names it
-        // "<path> (deleted)".
-        let started = identity(Path::new("/proc/self/exe")).or_else(|| identity(&path))?;
+        // The running image rather than its path, which an upgrade may already
+        // have replaced. Linux reaches a replaced image through /proc and names
+        // it "<path> (deleted)". Where the image cannot be read (Windows, or a
+        // macOS query that fails), the file at the path stands in for it as
+        // before, and a replacement made while this runs goes unnoticed.
+        let started = platform::image_identity().or_else(|| identity(&path))?;
         let path = path
             .to_str()
             .and_then(|path| path.strip_suffix(" (deleted)"))
@@ -405,5 +408,182 @@ mod tests {
         };
         assert!(executable.replaced());
         assert!(Executable::current().is_some_and(|current| !current.replaced()));
+    }
+
+    /// Set, to the folder they share, for the process
+    /// `a_replacement_while_a_worker_starts_is_detected` starts.
+    #[cfg(unix)]
+    const PROBE: &str = "HGS_TEST_REPLACED_EXECUTABLE";
+    /// How long that test and its probe each wait for the other.
+    #[cfg(unix)]
+    const PROBE_LIMIT: Duration = Duration::from_secs(60);
+
+    /// Run by `a_replacement_while_a_worker_starts_is_detected`: reads its
+    /// identity only after another file took the path it was started from.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "run by a_replacement_while_a_worker_starts_is_detected"]
+    fn replaced_while_starting_probe() {
+        let Some(dir) = std::env::var_os(PROBE).map(PathBuf::from) else {
+            return;
+        };
+        fs::write(dir.join("started"), b"").unwrap();
+        // It also ends by itself if the test never answers.
+        let deadline = Instant::now() + PROBE_LIMIT;
+        while !dir.join("replaced").exists() {
+            assert!(Instant::now() < deadline, "the executable was not replaced");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let executable = Executable::current().unwrap();
+        println!("probe replaced={}", executable.replaced());
+    }
+
+    /// The probe process, which only this test starts and reaps, and the folder
+    /// with its executable link, log and markers. The folder is removed only once
+    /// the probe is known to be reaped; otherwise it is kept as evidence.
+    #[cfg(unix)]
+    struct Probe {
+        child: std::process::Child,
+        /// Its start as `platform::process_identity` read it before anything
+        /// reaped the child, so the ID could not name another process.
+        birth: Option<String>,
+        path: PathBuf,
+        dir: tempfile::TempDir,
+        status: Option<std::process::ExitStatus>,
+        stopped: Option<Result<std::process::ExitStatus, String>>,
+    }
+
+    #[cfg(unix)]
+    impl Probe {
+        fn new(child: std::process::Child, path: PathBuf, dir: tempfile::TempDir) -> Self {
+            let birth = platform::process_identity(child.id())
+                .filter(|process| process.parent == std::process::id())
+                .map(|process| process.birth);
+            Self {
+                child,
+                birth,
+                path,
+                dir,
+                status: None,
+                stopped: None,
+            }
+        }
+        fn describe(&self) -> String {
+            let (pid, birth) = (self.child.id(), &self.birth);
+            format!("probe {pid} (birth {birth:?}, {})", self.path.display())
+        }
+        /// Its exit status once reaped. Only this method reaps it.
+        fn poll(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            if self.status.is_none() {
+                self.status = self.child.try_wait()?;
+            }
+            Ok(self.status)
+        }
+        /// Kills the probe if it still runs and reaps it, waiting at most 10 s
+        /// after the kill. An error says why it may still exist.
+        fn stop(&mut self) -> Result<std::process::ExitStatus, String> {
+            if let Some(result) = &self.stopped {
+                return result.clone();
+            }
+            let mut killed = None;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let result = loop {
+                match self.poll() {
+                    Ok(Some(status)) => break Ok(status),
+                    // Not reaped, so the ID is still this child's.
+                    Ok(None) if killed.is_none() => killed = Some(self.child.kill()),
+                    Ok(None) if Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(10))
+                    }
+                    Ok(None) => break Err(format!("not reaped 10 s after SIGKILL ({killed:?})")),
+                    Err(error) => break Err(format!("unknown status: {error} (kill {killed:?})")),
+                }
+            };
+            // Once reaped, no process with this ID and start may remain.
+            let result =
+                result.and_then(|status| match platform::process_identity(self.child.id()) {
+                    Some(process) if Some(&process.birth) == self.birth.as_ref() => {
+                        Err(format!("still running after it was reaped with {status}"))
+                    }
+                    _ => Ok(status),
+                });
+            self.stopped = Some(result.clone());
+            result
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Probe {
+        /// Also runs while a failed assertion unwinds, so nothing here panics.
+        fn drop(&mut self) {
+            use std::io::Write;
+            let explicit = self.stopped.is_some();
+            let result = self.stop();
+            // A probe that may still exist keeps its folder, and only that one.
+            self.dir.disable_cleanup(result.is_err());
+            if !explicit || result.is_err() {
+                let folder = if result.is_err() { "kept" } else { "removed" };
+                let (probe, dir) = (self.describe(), self.dir.path().display());
+                let _ = writeln!(std::io::stderr(), "{probe}: {result:?}; {folder} {dir}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replacement_while_a_worker_starts_is_detected() {
+        use std::io::Read;
+        let test = std::env::current_exe().unwrap();
+        // A link, not a copy: a file this process just wrote can be busy for exec.
+        let dir = tempfile::tempdir_in(test.parent().unwrap()).unwrap();
+        let path = dir.path().join("hgs");
+        let (started, replaced) = (dir.path().join("started"), dir.path().join("replaced"));
+        let next = dir.path().join(".hgs.new");
+        fs::hard_link(&test, &path).unwrap();
+        // Output goes to a file, so neither process can block on a pipe.
+        let log = dir.path().join("probe.log");
+        let output = File::create(&log).unwrap();
+        let printed = || {
+            let mut bytes = Vec::new();
+            if let Ok(file) = File::open(&log) {
+                let _ = file.take(64 * 1024).read_to_end(&mut bytes);
+            }
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let child = Command::new(&path)
+            .args([
+                "swarm::service::tests::replaced_while_starting_probe",
+                "--exact",
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(PROBE, dir.path())
+            .stdin(Stdio::null())
+            .stdout(output.try_clone().unwrap())
+            .stderr(output)
+            .spawn()
+            .unwrap();
+        let mut probe = Probe::new(child, path.clone(), dir);
+        let deadline = Instant::now() + PROBE_LIMIT;
+        while !started.exists() {
+            let running = probe.poll().unwrap().is_none();
+            assert!(running && Instant::now() < deadline, "{}", printed());
+            thread::sleep(Duration::from_millis(10));
+        }
+        // As an upgrade does between exec and the worker's first look.
+        fs::write(&next, b"new").unwrap();
+        fs::rename(&next, &path).unwrap();
+        fs::write(&replaced, b"").unwrap();
+        let deadline = Instant::now() + PROBE_LIMIT;
+        while probe.poll().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "{}", printed());
+            thread::sleep(Duration::from_millis(10));
+        }
+        // The cleanup result: reaped, with no process left under its ID and start.
+        let status = probe.stop();
+        let ended = status.as_ref().is_ok_and(|status| status.success());
+        assert!(ended, "{}: {status:?}\n{}", probe.describe(), printed());
+        assert!(printed().contains("probe replaced=true"), "{}", printed());
     }
 }

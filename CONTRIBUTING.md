@@ -3,6 +3,36 @@
 Build requirements are documented in `docs/installation.md`. Keep fixtures synthetic and
 machine connection settings local. `AGENTS.md` describes the Beads workflow.
 
+## Proposals and repository labels
+
+A feature PR is a proposal until maintainers accept its product scope. Before
+adopting it, establish the use cases, configuration and lifecycle behavior, and
+behavior on every supported platform. Optional third-party tools can be useful
+extension proposals without belonging in the Zerus core. Deferring one does not
+commit the project to implementing it or to a particular extension API.
+
+Keep the existing `bug`, `enhancement`, `documentation` and technical labels.
+Use these additional labels to retain product decisions on issues and PRs:
+
+| Label | Meaning |
+| --- | --- |
+| `proposal` | An idea whose product scope has not been accepted. |
+| `deferred` | Retained for future consideration, without an active implementation or release commitment. |
+| `extensions` | An optional third-party integration suited to a future plugin or extension. |
+| `partially-adopted` | Part of a PR was adopted separately; the closing comment records what happened to the rest. |
+
+Close deferred implementation PRs with a short explanation and retain their
+labels, commits and discussion. Use `wontfix` for work the project does not plan
+to take, rather than for an idea being kept for later. When a PR mixes a bug fix
+and an unaccepted feature, investigate and take the fix separately with author
+attribution; explain exactly what was adopted before closing the original PR.
+Beads continues to own accepted implementation tasks and blockers.
+
+To revisit retained ideas, search GitHub for
+`is:pr is:closed label:proposal label:deferred`; add `label:extensions` to find
+plugin candidates. Search `is:pr is:closed label:partially-adopted` to find PRs
+whose fixes were taken separately.
+
 ## Local checks
 
 ```sh
@@ -160,9 +190,12 @@ Beads issues, history and memories must contain only information suitable for pu
 source collaboration. An ignored local database still becomes remote data when
 `bd dolt push` is run. Review the exported issues and memory before synchronizing.
 
-For release preparation, run Gitleaks on both the working tree and all Git history,
-and review binary assets and dependency notices. The local privacy script catches
-common accidental machine paths and keys; it is not a complete secret scanner.
+Quick checks run Gitleaks with its default rules on the working tree and all Git
+history of every push and pull request; findings are redacted from the public log
+and `gitleaks:allow` comments do not hide them. For release preparation, also run
+Gitleaks on the candidate source archive and Beads data, and review binary assets
+and dependency notices. The local privacy script catches common accidental machine
+paths and keys; it is not a complete secret scanner.
 
 <a id="windows"></a>
 
@@ -212,7 +245,17 @@ HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
   python -X utf8 scripts/ci/agent-compatibility.py </dev/null
 export QT_ROOT_DIR="$(cygpath -w ~/Qt/6.10.3/msvc2022_64)"
 bash scripts/ci/gui.sh </dev/null
+cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --lib windows_management::tests
+cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --test windows_gateway
+cargo +1.99.1 build --release --locked --manifest-path services/mobile/connector/Cargo.toml
+HGS_TEST_CONNECTOR="$(cygpath -w "$PWD/services/mobile/connector/target/release/zerus-mobile-connector.exe")" \
+HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
+HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" \
+  python scripts/ci/outside-job.py --custody-only --timeout 900 \
+    --log artifacts/test-results/windows-mobile-gateway.log -- \
+    python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
 python scripts/package-windows.py --cli target/release/hgs.exe \
+    --connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
     --gui .ci-build/gui/hgs-tray.exe --conpty target/conpty \
     --output artifacts/zerus-windows-x86_64.zip
 python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest
@@ -228,6 +271,39 @@ native session host of Windows Phase 2 has its own isolated recipe and tests,
 `tests/test_windows_native_agents.py`, which `scripts/ci/agent-compatibility.py`
 runs with the reviewed Claude Code and Codex packages, each against a local fake
 API: [testing the Windows session host](docs/windows-host-testing.md).
+
+Kimi's optional native input, question and startup-trust fixtures are
+`test_kimi_native.NativeKimi` (two cases),
+`test_kimi_questions_native.NativeKimiQuestions` (three) and
+`test_kimi_questions_native.NativeKimiTrust` (three). Run them only with an
+explicitly reviewed `HGS_KIMI_TEST_BIN` and exact `HGS_KIMI_TEST_SHA256`, a sealed
+`HGS_TEST_BIN`, private helper PATH and evidence directory; never point them at
+the installed Kimi. Each case runs a private copy, disables automatic updates,
+uses its loopback model and platform fixture, proves the child image and private
+environment, and retains uncertain cleanup. The macOS cases compile one exec
+shim per case, so they require both native and compiler resources. A campaign
+over two reviewed Kimi versions is sixteen native cases, not the seventeen R2
+and seven question-fixture controls. The latter use stand-ins and loopback
+servers and establish fixture behavior only. `test_kimi_trust` and
+`test_kimi_cache_hint` additionally execute hgs and private tmux fixtures; they
+are synthetic integration tests, not pure controls. Historical native results
+do not qualify a newly composed candidate.
+
+The separate [pinned Kimi native workflow](.github/workflows/kimi-native.yml)
+runs these sixteen cases on disposable standard Linux and macOS runners for
+relevant PR changes or a manual run. It builds hgs once with Rust 1.99.1 and
+two jobs, runs the existing pinned tmux in a private prefix, and checks both
+official version manifests and all image sizes/SHA-256 pins before native
+execution. It receives no provider or publication credentials, uses no cache,
+and never installs Kimi globally. Linux x64 and Darwin arm64 are the only
+reviewed images; an unexpected runner architecture fails before the build.
+Every case keeps its existing image/environment/custody assertions. A timeout
+or uncertain cleanup fails, retains the recorded private roots and images as
+bounded diagnostics, and never claims that stopping the test leader stopped
+its detached agents. Ephemeral VM disposal is the final boundary. Public model
+endpoints are not configured; the fixtures' model and platform are loopback
+only. This is not a kernel network enclosure or Windows Kimi qualification.
+The historical NP50 owner-Mac campaigns are separate and are not replayed.
 `scripts/fetch-conpty.py` downloads the ConPTY package pinned in
 `packaging/windows/conpty.json` from nuget.org and writes only its checked
 `conpty.dll` and `OpenConsole.exe`; `package-windows.py` puts them next to
@@ -262,3 +338,26 @@ rewrites arguments that look like POSIX paths when it starts a Windows program: 
 [the real-peer smoke](docs/ci-and-aur.md#real-peer-smoke-on-a-windows-pc).
 `tray/tools/export-windows-icon.py` (Pillow) regenerates the checked-in Windows icon
 after artwork changes.
+
+`test_windows_mobile_gateway.py` needs Git for Windows' `openssl` on PATH and
+runs outside a job that forbids breakaway, as do the other session-host suites.
+Before that fixture, the two `windows_management::tests` library cases exercise
+actual management-lock contention and expiry, and the six `windows_gateway`
+integration cases exercise private configuration, revision admission, ACLs and
+independent ownership of temporary fixture roots.
+They must execute on Windows; Linux excludes them and is not runtime evidence.
+It creates only a throwaway profile, tracked fake Codex session, copied gateway
+bundle and HTTPS loopback protocol fixture. It checks actual connector Start,
+duplicate Start, published capabilities, Terminal snapshot/input and duplicate
+receipts, phone-list/invitation APIs, graceful Stop and the same surviving native
+host/session. Startup custody is reserved before Start, including failed or
+timed-out launches. Recovery verifies the private revision/generation/control
+and unique copied process image, pins a Windows process handle and rechecks
+control. Cleanup requires confirmed handle exit; an unknown final wait retains
+the private root and fails the gate. Forced termination is limited to that owned
+handle and also fails the graceful-stop gate. The separate `--custody-only`
+launcher forbids executable-pattern cleanup and retains unknown timeout state;
+there is no PID/tree fallback for the connector. It does not install
+into an owner profile, contact a production relay or pair a real phone. Run the
+production relay's existing contract suites separately. A skipped or unavailable
+Windows suite is not evidence of supported runtime behavior.

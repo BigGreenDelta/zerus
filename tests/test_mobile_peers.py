@@ -285,6 +285,71 @@ class MobilePeers(unittest.TestCase):
         self.assertEqual(local['hgs_version'], version)
         self.assertEqual(peer['hgs_version'], version)
 
+    def test_git_status_help_marker_travels_with_the_exact_native_peer(self):
+        marker = 'Mobile Git status ABI: git-status-v1'
+        direct = self.call('b', '--help').stdout
+        remote = self.call('a', 'mobile-peer', '--json', data=self.request()).stdout
+        self.assertIn(marker, direct)
+        self.assertEqual(remote, direct)
+        self.assertFalse((self.root / 'native-called').exists())
+
+    def test_git_status_reads_the_exact_checkout_without_mutating_git(self):
+        checkout = self.root / "checkout ' проект"
+        env = {key: value for key, value in self.env.items() if not key.startswith('GIT_')}
+        env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
+        def git(*args):
+            return subprocess.check_output(['git', *args], env=env, stderr=subprocess.PIPE)
+        git('init', '-q', '-b', 'main', str(checkout))
+        (checkout / 'tracked').write_text('initial\n')
+        git('-C', str(checkout), 'add', '.')
+        git('-C', str(checkout), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+            'commit', '-qm', 'fixture')
+        (checkout / 'tracked').write_text('changed\n')
+        index = (checkout / '.git/index').read_bytes()
+        refs = git('-C', str(checkout), 'show-ref')
+        argv = ['git-status', '--path', str(checkout), '--json']
+        remote = self.call('a', 'mobile-peer', '--json', data=self.request(argv)).json()
+        direct = self.call('b', *argv).json()
+        local = self.request(argv, target=self.ids['a'])
+        del local['via']
+        local = self.call('a', '__mobile-peer-local', '--json', data=local).json()
+        for result in [direct, remote, local]:
+            self.assertEqual(result['path'], str(checkout.resolve()))
+            self.assertEqual(result['root'], str(checkout.resolve()))
+            self.assertEqual((result['state'], result['branch'], result['changed_files'], result['remote_state']),
+                             ('ok', 'main', 1, 'no_upstream'))
+        self.assertEqual((checkout / '.git/index').read_bytes(), index)
+        self.assertEqual(git('-C', str(checkout), 'show-ref'), refs)
+        self.assertEqual((checkout / 'tracked').read_text(), 'changed\n')
+        self.assertFalse((checkout / '.git/FETCH_HEAD').exists())
+        self.assertEqual({alias for alias, _ in self.calls()}, {'b'})
+        self.assertFalse((self.root / 'native-called').exists())
+
+    def test_git_status_invalid_shapes_and_targets_never_reach_git(self):
+        called = self.root / 'git-called'
+        fake = Path(self.env['HOME']) / '.local/bin/git'
+        fake.write_text('#!/usr/bin/env python3\nimport os, pathlib\n'
+                        "pathlib.Path(os.environ['MOBILE_PEERS_TEST_ROOT'], 'git-called').touch()\nraise SystemExit(1)\n")
+        fake.chmod(0o755)
+        path = str(self.root / 'checkout')
+        argv = ['git-status', '--path', path, '--json']
+        invalid = [self.request(argv, payload={}), self.request(argv + ['--json']),
+                   self.request(argv + ['--refresh']), self.request(argv + ['--path', path]),
+                   self.request(['git-status', '--path', 'relative', '--json']),
+                   self.request(['git-status', '--path', '/fixture/é' + 'é' * 2048, '--json']),
+                   self.request(['@c', *argv])]
+        for request in invalid:
+            with self.subTest(argv=request['argv'], payload=request['payload']):
+                self.call('a', 'mobile-peer', '--json', data=request, ok=False)
+        self.assertEqual(self.calls(), [])
+        self.call('a', 'mobile-peer', '--json', data=self.request(argv, target=self.ids['c']), ok=False)
+        self.call('a', 'mobile-peer', '--json', data=self.request(argv, via='c'), ok=False)
+        wrong_local = self.request(argv)
+        del wrong_local['via']
+        self.call('a', '__mobile-peer-local', '--json', data=wrong_local, ok=False)
+        self.assertFalse(called.exists())
+        self.assertFalse((self.root / 'native-called').exists())
+
     def test_remote_directory_creation_pins_target_and_never_overwrites_or_replays(self):
         target = self.root / "new ' проект $(touch injected)"
         identity = str(uuid.uuid4())

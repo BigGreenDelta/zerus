@@ -78,8 +78,12 @@ fi
 
 # --- 2. .app bundle -------------------------------------------------------------
 echo "[2/4] Installing the .app bundle to ~/Applications..."
-# Sign before copying. Certificate signing keeps privacy identity stable across
-# source rebuilds; incompatible or missing identities stop before replacement.
+# Keep the uninstalled build's separate privacy identity. Only this disposable
+# copy receives the public identity and compatible certificate before replacement.
+LOCAL_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/zerus-source-install.XXXXXX")"
+trap 'rm -rf "${LOCAL_STAGE}"' EXIT
+ditto "${BUILD_APP}" "${LOCAL_STAGE}/hgs-tray.app"
+BUILD_APP="${LOCAL_STAGE}/hgs-tray.app"
 python3 "${SCRIPT_DIR}/sign-local-macos.py" "${BUILD_APP}" "${APP_DEST}"
 mkdir -p "${HOME}/Applications"
 if [ "$(bundle_cdhash "${BUILD_APP}")" != "$(bundle_cdhash "${APP_DEST}")" ]; then

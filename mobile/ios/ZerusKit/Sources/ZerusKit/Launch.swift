@@ -45,6 +45,8 @@ public struct LaunchModel: Hashable, Sendable {
     public let label: String
     /// The model's own native effort variants (OpenCode), in catalog order.
     public var efforts: [EffortOption] = []
+    public var provider = "", providerLabel = ""
+    public var free = false, favorite = false, isDefault = false
 }
 
 /// One native effort choice; `label` is the computer's name for it, or the familiar name of a standard level.
@@ -225,15 +227,19 @@ public enum LaunchPresentation {
         guard provider == "opencode" else { return [] }
         let matching = (raw?.objects("accounts") ?? []).filter { $0.string("provider") == provider && $0.string("id") == accountId }
         guard matching.count == 1 else { return [] }
-        var seen = Set<String>()
-        return matching[0].objects("model_options").prefix(256).compactMap { option in
-            let rawValue = option["value"] ?? option["id"]
-            guard case .string(let value)? = rawValue, validModel(value), seen.insert(value).inserted else { return nil }
-            var label = value
-            if case .string(let text)? = option["label"], usableLabel(text) { label = text }
-            let efforts = EffortOption.options(option.strings("effort_options"), labels: option.strings("effort_labels"))
-            return LaunchModel(value: value, label: label, efforts: efforts)
+        return OpenCodeCatalog.models(matching[0].array("model_options")).map { model in
+            LaunchModel(value: model.value, label: model.label, efforts: model.efforts, provider: model.provider,
+                providerLabel: model.providerLabel, free: model.free, favorite: model.favorite, isDefault: model.isDefault)
         }
+    }
+
+    public static func catalogNotice(_ raw: JSONObject?, provider: String, accountId: String) -> String {
+        guard provider == "opencode" else { return "" }
+        let matching = (raw?.objects("accounts") ?? []).filter { $0.string("provider") == provider && $0.string("id") == accountId }
+        guard matching.count == 1, let catalog = OpenCodeCatalog.account(matching[0]) else { return "" }
+        return [OpenCodeCatalog.stateMessage(state: catalog.state, reason: catalog.reason),
+                OpenCodeCatalog.truncationMessage(models: catalog.modelsTruncated, providers: false)]
+            .filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     /// The chosen OpenCode model's effort variants, offered only when this computer's connector accepts launch effort.
@@ -404,13 +410,24 @@ public enum LaunchPresentation {
             var row: JSONObject = ["id": .string(account.id), "provider": .string(account.provider), "label": .string(account.label), "native": .bool(account.native),
                                    "is_default": .bool(account.isDefault), "installed": .bool(account.installed), "auth_status": .string(account.authStatus),
                                    "model_options": .array(models(raw, provider: account.provider, accountId: account.id).map { model in
-                                       var option: JSONObject = ["value": .string(model.value), "label": .string(model.label)]
+                                       var option: JSONObject = ["value": .string(model.value), "label": .string(model.label),
+                                           "provider": .string(model.provider), "provider_label": .string(model.providerLabel), "free": .bool(model.free)]
+                                       if model.favorite { option["favorite"] = .bool(true) }
+                                       if model.isDefault { option["default"] = .bool(true) }
                                        if !model.efforts.isEmpty {
                                            option["effort_options"] = JSON(model.efforts.map(\.value))
                                            option["effort_labels"] = JSON(model.efforts.map(\.label))
                                        }
                                        return .object(option)
                                    })]
+            if account.provider == "opencode" {
+                let matching = raw.objects("accounts").filter { $0.string("provider") == account.provider && $0.string("id") == account.id }
+                if matching.count == 1, let catalog = OpenCodeCatalog.account(matching[0]) {
+                    row["catalog_state"] = .string(catalog.state)
+                    row["catalog_reason"] = .string(catalog.reason)
+                    row["model_options_truncated"] = .bool(catalog.modelsTruncated)
+                }
+            }
             if let usage = account.usage { row["usage"] = AccountSnapshots.accountJSON(usage)["usage"] }
             return .object(row)
         })

@@ -1,11 +1,14 @@
 """Fixed context-control transport; native hgs remains the final authority."""
 import uuid
 import re
+from .analytics import OPERATIONS as ANALYTICS_READS
 from .speech import OPERATIONS as SPEECH_OPERATIONS, READS as SPEECH_READS
 from .speech_config import OPERATIONS as SPEECH_CONFIG_OPERATIONS, READS as SPEECH_CONFIG_READS
 from .voice import OPERATIONS as VOICE_OPERATIONS, READS as VOICE_READS
 
 CONTEXT_COMMANDS = {"compact_context": "compact-context", "clear_context": "clear-context"}
+CLEAR_CONTEXT_DISMISS_FEATURE = "clear_context_dismiss"
+CLEAR_CONTEXT_DISMISS_HELP = "Mobile clear-context ABI: dismiss-prompt-v1"
 LIFECYCLE_OPERATIONS = frozenset({"pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget"})
 TERMINAL_OPERATIONS = frozenset({"terminal_snapshot", "terminal_input"})
 LAUNCH_OPERATIONS = frozenset({"catalog", "dirs", "directory_create", "launch", "worktrees", "worktree_create"})
@@ -13,9 +16,9 @@ COMPUTER_OPERATIONS = frozenset({"set_mobile_delivery"})
 MOBILE_DELIVERY = ("immediate", "away", "away_5", "away_10", "away_15", "away_30")
 ATTACHMENT_OPERATIONS = frozenset({"attachment_read"})
 FILE_OPERATIONS = frozenset({"file_read"})
-OPERATIONS = SPEECH_CONFIG_OPERATIONS | VOICE_OPERATIONS | SPEECH_OPERATIONS | LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | ATTACHMENT_OPERATIONS | FILE_OPERATIONS | frozenset({"archive_list","inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "recovery_action", "mark_read", *CONTEXT_COMMANDS})
+OPERATIONS = ANALYTICS_READS | SPEECH_CONFIG_OPERATIONS | VOICE_OPERATIONS | SPEECH_OPERATIONS | LAUNCH_OPERATIONS | LIFECYCLE_OPERATIONS | TERMINAL_OPERATIONS | COMPUTER_OPERATIONS | ATTACHMENT_OPERATIONS | FILE_OPERATIONS | frozenset({"project_assignment", "project_assign", "archive_list","hooks_status","inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop", "history", "history_projection", "recovery_action", "mark_read", "session_notifications", *CONTEXT_COMMANDS})
 FEATURES = frozenset({"inspect_after", "inspect_agent", "send_agent"})
-READ_OPERATIONS = SPEECH_CONFIG_READS | VOICE_READS | SPEECH_READS | frozenset({"archive_list", "inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "mark_read", "attachment_read", "file_read"})
+READ_OPERATIONS = ANALYTICS_READS | SPEECH_CONFIG_READS | VOICE_READS | SPEECH_READS | frozenset({"project_assignment", "archive_list", "hooks_status", "inspect", "process_output", "terminal_snapshot", "catalog", "dirs", "worktrees", "history", "history_projection", "mark_read", "attachment_read", "file_read"})
 # Predicate of the persisted read_history_v3 index and the one-hour read class.
 # attachment_read is a read with its own short class, so this text stays fixed.
 READ_SQL = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')"
@@ -42,6 +45,16 @@ def validate_context(payload, request_id):
         value = payload[field]
         if not isinstance(value, str) or not value or len(value) > maximum or any(ord(c) < 32 or ord(c) == 127 for c in value):
             raise ValueError("context control requires nonempty bounded native identity")
+
+
+def validate_clear_context(payload, request_id):
+    """Keep ordinary context validation unchanged; only clear accepts this opt-in."""
+    ordinary = payload
+    if isinstance(payload, dict) and "dismiss_prompt" in payload:
+        if type(payload["dismiss_prompt"]) is not bool:
+            raise ValueError("dismiss_prompt must be a boolean")
+        ordinary = {key: value for key, value in payload.items() if key != "dismiss_prompt"}
+    validate_context(ordinary, request_id)
 
 
 def bounded(value, maximum, empty=False):

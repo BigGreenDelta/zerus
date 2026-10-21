@@ -1,6 +1,7 @@
 #include "SessionList.h"
 #include "SessionCardDelegate.h"
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -14,6 +15,8 @@
 #include <QScrollBar>
 #include <QHelpEvent>
 #include <QToolTip>
+#include <QToolButton>
+#include <QDynamicPropertyChangeEvent>
 #include <cmath>
 
 namespace { constexpr auto Mime = "application/x-hgs-session-placement"; }
@@ -47,6 +50,12 @@ SessionList::SessionList(QWidget *parent) : WorkspaceList(parent), m_token(QUuid
         m_animationRegions = std::move(nextRegions);
     });
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, &SessionList::syncActivityAnimation);
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, &SessionList::scheduleRowExpandButtons);
+    connect(model(), &QAbstractItemModel::dataChanged, this, &SessionList::scheduleRowExpandButtons);
+    connect(model(), &QAbstractItemModel::rowsInserted, this, &SessionList::scheduleRowExpandButtons);
+    connect(model(), &QAbstractItemModel::rowsRemoved, this, &SessionList::scheduleRowExpandButtons);
+    connect(model(), &QAbstractItemModel::modelReset, this, &SessionList::scheduleRowExpandButtons);
+    connect(model(), &QAbstractItemModel::layoutChanged, this, &SessionList::scheduleRowExpandButtons);
     m_elapsedTimer.setInterval(1000);
     connect(&m_elapsedTimer, &QTimer::timeout, this, [this] {
         syncActivityAnimation();
@@ -56,6 +65,16 @@ SessionList::SessionList(QWidget *parent) : WorkspaceList(parent), m_token(QUuid
                 viewport()->update(SessionDelegate::elapsedRegion(animationOption(index), index));
         }
     });
+}
+
+SessionList::~SessionList()
+{
+    // QWidget deletes the owned model/scrollbar after our members are gone;
+    // QObject's automatic disconnection happens later than that teardown.
+    disconnect(model(), nullptr, this, nullptr);
+    disconnect(verticalScrollBar(), nullptr, this, nullptr);
+    m_activityTimer.stop(); m_elapsedTimer.stop();
+    QCoreApplication::removePostedEvents(this, QEvent::MetaCall);
 }
 
 void SessionList::setActivityAnimationEnabled(bool enabled)
@@ -93,7 +112,7 @@ QStyleOptionViewItem SessionList::animationOption(const QModelIndex &index) cons
     option.state.setFlag(QStyle::State_Selected, selectionModel()->isSelected(index));
     return option;
 }
-void SessionList::showEvent(QShowEvent *event) { WorkspaceList::showEvent(event); syncActivityAnimation(); }
+void SessionList::showEvent(QShowEvent *event) { WorkspaceList::showEvent(event); syncActivityAnimation(); scheduleRowExpandButtons(); }
 void SessionList::hideEvent(QHideEvent *event) { m_activityTimer.stop(); m_elapsedTimer.stop(); setProperty("workingPulse", 0.0); WorkspaceList::hideEvent(event); }
 
 void SessionList::clearBulkSelection()
@@ -111,7 +130,71 @@ void SessionList::setSelectionBar(QWidget *bar, bool visible)
 void SessionList::resizeEvent(QResizeEvent *event)
 {
     WorkspaceList::resizeEvent(event);
+    scheduleRowExpandButtons();
     if (m_selectionBar) m_selectionBar->setGeometry(6, height() - m_selectionBar->height() - 6, qMax(0, width() - 12), m_selectionBar->height());
+}
+
+void SessionList::scheduleRowExpandButtons()
+{
+    if (m_rowExpandButtonsPending) return;
+    m_rowExpandButtonsPending = true;
+    QTimer::singleShot(0, this, [this] { m_rowExpandButtonsPending = false; syncRowExpandButtons(); });
+}
+
+bool SessionList::event(QEvent *event)
+{
+    if (event->type() == QEvent::DynamicPropertyChange) {
+        const auto name = static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName();
+        if (name == "expansion" || name == "hgsDark") scheduleRowExpandButtons();
+    }
+    return WorkspaceList::event(event);
+}
+
+void SessionList::syncRowExpandButtons()
+{
+    const bool full = SessionStrip::expansion(this) >= 1;
+    if (full != m_rowFullLayout) { m_rowFullLayout = full; doItemsLayout(); }
+    auto unused = m_rowExpandButtons;
+    const bool dark = property("hgsDark").toBool();
+    // Overlay real accessible controls only for visible rows, never for the
+    // complete session inventory. A very tall viewport still has a hard cap.
+    if (isVisible() && full) for (int y = 0, controls = 0; y < viewport()->height() && controls < 128;) {
+        const auto index = indexAt(QPoint(viewport()->width() / 2, y));
+        if (!index.isValid()) { ++y; continue; }
+        const auto option = animationOption(index);
+        const QRect rect = SessionDelegate::expandRowRect(option, index);
+        y = qMax(y + 1, option.rect.bottom() + 1);
+        if (rect.isEmpty()) continue;
+        ++controls;
+        QPersistentModelIndex pin(index);
+        auto *button = m_rowExpandButtons.value(pin);
+        if (!button) {
+            button = new QToolButton(viewport()); button->setObjectName("expandSessionRow");
+            button->setAutoRaise(true); button->setIconSize({16, 16}); button->setFocusPolicy(Qt::StrongFocus);
+            button->setToolTip(tr("Expand session row"));
+            connect(button, &QToolButton::clicked, this, [this, pin] {
+                if (pin.isValid() && SessionDelegate::rowCollapsed(pin)) emit rowExpanded(pin.data(SessionRoles::Key).toString());
+            });
+            m_rowExpandButtons.insert(pin, button);
+        }
+        unused.remove(pin);
+        button->setProperty("sessionKey", index.data(SessionRoles::Key));
+        button->setAccessibleName(tr("Expand session row: %1").arg(index.data(SessionRoles::Title).toString()));
+        button->setAccessibleDescription(SessionDelegate::compactDescription(option, index));
+        const auto tooltip = SessionDelegate::compactTooltip(option, index);
+        button->setToolTip(tooltip.isEmpty() ? tr("Expand session row") : tr("Expand session row") + '\n' + tooltip);
+        if (!button->property("rowTheme").isValid() || button->property("rowTheme").toBool() != dark) {
+            button->setProperty("rowTheme", dark);
+            button->setIcon(workspaceIcon("expand-row", QColor(dark ? "#a1adbb" : "#647386")));
+            button->setStyleSheet(QString("QToolButton { background:transparent; border:1px solid transparent; border-radius:4px; padding:0; } QToolButton:hover { background:%1; } QToolButton:focus { border-color:%2; }")
+                .arg(dark ? "#344650" : "#d4e4e9", dark ? "#8bdfc0" : "#22795b"));
+        }
+        button->setGeometry(rect); button->show(); button->raise();
+    }
+    for (auto it = unused.cbegin(); it != unused.cend(); ++it) {
+        if (it.value()->hasFocus()) setFocus(Qt::OtherFocusReason);
+        it.value()->hide(); it.value()->deleteLater(); m_rowExpandButtons.remove(it.key());
+    }
 }
 
 QString SessionList::childrenLabel(const QModelIndex &index)
@@ -122,7 +205,7 @@ QString SessionList::childrenLabel(const QModelIndex &index)
 
 QRect SessionList::childrenControlRect(const QRect &row, const QModelIndex &index, QFont font)
 {
-    if (!index.data(SessionRoles::HasChildren).toBool() || index.data(SessionRoles::Header).toBool()
+    if (SessionDelegate::rowCollapsed(index) || !index.data(SessionRoles::HasChildren).toBool() || index.data(SessionRoles::Header).toBool()
         || !index.data(SessionRoles::ChildId).toString().isEmpty()) return {};
     font.setPixelSize(11); font.setWeight(QFont::Normal);
     const int width = CachedText::width(font, childrenLabel(index)) + 46;
@@ -148,6 +231,13 @@ bool SessionList::viewportEvent(QEvent *event)
         const auto *help = static_cast<QHelpEvent *>(event);
         const auto *row = itemAt(help->pos());
         if (row) {
+            const auto index = indexFromItem(row);
+            if (SessionDelegate::rowCollapsed(index)) {
+                const auto text = SessionDelegate::compactTooltip(animationOption(index), index);
+                if (!text.isEmpty()) QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), visualItemRect(row));
+                else QToolTip::hideText();
+                return true;
+            }
             const auto question = SessionDelegate::optionalQuestionRect(visualItemRect(row), indexFromItem(row), font(),
                 property("compact").toBool(), row->isSelected());
             if (question.contains(help->pos())) {
@@ -403,6 +493,9 @@ void SessionList::keyPressEvent(QKeyEvent *e)
     if (e->key() == Qt::Key_Escape && m_bulkSelecting) { clearBulkSelection(); e->accept(); return; }
     if ((e->key() == Qt::Key_Left || e->key() == Qt::Key_Right) && currentItem()) {
         const auto *current = currentItem();
+        if (e->key() == Qt::Key_Right && current->data(SessionRoles::RowCollapsed).toBool() && !narrow(this)) {
+            emit rowExpanded(current->data(SessionRoles::Key).toString()); e->accept(); return;
+        }
         if (!current->data(SessionRoles::ChildId).toString().isEmpty()) {
             if (e->key() == Qt::Key_Left) for (int i = row(current) - 1; i >= 0; --i)
                 if (item(i)->data(SessionRoles::Key) == current->data(SessionRoles::ParentKey)) { setCurrentRow(i); break; }

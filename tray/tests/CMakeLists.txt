@@ -1,5 +1,10 @@
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
+add_executable(test_ui_language test_ui_language.cpp)
+target_include_directories(test_ui_language PRIVATE ../src)
+target_link_libraries(test_ui_language PRIVATE Qt6::Test Qt6::Widgets hgs-translations)
+# Registered below, after the common native-test launcher is defined.
+
 # support/FakeCli.h starts fixture scripts as fake executables on every platform.
 set(ZERUS_TEST_SUPPORT "${CMAKE_CURRENT_SOURCE_DIR}/support")
 if(WIN32)
@@ -222,8 +227,13 @@ add_executable(test_hgsclient test_hgsclient.cpp)
 add_executable(test_automaticapprovals test_automaticapprovals.cpp)
 target_link_libraries(test_automaticapprovals PRIVATE Qt6::Test hgs-tray-ui)
 zerus_add_test(automaticapprovals test_automaticapprovals)
+add_executable(test_analytics test_analytics.cpp)
+target_link_libraries(test_analytics PRIVATE Qt6::Test hgs-tray-ui)
+zerus_add_test(analytics test_analytics)
+set_tests_properties(analytics PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 target_include_directories(test_hgsclient PRIVATE ../src)
 target_link_libraries(test_hgsclient PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
+target_compile_definitions(test_hgsclient PRIVATE ZERUS_OPENCODE_QUEUED_MESSAGE_IDS="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-queued-message-ids.json")
 zerus_add_test(hgsclient test_hgsclient)
 
 add_executable(test_readmarksync test_readmarksync.cpp)
@@ -466,6 +476,11 @@ if(TARGET hgs-tray-native-ui)
     set_tests_properties(nativeuiplugin PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu;QT_QUICK_BACKEND=software")
 endif()
 
+zerus_add_test(ui-language test_ui_language)
+set_tests_properties(ui-language PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_test(NAME translation-catalog COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+    -s "${PROJECT_SOURCE_DIR}/translations" -p "test_*.py")
+
 add_executable(test_activityview test_activityview.cpp)
 target_include_directories(test_activityview PRIVATE ../src)
 target_link_libraries(test_activityview PRIVATE Qt6::Test Qt6::Widgets Qt6::Multimedia hgs-markdown hgs-tray-activity)
@@ -475,7 +490,8 @@ set_tests_properties(activityview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscr
 add_executable(test_messagecomposer test_messagecomposer.cpp)
 target_include_directories(test_messagecomposer PRIVATE ../src)
 target_link_libraries(test_messagecomposer PRIVATE Qt6::Test Qt6::Widgets hgs-external-file hgs-tray-ui)
-target_compile_definitions(test_messagecomposer PRIVATE ZERUS_OPENCODE_EFFORT_IDS="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-effort-ids.json")
+target_compile_definitions(test_messagecomposer PRIVATE ZERUS_OPENCODE_EFFORT_IDS="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-effort-ids.json"
+    ZERUS_OPENCODE_PROVIDER_CATALOG="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-provider-catalog.json")
 zerus_add_test(messagecomposer test_messagecomposer)
 set_tests_properties(messagecomposer PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
@@ -503,6 +519,7 @@ set_tests_properties(composertoolbar PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=off
 add_executable(test_questioncard test_questioncard.cpp)
 target_include_directories(test_questioncard PRIVATE ../src)
 target_link_libraries(test_questioncard PRIVATE Qt6::Test Qt6::Widgets hgs-markdown hgs-tray-ui)
+target_compile_definitions(test_questioncard PRIVATE ZERUS_OPENCODE_FORM_CONTRACT="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-form-contract.json")
 zerus_add_test(questioncard test_questioncard)
 set_tests_properties(questioncard PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
@@ -572,6 +589,13 @@ target_compile_definitions(test_newsessiondialog PRIVATE ZERUS_OPENCODE_EFFORT_I
 zerus_add_test(newsessiondialog test_newsessiondialog)
 set_tests_properties(newsessiondialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_opencodemodelpicker test_opencodemodelpicker.cpp)
+target_include_directories(test_opencodemodelpicker PRIVATE ../src)
+target_link_libraries(test_opencodemodelpicker PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+target_compile_definitions(test_opencodemodelpicker PRIVATE ZERUS_OPENCODE_PROVIDER_CATALOG="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-provider-catalog.json")
+zerus_add_test(opencodemodelpicker test_opencodemodelpicker)
+set_tests_properties(opencodemodelpicker PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_attachmentviewer test_attachmentviewer.cpp)
 target_include_directories(test_attachmentviewer PRIVATE ../src)
 target_link_libraries(test_attachmentviewer PRIVATE Qt6::Test Qt6::Widgets hgs-external-file hgs-tray-core)
@@ -607,6 +631,12 @@ set_tests_properties(updates PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 target_link_libraries(test_sessionswindow PRIVATE hgs-updates)
 target_link_libraries(test_traymenu PRIVATE hgs-updates)
 
+add_executable(test_windowsmobilesettings test_windowsmobilesettings.cpp)
+target_include_directories(test_windowsmobilesettings PRIVATE ../src)
+target_link_libraries(test_windowsmobilesettings PRIVATE Qt6::Test Qt6::Widgets)
+zerus_add_test(windowsmobilesettings test_windowsmobilesettings)
+set_tests_properties(windowsmobilesettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_relaysettings test_relaysettings.cpp)
 target_include_directories(test_relaysettings PRIVATE ../src)
 target_link_libraries(test_relaysettings PRIVATE Qt6::Test Qt6::Widgets)
@@ -632,7 +662,7 @@ set_tests_properties(phonepairing PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscr
 # Windows pieces with portable logic: the Windows Terminal command, the console
 # host, terminal templates, tray-icon notifications and the swarm worker the
 # Windows tray supervises.
-add_executable(test_windowsdesktop test_windowsdesktop.cpp)
+add_executable(test_windowsdesktop test_windowsdesktop.cpp ../resources.qrc)
 target_include_directories(test_windowsdesktop PRIVATE ../src)
 target_link_libraries(test_windowsdesktop PRIVATE Qt6::Test Qt6::Widgets hgs-tray-windows)
 if(WIN32)

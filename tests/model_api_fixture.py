@@ -12,7 +12,12 @@ one of these phrases (not a request that quotes it, such as a title request):
 
 - QUESTIONS: Claude's AskUserQuestion with QUESTION_ITEMS, Codex's request_user_input_async
   with CODEX_QUESTIONS when it offers that tool.
+- TALL_QUESTION: Claude's AskUserQuestion with TALL_QUESTION_ITEMS, taller than the 80x24
+  of a pane no client views.
 - WRITE: Claude's Write tool, creating APPROVED_FILE in --project with APPROVED_TEXT.
+- BASH: Claude's Bash tool with BASH_INPUT, which creates BASH_FILE in its folder; LONG_BASH
+  the same command after LONG_LINES no-op lines, a panel taller than the 192 rows to which
+  hgs grows a pane no client views (question_terminal::MAX_UNVIEWED_ROWS), so it stays clipped.
 
 After the tool's result the turn ends with DONE. Side requests (titles, token counts) get
 the plain reply.
@@ -30,10 +35,16 @@ from urllib.parse import urlsplit
 
 QUESTIONS = "Ask the fixture questions now."
 WRITE = "Use the Write tool now."
+TALL_QUESTION = "Ask the tall fixture question now."
 REPLY = "Fixture reply."
 DONE = "Fixture complete."
 APPROVED_FILE = "approved.txt"
 APPROVED_TEXT = "approved through hgs\n"
+BASH = "Use the Bash tool now."
+LONG_BASH = "Use the long Bash tool now."
+BASH_FILE = "bash-approved.txt"
+BASH_INPUT = {"command": f"printf approved > {BASH_FILE}", "description": "Create the fixture file after approval"}
+LONG_LINES = 240
 # The questions of tests/test_claude_questions_native.py, which the Windows screen fixtures
 # tests/fixtures/claude-question-*-windows.txt were recorded with.
 QUESTION_ITEMS = [
@@ -46,6 +57,18 @@ QUESTION_ITEMS = [
         {"label": "Nothing", "description": "No extra notes"}, {"label": "Later", "description": "Discuss later"}]},
 ]
 CODEX_QUESTIONS = [{"title": "Which option should the fixture use?", "options": ["One", "Two"]}]
+# The tall question of tests/test_claude_questions_native.py.
+TALL_QUESTION_ITEMS = [
+    {"question": "Which release should we prepare?", "header": "Провайдер", "multiSelect": True, "options": [
+        {"label": "API-ключи", "description": "Любой провайдер из списка (Z.AI, OpenRouter, DeepSeek и другие): ввести, "
+         "заменить или удалить ключ на выбранной машине. Дополнительные поля провайдер описывает сам."},
+        {"label": "Вход через браузер", "description": "Подписки: показываем ссылку и код, вход выполняется в своём "
+         "браузере, даже если машина удалённая. Для этого нужен запущенный сервер на той машине."},
+        {"label": "Свои адреса", "description": "Свой совместимый адрес (локальная модель, корпоративный прокси): URL, "
+         "ключ и список моделей, которые появятся в выборе модели."},
+        {"label": "Копировать на другую машину", "description": "Перенести уже настроенного провайдера с одной машины "
+         "на другую без повторного ввода ключа, с подтверждением на обеих сторонах."}]},
+]
 
 
 def items(body):
@@ -115,10 +138,16 @@ def plan(body, project):
         return ("text", DONE)
     if prompt == QUESTIONS and "AskUserQuestion" in offered:
         return ("tool", "AskUserQuestion", {"questions": QUESTION_ITEMS})
+    if prompt == TALL_QUESTION and "AskUserQuestion" in offered:
+        return ("tool", "AskUserQuestion", {"questions": TALL_QUESTION_ITEMS})
     if prompt == QUESTIONS and "request_user_input_async" in offered:
         return ("tool", "request_user_input_async", {"questions": CODEX_QUESTIONS})
     if prompt == WRITE and "Write" in offered and project:
         return ("tool", "Write", {"file_path": os.path.join(project, APPROVED_FILE), "content": APPROVED_TEXT})
+    if prompt == BASH and "Bash" in offered:
+        return ("tool", "Bash", BASH_INPUT)
+    if prompt == LONG_BASH and "Bash" in offered:
+        return ("tool", "Bash", dict(BASH_INPUT, command=":\n" * LONG_LINES + BASH_INPUT["command"]))
     return ("text", REPLY)
 
 

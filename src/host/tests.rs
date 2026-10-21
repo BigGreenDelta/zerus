@@ -9,9 +9,10 @@ use super::{
     link::{memory_pair, write_json, Link},
     protocol::{
         Attach, Attached, Captured, ConsoleEvidence, ConsoleProcess, Control, CreateSession,
-        Created, Done, EnvValue, ErrorBody, ErrorCode, Hello, HelloAnswer, HelloReply, InputClaim,
-        InputReady, Integrity, Key, Kind, LaunchState, Listed, Op, PaneDetails, Protocols,
-        Resolved, Role, Signal, Size, SupervisorOp, SupervisorRegistration, Target, RUN_MARKER,
+        Created, Done, EnvValue, ErrorBody, ErrorCode, Grown, Hello, HelloAnswer, HelloReply,
+        InputClaim, InputReady, Integrity, Key, Kind, LaunchState, Listed, Op, PaneDetails,
+        Protocols, Resolved, Role, Signal, Size, SupervisorOp, SupervisorRegistration, Target,
+        RUN_MARKER,
     },
     registry::{last_lines, Host, Linger, Next},
     server::serve_connection,
@@ -825,6 +826,64 @@ fn queries_get_one_answer_from_the_host_and_never_reach_clients() {
     stream.send(b"\x1b").unwrap();
     assert_eq!(program.input_until(b"\x1b"), b"\x1b");
     assert!(program.read_input(session::ESCAPE_TIME * 3).is_empty());
+}
+
+#[test]
+fn only_an_unviewed_pane_grows_and_the_next_client_sets_its_size_again() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    client.call::<Created>(create("l", "claude/p/a")).unwrap();
+    let program = launcher.program(0);
+    let mut grow = |rows| {
+        client
+            .call::<Grown>(Op::GrowUnviewed {
+                target: pane("claude/p/a"),
+                rows,
+            })
+            .map(|grown| grown.grown)
+    };
+    assert_eq!(grow(48), Ok(true));
+    assert_eq!(program.sizes().last(), Some(&Size { cols: 80, rows: 48 }));
+    // It never shrinks, nor resizes to the size it has.
+    assert_eq!(grow(48), Ok(false));
+    assert_eq!(grow(30), Ok(false));
+    assert_eq!(grow(1025).unwrap_err().code, ErrorCode::Invalid);
+    let details = info(&mut client, pane("claude/p/a"));
+    assert_eq!((details.width, details.height), (80, 48));
+
+    // A viewed pane keeps its client's size.
+    let small = Size { cols: 60, rows: 20 };
+    let (attached, stream) = connect_as(&host, 10, Role::Attach)
+        .attach(Attach {
+            target: pane("claude/p/a"),
+            size: small,
+            run_id: None,
+        })
+        .unwrap();
+    assert_eq!(program.sizes().last(), Some(&small));
+    let resizes = program.sizes().len();
+    let mut client = connect(&host);
+    let mut grow = |rows| {
+        client
+            .call::<Grown>(Op::GrowUnviewed {
+                target: pane("claude/p/a"),
+                rows,
+            })
+            .map(|grown| grown.grown)
+    };
+    assert_eq!(grow(96), Ok(false));
+    assert_eq!(program.sizes().len(), resizes);
+    drop(stream);
+    drop(attached);
+    eventually("the detach", || {
+        let listed: Listed = connect(&host).call(Op::List).unwrap();
+        listed.sessions[0].attached == 0
+    });
+    // Detached, it grows from the size the client left.
+    assert_eq!(grow(40), Ok(true));
+    assert_eq!(program.sizes().last(), Some(&Size { cols: 60, rows: 40 }));
+    program.exit(0);
+    eventually("the end", || grow(96).is_err());
 }
 
 #[test]

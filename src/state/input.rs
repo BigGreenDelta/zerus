@@ -169,6 +169,15 @@ pub(super) fn checked_resumed(name: &str, run_id: &str, conversation_id: &str) -
     Ok(record)
 }
 
+/// A Claude turn stopped with Esc, whose prompt may take /clear before Ready.
+pub(super) fn checked_interrupted(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
+    let record = checked_input(name, run_id, conversation_id, true)?;
+    if !clear_context::stopped(&record) {
+        return Err("The session is no longer interrupted; refresh before clearing".into());
+    }
+    Ok(record)
+}
+
 /// Session settings may precede the first user message, when Codex/Kimi have
 /// not created a conversation yet. Other idle-only actions keep checked_ready.
 pub(super) fn checked_settings(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
@@ -316,8 +325,22 @@ fn checked_input(
     {
         return Err("previous input has not been confirmed by the agent; inspect Terminal before sending again".into());
     }
+    if settings_unconfirmed(&record) {
+        return Err(SETTINGS_UNCONFIRMED.into());
+    }
     Ok(record)
 }
+
+/// Keys of a model or effort change the agent may not have read yet. Unlike
+/// sent text it is not a first message, so a new session keeps its first
+/// message state; a later native event settles it.
+fn settings_unconfirmed(record: &Value) -> bool {
+    record["settings_unconfirmed_at"]
+        .as_f64()
+        .is_some_and(|at| record["last_event_at"].as_f64().unwrap_or(0.0) <= at)
+}
+
+const SETTINGS_UNCONFIRMED: &str = "the agent did not react to the last model settings change; finish or cancel it in Terminal, then send a message there to continue";
 
 /// Capture ANSI attributes so a faint Codex placeholder is distinguishable from
 /// a user's existing draft. Never clear/edit the terminal's current draft.
@@ -811,10 +834,12 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     })();
     cleanup();
     if let Err(error) = result {
+        crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Uncertain);
         return Err(format!(
             "delivery uncertain: {error}; inspect Terminal before retrying"
         ));
     }
+    crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Submitted);
     Ok(receipt)
 }
 
@@ -860,6 +885,17 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unread_settings_keys_wait_for_a_native_event() {
+        let mut record = json!({"settings_unconfirmed_at": 10.0, "last_event_at": 9.0});
+        assert!(settings_unconfirmed(&record));
+        record["last_event_at"] = json!(10.0);
+        assert!(settings_unconfirmed(&record));
+        record["last_event_at"] = json!(10.5);
+        assert!(!settings_unconfirmed(&record));
+        assert!(!settings_unconfirmed(&json!({"last_event_at": 0.0})));
+    }
+
     #[test]
     fn idle_only_dispatch_and_new_session_settings_follow_the_listing() {
         // Clear, compaction and settings dispatch accept the Ready session the

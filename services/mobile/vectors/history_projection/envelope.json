@@ -1,0 +1,14 @@
+{
+  "computer_id": "40000000-0000-4000-8000-000000000004",
+  "operation": "history_projection",
+  "payload": {
+    "expected_conversation_id": "conversation-one",
+    "expected_run_id": "run-one",
+    "history_epoch": "epoch-one",
+    "projection_after": 0,
+    "projection_until": 7,
+    "request_id": "10000000-0000-4000-8000-000000000001"
+  },
+  "request_id": "10000000-0000-4000-8000-000000000001",
+  "session": "codex/example/mobile"
+}

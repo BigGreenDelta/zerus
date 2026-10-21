@@ -271,6 +271,73 @@ fn apply(current: &Value, questions: Option<&[Value]>, request: &Request, existi
     (reply, attention, next)
 }
 
+/// Moves the marks of a session owned by its name (DeepSeek) to its new name;
+/// a tracked session keeps its journal name across renames.
+pub(super) fn rename_owner(old: &str, new: &str) -> Result<()> {
+    let _guard = lock(Some(&root().join("read-marks.lock")))?;
+    let mut sessions = load();
+    let Some(map) = sessions.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(marks) = map.remove(old) else {
+        return Ok(());
+    };
+    map.insert(new.to_owned(), marks);
+    atomic(&path(), &format!("{}\n", json!({"version": 1, "sessions": sessions})))
+}
+
+/// OpenCode renames take this writer before their bindings lock. Read writers
+/// inspect OpenCode while holding the same writer, so reversing that order can
+/// deadlock. The existing v1 file stays the only reader/writer protocol.
+pub(super) struct RenameGuard {
+    _guard: Guard,
+    path: PathBuf,
+    sessions: Value,
+}
+impl RenameGuard {
+    pub(super) fn at(path: &Path) -> Result<Self> {
+        let guard = lock(Some(&path.with_extension("lock")))?;
+        let sessions = match fs::read_to_string(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => json!({}),
+            Ok(text) => serde_json::from_str::<Value>(&text)
+                .ok()
+                .filter(|value| value["version"] == 1 && value["sessions"].is_object())
+                .map(|value| value["sessions"].clone())
+                .ok_or("Shared read marks could not be read; rename was not started")?,
+            Err(_) => {
+                return Err("Shared read marks could not be read; rename was not started".into())
+            }
+        };
+        Ok(Self {
+            _guard: guard,
+            path: path.to_owned(),
+            sessions,
+        })
+    }
+
+    pub(super) fn transfer(&mut self, old: &str, new: &str) -> Result<()> {
+        if old == new {
+            return Ok(());
+        }
+        let map = self
+            .sessions
+            .as_object_mut()
+            .ok_or("Invalid shared read marks")?;
+        let Some(marks) = map.remove(old) else {
+            return Ok(());
+        };
+        map.insert(new.to_owned(), marks);
+        atomic(
+            &self.path,
+            &format!("{}\n", json!({"version": 1, "sessions": self.sessions})),
+        )
+    }
+}
+
+pub(super) fn lock_rename() -> Result<RenameGuard> {
+    RenameGuard::at(&path())
+}
+
 /// Keep the newest conversations of one session.
 fn bounded(conversations: &mut serde_json::Map<String, Value>) {
     while conversations.len() > MAX_CONVERSATIONS {
@@ -539,6 +606,27 @@ mod tests {
         let (unknown, digest) = listed(Ok(None));
         assert!(unknown.is_null());
         assert_eq!(digest, json!(signature(&working, None)));
+    }
+
+    #[test]
+    fn an_unreadable_question_index_keeps_requests_acknowledgeable() {
+        // Optional questions are unknown (null) both while the index catches up
+        // and when it cannot be read; only the first signature is unacknowledgeable.
+        let mut unreadable = waiting();
+        enrich_listing(&mut unreadable, &json!({}), "codex/project/review", Err("Conversation transcript identity mismatch".into()));
+        assert!(unreadable["optional_questions"].is_null());
+        let digest = unreadable["attention_signature"].as_str().unwrap().to_owned();
+        assert_eq!(digest, signature(&waiting(), Some(&[])).unwrap());
+        // `hgs read` sees the same unreadable index as no questions and applies it.
+        let (_, attention, read) = apply(&waiting(), Some(&[]), &request(None, Some(&digest)), &Value::Null, 1.0);
+        assert!(attention);
+        assert_eq!(read["attention_signature"], json!(digest));
+        let mut catching_up = waiting();
+        enrich_listing(&mut catching_up, &json!({}), "codex/project/review", Ok(None));
+        assert!(catching_up["optional_questions"].is_null());
+        let unknown = catching_up["attention_signature"].as_str().unwrap().to_owned();
+        assert_ne!(unknown, digest);
+        assert!(!apply(&waiting(), None, &request(None, Some(&unknown)), &Value::Null, 1.0).1);
     }
 
     #[test]

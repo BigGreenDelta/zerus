@@ -28,6 +28,24 @@ public struct ZerusError: Error, LocalizedError, Equatable, Sendable {
     public static func mismatch(_ message: String) -> ZerusError { ZerusError(.mismatch, message) }
 }
 
+/// Bounds a read that may poll; the slower branch is cancelled. Nothing is retried or resent.
+public enum Deadline {
+    public static let expired = ZerusError(.unavailable, "The check did not finish in time.")
+
+    public static func within<T: Sendable>(_ limit: Duration, _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(for: limit)
+                throw expired
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw expired }
+            return first
+        }
+    }
+}
+
 /// HTTPS client for protocol version 1. It never follows redirects, stores no
 /// cookies or cached responses and never retries a request by itself.
 public struct RelayClient: Sendable {
@@ -131,8 +149,8 @@ public struct RelayClient: Sendable {
 
     // MARK: Requests
 
-    static let childOperations: Set<String> = ["inspect", "history", "send", "attachment_read", "file_read"]
-    static let archiveOperations: Set<String> = ["inspect", "history", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read"]
+    static let childOperations: Set<String> = ["inspect", "history", "history_projection", "send", "attachment_read", "file_read"]
+    static let archiveOperations: Set<String> = ["inspect", "history", "history_projection", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read"]
 
     /// Submits one request with an immutable UUID. The caller has already made it durable.
     public func submit(_ connection: Connection, target: Target, operation: String, payload: JSONObject, id: String) async throws -> JSONObject {
@@ -157,6 +175,15 @@ public struct RelayClient: Sendable {
     }
 
     static let mismatchedReceipt = ZerusError.mismatch("Gateway returned a mismatched receipt. Delivery remains unconfirmed.")
+
+    /// The status-only check of an unconfirmed request: its original receipt, polled until it settles, within `limit`.
+    /// It never submits anything; on expiry the read or poll in progress is cancelled.
+    public func boundedReceipt(_ connection: Connection, id: String, limit: Duration = .seconds(45),
+                               pollDelay: Duration = .milliseconds(800)) async throws -> JSONObject {
+        try await Deadline.within(limit) {
+            try await self.waitForReceipt(connection, initial: try await self.receipt(connection, id: id), pollDelay: pollDelay)
+        }
+    }
 
     /// Reads the original receipt; it never creates a replacement request.
     public func receipt(_ connection: Connection, id: String) async throws -> JSONObject {
@@ -227,6 +254,19 @@ public struct RelayClient: Sendable {
         return try await Task.detached(priority: .userInitiated) { try HistoryPage.parse(target: target, id: id, raw: result) }.value
     }
 
+    /// One intact projection page; applying it is a separate display-cache operation.
+    public func historyProjection(_ connection: Connection, target: Target, epoch: String, after: Int64, until: Int64) async throws -> HistoryProjection.Page {
+        let id = UUID().uuidString.lowercased()
+        let payload = try HistoryProjection.payload(target, id: id, epoch: epoch, after: after, until: until)
+        let receipt = try await waitForReceipt(connection, initial: submit(connection, target: target, operation: "history_projection", payload: payload, id: id))
+        guard receipt.string("state") == "completed", let result = receipt.object("result") else {
+            throw ZerusError(.unavailable, "History changes are not available yet.")
+        }
+        return try await Task.detached(priority: .userInitiated) {
+            try HistoryProjection.parse(target: target, id: id, epoch: epoch, after: after, until: until, raw: result)
+        }.value
+    }
+
     /// Shared read mark; the computer applies only current values, so each attempt has its own request.
     public func markRead(_ connection: Connection, target: Target, payload: JSONObject) async throws -> JSONObject {
         guard target.archiveId.isEmpty, target.agentId.isEmpty else { throw ZerusError.invalid("Read marks belong to the live parent conversation.") }
@@ -246,10 +286,11 @@ public struct RelayClient: Sendable {
         return result
     }
 
-    /// A computer-scoped speech request (statistics or provider configuration) with an empty session.
+    /// A computer-scoped speech request (statistics, profiles or provider configuration) with an empty session.
     public func speech(_ connection: Connection, host: MachineKey, operation: String, payload: JSONObject,
                        id: String = UUID().uuidString.lowercased(), fallback: String) async throws -> JSONObject {
-        guard host.connectionId == connection.id, operation == "speech_stats" || SpeechConfigProtocol.operations.contains(operation) else {
+        guard host.connectionId == connection.id,
+              ["speech_stats", "speech_profiles"].contains(operation) || SpeechConfigProtocol.operations.contains(operation) else {
             throw ZerusError.invalid("Invalid speech request.")
         }
         let receipt = try await waitForReceipt(connection, initial: post(connection, computerId: host.computerId, operation: operation, payload: payload, id: id))

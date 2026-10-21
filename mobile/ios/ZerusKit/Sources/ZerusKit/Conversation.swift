@@ -275,7 +275,9 @@ public enum ConversationSearch {
             let body = replies?.map { "Question\n\($0.question)\nYour answer\n\($0.answer)" }.joined(separator: "\n\n") ?? event.text
             let text = [body, event.attachments.map(\.name).joined(separator: "\n")]
                 .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.joined(separator: "\n")
-            return SearchableMessage(eventId: event.id, role: replies != nil ? "You (answer)" : event.role, text: text, at: event.at)
+            let role = replies != nil ? "You (answer)" : event.role == ActivityNotices.role
+                ? ActivityNotices.label(origin: event.origin ?? "", sender: event.sender ?? "") : event.role
+            return SearchableMessage(eventId: event.id, role: role, text: text, at: event.at)
         }
     }
 
@@ -355,12 +357,14 @@ public enum ConversationLoadPresentation {
     }
 
     public static func status(hasContent: Bool, detailLoading: Bool, detailProgress: Bool, historyLoading: Bool, historyProgress: Bool,
-                              demo: Bool, resolved: Bool = false) -> Status? {
+                              demo: Bool, resolved: Bool = false, opening: Bool = false) -> Status? {
         if demo || !detailLoading && !historyLoading { return nil }
-        let progress = detailLoading && detailProgress || historyLoading && historyProgress
+        // Opening cached messages shows its first reads at once; later polls wait for the delayed gate.
+        let progress = opening || detailLoading && detailProgress || historyLoading && historyProgress
         let initial = !hasContent && !resolved
         if !initial && !progress { return nil }
         let text = initial ? "Loading conversation…"
+            : opening ? "Updating messages…"
             : historyLoading && detailLoading ? "Refreshing conversation and history…"
             : historyLoading ? "Loading message history…" : "Refreshing conversation…"
         return Status(text: text, initial: initial, spinner: progress)
@@ -496,6 +500,20 @@ public enum MessageChanges {
         if state.pickerId == selectionId {
             copy.pickerDraft = nil
             copy.pickerId = ""
+        }
+        return copy
+    }
+
+    /// Messages a native row proved delivered (`ConversationMerge.Result.recordedRequestIds`) become recorded, which ends
+    /// their recovery; a reviewed message stays reviewed.
+    public static func recorded(_ state: MessageState, _ requestIds: Set<String>) -> MessageState {
+        var copy = state
+        copy.outgoing = state.outgoing.map { message in
+            guard requestIds.contains(message.requestId), message.status != "reviewed" else { return message }
+            var updated = message
+            updated.status = "recorded"
+            updated.error = ""
+            return updated
         }
         return copy
     }

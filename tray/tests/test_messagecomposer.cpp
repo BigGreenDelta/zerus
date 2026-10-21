@@ -1,4 +1,5 @@
 #include "MessageComposer.h"
+#include "OpenCodeModelPicker.h"
 #include "SessionCardDelegate.h"
 #include "AttachmentViewer.h"
 #include "ComposerToolbar.h"
@@ -20,6 +21,7 @@
 #include <QDragLeaveEvent>
 #include <QDropEvent>
 #include <QFile>
+#include <QFileDialog>
 #include <QFontInfo>
 #include <QFrame>
 #include <QHelpEvent>
@@ -31,9 +33,11 @@
 #include <QJsonDocument>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QMenu>
 #include <QLineEdit>
 #include <QMimeData>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QProcess>
 #include <QSettings>
@@ -142,6 +146,42 @@ bool setSendingReady(MessageComposer &composer, const QString &key, bool preserv
     while (!result->has_value() && clock.elapsed() < 20000) QTest::qWait(1);
     return result->value_or(false);
 }
+
+void withReferenceDialog(MessageComposer &composer, const std::function<void(QDialog *)> &check)
+{
+    auto *button = composer.findChild<QPushButton *>("referenceMessageFile");
+    QVERIFY(button); QVERIFY(button->isEnabled());
+    bool handled = false;
+    QTimer::singleShot(0, &composer, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        // Failed assertions and rejected paths must never strand a modal loop.
+        const auto close = qScopeGuard([dialog] { if (dialog->isVisible()) dialog->reject(); });
+        handled = true; check(dialog);
+    });
+    button->click();
+    QVERIFY(handled);
+}
+
+QString quotedReference(const QString &path)
+{
+    const auto quoted = QJsonDocument(QJsonArray{path}).toJson(QJsonDocument::Compact);
+    return "Use the existing file at " + QString::fromUtf8(quoted.mid(1, quoted.size() - 2)) + '.';
+}
+}
+
+// The shared contract's OpenCode short list (tests/fixtures/opencode-provider-catalog.json).
+static QJsonArray sharedShortList()
+{
+    QFile file(QStringLiteral(ZERUS_OPENCODE_PROVIDER_CATALOG)); if (!file.open(QIODevice::ReadOnly)) return {};
+    return QJsonDocument::fromJson(file.readAll()).object()["row"].toObject()["model_options"].toArray();
+}
+
+static QJsonArray withSolo(QJsonArray models)
+{
+    models.append(QJsonObject{{"id","solo/solo-model"},{"value","solo/solo-model"},{"label","Solo model"},{"provider","solo"},
+        {"provider_label","Solo fixture"},{"free",false},{"effort_options",QJsonArray{"low"}},{"effort_labels",QJsonArray{"Low"}}});
+    return models;
 }
 
 class TestMessageComposer : public QObject {
@@ -188,6 +228,20 @@ private slots:
     void inlineReferencesFollowCursorAndSurviveEditing();
     void escapeReleasesFocusWithoutChangingDraft();
     void attachmentLimits();
+    void existingLargeFileReferenceNeverUploadsAndSurvivesRestart();
+    void remoteFileReferenceUsesTheNamedComputerAndQuotedPath_data();
+    void remoteFileReferenceUsesTheNamedComputerAndQuotedPath();
+    void invalidFileReferencesPreserveTheDraft_data();
+    void invalidFileReferencesPreserveTheDraft();
+    void fileReferenceRefusesChangedContext_data();
+    void fileReferenceRefusesChangedContext();
+    void fileReferenceFitsNarrowComposerAndHonorsLocks();
+    void fileReferenceOwnerDeletionUnwindsModal_data();
+    void fileReferenceOwnerDeletionUnwindsModal();
+    void fileReferenceInsertionSeparatesSelectionBoundaries_data();
+    void fileReferenceInsertionSeparatesSelectionBoundaries();
+    void fileReferenceReplacementHonorsActualUtf8Limit_data();
+    void fileReferenceReplacementHonorsActualUtf8Limit();
     void textLimitCountsUtf8Bytes();
     void failureAndUncertaintyPreserveDraft();
     void sendingHidesPayloadAndRestoresFailedBackgroundDelivery();
@@ -199,6 +253,15 @@ private slots:
     void modelSettingsPreserveDraftAndDistinguishPending();
     void openCodeModelSettingsOfferModelDefaultEffort();
     void openCodeEffortIdsFollowSharedRule();
+    void openCodePickerChoosesFromTheShortListAndAllModels();
+    void openCodeAllModelsChoiceSurvivesADetailsRefresh();
+    void openCodeStarRequestsAFavoriteForThisSession();
+    void openCodeOnAnOlderComputerOffersNoStarsOrAllModels();
+    void otherAgentsKeepThePlainModelList();
+    void openCodeLateAnswersStayWithTheirSession();
+    void openCodeConfirmedFavoriteOutlivesOlderListsAndCatalogs();
+    void openCodeAnotherFolderStartsThePickerAfresh();
+    void openCodeChoosingAgainTakesTheNewerDescription();
     void modelSettingsShowProviderNoticeBeforeApply();
     void modelSettingsUnavailableExplainsWhy();
     void modelSettingsFitNarrowColumn();
@@ -222,6 +285,292 @@ private slots:
 private:
     QTemporaryDir m_settings;
 };
+
+void TestMessageComposer::existingLargeFileReferenceNeverUploadsAndSurvivesRestart()
+{
+    QTemporaryDir source; QVERIFY(source.isValid());
+    const auto path = source.filePath("large existing file.bin");
+    QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly));
+    QVERIFY(file.resize(64 * 1024 * 1024)); file.close();
+#ifdef Q_OS_UNIX
+    // Metadata remains available while opening the content is forbidden.
+    QVERIFY(file.setPermissions({}));
+    const auto restore = qScopeGuard([&] { file.setPermissions(QFile::ReadOwner | QFile::WriteOwner); });
+#endif
+    const QString key = "\nlarge-file-reference";
+    const QString expected = "Analyze this: " + quotedReference(path);
+    {
+        MessageComposer composer; QList<Submission> submissions; observe(composer, submissions);
+        setSessionReady(composer, key); composer.setAvailability(true); composer.setFileReferenceTarget(key, {}, "Local fixture");
+        composer.editor()->setPlainText("Analyze this: ");
+        auto cursor = composer.editor()->textCursor(); cursor.movePosition(QTextCursor::End); composer.editor()->setTextCursor(cursor);
+        withReferenceDialog(composer, [&](QDialog *dialog) {
+            QVERIFY(dialog->findChild<QPushButton *>("browseReferenceFile"));
+            dialog->findChild<QLineEdit *>("fileReferencePath")->setText(path);
+            dialog->findChild<QPushButton *>("insertFileReference")->click();
+        });
+        QCOMPARE(composer.editor()->toPlainText(), expected); QCOMPARE(submissions.size(), 0);
+        QVERIFY(composer.findChildren<QPushButton *>("removeAttachment").isEmpty());
+        ComposerDraftStore::flushWrites();
+    }
+    MessageComposer restored; QList<Submission> submissions; observe(restored, submissions);
+    setSessionReady(restored, key); restored.setAvailability(true);
+    QCOMPARE(restored.editor()->toPlainText(), expected);
+    sendButton(restored)->click(); QCOMPARE(submissions.size(), 1);
+    QCOMPARE(submissions.first().text, expected); QVERIFY(submissions.first().attachments.isEmpty());
+    restored.deliveryFinished(key, false, "Delivery unknown", true);
+    QCOMPARE(restored.editor()->toPlainText(), expected); QVERIFY(!sendButton(restored)->isEnabled());
+    QCOMPARE(QFileInfo(path).size(), qint64(64 * 1024 * 1024));
+}
+
+void TestMessageComposer::remoteFileReferenceUsesTheNamedComputerAndQuotedPath_data()
+{
+    QTest::addColumn<QString>("path");
+    QTest::newRow("posix-quotes") << "/not-a-local-fixture/large \"quoted\" report.bin";
+    QTest::newRow("home") << "~/large existing.bin";
+    QTest::newRow("windows-drive") << "C:\\not-a-local-fixture\\large \"quoted\" report.bin";
+    QTest::newRow("windows-forward") << "D:/not-a-local-fixture/large report.bin";
+    QTest::newRow("windows-unc") << "\\\\fixture-server\\share\\large report.bin";
+    QTest::newRow("windows-unc-forward") << "//fixture-server/share/large report.bin";
+}
+
+void TestMessageComposer::remoteFileReferenceUsesTheNamedComputerAndQuotedPath()
+{
+    QFETCH(QString, path);
+    MessageComposer composer; QList<Submission> submissions; observe(composer, submissions);
+    const QString key = "peer\nfixture\nconversation\nchild";
+    setSessionReady(composer, key); composer.setAvailability(true);
+    composer.setAttachmentAvailability(false, "This adapter cannot upload attachments");
+    composer.setFileReferenceTarget(key, "fixture-peer", "Remote fixture");
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        QVERIFY(!dialog->findChild<QPushButton *>("browseReferenceFile"));
+        const auto hint = dialog->findChild<QLabel *>("fileReferenceHint")->text();
+        QVERIFY(hint.contains("Remote fixture")); QVERIFY(hint.contains("fixture-peer")); QVERIFY(hint.contains("not on this computer"));
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText(path);
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    QCOMPARE(composer.editor()->toPlainText(), quotedReference(path)); QCOMPARE(submissions.size(), 0);
+    QVERIFY(!composer.canAttachFiles()); QVERIFY(sendButton(composer)->isEnabled());
+    sendButton(composer)->click(); QCOMPARE(submissions.size(), 1);
+    QCOMPARE(submissions[0].key, key); QCOMPARE(submissions[0].text, quotedReference(path)); QVERIFY(submissions[0].attachments.isEmpty());
+}
+
+void TestMessageComposer::invalidFileReferencesPreserveTheDraft_data()
+{
+    QTest::addColumn<QString>("path"); QTest::addColumn<bool>("local");
+    QTest::newRow("relative-remote") << "folder/file.bin" << false;
+    QTest::newRow("url") << "https://example.test/file.bin" << false;
+    QTest::newRow("drive-relative") << "C:desktop\\file.bin" << false;
+    QTest::newRow("windows-device") << "\\\\?\\C:\\desktop\\file.bin" << false;
+    QTest::newRow("newline") << "/tmp/first\nsecond" << false;
+    QTest::newRow("control") << QString("/tmp/first") + QChar(0x1b) + "second" << false;
+    QTest::newRow("missing-local") << "/missing-reference-fixture/file.bin" << true;
+}
+
+void TestMessageComposer::invalidFileReferencesPreserveTheDraft()
+{
+    QFETCH(QString, path); QFETCH(bool, local);
+    MessageComposer composer; setSessionReady(composer, "reference-invalid");
+    composer.setFileReferenceTarget(composer.sessionKey(), local ? QString() : QString("peer"), "Fixture");
+    composer.editor()->setPlainText("Keep this draft");
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText(path);
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+        QVERIFY(dialog->isVisible()); QVERIFY(!dialog->findChild<QLabel *>("fileReferenceError")->text().isEmpty());
+    });
+    QCOMPARE(composer.editor()->toPlainText(), "Keep this draft");
+}
+
+void TestMessageComposer::fileReferenceRefusesChangedContext_data()
+{
+    QTest::addColumn<QString>("change");
+    for (const auto *value : {"session", "round-trip", "host", "run", "conversation", "child-close", "draft", "lock"}) QTest::newRow(value) << QString(value);
+}
+
+void TestMessageComposer::fileReferenceRefusesChangedContext()
+{
+    QFETCH(QString, change);
+    MessageComposer composer; const QString key = "peer\nmain\nconversation\nchild";
+    setSessionReady(composer, key); composer.setFileReferenceTarget(key, "peer", "Remote", "run-one\nconversation-one");
+    composer.editor()->setPlainText("Original draft");
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText("~/large.bin");
+        if (change == "session" || change == "round-trip") {
+            composer.setSessionKey("peer\nother");
+            if (change == "round-trip") { composer.setSessionKey(key); composer.setFileReferenceTarget(key, "peer", "Remote"); }
+        } else if (change == "host") composer.setFileReferenceTarget(key, "other-peer", "Remote");
+        else if (change == "run") composer.setFileReferenceTarget(key, "peer", "Remote", "run-two\nconversation-one");
+        else if (change == "conversation") composer.setFileReferenceTarget(key, "peer", "Remote", "run-one\nconversation-two");
+        else if (change == "child-close") composer.setFileReferenceTarget({}, {}, {});
+        else if (change == "draft") composer.editor()->setPlainText("Newer draft");
+        else composer.setSessionStatus("Input blocked", true, true);
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    QVERIFY(!composer.editor()->toPlainText().contains("Use the existing file"));
+    setSessionReady(composer, key);
+    QCOMPARE(composer.editor()->toPlainText(), change == "draft" ? QString("Newer draft") : QString("Original draft"));
+}
+
+void TestMessageComposer::fileReferenceFitsNarrowComposerAndHonorsLocks()
+{
+    MessageComposer composer; setSessionReady(composer, "reference-layout");
+    composer.setFileReferenceTarget(composer.sessionKey(), "peer", "Remote");
+    composer.setModelSettings("a-very-long-model-name-in-the-catalog", "xhigh", {}, false, "Unavailable");
+    composer.resize(280, 220); composer.show(); QTest::qWait(20);
+    const auto *reference = composer.findChild<QPushButton *>("referenceMessageFile");
+    auto *attach = composer.findChild<QPushButton *>("attachMessageFile");
+    auto *referenceAction = composer.findChild<QAction *>("referenceExistingFileAction");
+    const auto *settings = composer.findChild<QPushButton *>("sessionModelSettings");
+    const auto *send = sendButton(composer);
+    QCOMPARE(composer.width(), 280); QVERIFY(!reference->isVisible()); QVERIFY(attach->menu());
+    QVERIFY(referenceAction->isEnabled()); QVERIFY(attach->geometry().right() < settings->geometry().left());
+    QVERIFY(send->geometry().right() < composer.width());
+    composer.setInterruptAvailability(true, true); QTest::qWait(20);
+    QCOMPARE(composer.width(), 280); QVERIFY(settings->isVisible());
+    QVERIFY(send->geometry().right() < composer.width());
+    composer.setAttachmentAvailability(false, "Uploads unavailable");
+    QVERIFY(attach->isEnabled()); QVERIFY(referenceAction->isEnabled()); QVERIFY(!composer.canAttachFiles());
+    composer.setRecording(true); QVERIFY(!reference->isEnabled());
+    QVERIFY(!referenceAction->isEnabled()); QVERIFY(!attach->isEnabled());
+    composer.setRecording(false); QVERIFY(reference->isEnabled());
+    composer.setSessionStatus("Blocked", true, true); QVERIFY(!reference->isEnabled());
+    composer.setSessionStatus({}); QVERIFY(reference->isEnabled());
+    composer.editor()->setPlainText("Waiting");
+    QVERIFY(composer.setWaitingToSend(composer.sessionKey(), "Pending start")); QVERIFY(!reference->isEnabled());
+    QVERIFY(!referenceAction->isEnabled());
+}
+
+void TestMessageComposer::fileReferenceOwnerDeletionUnwindsModal_data()
+{
+    QTest::addColumn<QString>("point");
+    for (const auto *value : {"dialog", "accepted", "browse"}) QTest::newRow(value) << QString(value);
+}
+
+void TestMessageComposer::fileReferenceOwnerDeletionUnwindsModal()
+{
+    QFETCH(QString, point);
+    const bool nativeDialogs = QApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+    const auto restoreDialogs = qScopeGuard([=] { QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, nativeDialogs); });
+    QPointer<MessageComposer> composer = new MessageComposer;
+    const auto cleanup = qScopeGuard([&] { delete composer.data(); });
+    setSessionReady(*composer, "reference-owner-deletion");
+    composer->setFileReferenceTarget(composer->sessionKey(), point == "browse" ? QString() : QString("peer"), "Fixture");
+    int sends = 0, observed = 0;
+    connect(composer, &MessageComposer::sendRequested, this, [&] { ++sends; });
+    QTimer::singleShot(0, this, [&] {
+        const QPointer<QDialog> dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        const auto close = qScopeGuard([dialog] { if (dialog && dialog->isVisible()) dialog->reject(); });
+        QVERIFY(dialog); ++observed;
+        if (point == "browse") {
+            QTimer::singleShot(0, this, [&] {
+                const auto dispose = qScopeGuard([&] { delete composer.data(); });
+                auto *picker = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+                QVERIFY(picker); QCOMPARE(picker->objectName(), "fileReferencePicker"); ++observed;
+            });
+            dialog->findChild<QPushButton *>("browseReferenceFile")->click();
+        } else if (point == "accepted") {
+            connect(dialog, &QDialog::accepted, this, [&] { delete composer.data(); });
+            dialog->findChild<QLineEdit *>("fileReferencePath")->setText("~/large.bin");
+            dialog->findChild<QPushButton *>("insertFileReference")->click();
+        } else delete composer.data();
+    });
+    composer->findChild<QPushButton *>("referenceMessageFile")->click();
+    QVERIFY(composer.isNull()); QCOMPARE(observed, point == "browse" ? 2 : 1); QCOMPARE(sends, 0);
+    QVERIFY(!QApplication::activeModalWidget());
+}
+
+void TestMessageComposer::fileReferenceInsertionSeparatesSelectionBoundaries_data()
+{
+    QTest::addColumn<QString>("before"); QTest::addColumn<int>("anchor"); QTest::addColumn<int>("position");
+    QTest::addColumn<QString>("expected"); QTest::addColumn<int>("expectedPosition");
+    const QString reference = "Use the existing file at \"/remote/report.bin\".";
+    const int length = int(reference.size());
+    QTest::newRow("empty") << "" << 0 << 0 << reference << length;
+    QTest::newRow("beginning") << "Analyze this" << 0 << 0 << reference + " Analyze this" << length + 1;
+    QTest::newRow("end") << "Analyze this" << 12 << 12 << "Analyze this " + reference << 13 + length;
+    QTest::newRow("middle") << "leftright" << 4 << 4 << "left " + reference + " right" << 6 + length;
+    QTest::newRow("selection") << "leftOLDright" << 4 << 7 << "left " + reference + " right" << 6 + length;
+    QTest::newRow("reverse-selection") << "leftOLDright" << 7 << 4 << "left " + reference + " right" << 6 + length;
+    QTest::newRow("existing-whitespace") << "left \nright" << 5 << 5 << "left " + reference + "\nright" << 5 + length;
+    QTest::newRow("replace-all") << "old draft" << 0 << 9 << reference << length;
+}
+
+void TestMessageComposer::fileReferenceInsertionSeparatesSelectionBoundaries()
+{
+    QFETCH(QString, before); QFETCH(int, anchor); QFETCH(int, position);
+    QFETCH(QString, expected); QFETCH(int, expectedPosition);
+    MessageComposer composer; const QString key = "reference-boundaries";
+    setSessionReady(composer, key); composer.setFileReferenceTarget(key, "peer", "Remote");
+    composer.editor()->setPlainText(before);
+    auto cursor = composer.editor()->textCursor(); cursor.setPosition(anchor); cursor.setPosition(position, QTextCursor::KeepAnchor);
+    composer.editor()->setTextCursor(cursor);
+    QSignalSpy sends(&composer, &MessageComposer::sendRequested);
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        QCOMPARE(composer.editor()->textCursor().anchor(), anchor); QCOMPARE(composer.editor()->textCursor().position(), position);
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText("/remote/report.bin");
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+    });
+    QCOMPARE(composer.editor()->toPlainText(), expected);
+    QCOMPARE(composer.editor()->textCursor().position(), expectedPosition); QVERIFY(!composer.editor()->textCursor().hasSelection());
+    QCOMPARE(sends.size(), 0); QVERIFY(composer.findChildren<QPushButton *>("removeAttachment").isEmpty());
+    ComposerDraftStore::flushWrites();
+    MessageComposer restored; setSessionReady(restored, key);
+    QCOMPARE(restored.editor()->toPlainText(), expected); QCOMPARE(restored.editor()->textCursor().position(), expectedPosition);
+}
+
+void TestMessageComposer::fileReferenceReplacementHonorsActualUtf8Limit_data()
+{
+    QTest::addColumn<QString>("before"); QTest::addColumn<int>("anchor"); QTest::addColumn<int>("position");
+    QTest::addColumn<QString>("expectedInsertion"); QTest::addColumn<bool>("allowed");
+    const int maximum = int(HgsClient::MaximumMessageBytes);
+    const QString reference = "Use the existing file at \"/remote/report.bin\".";
+    const int length = reference.toUtf8().size();
+    const QString append = QString(maximum - length - 1, 'a') + ' ';
+    QTest::newRow("exact-append") << append << int(append.size()) << int(append.size()) << reference << true;
+    const QString overflow(maximum - length, 'a');
+    QTest::newRow("leading-padding-overflow") << overflow << int(overflow.size()) << int(overflow.size()) << ' ' + reference << false;
+    const QString full(maximum, 'x');
+    QTest::newRow("selection-reclaims-budget") << full << maximum - length - 1 << maximum << ' ' + reference << true;
+    QTest::newRow("two-boundaries-exact") << full << 10 << 10 + length + 2 << ' ' + reference + ' ' << true;
+    QTest::newRow("selection-one-byte-over") << full << maximum - length << maximum << ' ' + reference << false;
+    const QString multi = QString(maximum - 64 - 4, 'a') + QString(32, QChar(0xe9)) + "tail";
+    QTest::newRow("utf8-selection") << multi << maximum - 64 - 4 << maximum - 64 - 4 + 32 << ' ' + reference + ' ' << true;
+    const QString emoji = QString::fromUtf8("😀").repeated(maximum / 4);
+    QTest::newRow("surrogate-selection") << emoji << int(emoji.size()) - 40 << int(emoji.size()) << ' ' + reference << true;
+    const QString oversized(maximum + 100, 'x');
+    QTest::newRow("replace-all-reduces-oversize") << oversized << 0 << int(oversized.size()) << reference << true;
+}
+
+void TestMessageComposer::fileReferenceReplacementHonorsActualUtf8Limit()
+{
+    QFETCH(QString, before); QFETCH(int, anchor); QFETCH(int, position);
+    QFETCH(QString, expectedInsertion); QFETCH(bool, allowed);
+    MessageComposer composer; setSessionReady(composer, "reference-byte-budget");
+    composer.setFileReferenceTarget(composer.sessionKey(), "peer", "Remote"); composer.editor()->setPlainText(before);
+    auto cursor = composer.editor()->textCursor(); cursor.setPosition(anchor); cursor.setPosition(position, QTextCursor::KeepAnchor);
+    composer.editor()->setTextCursor(cursor);
+    bool inserted = false; QString error;
+    QSignalSpy sends(&composer, &MessageComposer::sendRequested);
+    withReferenceDialog(composer, [&](QDialog *dialog) {
+        dialog->findChild<QLineEdit *>("fileReferencePath")->setText("/remote/report.bin");
+        dialog->findChild<QPushButton *>("insertFileReference")->click();
+        inserted = !dialog->isVisible(); error = dialog->findChild<QLabel *>("fileReferenceError")->text();
+    });
+    QCOMPARE(inserted, allowed);
+    QString expected = before;
+    expected.replace(qMin(anchor, position), qAbs(position - anchor), expectedInsertion);
+    if (allowed) {
+        QVERIFY(expected.toUtf8().size() <= HgsClient::MaximumMessageBytes);
+        QCOMPARE(composer.editor()->toPlainText(), expected); QVERIFY(error.isEmpty());
+        QCOMPARE(composer.editor()->textCursor().position(), qMin(anchor, position) + expectedInsertion.size());
+    } else {
+        QVERIFY(expected.toUtf8().size() > HgsClient::MaximumMessageBytes);
+        QCOMPARE(composer.editor()->toPlainText(), before); QVERIFY(error.contains("64 KiB"));
+        QCOMPARE(composer.editor()->textCursor().anchor(), anchor); QCOMPARE(composer.editor()->textCursor().position(), position);
+    }
+    QCOMPARE(sends.size(), 0); QVERIFY(composer.findChildren<QPushButton *>("removeAttachment").isEmpty());
+}
 
 void TestMessageComposer::unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval()
 {
@@ -1019,6 +1368,268 @@ void TestMessageComposer::openCodeEffortIdsFollowSharedRule()
     composer.setModelSettings("fixture/ids", {}, options, true, {}, {}, {}, "now"); button->click();
     QStringList unchanged; for (const auto &id : ids) if (!id.toString().isEmpty()) unchanged << id.toString();
     QCOMPARE(offered(), unchanged);
+}
+
+void TestMessageComposer::openCodePickerChoosesFromTheShortListAndAllModels()
+{
+    const auto options = sharedShortList(); QCOMPARE(options.size(), 8);
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QSignalSpy changes(&composer, &MessageComposer::settingsRequested), catalogs(&composer, &MessageComposer::openCodeCatalogRequested);
+    composer.show(); QTest::qWait(20);
+    composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels"); QVERIFY(picker && picker->isVisible());
+    QVERIFY(!composer.findChild<QComboBox *>("sessionModelChoice")->isVisible());
+    picker->select("keyed/paid-model");
+    auto *apply = composer.findChild<QPushButton *>("applySessionSettings"); QVERIFY(apply->isEnabled()); apply->click();
+    QCOMPARE(changes[0], QVariantList({"opencode/session", "keyed/paid-model", ""}));
+    composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    picker->findChild<QPushButton *>("openCodeAllModels")->click();
+    QCOMPARE(catalogs.size(), 1); QCOMPARE(catalogs[0][0].toString(), QString("opencode/session"));
+    const QJsonObject catalog{{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}};
+    composer.setOpenCodeCatalog("other/session", catalog);
+    QVERIFY(!picker->values().contains("solo/solo-model"));
+    composer.setOpenCodeCatalog("opencode/session", catalog);
+    picker->select("solo/solo-model");
+    auto *efforts = composer.findChild<QComboBox *>("sessionEffortChoice");
+    QStringList shown; for (int i = 0; i < efforts->count(); ++i) shown << efforts->itemText(i);
+    QCOMPARE(shown, QStringList({"Default", "Low"}));
+    efforts->setCurrentIndex(1); apply->click();
+    QCOMPARE(changes[1], QVariantList({"opencode/session", "solo/solo-model", "low"}));
+}
+
+void TestMessageComposer::openCodeAllModelsChoiceSurvivesADetailsRefresh()
+{
+    const auto options = sharedShortList();
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    picker->findChild<QPushButton *>("openCodeAllModels")->click();
+    composer.setOpenCodeCatalog("opencode/session", {{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}});
+    picker->select("solo/solo-model");
+    // SessionsWindow calls setModelSettings on every details refresh with the session's own list.
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    auto *apply = composer.findChild<QPushButton *>("applySessionSettings");
+    QCOMPARE(composer.findChild<QComboBox *>("sessionModelChoice")->currentData().toString(), QString("solo/solo-model"));
+    QVERIFY(apply->isEnabled());
+    QVERIFY(!composer.findChild<QComboBox *>("sessionModelChoice")->isVisible());
+    QSignalSpy changes(&composer, &MessageComposer::settingsRequested); apply->click();
+    QCOMPARE(changes[0], QVariantList({"opencode/session", "solo/solo-model", ""}));
+}
+
+void TestMessageComposer::openCodeStarRequestsAFavoriteForThisSession()
+{
+    const auto options = sharedShortList();
+    MessageComposer composer; setSessionReady(composer, "opencode/session");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QSignalSpy favorites(&composer, &MessageComposer::openCodeFavoriteRequested);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    emit picker->favoriteRequested("fixture/alternate", true);
+    QCOMPARE(favorites[0], QVariantList({"opencode/session", "fixture/alternate", true}));
+    composer.setOpenCodeFavorite("other/session", "fixture/alternate", true, {});
+    QVERIFY(!picker->model("fixture/alternate")->favorite);
+    composer.setOpenCodeFavorite("opencode/session", "fixture/alternate", true, {});
+    QVERIFY(picker->model("fixture/alternate")->favorite);
+    composer.setOpenCodeContext(true, false, false, "arch");
+    emit picker->favoriteRequested("fixture/local", true); QCOMPARE(favorites.size(), 1);
+}
+
+void TestMessageComposer::openCodeOnAnOlderComputerOffersNoStarsOrAllModels()
+{
+    MessageComposer composer; setSessionReady(composer, "opencode/session");
+    composer.setModelSettings("fixture/local", {}, sharedShortList(), true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(false, false, true, "mac");
+    QSignalSpy catalogs(&composer, &MessageComposer::openCodeCatalogRequested), favorites(&composer, &MessageComposer::openCodeFavoriteRequested);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    auto *all = picker->findChild<QPushButton *>("openCodeAllModels"); QVERIFY(!all->isEnabled());
+    QCOMPARE(all->toolTip(), QString("Update Zerus on mac to search all models and star favorites."));
+    all->click(); emit picker->favoriteRequested("fixture/local", true);
+    QCOMPARE(catalogs.size(), 0); QCOMPARE(favorites.size(), 0);
+}
+
+void TestMessageComposer::otherAgentsKeepThePlainModelList()
+{
+    MessageComposer composer; setSessionReady(composer, "claude/session");
+    composer.setModelSettings("opus", {}, QJsonArray{QJsonObject{{"id","opus"},{"label","Opus"}}}, true, {}, {}, {}, "now", false);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    QVERIFY(composer.findChild<QComboBox *>("sessionModelChoice")->isVisible());
+    QVERIFY(!composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels")->isVisible());
+}
+
+// Another session starts the picker afresh in the same call: its own list and current
+// model, no catalog, All models off. The first session's late answers never show there,
+// and back in the first session nothing of before is pending.
+void TestMessageComposer::openCodeLateAnswersStayWithTheirSession()
+{
+    const auto options = sharedShortList();
+    const QJsonObject catalog{{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}};
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/first");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QSignalSpy catalogs(&composer, &MessageComposer::openCodeCatalogRequested), favorites(&composer, &MessageComposer::openCodeFavoriteRequested);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    picker->findChild<QPushButton *>("openCodeAllModels")->click(); QCOMPARE(catalogs.size(), 1);
+    emit picker->favoriteRequested("fixture/alternate", true); QCOMPARE(favorites.size(), 1);
+    setSessionReady(composer, "opencode/second");
+    const QJsonArray second{QJsonObject{{"id","fixture/plain"},{"value","fixture/plain"},{"label","Plain fixture"},
+        {"provider","fixture"},{"provider_label","fixture"}}};
+    composer.setModelSettings("fixture/plain", {}, second, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QCOMPARE(picker->values(), QStringList({"fixture/plain"})); QCOMPARE(picker->current(), QString("fixture/plain"));
+    QVERIFY(!picker->showingAll());
+    composer.setOpenCodeCatalog("opencode/first", catalog);
+    composer.setOpenCodeFavorite("opencode/first", "fixture/alternate", true, {});
+    composer.setOpenCodeCatalogFailed("opencode/first", "A late failure");
+    QCOMPARE(picker->values(), QStringList({"fixture/plain"})); QVERIFY(!picker->showingAll());
+    QVERIFY(picker->findChild<QLabel *>("openCodeModelNotice")->text().isEmpty());
+    // A choice made in the second session stays there.
+    composer.findChild<QPushButton *>("sessionModelSettings")->click(); picker->select("fixture/plain");
+    setSessionReady(composer, "opencode/first");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QVERIFY(!picker->showingAll()); QVERIFY(!picker->values().contains("solo/solo-model"));
+    QCOMPARE(picker->current(), QString("fixture/local"));
+    QVERIFY(!picker->model("fixture/alternate")->favorite);
+    composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    QCOMPARE(composer.findChild<QComboBox *>("sessionModelChoice")->findData("fixture/plain"), -1);
+    QCOMPARE(catalogs.size(), 1); QCOMPARE(favorites.size(), 1);
+}
+
+// A confirmed favorite outlives lists and catalogs read before it: a details refresh
+// and a late All models answer still show the change. A failure keeps the state and
+// says why; nothing is sent again.
+void TestMessageComposer::openCodeConfirmedFavoriteOutlivesOlderListsAndCatalogs()
+{
+    const auto options = sharedShortList();
+    const QJsonObject olderCatalog{{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}};
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeContext(true, false, true, "arch");
+    QSignalSpy favorites(&composer, &MessageComposer::openCodeFavoriteRequested);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    picker->findChild<QPushButton *>("openCodeAllModels")->click();
+    QVERIFY(!picker->model("fixture/alternate")->favorite);
+    emit picker->favoriteRequested("fixture/alternate", true);
+    composer.setOpenCodeFavorite("opencode/session", "fixture/alternate", true, {});
+    QVERIFY(picker->model("fixture/alternate")->favorite);
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    QVERIFY(picker->model("fixture/alternate")->favorite);
+    composer.setOpenCodeCatalog("opencode/session", olderCatalog);
+    QVERIFY(picker->model("solo/solo-model")); QVERIFY(picker->model("fixture/alternate")->favorite);
+    // Unstarring a favorite the older list still marks works the same way.
+    QVERIFY(picker->model("keyed/paid-model")->favorite);
+    emit picker->favoriteRequested("keyed/paid-model", false);
+    composer.setOpenCodeFavorite("opencode/session", "keyed/paid-model", false, {});
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    composer.setOpenCodeCatalog("opencode/session", olderCatalog);
+    QVERIFY(!picker->model("keyed/paid-model")->favorite); QVERIFY(picker->model("fixture/alternate")->favorite);
+    emit picker->favoriteRequested("fixture/local", true); QCOMPARE(favorites.size(), 3);
+    composer.setOpenCodeFavorite("opencode/session", "fixture/local", false, "Account catalog is busy.");
+    QVERIFY(!picker->model("fixture/local")->favorite);
+    QVERIFY(composer.findChild<QLabel *>("sessionSettingsHint")->text().contains("Account catalog is busy."));
+    QTest::qWait(50); QCOMPARE(favorites.size(), 3);
+}
+
+// The shown session on another computer or in another folder starts its picker afresh,
+// as another session does: the catalog, a loading request, All models, a failure and the
+// choices made for the place before are gone, while its current model stays listed. A
+// refresh of the same context keeps them; the next explicit All models asks once.
+void TestMessageComposer::openCodeAnotherFolderStartsThePickerAfresh()
+{
+    const auto options = sharedShortList();
+    const QJsonObject catalog{{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}};
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session");
+    // As SessionsWindow renders details: the context first, then the session's list.
+    const auto details = [&](const QString &host, const QString &folder, const QString &model) {
+        composer.setOpenCodeContext(true, false, true, "arch", host, folder);
+        composer.setModelSettings(model, {}, options, true, {}, {}, {}, "now", true);
+    };
+    details("arch", "/workspace/project", "fixture/local");
+    QSignalSpy catalogs(&composer, &MessageComposer::openCodeCatalogRequested), changes(&composer, &MessageComposer::settingsRequested);
+    composer.show();
+    auto *open = composer.findChild<QPushButton *>("sessionModelSettings"); open->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    auto *all = picker->findChild<QPushButton *>("openCodeAllModels");
+    auto *notice = picker->findChild<QLabel *>("openCodeModelNotice");
+    auto *models = composer.findChild<QComboBox *>("sessionModelChoice");
+    auto *hint = composer.findChild<QLabel *>("sessionSettingsHint");
+    all->click(); QCOMPARE(catalogs.size(), 1); composer.setOpenCodeCatalog("opencode/session", catalog);
+    picker->select("solo/solo-model"); composer.findChild<QPushButton *>("applySessionSettings")->click(); QCOMPARE(changes.size(), 1);
+    // The session now runs solo, which its own list lacks: a refresh of the same context keeps its description.
+    const auto generation = composer.openCodeGeneration();
+    details("arch", "/workspace/project", "solo/solo-model");
+    QCOMPARE(composer.openCodeGeneration(), generation);
+    open->click(); QVERIFY(picker->showingAll()); QCOMPARE(models->currentText(), QString("Solo model"));
+    composer.setOpenCodeFavorite("opencode/session", "fixture/alternate", false, "Account catalog is busy.");
+    QVERIFY(hint->text().contains("Account catalog is busy."));
+    // In another folder only the current model stays, described by its value.
+    details("arch", "/workspace/moved", "solo/solo-model");
+    QVERIFY(composer.openCodeGeneration() != generation); QVERIFY(!picker->isVisible());
+    QVERIFY(!picker->showingAll()); QCOMPARE(picker->current(), QString("solo/solo-model"));
+    QCOMPARE(picker->model("solo/solo-model")->label, QString("solo/solo-model"));
+    open->click(); QCOMPARE(models->currentText(), QString("solo/solo-model")); QVERIFY(!hint->text().contains("Account catalog is busy."));
+    // A request still loading when the computer changes is gone too; the next All models asks once.
+    all->click(); QCOMPARE(catalogs.size(), 2); QCOMPARE(notice->text(), QString("Loading all models…"));
+    const auto loading = composer.openCodeGeneration();
+    details("mac", "/workspace/moved", "solo/solo-model");
+    QVERIFY(composer.openCodeGeneration() != loading); QVERIFY(!picker->showingAll()); QVERIFY(notice->text().isEmpty());
+    open->click(); all->click(); QCOMPARE(catalogs.size(), 3); composer.setOpenCodeCatalog("opencode/session", catalog);
+    QVERIFY(picker->showingAll()); QVERIFY(picker->values().contains("solo/solo-model")); QVERIFY(notice->text().isEmpty());
+    // A return to the same session, computer and folder is a new context as well.
+    const auto shown = composer.openCodeGeneration();
+    setSessionReady(composer, "opencode/other"); details("mac", "/workspace/moved", "fixture/local");
+    setSessionReady(composer, "opencode/session"); details("mac", "/workspace/moved", "solo/solo-model");
+    QVERIFY(composer.openCodeGeneration() > shown + 1); QVERIFY(!picker->showingAll());
+    QCOMPARE(catalogs.size(), 3); QCOMPARE(changes.size(), 1);
+}
+
+// Chosen again, a model takes its newest description: a newer catalog of the same context
+// renames it and offers another variant. The combo, the efforts and a later details refresh
+// show it, and nothing is sent before Apply.
+void TestMessageComposer::openCodeChoosingAgainTakesTheNewerDescription()
+{
+    const auto options = sharedShortList();
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "opencode/session");
+    composer.setOpenCodeContext(true, false, true, "arch", {}, "/workspace/project");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    QSignalSpy changes(&composer, &MessageComposer::settingsRequested);
+    composer.show(); composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    auto *picker = composer.findChild<OpenCodeModelPicker *>("sessionOpenCodeModels");
+    auto *models = composer.findChild<QComboBox *>("sessionModelChoice");
+    auto *efforts = composer.findChild<QComboBox *>("sessionEffortChoice");
+    const auto shown = [&] { QStringList items; for (int i = 0; i < efforts->count(); ++i) items << efforts->itemText(i); return items; };
+    picker->findChild<QPushButton *>("openCodeAllModels")->click();
+    composer.setOpenCodeCatalog("opencode/session", {{"catalog_state","ready"},{"models",withSolo(options)},{"model_options",options}});
+    picker->select("solo/solo-model"); efforts->setCurrentIndex(efforts->findData("low"));
+    QCOMPARE(shown(), QStringList({"Default", "Low"})); QCOMPARE(efforts->currentData().toString(), QString("low"));
+    // The same context's newer catalog: solo has another label and only another variant.
+    auto newer = withSolo(options); auto solo = newer.last().toObject();
+    solo["label"] = "Solo model renamed"; solo["effort_options"] = QJsonArray{"high"}; solo["effort_labels"] = QJsonArray{"High"};
+    newer.replace(newer.size() - 1, solo);
+    composer.setOpenCodeCatalog("opencode/session", {{"catalog_state","ready"},{"models",newer},{"model_options",options}});
+    picker->select("solo/solo-model");
+    QCOMPARE(models->currentText(), QString("Solo model renamed")); QCOMPARE(shown(), QStringList({"Default", "High"}));
+    // A details refresh of the session's own list keeps the newer description.
+    composer.setOpenCodeContext(true, false, true, "arch", {}, "/workspace/project");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, {}, {}, "now", true);
+    QCOMPARE(models->currentData().toString(), QString("solo/solo-model")); QCOMPARE(changes.size(), 0);
+    efforts->setCurrentIndex(efforts->findData("high")); composer.findChild<QPushButton *>("applySessionSettings")->click();
+    QCOMPARE(changes.size(), 1); QCOMPARE(changes[0], QVariantList({"opencode/session", "solo/solo-model", "high"}));
+    // Reported as pending, the reopened popup describes it from the kept choice.
+    composer.setOpenCodeContext(true, false, true, "arch", {}, "/workspace/project");
+    composer.setModelSettings("fixture/local", {}, options, true, {}, "solo/solo-model", "high", "ready", true);
+    composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    QCOMPARE(models->currentData().toString(), QString("solo/solo-model")); QCOMPARE(models->currentText(), QString("Solo model renamed"));
+    QCOMPARE(shown(), QStringList({"Default", "High"})); QCOMPARE(efforts->currentData().toString(), QString("high"));
+    QCOMPARE(changes.size(), 1);
 }
 
 void TestMessageComposer::modelSettingsShowProviderNoticeBeforeApply()

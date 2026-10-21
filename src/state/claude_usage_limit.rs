@@ -211,7 +211,7 @@ pub(super) fn available(record: &Value, question: &Value) -> Result<()> {
     if snapshot(&record, &kimi_tui_choice::capture(&record)?).map(|s| s.0)
         != Some(question["question_hash"].clone())
     {
-        return Err("Claude's usage-limit choices changed; refresh Activity".into());
+        return Err("Claude's usage-limit choices changed; nothing was sent".into());
     }
     Ok(())
 }

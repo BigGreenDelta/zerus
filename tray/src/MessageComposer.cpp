@@ -1,10 +1,13 @@
 #include "MessageComposer.h"
 #include "OpenCodeEffort.h"
+#include "OpenCodeModelPicker.h"
+#include "OpenCodeModels.h"
 #include "AttachmentViewer.h"
 #include "ComposerToolbar.h"
 #include "ContentScale.h"
 #include "ExternalFile.h"
 #include "LocalFile.h"
+#include "MachinePlatform.h"
 #include "Shortcuts.h"
 #include "SessionCardDelegate.h"
 #include "WorkspaceIcons.h"
@@ -18,6 +21,7 @@
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDropEvent>
 #include <QDragLeaveEvent>
 #include <QFile>
@@ -30,13 +34,16 @@
 #include <QKeyEvent>
 #include <QToolTip>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QLocale>
 #include <QMessageBox>
+#include <QMenu>
 #include <QMimeData>
 #include <QMimeDatabase>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QScreen>
 #include <QSignalBlocker>
@@ -216,6 +223,13 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     m_attach->setFixedSize(34, 34); m_attach->setIconSize(QSize(19, 19));
     m_attach->setToolTip(tr("Attach files, paste an image, or drop files onto this session"));
     m_attach->setAccessibleName(tr("Attach files to message"));
+    m_reference = new QPushButton; m_reference->setObjectName("referenceMessageFile");
+    m_reference->setFixedSize(34, 34); m_reference->setIconSize(QSize(19, 19));
+    m_reference->setAccessibleName(tr("Reference an existing file"));
+    m_fileMenu = new QMenu(m_attach);
+    m_attachFileAction = m_fileMenu->addAction(tr("Attach files…"), this, &MessageComposer::attachFiles);
+    m_referenceFileAction = m_fileMenu->addAction(tr("Reference an existing file…"), this, &MessageComposer::referenceFile);
+    m_referenceFileAction->setObjectName("referenceExistingFileAction");
     m_status = new StatusMessage; m_status->setObjectName("messageStatus"); m_status->setFixedHeight(34);
     m_status->setTextFormat(Qt::PlainText); m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_retry = new QPushButton(tr("Allow retry")); m_retry->setObjectName("allowMessageRetry"); m_retry->hide();
@@ -237,6 +251,10 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     m_models = new QComboBox; m_models->setObjectName("sessionModelChoice"); m_models->setAccessibleName(tr("Model"));
     m_models->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); m_models->setMinimumContentsLength(12);
     modelLabel->setBuddy(m_models); settingsLayout->addWidget(modelLabel); settingsLayout->addWidget(m_models);
+    // OpenCode chooses in its grouped picker; m_models stays hidden there as the selected value.
+    m_openCodeModels = new OpenCodeModelPicker; m_openCodeModels->setObjectName("sessionOpenCodeModels"); m_openCodeModels->hide();
+    if (auto *list = m_openCodeModels->findChild<QWidget *>("openCodeModelList")) list->setMaximumHeight(320);
+    settingsLayout->addWidget(m_openCodeModels);
     auto *effortLabel = m_effortLabel = new QLabel(tr("Reasoning effort"));
     m_efforts = new QComboBox; m_efforts->setObjectName("sessionEffortChoice"); m_efforts->setAccessibleName(tr("Reasoning effort"));
     effortLabel->setBuddy(m_efforts); settingsLayout->addWidget(effortLabel); settingsLayout->addWidget(m_efforts);
@@ -257,12 +275,22 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     connect(m_settings, &QPushButton::clicked, this, &MessageComposer::openSettings);
     connect(m_models, &QComboBox::currentIndexChanged, this, &MessageComposer::updateSettingsEfforts);
     connect(m_efforts, &QComboBox::currentIndexChanged, this, &MessageComposer::updateSettingsApply);
+    connect(m_openCodeModels, &OpenCodeModelPicker::chosen, this, &MessageComposer::chooseOpenCodeModel);
+    connect(m_openCodeModels, &OpenCodeModelPicker::catalogRequested, this, [this] {
+        if (m_popupKey == m_key && m_modelDefaultEffort) emit openCodeCatalogRequested(m_key);
+    });
+    connect(m_openCodeModels, &OpenCodeModelPicker::favoriteRequested, this, [this](const QString &value, bool favorite) {
+        // Only the confirmed answer changes the star; a failure is never sent again on its own.
+        if (m_popupKey != m_key || !m_modelDefaultEffort || !m_openCodeSupported || !m_openCodeOnline) return;
+        m_openCodeError.clear(); m_openCodeModels->setFavoritePending(value, true); updateSettingsApply();
+        emit openCodeFavoriteRequested(m_key, value, favorite);
+    });
     connect(m_applySettings, &QPushButton::clicked, this, [this] {
         if (m_popupKey != m_key || !m_applySettings->isEnabled()) return;
         const QString model = m_models->currentData().toString(), effort = m_efforts->currentData().toString();
         m_settingsPopup->hide(); emit settingsRequested(m_key, model, effort);
     });
-    actions->addWidget(m_attach); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_refreshStatus); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
+    actions->addWidget(m_attach); actions->addWidget(m_reference); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_refreshStatus); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
     inputLayout->addLayout(actions);
     connect(edit, &QPlainTextEdit::textChanged, this, [this]() {
         if (m_loading || m_key.isEmpty()) return;
@@ -307,7 +335,8 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     edit->addAction(m_sendAction);
     connect(&ShortcutRegistry::instance(), &ShortcutRegistry::changed, this, &MessageComposer::applyShortcuts);
     applyShortcuts();
-    connect(m_attach, &QPushButton::clicked, this, &MessageComposer::attachFiles);
+    connect(m_attach, &QPushButton::clicked, this, [this] { if (!m_attach->menu()) attachFiles(); });
+    connect(m_reference, &QPushButton::clicked, this, &MessageComposer::referenceFile);
     connect(m_send, &QPushButton::clicked, this, &MessageComposer::send);
     connect(m_retry, &QPushButton::clicked, this, [this]() {
         if (m_key.isEmpty()) return;
@@ -345,8 +374,11 @@ void MessageComposer::setSessionKey(const QString &key)
 {
     if (key == m_key) return;
     ++m_navigationRevision;
+    setFileReferenceTarget({}, {}, {});
     m_sessionStatus.clear(); m_sessionStatusError = false; m_sessionStatusBlocksInput = false;
     m_settingsPopup->hide();
+    // Another session or none: the OpenCode picker's context ends here, also when the same one returns.
+    m_openCodeContext.clear(); resetOpenCodeModels();
     m_toolbar->closePopovers(); m_preview->hide();
     if (!key.isEmpty() && !m_drafts.contains(key)) {
         m_drafts.insert(key, {}); m_loadingKeys.insert(key);
@@ -680,6 +712,102 @@ void MessageComposer::attachFiles()
     for (const auto &file : files) attachFile(file);
 }
 
+void MessageComposer::setFileReferenceTarget(const QString &key, const QString &host, const QString &machine, const QString &context)
+{
+    const QString bound = key == m_key ? key : QString();
+    if (m_referenceKey == bound && m_referenceHost == host && m_referenceMachine == machine && m_referenceContext == context) return;
+    m_referenceKey = bound; m_referenceHost = host; m_referenceMachine = machine; m_referenceContext = context;
+    ++m_referenceRevision;
+    updateControls();
+}
+
+void MessageComposer::referenceFile()
+{
+    if (m_referenceKey.isEmpty() || m_referenceKey != m_key || !canEditAttachments() || isPreparingSending(m_key)) return;
+    const auto target = voiceTarget();
+    const auto revision = m_referenceRevision;
+    const QPointer<MessageComposer> owner(this);
+    const auto current = [owner, target, revision] {
+        if (!owner) return false;
+        const auto now = owner->voiceTarget();
+        return now.key == target.key && now.navigation == target.navigation && now.revision == target.revision
+            && revision == owner->m_referenceRevision && owner->m_referenceKey == owner->m_key
+            && owner->canEditAttachments() && !owner->isPreparingSending(owner->m_key);
+    };
+    const bool local = m_referenceHost.isEmpty();
+    const auto machine = local ? tr("this computer") : m_referenceMachine.isEmpty() ? m_referenceHost : m_referenceMachine;
+    const QPointer<QDialog> dialog = new QDialog(this); dialog->setObjectName("fileReferenceDialog");
+    dialog->setWindowTitle(tr("Reference file — %1").arg(machine));
+    auto *layout = new QVBoxLayout(dialog);
+    auto *hint = new QLabel(local
+        ? tr("Insert a path to an existing file on this computer. Only the path is added; the file is not read or uploaded.")
+        : tr("Enter the path of an existing file on %1 (%2), not on this computer. Only the path is added; its existence is not checked here.").arg(machine, m_referenceHost));
+    hint->setObjectName("fileReferenceHint"); hint->setTextFormat(Qt::PlainText); hint->setWordWrap(true); layout->addWidget(hint);
+    auto *row = new QHBoxLayout;
+    const QPointer<QLineEdit> path = new QLineEdit; path->setObjectName("fileReferencePath"); path->setAccessibleName(tr("File path on %1").arg(machine));
+    path->setPlaceholderText(local ? tr("Absolute file path") : tr("/path/to/file, ~/file or C:\\path\\file")); row->addWidget(path, 1);
+    if (local) {
+        auto *browse = new QPushButton(tr("Browse…")); browse->setObjectName("browseReferenceFile"); row->addWidget(browse);
+        connect(browse, &QPushButton::clicked, dialog, [owner, dialog, path] {
+            if (!owner || !dialog) return;
+            const QPointer<QFileDialog> picker = new QFileDialog(dialog, tr("Reference an existing file"));
+            picker->setObjectName("fileReferencePicker"); picker->setFileMode(QFileDialog::ExistingFile);
+            picker->setNameFilter(tr("All files (*)"));
+            const auto outcome = picker->exec();
+            const auto selected = picker && outcome == QDialog::Accepted ? picker->selectedFiles().value(0) : QString();
+            delete picker.data();
+            if (owner && dialog && path && !selected.isEmpty()) path->setText(selected);
+        });
+    }
+    layout->addLayout(row);
+    auto *error = new QLabel; error->setObjectName("fileReferenceError"); error->setWordWrap(true); error->setTextFormat(Qt::PlainText); layout->addWidget(error);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
+    auto *insert = buttons->addButton(tr("Insert reference"), QDialogButtonBox::AcceptRole); insert->setObjectName("insertFileReference");
+    layout->addWidget(buttons); connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    QString reference;
+    connect(buttons, &QDialogButtonBox::accepted, dialog, [&, owner, dialog] {
+        if (!dialog) return;
+        if (!current()) {
+            dialog->reject(); return;
+        }
+        QString value = path->text();
+        if (value.isEmpty() || value.toUtf8().size() > 32768
+            || std::any_of(value.cbegin(), value.cend(), [](QChar c) { return c.category() == QChar::Other_Control; })) {
+            error->setText(tr("Enter a file path without line breaks or control characters.")); return;
+        }
+        if (local) {
+            if (value.startsWith("~/")) value = QDir::homePath() + value.mid(1);
+            const QFileInfo info(value);
+            if (!info.isAbsolute() || !info.isFile()) { error->setText(tr("Choose an existing file on this computer.")); return; }
+            value = info.absoluteFilePath();
+        } else if (!((value.startsWith('/') && !value.startsWith("//")) || value.startsWith("~/")
+            || MachinePlatform::absolute(value, MachinePlatform::Style::Windows))) {
+            error->setText(tr("Enter an absolute path or ~/ path on %1.").arg(machine)); return;
+        }
+        // JSON quoting preserves spaces, literal quotes and Windows separators.
+        // These are draft instructions, never a shell command or an upload.
+        const auto quoted = QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact);
+        reference = tr("Use the existing file at %1.").arg(QString::fromUtf8(quoted.mid(1, quoted.size() - 2)));
+        const auto text = owner->m_editor->toPlainText();
+        const auto cursor = owner->m_editor->textCursor();
+        const auto begin = cursor.selectionStart(), end = cursor.selectionEnd();
+        if (begin > 0 && !text[begin - 1].isSpace()) reference.prepend(' ');
+        if (end < text.size() && !text[end].isSpace()) reference.append(' ');
+        auto result = text;
+        result.replace(begin, end - begin, reference);
+        if (result.toUtf8().size() > MaxTextBytes) {
+            error->setText(tr("Message exceeds 64 KiB.")); return;
+        }
+        dialog->accept();
+    });
+    dialog->resize(520, dialog->sizeHint().height()); path->setFocus();
+    const auto outcome = dialog->exec();
+    delete dialog.data();
+    if (outcome != QDialog::Accepted || !current()) return;
+    auto cursor = owner->m_editor->textCursor(); cursor.insertText(reference); owner->m_editor->setTextCursor(cursor);
+    owner->m_editor->setFocus(Qt::OtherFocusReason);
+}
+
 void MessageComposer::attachDroppedFiles(const QStringList &paths)
 {
     if(!canAttachFiles())return;
@@ -879,8 +1007,25 @@ void MessageComposer::updateControls()
         :m_sessionStatusBlocksInput?m_sessionStatus:QString();
     m_editor->setToolTip(lockHint);
     m_editor->setAccessibleDescription(lockHint);
-    m_attach->setEnabled(!m_key.isEmpty() && !locked && m_attachmentsAvailable);
-    m_attach->setToolTip(m_attachmentsAvailable?tr("Attach files, paste an image, or drop files onto this session"):m_attachmentsReason);
+    const bool referenceTarget = !m_referenceKey.isEmpty() && m_referenceKey == m_key;
+    const bool fileMenu = m_narrow && referenceTarget;
+    // Keep Files, model settings, Stop and Send within a narrow column.
+    // The existing Stop icon and accessible name retain the same action.
+    m_stop->setText(fileMenu ? QString() : tr("Stop"));
+    m_stop->setAccessibleName(tr("Stop current turn"));
+    m_stop->setMinimumWidth(fileMenu ? 34 : 0); m_stop->setMaximumWidth(fileMenu ? 34 : QWIDGETSIZE_MAX);
+    m_attach->setMenu(fileMenu ? m_fileMenu : nullptr);
+    m_attach->setEnabled(!m_key.isEmpty() && !locked && (m_attachmentsAvailable || fileMenu));
+    m_attach->setAccessibleName(fileMenu ? tr("Files: attach or reference an existing file") : tr("Attach files to message"));
+    m_attachFileAction->setEnabled(canAttachFiles());
+    m_referenceFileAction->setEnabled(referenceTarget && canEditAttachments() && !isPreparingSending(m_key));
+    m_reference->setVisible(referenceTarget && !fileMenu);
+    m_reference->setEnabled(!m_key.isEmpty() && !locked && !isPreparingSending(m_key));
+    m_reference->setToolTip(m_referenceHost.isEmpty()
+        ? tr("Reference an existing file on this computer without uploading it")
+        : tr("Reference an existing file on %1 without uploading it").arg(m_referenceMachine.isEmpty() ? m_referenceHost : m_referenceMachine));
+    m_attach->setToolTip(fileMenu ? tr("Files: attach copies or reference an existing file on the agent's computer")
+        : m_attachmentsAvailable ? tr("Attach files, paste an image, or drop files onto this session") : m_attachmentsReason);
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
     m_attach->setVisible(!m_taskMode);
@@ -917,7 +1062,7 @@ void MessageComposer::updateControls()
     if (!showSettings) m_settingsPopup->hide();
     // Do not transfer an unfinished settings interaction to the Stop action.
     if (returnFocus) m_editor->setFocus(Qt::OtherFocusReason);
-    m_actions->setStretch(1, status.isEmpty() ? 1 : 0);
+    m_actions->setStretch(2, status.isEmpty() ? 1 : 0);
     setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg(ownError || (status == m_sessionStatus && m_sessionStatusError)
         ? (m_dark ? "#f4ab9b" : "#a13224") : waiting ? (m_dark ? "#efc978" : "#92641b") : (m_dark ? "#a2adbc" : "#627082")));
     emit controlsChanged();
@@ -1086,6 +1231,22 @@ void MessageComposer::setModelSettings(const QString &model, const QString &effo
 {
     m_model = model; m_effort = effort; m_modelOptions = options; m_settingsEnabled = enabled; m_modelDefaultEffort = modelDefaultEffort;
     m_settingsReason = reason; m_pendingModel = pendingModel; m_pendingEffort = pendingEffort; m_applyWhen = applyWhen;
+    if (modelDefaultEffort) {
+        // Another context starts the picker afresh before its list and current model are set.
+        enterOpenCodeContext();
+        m_openCodeShort = options;
+        // Picker choices stay offered with their variants, also when this list lacks them.
+        const auto chosen = m_openCodeChosen.value(m_key).entries;
+        for (const auto &entry : chosen) {
+            const auto id = entry.toObject().value("id").toString();
+            if (std::none_of(m_modelOptions.cbegin(), m_modelOptions.cend(), [&](const QJsonValue &option) { return option.toObject().value("id").toString() == id; }))
+                m_modelOptions.append(entry);
+        }
+        m_openCodeModels->setShortList(withConfirmedFavorites(options), m_openCodeTruncated);
+        // An open popup keeps the model chosen in it; otherwise the session's own.
+        m_openCodeModels->setCurrent(m_settingsPopup->isVisible() && m_popupKey == m_key ? m_models->currentData().toString()
+                                                                                        : pendingModel.isEmpty() ? model : pendingModel);
+    } else if (!m_openCodeContext.isEmpty()) { m_openCodeContext.clear(); resetOpenCodeModels(); }
     updateSettingsButton();
     if (m_settingsPopup->isVisible()) updateSettingsApply();
 }
@@ -1116,14 +1277,16 @@ void MessageComposer::openSettings()
     }
     if (m_models->findData(model) < 0 && !model.isEmpty()) m_models->insertItem(0, model, model);
     m_models->setCurrentIndex(m_models->findData(model));
+    if (m_modelDefaultEffort) m_openCodeModels->setCurrent(model);
     updateSettingsEfforts(); updateSettingsApply();
     const QRect available = screen()->availableGeometry();
-    m_settingsPopup->setFixedWidth(qMin(360, available.width() - 24)); m_settingsPopup->adjustSize();
+    m_settingsPopup->setFixedWidth(qMin(m_modelDefaultEffort ? 420 : 360, available.width() - 24)); m_settingsPopup->adjustSize();
     QPoint position = m_settings->mapToGlobal(QPoint(m_settings->width() - m_settingsPopup->width(), -m_settingsPopup->height() - 7));
     position.setX(qBound(available.left() + 8, position.x(), available.right() - m_settingsPopup->width() - 8));
     position.setY(qBound(available.top() + 8, position.y(), available.bottom() - m_settingsPopup->height() - 8));
     m_settingsPopup->move(position); m_settingsPopup->show();
-    (m_settingsTerminal->isVisible() ? static_cast<QWidget *>(m_settingsTerminal) : m_models)->setFocus(Qt::PopupFocusReason);
+    (m_settingsTerminal->isVisible() ? static_cast<QWidget *>(m_settingsTerminal)
+        : m_modelDefaultEffort ? static_cast<QWidget *>(m_openCodeModels) : m_models)->setFocus(Qt::PopupFocusReason);
 }
 
 void MessageComposer::updateSettingsEfforts()
@@ -1178,11 +1341,13 @@ void MessageComposer::updateSettingsApply()
 {
     const bool native = m_settingsTerminalAvailable && !m_settingsEnabled;
     m_settingsTerminal->setVisible(native);
-    for (auto *widget : QList<QWidget *>{m_models,m_efforts,m_modelLabel,m_effortLabel,m_applySettings}) widget->setVisible(!native);
+    for (auto *widget : QList<QWidget *>{m_efforts,m_modelLabel,m_effortLabel,m_applySettings}) widget->setVisible(!native);
+    // OpenCode chooses in its picker; m_models stays the selected value.
+    m_models->setVisible(!native && !m_modelDefaultEffort); m_openCodeModels->setVisible(!native && m_modelDefaultEffort);
     bool offered = false;
     for (const auto &value : m_modelOptions) offered |= value.toObject().value("id").toString() == m_models->currentData().toString();
     const bool enabled = m_settingsEnabled && m_popupKey == m_key && !isSending(m_key);
-    m_models->setEnabled(enabled && m_models->count() > 1);
+    m_models->setEnabled(enabled && m_models->count() > 1); m_openCodeModels->setEnabled(enabled);
     m_efforts->setEnabled(enabled && offered && (m_modelDefaultEffort ? m_efforts->count() > 1 : !m_efforts->currentData().toString().isEmpty()));
     const QString intendedModel = m_pendingModel.isEmpty() ? m_model : m_pendingModel;
     const bool pending = !m_pendingModel.isEmpty() || !m_pendingEffort.isEmpty();
@@ -1196,10 +1361,147 @@ void MessageComposer::updateSettingsApply()
         : m_applyWhen == "ready" ? tr("Applies when the agent is ready. Messages sent while it is working use the current model.")
         : tr("Applies to this session only.");
     if (m_settingsEnabled && !m_settingsNotice.isEmpty()) hint += '\n' + m_settingsNotice;
+    if (m_modelDefaultEffort && !m_openCodeError.isEmpty()) hint += '\n' + m_openCodeError;
     if (pending)
         hint = tr("Pending: %1%2\nCurrent: %3%4\n%5").arg(intendedModel, intendedEffort.isEmpty() ? QString() : "  " + intendedEffort,
             m_model, m_effort.isEmpty() ? QString() : "  " + m_effort, hint);
     m_settingsHint->setText(hint);
+}
+
+void MessageComposer::setOpenCodeContext(bool supported, bool truncated, bool online, const QString &computer,
+                                         const QString &host, const QString &folder)
+{
+    m_openCodeSupported = supported; m_openCodeOnline = online; m_openCodeComputer = computer;
+    m_openCodeHost = host; m_openCodeFolder = folder;
+    // Another session's context starts in setModelSettings, with its list. The shown session
+    // somewhere else starts afresh here, with its own list and current model.
+    const bool shown = !m_openCodeContext.isEmpty() && m_openCodeContext.first() == m_key;
+    if (shown && enterOpenCodeContext()) {
+        m_modelOptions = m_openCodeShort; m_openCodeTruncated = truncated;
+        m_openCodeModels->setShortList(withConfirmedFavorites(m_openCodeShort), truncated);
+        m_openCodeModels->setCurrent(m_pendingModel.isEmpty() ? m_model : m_pendingModel);
+    } else if (truncated != m_openCodeTruncated) {
+        m_openCodeTruncated = truncated;
+        if (shown) m_openCodeModels->setShortList(withConfirmedFavorites(m_openCodeShort), truncated);
+    }
+    // Details refresh often: the stars are redrawn only when this changes.
+    const auto availability = QString::number(supported) + QString::number(online) + computer;
+    if (availability == m_openCodeAvailability) return;
+    m_openCodeAvailability = availability;
+    m_openCodeModels->setAllModelsAvailable(supported, OpenCodeModels::updateText(computer));
+    m_openCodeModels->setFavoritesAvailable(supported && online, supported ? tr("%1 is offline.").arg(computer) : OpenCodeModels::updateText(computer));
+}
+
+void MessageComposer::setOpenCodeCatalog(const QString &sessionKey, const QJsonObject &catalog)
+{
+    if (sessionKey == m_key && sessionKey == m_openCodeContext.value(0)) m_openCodeModels->setCatalog(withConfirmedFavorites(catalog));
+}
+
+void MessageComposer::setOpenCodeCatalogFailed(const QString &sessionKey, const QString &reason)
+{
+    if (sessionKey == m_key && sessionKey == m_openCodeContext.value(0)) m_openCodeModels->setCatalogFailed(reason);
+}
+
+void MessageComposer::setOpenCodeFavorite(const QString &sessionKey, const QString &value, bool favorite, const QString &error)
+{
+    // Another session's answer is ignored; the owner passes only answers made in this context.
+    if (sessionKey != m_key || sessionKey != m_openCodeContext.value(0)) return;
+    if (error.isEmpty()) {
+        // Lists and catalogs read before the change keep it: details refresh before they report it.
+        if (!m_openCodeFavorites.contains(value) && m_openCodeFavorites.size() >= 64) m_openCodeFavorites.erase(m_openCodeFavorites.begin());
+        m_openCodeFavorites.insert(value, favorite);
+    } else m_openCodeError = error;
+    m_openCodeModels->setFavoritePending(value, false); m_openCodeModels->setFavorite(value, favorite);
+    if (m_settingsPopup->isVisible()) updateSettingsApply();
+}
+
+// The picker's context is the session with the computer and folder its catalog is read
+// from. A new one, a return to the same session included, starts afresh before its list
+// and current model are set; this session's choices made elsewhere are dropped.
+bool MessageComposer::enterOpenCodeContext()
+{
+    const QStringList context{m_key, m_openCodeHost, m_openCodeFolder};
+    if (context == m_openCodeContext) return false;
+    // An open popup of the same session holds choices made for its old place.
+    if (m_openCodeContext.value(0) == m_key && m_popupKey == m_key) m_settingsPopup->hide();
+    const auto chosen = m_openCodeChosen.value(m_key);
+    if (chosen.host != m_openCodeHost || chosen.folder != m_openCodeFolder) { m_openCodeChosen.remove(m_key); m_openCodeChosenOrder.removeAll(m_key); }
+    m_openCodeContext = context; resetOpenCodeModels();
+    return true;
+}
+
+// Every new context starts the picker afresh: its catalog, a loading request, All models,
+// pending stars, confirmed favorites and failure text belong to the context before.
+void MessageComposer::resetOpenCodeModels()
+{
+    m_openCodeModels->setCatalog({}); m_openCodeFavorites.clear(); m_openCodeError.clear(); m_openCodeAvailability.clear();
+    ++m_openCodeGeneration;
+}
+
+// The picker's choice: kept for this session in this context, since its own list may lack
+// it, and selected in m_models, whose effort and Apply logic is unchanged. A model chosen
+// again takes its newest description, also in the combo.
+void MessageComposer::chooseOpenCodeModel(const QString &value)
+{
+    if (m_popupKey != m_key || !m_modelDefaultEffort || m_openCodeContext.value(0) != m_key) return;
+    const auto model = m_openCodeModels->model(value); if (!model) return;
+    const QJsonObject entry{{"id", value}, {"value", value}, {"label", model->label},
+        {"effort_options", QJsonArray::fromStringList(model->efforts)}, {"effort_labels", QJsonArray::fromStringList(model->effortLabels)}};
+    const auto put = [&](QJsonArray &entries) {
+        for (qsizetype index = 0; index < entries.size(); ++index)
+            if (entries.at(index).toObject().value("id").toString() == value) { entries.replace(index, entry); return; }
+        entries.append(entry);
+    };
+    auto &chosen = m_openCodeChosen[m_key];
+    chosen.host = m_openCodeContext.value(1); chosen.folder = m_openCodeContext.value(2);
+    put(chosen.entries); while (chosen.entries.size() > 16) chosen.entries.removeAt(0);
+    m_openCodeChosenOrder.removeAll(m_key); m_openCodeChosenOrder.append(m_key);
+    while (m_openCodeChosenOrder.size() > 32) m_openCodeChosen.remove(m_openCodeChosenOrder.takeFirst());
+    put(m_modelOptions);
+    const auto label = model->label.isEmpty() ? value : model->label;
+    if (const int listed = m_models->findData(value); listed < 0) m_models->addItem(label, value); else m_models->setItemText(listed, label);
+    const int index = m_models->findData(value);
+    if (m_models->currentIndex() == index) updateSettingsEfforts(); else m_models->setCurrentIndex(index);
+}
+
+// A confirmed favorite change in entries hgs listed (value, else id): the mark is set,
+// or removed as hgs leaves it out; every other field stays.
+QJsonArray MessageComposer::withConfirmedFavorites(QJsonArray entries) const
+{
+    if (m_openCodeFavorites.isEmpty()) return entries;
+    for (qsizetype index = 0; index < entries.size(); ++index) {
+        auto entry = entries.at(index).toObject();
+        const auto value = entry.value("value").toString(entry.value("id").toString());
+        if (!m_openCodeFavorites.contains(value)) continue;
+        if (m_openCodeFavorites.value(value)) entry.insert("favorite", true); else entry.remove("favorite");
+        entries.replace(index, entry);
+    }
+    return entries;
+}
+
+// The same in a catalog: both model lists and its favorites, where a new favorite is
+// listed once, as hgs lists it ({value, available}).
+QJsonObject MessageComposer::withConfirmedFavorites(QJsonObject catalog) const
+{
+    if (m_openCodeFavorites.isEmpty()) return catalog;
+    for (const auto *list : {"model_options", "models"})
+        if (catalog.contains(list)) catalog.insert(list, withConfirmedFavorites(catalog.value(list).toArray()));
+    if (!catalog.contains("favorites")) return catalog;
+    QJsonArray favorites; QSet<QString> listed;
+    for (const auto &entry : catalog.value("favorites").toArray()) {
+        const auto value = entry.toObject().value("value").toString();
+        if (m_openCodeFavorites.contains(value) && !m_openCodeFavorites.value(value)) continue;
+        listed.insert(value); favorites.append(entry);
+    }
+    const auto models = catalog.value("models").toArray();
+    for (auto it = m_openCodeFavorites.cbegin(); it != m_openCodeFavorites.cend(); ++it) {
+        if (!it.value() || listed.contains(it.key())) continue;
+        const bool available = std::any_of(models.cbegin(), models.cend(), [&](const QJsonValue &model) {
+            const auto entry = model.toObject(); return entry.value("value").toString(entry.value("id").toString()) == it.key(); });
+        favorites.append(QJsonObject{{"value", it.key()}, {"available", available}});
+    }
+    catalog.insert("favorites", favorites);
+    return catalog;
 }
 
 void MessageComposer::setTheme(bool dark)
@@ -1208,6 +1510,7 @@ void MessageComposer::setTheme(bool dark)
     updateSettingsButton();
     m_toolbar->setTheme(dark);
     m_attach->setIcon(workspaceIcon("attachment", dark ? QColor("#c5cfdb") : QColor("#536477")));
+    m_reference->setIcon(workspaceIcon("connect", dark ? QColor("#c5cfdb") : QColor("#536477")));
     m_refreshStatus->setIcon(composerIcon("refresh", QColor(dark ? "#efc978" : "#92641b"), QColor(dark ? "#85909e" : "#6d7784")));
     m_retry->setIcon(composerIcon("refresh", QColor(dark ? "#efc978" : "#92641b"), QColor(dark ? "#85909e" : "#6d7784")));
     m_stop->setIcon(workspaceIcon("stop",dark ? QColor("#ff9ca8") : QColor("#b52d48")));

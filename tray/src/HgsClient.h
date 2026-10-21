@@ -43,6 +43,11 @@ struct SessionInfo {
     double backgroundStarted = 0, backgroundObservedAt = 0;
     QString backgroundCommand;
     bool reviewLater = false, attentionAcknowledged = false;
+    // Confirmed notification preference from the session's host, shared by devices.
+    bool muted = false;
+    bool sharedNotifications = false;
+    QJsonObject notificationPreferences;
+    QString notificationPreferencesError;
     // Shared read state from the session's host. sharedRead is false for hosts
     // whose hgs predates `hgs read`; those keep this device's own marks.
     bool sharedRead = false;
@@ -64,7 +69,7 @@ struct SessionInfo {
     QJsonArray subagentPreviews;
     QJsonObject subagents;
     QString processState, conversationState, runtimeState;
-    double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0;
+    double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0, attentionStarted = 0;
     int subagentCount = 0;
     // Pending optional Codex questions ("optional_questions"): the exact count,
     // the IDs the host lists (the newest ones) and the newest question's time.
@@ -164,6 +169,9 @@ public:
     explicit HgsClient(QString hgsPath, QObject *parent = nullptr);
     ~HgsClient() override;
     QString executable() const { return m_hgs; }
+    // Tests only: an empty program fails inside QProcess::start() on every
+    // platform, as a missing executable does on Windows.
+    void setExecutableForTests(const QString &program) { m_hgs = program; }
     // Read the configured executable, including older CLIs without snapshot metadata.
     void requestVersion();
     void requestSessionReference(const QString &host, const QString &name, const QString &run,
@@ -184,6 +192,11 @@ public:
     // Directory request IDs let views discard replies to superseded navigation.
     void requestProjects(const QString &host = {});
     quint64 requestAccounts(const QString &host, const QStringList &arguments = {QStringLiteral("ls")}, const QByteArray &input = {});
+    // `hgs [@host] account models native-opencode --location DIR --json`: 30 s, at most 5 MiB of output.
+    quint64 requestOpenCodeModels(const QString &host, const QString &location);
+    // `hgs [@host] account favorite native-opencode --model VALUE --favorite on|off --request-id UUID --json`:
+    // a fresh request identity per call. A failure is reported, never retried.
+    quint64 requestOpenCodeFavorite(const QString &host, const QString &value, bool favorite);
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     // hgs [@host] mobile …: phones of the workspace that host's mobile connection
     // reaches. Probes the host CLI first, so an older one is never asked.
@@ -236,7 +249,9 @@ public:
     quint64 requestAttachment(const QString &host, const QString &name, const QJsonObject &file,
                               const QString &conversation, const QString &archive = {}, const QString &agent = {});
     quint64 downloadFile(const QString &host, const QString &path, const QString &destination);
-    quint64 downloadFileToCache(const QString &host, const QString &path);
+    // A checked local snapshot only; no remote freshness is inferred. Always async.
+    quint64 findCachedFile(const QString &host, const QString &path);
+    quint64 downloadFileToCache(const QString &host, const QString &path, bool force = false);
     quint64 requestApprovalLog(const QString &operation, const QJsonObject &data = {});
     static constexpr qsizetype MaximumMessageBytes = 64 * 1024;
     static constexpr qsizetype MaximumAttachmentBytes = 10 * 1024 * 1024;
@@ -268,6 +283,7 @@ public:
     // `hgs [@host] read <session> --json`: the host applies each field only while
     // it is current. A JSON answer, including not_found, is delivered.
     quint64 requestRead(const QString &host, const QString &name, const QJsonObject &payload);
+    quint64 requestNotifications(const QString &host, const QString &name, const QJsonObject &payload);
 
     // Чистые функции разбора: тестируются без запуска процессов.
     void cancelArchivePages();
@@ -307,6 +323,8 @@ signals:
     void attachmentReady(quint64 request, const QJsonObject &file, const QByteArray &bytes);
     void fileDownloaded(quint64 request, const QString &destination);
     void fileDownloadFailed(quint64 request, const QString &error);
+    // Empty destination and error mean a cache miss.
+    void fileCacheChecked(quint64 request, const QString &destination, const QString &error);
     void downloadCacheWarning(const QString &error);
     void approvalLogFinished(quint64 request, const QString &operation, const QJsonObject &result, const QString &error);
     void attachmentFailed(quint64 request, const QString &detail);
@@ -319,6 +337,10 @@ signals:
     void searchFailed(quint64 request, const QString &host, const QString &error);
     void accountsReady(quint64 request, const QString &host, const QJsonObject &result);
     void accountsFailed(quint64 request, const QString &host, const QString &error);
+    void openCodeModelsReady(quint64 request, const QString &host, const QString &location, const QJsonObject &catalog);
+    void openCodeModelsFailed(quint64 request, const QString &host, const QString &location, const QString &error);
+    void openCodeFavoriteReady(quint64 request, const QString &host, const QJsonObject &receipt);
+    void openCodeFavoriteFailed(quint64 request, const QString &host, const QString &error);
     void mobileReady(quint64 request, const QString &host, const QJsonObject &result);
     void mobileFailed(quint64 request, const QString &host, const QString &error);
     void machinesReady(quint64 request, const QJsonObject &result);
@@ -337,6 +359,7 @@ signals:
     void questionAnswerFailed(quint64 request, const QString &host, const QString &name,
                               const QString &detail, bool deliveryUncertain);
     void readFinished(quint64 request, bool delivered, const QJsonObject &result, const QString &error);
+    void notificationsFinished(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void queueSendFinished(quint64 request, bool ok, const QJsonObject &receipt, const QString &error);
     void messageSent(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt);
     void messageFailed(quint64 request, const QString &host, const QString &name, const QString &detail, bool deliveryUncertain);
@@ -379,7 +402,11 @@ private:
     quint64 m_archiveRequest = 0;
     QHash<QString,QObject *> m_archiveJobs;
     void transferFile(quint64 id, const QString &host, const QString &path, const QString &destination,
-                      const std::shared_ptr<DownloadCache::Pending> &pending = {});
+                      const std::shared_ptr<DownloadCache::Pending> &pending = {}, const QByteArray &cacheKey = {});
+    void prepareCachedDownload(const QByteArray &key, const QString &root, const QString &host, const QString &path);
+    void finishCachedDownload(const QByteArray &key, const QString &path, const QString &error, const QString &warning = {});
+    struct CachedDownload { QList<quint64> requests; bool force = false; };
+    QHash<QByteArray, CachedDownload> m_cachedDownloads;
     void scheduleDownloadCacheTrim();
     void trimDownloadCache();
     QTimer *m_downloadCacheTimer = nullptr;
@@ -436,6 +463,7 @@ private:
     QSet<QString> m_messagesInFlight;
     quint64 m_answerRequest = 0;
     quint64 m_readRequest = 0;
+    quint64 m_notificationsRequest = 0;
     bool m_presenceInFlight = false, m_presencePending = false;
     QPair<double, bool> m_pendingPresence;
     QSet<QString> m_answersInFlight;

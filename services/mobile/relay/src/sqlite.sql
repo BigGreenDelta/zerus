@@ -72,3 +72,19 @@ CREATE INDEX IF NOT EXISTS archive_history ON requests(updated,id) WHERE operati
 CREATE INDEX IF NOT EXISTS task_exchange_history ON requests(updated,id) WHERE operation='task_exchange' AND state IN ('completed','failed','uncertain');
 
 CREATE INDEX IF NOT EXISTS task_done_history ON requests(updated,id) WHERE operation='task_done' AND state IN ('completed','failed','uncertain');
+-- Content-free hook diagnostics expire independently of native mutations.
+CREATE INDEX IF NOT EXISTS hook_health_history ON requests(updated,id) WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain');
+
+CREATE INDEX IF NOT EXISTS analytics_reads_history ON requests(updated,id) WHERE operation='analytics_read' AND state IN ('completed','failed','uncertain');
+
+CREATE INDEX IF NOT EXISTS git_status_history_v1 ON requests(updated,id) WHERE operation='git_status' AND state IN ('completed','failed','uncertain');
+
+-- Permanent shared-notification highwater, independent of gateway route lifetime.
+CREATE TABLE IF NOT EXISTS computer_notification_preferences(computer_id TEXT PRIMARY KEY REFERENCES computers(id),workspace_id TEXT NOT NULL REFERENCES workspaces(id),preferences TEXT NOT NULL,payload_bytes BIGINT NOT NULL);
+CREATE INDEX IF NOT EXISTS computer_notification_workspace ON computer_notification_preferences(workspace_id,computer_id);
+
+-- Projection reads have their own class; the persisted read_history_v3 stays unchanged.
+CREATE INDEX IF NOT EXISTS history_projection_reads_v1 ON requests(updated,id) WHERE operation='history_projection' AND state IN ('completed','failed','uncertain');
+-- Additive index for session-project-v1 reads; legacy read_history_v3 and
+-- mutation UUID tombstones are deliberately unchanged on upgrade.
+CREATE INDEX IF NOT EXISTS project_assignment_history_v1 ON requests(updated,id) WHERE operation='project_assignment' AND state IN ('completed','failed','uncertain');

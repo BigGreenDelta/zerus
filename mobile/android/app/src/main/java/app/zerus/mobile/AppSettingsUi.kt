@@ -30,6 +30,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
     val context = LocalContext.current
     val preferences: AppSettingsViewModel = viewModel()
     var notices by rememberSaveable { mutableStateOf(false) }
+    var analytics by rememberSaveable { mutableStateOf(false) }
     var details by rememberSaveable { mutableStateOf(false) }
     var linkError by rememberSaveable { mutableStateOf(false) }
     val settingsScroll = rememberScrollState()
@@ -71,6 +72,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel
                     Text("Updates", style = MaterialTheme.typography.titleLarge)
                     UpdatesContent(model, updater, interactionBlocked = { preferences.saving })
                     HorizontalDivider()
+                    Text("Computer analytics", style = MaterialTheme.typography.titleLarge)
+                    Text("Private agent and voice summaries from your connected computers.", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = { analytics = true }, enabled = !preferences.saving) { Text("View computer analytics") }
+                    HorizontalDivider()
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text("About Zerus", style = MaterialTheme.typography.titleMedium)
@@ -108,4 +113,5 @@ import androidx.lifecycle.viewmodel.compose.viewModel
             }
         }
     }
+    if (analytics) PrivateAnalyticsScreen(model) { analytics = false }
 }

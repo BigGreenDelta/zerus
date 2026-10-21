@@ -13,6 +13,7 @@ import re
 import subprocess
 
 BUNDLE_ID = "com.hgdev.hgs-tray"
+LOCAL_BUNDLE_ID = BUNDLE_ID + ".local"
 KINDS = ("Developer ID Application", "Apple Development")
 IDENTITY = re.compile(r'^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"([^"]+)"\s*$', re.M)
 MACH_O = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
@@ -47,9 +48,10 @@ def requirement(app):
     raise ValueError("The bundle has no designated signing requirement.")
 
 
-def bundle_info(app):
+def bundle_info(app, *, source=False):
     info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
-    if info.get("CFBundleIdentifier") != BUNDLE_ID:
+    allowed = (BUNDLE_ID, LOCAL_BUNDLE_ID) if source else (BUNDLE_ID,)
+    if info.get("CFBundleIdentifier") not in allowed:
         raise ValueError(f"Expected the compatible {BUNDLE_ID} bundle identifier.")
     if info.get("CFBundleExecutable") != "hgs-tray":
         raise ValueError("Expected the hgs-tray bundle executable.")
@@ -114,7 +116,7 @@ def verify_continuity(app, installed):
 def sign(app, installed, requested=""):
     if app.resolve() == installed.resolve() or app.is_symlink():
         raise ValueError("Signing requires a separate source bundle; the installed app must stay untouched.")
-    info = bundle_info(app)
+    info = bundle_info(app, source=True)
     executable = app / "Contents/MacOS" / info["CFBundleExecutable"]
     if not executable.is_file() or executable.is_symlink():
         raise ValueError("The source bundle executable is missing or is a link.")
@@ -129,24 +131,38 @@ def sign(app, installed, requested=""):
                     raise ValueError("Unexpected nested code in the source bundle; use the distribution signer.")
     current = installed_identity(installed)
     identity = select_identity(identities(), current, requested)
+    # The installer supplies a private copy. Promote only after a compatible key
+    # has been selected; failed preparation must retain the local identifier.
+    plist = app / "Contents/Info.plist"
+    original = plist.read_bytes()
+    promoted = info["CFBundleIdentifier"] == LOCAL_BUNDLE_ID
+    complete = False
     try:
-        run("codesign", "--force", "--sign", identity, "--options", "0", "--timestamp=none", app)
-    except subprocess.CalledProcessError as error:
-        raise ValueError("codesign could not use the selected private key. Test signing from Terminal on the Mac; "
-                         "unlock its keychain and respond to any key-access dialog there. "
-                         "The installer does not unlock keys or change their access controls. "
-                         "See docs/macos-distribution.md#local-source-builds.\n" + error.stderr.strip()) from error
-    run("codesign", "--verify", "--deep", "--strict", app)
-    signed = details(app)
-    if (signed.get("Signature") == "adhoc" or not any(signed.get("Authority", "").startswith(kind + ":")
-                                                    for kind in KINDS)
-            or "cdhash" in requirement(app).lower()):
-        raise ValueError("The source bundle did not receive a stable certificate signature.")
-    if current:
-        verify_continuity(app, installed)
-        print("Local certificate signature verified; privacy identity matches the installed application.")
-    else:
-        print("Local certificate signature verified; subsequent compatible rebuilds retain this identity.")
+        if promoted:
+            info["CFBundleIdentifier"] = BUNDLE_ID
+            plist.write_bytes(plistlib.dumps(info))
+        try:
+            run("codesign", "--force", "--sign", identity, "--options", "0", "--timestamp=none", app)
+        except subprocess.CalledProcessError as error:
+            raise ValueError("codesign could not use the selected private key. Test signing from Terminal on the Mac; "
+                             "unlock its keychain and respond to any key-access dialog there. "
+                             "The installer does not unlock keys or change their access controls. "
+                             "See docs/macos-distribution.md#local-source-builds.\n" + error.stderr.strip()) from error
+        run("codesign", "--verify", "--deep", "--strict", app)
+        signed = details(app)
+        if (signed.get("Signature") == "adhoc" or not any(signed.get("Authority", "").startswith(kind + ":")
+                                                        for kind in KINDS)
+                or "cdhash" in requirement(app).lower()):
+            raise ValueError("The source bundle did not receive a stable certificate signature.")
+        if current:
+            verify_continuity(app, installed)
+            print("Local certificate signature verified; privacy identity matches the installed application.")
+        else:
+            print("Local certificate signature verified; subsequent compatible rebuilds retain this identity.")
+        complete = True
+    finally:
+        if promoted and not complete:
+            plist.write_bytes(original)
 
 
 def main():

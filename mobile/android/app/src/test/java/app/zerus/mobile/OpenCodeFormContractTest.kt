@@ -30,7 +30,7 @@ class OpenCodeFormContractTest {
     }
 
     @Test fun everyContractCardKeepsItsIdentityItemsAndAnswerability() {
-        assertEquals(11, cases.size)
+        assertEquals(17, cases.size)
         cases.forEach { example ->
             val name = example.getString("name"); val card = example.getJSONObject("card")
             val question = question(example)
@@ -58,6 +58,7 @@ class OpenCodeFormContractTest {
             assertEquals(name, item.getString("header"), prompt.header)
             assertEquals(name, item.getBoolean("multi_select"), prompt.multi)
             assertEquals(name, item.getBoolean("allow_other"), prompt.other)
+            assertEquals(name, item.optBoolean("required", true), prompt.required)
             assertEquals(name, item.getJSONArray("options").objects().map { it.getString("id") to it.getString("label") }, prompt.choices.map { it.id to it.label })
             assertEquals(name, item.optString("input_kind"), prompt.inputKind)
             assertEquals(name, item.optInt("max_length", -1), prompt.maxLength ?: -1)
@@ -220,9 +221,83 @@ class OpenCodeFormContractTest {
         cases.filter { it.has("answers") && !it.getJSONObject("card").getBoolean("approval") }.forEach { example ->
             val name = example.getString("name")
             val (chosen, texts) = answers(example)
-            val error = QuestionPolicies.answerError(question(example).prompts, chosen, texts)
+            val question = question(example)
+            val error = QuestionPolicies.answerError(question.prompts, chosen, texts, QuestionPolicies.formReplyText(question))
             if (example.has("reply")) assertEquals(name, "", error) else assertTrue(name, error.isNotBlank())
         }
+    }
+
+    /** Answer rows as plain values, so key order cannot matter. */
+    private fun rows(answers: JSONArray) = answers.objects().map { row -> row.keys().asSequence().sorted().associateWith { key ->
+        row.get(key).let { value -> if (value is JSONArray) (0 until value.length()).map(value::get) else value }
+    } }
+
+    @Test fun textStartingWithSlashOrBangIsAnOrdinaryFormAnswer() {
+        // hgs sends OpenCode form text through the form reply API, never to a terminal.
+        listOf("plain-string-slash", "plain-string-bang").forEach { name ->
+            val example = case(name)
+            val question = question(example)
+            val (chosen, texts) = answers(example)
+            val literal = QuestionPolicies.formReplyText(question)
+            assertTrue(name, literal)
+            assertEquals(name, "", QuestionPolicies.answerError(question.prompts, chosen, texts, literal))
+            assertTrue(name, QuestionPolicies.complete(question.prompts, chosen, texts, literal))
+            assertTrue(name, QuestionSteps.current(question.prompts, 0, chosen, texts, literal).complete)
+            assertEquals(name, rows(example.getJSONArray("answers")), rows(QuestionPolicies.answers(question.prompts, chosen, texts)))
+        }
+        // The same holds for an Other answer on an OpenCode choice item.
+        val choice = question(case("question-custom-text"))
+        listOf("/tmp/report.txt", "!important").forEach { text ->
+            assertEquals(text, "", QuestionPolicies.answerError(choice.prompts, emptyMap(), mapOf("q0" to text), QuestionPolicies.formReplyText(choice)))
+            assertTrue(text, QuestionPolicies.complete(choice.prompts, emptyMap(), mapOf("q0" to text), QuestionPolicies.formReplyText(choice)))
+        }
+        // A caller that does not say the card is a form keeps the refusal.
+        assertEquals("Enter command-like answers on your computer.", QuestionPolicies.answerError(choice.prompts, emptyMap(), mapOf("q0" to "/tmp/report.txt")))
+    }
+
+    @Test fun anOptionalTextFieldCompletesEmpty() {
+        val example = case("plain-string-optional")
+        val question = question(example)
+        assertFalse(question.prompts.single().required)
+        assertTrue(QuestionPolicies.complete(question.prompts, emptyMap(), emptyMap(), QuestionPolicies.formReplyText(question)))
+        assertTrue(QuestionSteps.current(question.prompts, 0, emptyMap(), emptyMap(), QuestionPolicies.formReplyText(question)).complete)
+        assertEquals(rows(example.getJSONArray("answers")), rows(QuestionPolicies.answers(question.prompts, emptyMap(), emptyMap())))
+    }
+
+    @Test fun everyPermissionCardCanBeAnsweredOnThePhone() {
+        val permissions = cases.filter { it.getJSONObject("card").getString("kind") == "opencode_permission" }
+        assertEquals(listOf("permission", "permission-once", "permission-reject", "permission-allow-refused"), permissions.map { it.getString("name") })
+        permissions.forEach { example ->
+            val name = example.getString("name"); val question = question(example)
+            assertTrue(name, example.getJSONObject("card").getBoolean("approval_choices"))
+            assertTrue(name, QuestionPolicies.openCodePermission(question))
+            assertFalse(name, QuestionPolicies.formReplyText(question))
+            assertTrue(name, QuestionPolicies.alwaysAllowOffered(question))
+            // Allow/deny approvals keep their own rule; it is not widened.
+            assertFalse(name, QuestionPolicies.approvalSupported(question))
+        }
+    }
+
+    @Test fun permissionButtonsSendTheContractAnswers() {
+        val question = question(case("permission"))
+        val target = Target("computer", "opencode/project/local", "run", "ses_A", "workspace")
+        // Reject, Allow once and the confirmed Always allow send exactly the rows hgs accepts, and the send path takes them.
+        val expected = mapOf(OpenCodePermissionAction.AllowOnce to "permission-once", OpenCodePermissionAction.AlwaysAllow to "permission",
+            OpenCodePermissionAction.Reject to "permission-reject")
+        assertEquals(expected.keys, QuestionPolicies.openCodePermissionActions(question).toSet())
+        expected.forEach { (action, name) ->
+            val row = QuestionPolicies.approvalAnswer(question, action.option)
+            assertEquals(name, rows(case(name).getJSONArray("answers")), rows(row))
+            assertTrue(name, QuestionSendPolicies.available(question, target, row.toString()))
+        }
+        var sent: JSONArray? = null
+        AlwaysAllowConfirmation().request(question, reviewed = true).confirm(question, eligible = true) { sent = it }
+        assertEquals(rows(case("permission").getJSONArray("answers")), rows(checkNotNull(sent)))
+        // hgs refuses allow/deny for these cards; no phone control offers them.
+        val (refused, texts) = answers(case("permission-allow-refused"))
+        assertEquals("Unknown answer option", case("permission-allow-refused").getString("error"))
+        assertTrue(QuestionPolicies.answerError(question.prompts, refused, texts).isNotBlank())
+        assertTrue(question.prompts.single().choices.none { it.id == "allow" || it.id == "deny" })
     }
 
     @Test fun androidCopyMatchesTheSharedFixture() {

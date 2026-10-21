@@ -337,6 +337,13 @@ impl Native for Process {
         for key in CONTEXT_KEYS {
             command.env_remove(key);
         }
+        #[cfg(windows)]
+        {
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW, hgs owns SSH's adapter.
+            command
+                .env_remove("HGS_HOST_SESSION")
+                .env_remove("HGS_HOST_PANE");
+        }
         let child = spawn(&mut command)
             .await
             .map_err(|_| NativeError::Failed(COULD_NOT_START))?;

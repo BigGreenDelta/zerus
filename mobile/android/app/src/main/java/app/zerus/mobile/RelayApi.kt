@@ -69,8 +69,8 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
     suspend fun computers(connection: Connection) = call(connection.url, connection.token, "/v1/computers")
     suspend fun capabilities(connection: Connection) = call(connection.url, connection.token, "/v1/capabilities")
     suspend fun submit(connection: Connection, target: Target, operation: String, payload: JSONObject, id: String): JSONObject {
-        require(target.agentId.isBlank() || operation in setOf("inspect", "history", "send", "attachment_read", "file_read")) { "This control belongs to the parent session." }
-        require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
+        require(target.agentId.isBlank() || operation in setOf("inspect", "history", "history_projection", "send", "attachment_read", "file_read")) { "This control belongs to the parent session." }
+        require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "history_projection", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
         return call(connection.url, connection.token, "/v1/requests", JSONObject().put("request_id", id)
             .put("computer_id", target.computerId).put("session", target.session).put("operation", operation).put("payload", payload)).also {
                 check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
@@ -146,6 +146,14 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
         check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "History is not available yet. Try again." } }
         return withContext(Dispatchers.Default) { HistoryPage.parse(target,id,receipt.getJSONObject("result")) }
     }
+    /** Read-only projection repair. The applied display marker belongs to the client cache only. */
+    suspend fun historyProjection(connection:Connection,target:Target,epoch:String,after:Long,until:Long):HistoryProjection.Page {
+        val id=UUID.randomUUID().toString()
+        val payload=HistoryProjection.payload(target,id,epoch,after,until)
+        val receipt=await(connection,submit(connection,target,"history_projection",payload,id))
+        check(receipt.string("state")=="completed") { receipt.string("error").ifBlank { "History changes are not available yet." } }
+        return withContext(Dispatchers.Default) { HistoryProjection.parse(target,id,epoch,after,until,receipt.getJSONObject("result")) }
+    }
     /** Shared read mark; the computer applies only current values, so each attempt has its own request ID. */
     suspend fun markRead(connection: Connection, target: Target, payload: JSONObject): JSONObject {
         require(target.archiveId.isBlank() && target.agentId.isBlank()) { "Read marks belong to the live parent conversation." }
@@ -189,11 +197,16 @@ object NativeParser {
             val type = value.string("type")
             if (type !in listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted", "QuestionAnswered", "AgentMessage", "Stop") ||
                 !inScope(value)) return null
+            // A native prompt the person did not write is a notice, as on desktop.
+            val origin = value.string("origin").takeIf { it in ActivityNotices.origins && type in
+                listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted") }.orEmpty()
             val role = when (type) {
                 "QuestionAnswered" -> "You (answer)"
                 "UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted" -> "You"
                 else -> "AgentMessage"
             }
+            // Identities keep the native role, so cached rows stay the same rows.
+            val shown = if (origin.isNotEmpty()) ActivityNotices.ROLE else role
             val source = value.string("source").ifBlank { stream }
             val voice = if (source == "hgs_voice") value.optJSONObject("voice")?.let {
                 runCatching { VoiceProtocol.message(it) }.getOrNull()
@@ -202,15 +215,17 @@ object NativeParser {
                 DisplayedAttachment(it.string("name"), it.string("mime"), it.optLong("bytes"), it.string("reference"),
                     it.string("request_id"), (it.opt("index") as? Int) ?: -1)
             }
-            val text = if (source == "hgs_delivery" && files.isNotEmpty()) value.optString("detail", "")
+            // Fallback identity belongs to the original native row, not its display label/body.
+            val identityText = if (source == "hgs_delivery" && files.isNotEmpty()) value.optString("detail", "")
                 else value.string("detail", "text", "message", "prompt", "submitted_text")
+            val text = if (origin.isNotEmpty()) ActivityNotices.body(origin, value.string("detail"), value.string("report")) else identityText
             if (text.isBlank() && files.isEmpty() && voice == null) return null
             val at = value.optDouble("at", 0.0).takeIf { it.isFinite() } ?: 0.0
             val nativeId = value.string("message_id", "seq", "source_offset")
             // Count only indistinguishable rows, rather than the whole array.
             // Prepending unrelated history therefore preserves existing keys.
             val fallback = if (nativeId.isBlank()) {
-                val identity = JSONArray(listOf(type, role, source, at, value.string("timestamp"), text,
+                val identity = JSONArray(listOf(type, role, source, at, value.string("timestamp"), identityText,
                     files.map { listOf(it.name, it.mime, it.bytes, it.reference) })).toString()
                 val digest = MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(Charsets.UTF_8))
                     .joinToString("") { "%02x".format(it) }
@@ -221,13 +236,24 @@ object NativeParser {
             } else "native:$nativeId"
             val originalId = value.string("original_id").ifBlank { "$stream:$source:$role:$fallback" }
             val historyId = value.string("history_id")
-            return Event(if (historyId.isBlank()) originalId else "history:$historyId", role,
-                text, value.string("at", "timestamp"), at, if (source in setOf("hgs_delivery", "hgs_voice") && role == "You") value.string("message_id") else "", files, source,
-                delivery = if (role == "You") MessageDeliveryPresentation.inboxState(value) else "",
+            val requestId = when {
+                shown != "You" -> ""
+                source in setOf("hgs_delivery", "hgs_voice") -> value.string("message_id")
+                // OpenCode dates a queued prompt by its delivery; hgs names the Zerus send
+                // that admitted it, so the phone can match its own message exactly.
+                source == "opencode_native" -> value.string("request_id").takeIf {
+                    runCatching { UUID.fromString(it).toString() == it }.getOrDefault(false) }.orEmpty()
+                else -> ""
+            }
+            return Event(if (historyId.isBlank()) originalId else "history:$historyId", shown,
+                text, value.string("at", "timestamp"), at, requestId, files, source,
+                delivery = if (shown == "You") MessageDeliveryPresentation.inboxState(value) else "",
                 nativeType = type, submittedText = if (source == "hgs_delivery") value.string("submitted_text") else "",
                 originalId = originalId, historyId = historyId, historyCursor = value.string("history_cursor"),
                 historyEpoch = raw.string("history_epoch"), incomingSeq = (value.opt("incoming_seq") as? Number)?.toLong()?.takeIf { it >= 0 },
-                originalIds = value.optJSONArray("original_ids")?.let { ids -> (0 until minOf(ids.length(),8)).mapNotNull { ids.opt(it) as? String } }.orEmpty(), detailTruncated = value.optBoolean("detail_truncated"), voice = voice)
+                originalIds = value.optJSONArray("original_ids")?.let { ids -> (0 until minOf(ids.length(),8)).mapNotNull { ids.opt(it) as? String } }.orEmpty(), detailTruncated = value.optBoolean("detail_truncated"), voice = voice,
+                origin = origin, sender = if (origin == "peer_message") value.string("sender") else "",
+                report = ActivityNotices.report(origin, value.string("report")))
         }
         val rows = (journal.mapNotNull { item ->
             fun replaces(provider: JSONObject, hook: JSONObject) = provider.string("type") == "AgentMessage" && inScope(provider) && inScope(hook) &&
@@ -240,7 +266,7 @@ object NativeParser {
         val used = mutableSetOf<Int>()
         val receipts = raw.optJSONArray("attachment_messages")?.objects().orEmpty().mapNotNull { parse(it, "attachment") }
         receipts.forEach { metadata ->
-            val candidate = rows.indices.filter { it !in used && rows[it].role == "You" && rows[it].requestId.isBlank() &&
+            val candidate = rows.indices.filter { it !in used && rows[it].role == "You" && AttachmentReceiptMatch.replaceable(metadata, rows[it]) &&
                 rows[it].nativeType in listOf("UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted") &&
                 AttachmentReceiptMatch.matches(metadata, rows[it]) }.singleOrNull()
             val exact = candidate?.takeIf { index -> receipts.count { AttachmentReceiptMatch.matches(it, rows[index]) } == 1 }
@@ -248,7 +274,7 @@ object NativeParser {
                 used += exact
                 rows[exact] = metadata.copy(at = rows[exact].at, originalIds = (metadata.originalIds + rows[exact].id).distinct().take(8))
             }
-            else if (rows.none { it.role == "You" && it.requestId == metadata.requestId && metadata.requestId.isNotBlank() }) rows += metadata
+            else if (rows.none { it.role == "You" && it.receiptRequestId == metadata.requestId && metadata.requestId.isNotBlank() }) rows += metadata
         }
         raw.optJSONArray("voice_messages")?.objects().orEmpty().forEach { item ->
             val metadata = parse(item, "voice") ?: return@forEach
@@ -304,7 +330,7 @@ object NativeParser {
         Question(card.string("question_id"), card.string("question_hash"), card.optJSONArray("questions")?.objects().orEmpty().map { prompt ->
             fun bound(key: String, limit: Int) = (prompt.opt(key) as? Number)?.toLong()?.takeIf { it in 0..limit }?.toInt()
             Prompt(prompt.string("id"), prompt.string("question", "prompt"), prompt.optJSONArray("options")?.objects().orEmpty().map {
-                Choice(it.string("id"), it.string("label"), it.string("description"))
+                Choice(it.string("id"), it.string("label"), it.string("description"), it.string("scope"))
             }, prompt.optBoolean("multi_select"), prompt.optBoolean("required", true), prompt.optBoolean("allow_other", false),
                 prompt.string("header"), prompt.string("body"), prompt.string("other_label"), prompt.string("other_description"),
                 prompt.string("input_kind"), bound("min_length", 1_000_000), bound("max_length", 1_000_000), bound("min_items", 1000), bound("max_items", 1000),
@@ -315,6 +341,7 @@ object NativeParser {
         }, card.optBoolean("can_answer"), card.optBoolean("can_skip"), card.optBoolean("optional"),
             nativeDelivery?.status.orEmpty(), (card.opt("created_at") as? Number)?.toDouble()?.takeIf { it.isFinite() && it > 0 && it < 253402300800.0 } ?: 0.0,
             card.string("source"), card.optBoolean("approval"), card.optBoolean("trust_request"), card.string("answer_unavailable_reason", "unavailable_reason"),
-            card.string("run_id"), card.string("conversation_id"), card.string("tool_call_id"), nativeDelivery)
+            card.string("run_id"), card.string("conversation_id"), card.string("tool_call_id"), nativeDelivery,
+            card.optBoolean("approval_choices"))
     }
 }

@@ -194,6 +194,20 @@ class InspectTests(unittest.TestCase):
         self.assertEqual(portable.UNPACKED_LIMIT, 500_000_000)
 
 
+class MobileConnectorBundleTests(unittest.TestCase):
+    def test_new_declaration_requires_connector_but_retained_zips_stay_valid(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(conpty_pair, "PIN", pinned()):
+            path=Path(temporary)/"bundle.zip"
+            bundle(path)
+            portable.inspect(path)
+            bundle(path, info=manifest(mobile_connector_bundled=True))
+            with self.assertRaisesRegex(ValueError, "mobile connector declaration"):
+                portable.inspect(path)
+            bundle(path, files=complete(**{"zerus-mobile-connector.exe":b"tested connector"}),
+                   info=manifest(mobile_connector_bundled=True))
+            self.assertTrue(portable.inspect(path)["mobile_connector_bundled"])
+
+
 class ConptyPinTests(unittest.TestCase):
     """packaging/windows/conpty.json: the reviewed package and its x64 pair."""
 
@@ -451,6 +465,7 @@ class PackageTests(unittest.TestCase):
         (self.rust / "inventory.json").write_text(json.dumps({"target": "x86_64-pc-windows-msvc", "packages": [{}]}))
         (base / "hgs.exe").write_bytes(b"tested cli")
         (base / "hgs-tray.exe").write_bytes(b"tested gui")
+        (base / "zerus-mobile-connector.exe").write_bytes(b"tested connector")
         # As scripts/fetch-conpty.py leaves it, with the synthetic pair pinned in
         # this process and in the scripts below.
         self.conpty = base / "conpty"
@@ -466,7 +481,7 @@ class PackageTests(unittest.TestCase):
         return subprocess.run(command, capture_output=True, text=True, **options)
 
     def package(self, output, **overrides):
-        arguments = {"--cli": self.directory / "hgs.exe", "--gui": self.directory / "hgs-tray.exe",
+        arguments = {"--connector": self.directory / "zerus-mobile-connector.exe", "--cli": self.directory / "hgs.exe", "--gui": self.directory / "hgs-tray.exe",
                      "--output": output, "--qt-root": self.qt, "--windeployqt": self.windeployqt,
                      "--crt-dir": self.crt, "--rust-licenses": self.rust, "--conpty": self.conpty, **overrides}
         command = []
@@ -493,7 +508,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         info = portable.inspect(output)
-        self.assertEqual(info, {**manifest(), "source_commit": head})
+        self.assertEqual(info, {**manifest(), "source_commit": head, "mobile_connector_bundled": True})
         arguments = json.loads((self.directory / "arguments.json").read_text())
         self.assertEqual(arguments[:-1], ["--release", "--no-compiler-runtime", "--no-opengl-sw",
                                           "--no-system-d3d-compiler", "--no-system-dxc-compiler",
@@ -506,6 +521,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(names, sorted(names))
             self.assertTrue(all(name.startswith(portable.TOP + "/") for name in names))
             self.assertEqual(archive.read(f"{portable.TOP}/hgs.exe"), b"tested cli")
+            self.assertEqual(archive.read(f"{portable.TOP}/zerus-mobile-connector.exe"), b"tested connector")
             self.assertEqual(archive.read(f"{portable.TOP}/hgs-tray.exe"), b"tested gui")
             self.assertEqual(archive.read(f"{portable.TOP}/concrt140.dll"), b"concrt140.dll")
             self.assertEqual(archive.read(f"{portable.TOP}/LICENSE"), (ROOT / "LICENSE").read_bytes())
@@ -534,6 +550,11 @@ class PackageTests(unittest.TestCase):
             self.assertIn(f"Zerus {VERSION} for Windows", readme)
             self.assertIn(head, readme)
             self.assertIn("Microsoft.Windows.Console.ConPTY 1.25.260930003, under the MIT license", readme)
+            # The archive keeps every Qt release; official_releases drops superseded ones.
+            self.assertIn("https://download.qt.io/archive/qt/6.10/6.10.3/single/qt-everywhere-src-6.10.3.tar.xz",
+                          readme)
+            self.assertIn("Git tags v6.10.3 in the Qt Project repositories", readme)
+            self.assertNotIn("official_releases", readme)
             self.assertNotRegex(readme, r"@[A-Z_]+@")
             self.assertNotRegex(readme, r"[^\r]\n")
         # Equal inputs give equal bytes, so a rebuilt zip can be compared.

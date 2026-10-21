@@ -61,6 +61,8 @@ public struct NativeModelChoice: Hashable, Sendable {
     public let efforts: [String]
     /// The native names of `efforts` by position (OpenCode `effort_labels`); empty when not reported.
     public var effortLabels: [String] = []
+    public var provider = "", providerLabel = ""
+    public var free = false, favorite = false, isDefault = false
 }
 
 public struct NativeSettings: Hashable, Sendable {
@@ -77,12 +79,13 @@ public struct NativeSettings: Hashable, Sendable {
     public let notice: String
     /// The inspected provider; only OpenCode offers native variants beyond the relay's fixed levels.
     public var agent = ""
+    public var modelsTruncated = false
 
     /// Relevant semantic fields only; timestamps and unrelated history polls do not invalidate a dialog.
     public var signature: String {
-        let choices: [JSON] = models.map { .array([.string($0.id), .string($0.label), JSON($0.efforts), JSON($0.effortLabels)]) }
+        let choices: [JSON] = models.map { .array([.string($0.id), .string($0.label), JSON($0.efforts), JSON($0.effortLabels), .string($0.provider), .string($0.providerLabel), .bool($0.free), .bool($0.favorite), .bool($0.isDefault)]) }
         return JSON.array([.string(model), .string(effort), .array(choices), JSON(efforts), .string(pendingModel), .string(pendingEffort),
-                           .string(pendingId), .string(applyWhen), .bool(supported), .string(reason), .string(notice)]).compact
+                           .string(pendingId), .string(applyWhen), .bool(supported), .string(reason), .string(notice), .bool(modelsTruncated)]).compact
     }
 
     /// The model's own effort variants (OpenCode `effort_options` with `effort_labels`), or the session's list when the
@@ -116,17 +119,33 @@ public enum SessionDetailsPresentation {
 
     public static func settings(_ raw: JSONObject?) -> NativeSettings {
         let model = raw?.string("settings_model") ?? ""
+        let options = raw?.objects("model_options") ?? []
+        let openCode = raw?.string("agent") == "opencode" || options.contains { option in
+            if case .string(let provider)? = option["provider"] { return !provider.isEmpty }
+            return false
+        }
+        let models: [NativeModelChoice]
+        if openCode {
+            models = OpenCodeCatalog.models(raw?.array("model_options")).map { model in
+                NativeModelChoice(id: model.value, label: model.label, efforts: model.efforts.map(\.value),
+                    effortLabels: model.efforts.map(\.label), provider: model.provider, providerLabel: model.providerLabel,
+                    free: model.free, favorite: model.favorite, isDefault: model.isDefault)
+            }
+        } else {
+            models = options.map { option in
+                let label = option.string("label")
+                return NativeModelChoice(id: option.string("id"), label: label.isEmpty ? option.string("id") : label,
+                    efforts: option.strings("effort_options"), effortLabels: option.strings("effort_labels"))
+            }
+        }
         return NativeSettings(
             model: model.isEmpty ? raw?.string("model") ?? "" : model, effort: raw?.string("effort") ?? "",
-            models: (raw?.objects("model_options") ?? []).map { option in
-                let label = option.string("label")
-                return NativeModelChoice(id: option.string("id"), label: label.isEmpty ? option.string("id") : label, efforts: option.strings("effort_options"),
-                                         effortLabels: option.strings("effort_labels"))
-            },
+            models: models,
             efforts: raw?.strings("effort_options") ?? [], pendingModel: raw?.string("pending_model") ?? "", pendingEffort: raw?.string("pending_effort") ?? "",
             pendingId: raw?.string("pending_settings_id") ?? "", applyWhen: raw?.string("settings_apply_when") ?? "",
             supported: raw?.bool("settings_change_supported") == true, reason: raw?.string("settings_change_reason") ?? "",
-            notice: raw?.string("settings_change_notice") ?? "", agent: raw?.string("agent") ?? "")
+            notice: raw?.string("settings_change_notice") ?? "", agent: raw?.string("agent") ?? "",
+            modelsTruncated: openCode && (raw?["model_options_truncated"] == .bool(true) || options.count > OpenCodeCatalog.maxModels))
     }
 
     public static func parse(_ raw: JSONObject?, _ target: Target, verified: Bool) -> SessionDetailsView {

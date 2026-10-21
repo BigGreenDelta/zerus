@@ -59,6 +59,14 @@ void QtTrayIcon::showClickableMessage(const QString &title, const QString &body,
     m_tray.showMessage(title, body, icon, msecs);
 }
 
+void QtTrayIcon::showClickableIconMessage(const QString &title, const QString &body,
+                                          const QIcon &icon, int msecs,
+                                          std::function<void()> clicked)
+{
+    m_messageClicked = std::move(clicked);
+    m_tray.showMessage(title, body, icon, msecs);
+}
+
 void QtTrayIcon::show()
 {
     m_tray.show();

@@ -226,11 +226,49 @@ extension ConversationModel {
         return SharedReadRequest(connection: connection, target: target, payload: payload, key: target.key + "\n" + JSON.object(payload).compact)
     }
 
+    /// A mark counts as shared only when the computer applied every field sent; a failed submission is forgotten so the
+    /// next view retries.
     func sendSharedRead(_ request: SharedReadRequest) async {
-        let completed: Bool
-        do { completed = try await app.client.markRead(request.connection, target: request.target, payload: request.payload).string("state") == "completed" }
-        catch { completed = false }
-        if !completed { sharedReadsSent.remove(request.key) }
+        let receipt: JSONObject
+        do { receipt = try await app.client.markRead(request.connection, target: request.target, payload: request.payload) }
+        catch {
+            sharedReadsSent.remove(request.key)
+            return
+        }
+        guard receipt.string("state") == "completed" else {
+            sharedReadsSent.remove(request.key)
+            return
+        }
+        if SharedReadPolicies.applied(receipt, payload: request.payload) {
+            sharedReadRetries.applied(request.key)
+            return
+        }
+        // Completed without applying: the same mark may go again only after a delay, without holding Read all.
+        // At capacity it stays sent, so nothing is ever resent beyond the bound.
+        if sharedReadRetries.unapplied(request.key, connectionId: request.target.connectionId, now: sharedReadNow()) != nil {
+            scheduleSharedReadRetries()
+        }
+    }
+
+    /// Monotonic seconds that keep running while the phone sleeps, like the timer's own sleep.
+    private func sharedReadNow() -> Double {
+        let elapsed = ContinuousClock.now - sharedReadClock
+        return Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+    }
+
+    /// The one owned timer: it wakes at the earliest due mark and allows exactly the released marks to be sent again.
+    /// Rescheduling cancels it; a cancelled or stale wakeup releases nothing.
+    func scheduleSharedReadRetries() {
+        sharedReadRetryTimer?.cancel()
+        sharedReadRetryTimer = nil
+        guard let due = sharedReadRetries.nextDue else { return }
+        let wait = max(0, due - sharedReadNow())
+        sharedReadRetryTimer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(wait))
+            guard !Task.isCancelled, let self else { return }
+            for key in self.sharedReadRetries.release(now: self.sharedReadNow()) { self.sharedReadsSent.remove(key) }
+            self.scheduleSharedReadRetries()
+        }
     }
 
     /// Tells the session's computer that this phone showed its current reply.

@@ -39,9 +39,9 @@ HERE = Path(__file__).resolve().parent
 if __name__ == "__main__":
     sys.path[:0] = [str(HERE.parent), str(HERE.parent / "tests")]
 
-from zerus_mobile import (accounts, attachment_reads, attachments, connector, context, fleet, file_reads, archives,  # noqa: E402
+from zerus_mobile import (analytics, accounts, attachment_reads, attachments, connector, context, fleet, file_reads, archives,  # noqa: E402
                           history, launch, managed_relay, projects, speech, speech_config, terminal,
-                          voice, worktrees)
+                          voice, worktrees, session_projects)
 from zerus_mobile.connector import Connector, ConnectorError, Journal  # noqa: E402
 
 FILE_LIMIT = 64 * 1024
@@ -75,7 +75,7 @@ SEALED = {"key_id": "a" * 64, "algorithm": speech_config.ALGORITHM,
           "ciphertext": base64.b64encode(bytes(40)).decode()}
 CONNECTOR_MODULES = ("connector", "context", "attachments", "attachment_reads", "file_reads", "archives", "history", "launch",
                      "worktrees", "speech", "speech_config", "voice", "recovery", "terminal", "fleet",
-                     "projects", "accounts", "managed_relay")
+                     "projects", "accounts", "managed_relay", "session_projects")
 # AttachmentViewCache.failure() shows UPDATE_REQUIRED for a receipt error
 # containing either text, and otherwise the first 200 characters of the error.
 ANDROID_UPDATE_REQUIRED = ("unavailable", "unsupported operation")
@@ -191,15 +191,21 @@ def connector_log(handler: logging.Handler):
 # Operation tables and the help-marker capability map.
 
 HELP_LINES = (
+    ("analytics", analytics.HELP_MARKER),
     ("lifecycle", "hgs session-action <session> --json"),
     ("terminal", "hgs terminal <session> --json"),
     ("recovery", "hgs recovery action --scoped-json"),
     ("history", "hgs history <session> --json"),
+    ("hook_health", "hooks-health-v1"),
+    ("session_project_version", session_projects.HELP_MARKER),
+    ("session_project_read", "hgs swarm session-project --json"),
+    ("session_project_assign", "hgs swarm assign-session --json"),
     ("launch", "hgs <agent> <directory> --new --launch-id ID"),
     ("project_launch", "hgs swarm assign-launch --json"),
     ("worktree", "Mobile worktree ABI: worktrees-v1"),
     ("directory_create", "hgs " + launch.DIRECTORY_CREATE_HELP),
     ("read", "hgs read <session> --json"),
+    ("session_notifications", "session-notifications-v1"),
     ("preference", "hgs swarm preference set mobile_delivery"),
     ("attachment_read", "hgs " + attachment_reads.HELP_MARKER),
     ("file_read", "hgs " + file_reads.HELP_MARKER),
@@ -209,6 +215,7 @@ HELP_LINES = (
     ("speech_config", speech_config.HELP_MARKER),
     ("peer_inventory", "hgs swarm mobile-peers --json"),
     ("peer_command", "hgs swarm mobile-peer --json"),
+    ("clear_context_dismiss", context.CLEAR_CONTEXT_DISMISS_HELP),
 )
 
 
@@ -1120,6 +1127,7 @@ def valid_payloads() -> dict:
     upsert_profile = {"id": "example", "name": "Example transcription", "adapter": "openai_http", "model": "fixture",
                       "language": "ru", "base_url": "https://speech.example.invalid/v1", "allow_insecure_http": False}
     return {
+        "analytics_read": {"schema": 1, "from": "2026-01-01", "through": "2026-03-31"},
         "inspect": {}, "send": identity(text="Hello from the phone"),
         "answer": identity(question_id="q", expected_question_hash="h", answers=[["Yes"]]),
         "interrupt": identity(expected_turn_started=True), "send_now": identity(queue_id="c" * 64),
@@ -1130,8 +1138,12 @@ def valid_payloads() -> dict:
         "restore": identity(archive_id=ARCHIVE), "forget": identity(archive_id=ARCHIVE),
         "terminal_snapshot": identity(),
         "terminal_input": identity(terminal_binding_id="d" * 64, text="ls", enter=True),
+        "hooks_status": identity(),
+        "project_assignment": identity(expected_machine_id=MACHINE),
+        "project_assign": identity(expected_machine_id=MACHINE,swarm_id=ident("project-swarm"),membership_token="a"*64,catalog_epoch="b"*64,project_id="logical"),
         "history": identity(limit=50), "recovery_action": identity(job_id=ident("job"), action="now"),
         "mark_read": {"run_id": RUN, "conversation_id": CONVERSATION, "reply_id": "7:100.5", "attention_signature": HASH_A},
+        "session_notifications": {"run_id": RUN, "conversation_id": CONVERSATION, "muted": True, "expected_revision": 0},
         "attachment_read": identity(message_id=ident("message"), index=0, offset=0, length=1024),
         "archive_list": {"from":0,"until":253402300800,"limit":50,"cursor":"","query":""},
         "file_read": identity(path="/workspace/example/Сводная.xlsx", offset=0, length=1024),
@@ -1154,7 +1166,7 @@ def valid_payloads() -> dict:
     }
 
 
-SESSIONLESS = {"archive_list"} | context.LAUNCH_OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS | context.COMPUTER_OPERATIONS
+SESSIONLESS = {"analytics_read", "archive_list"} | context.LAUNCH_OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS | context.COMPUTER_OPERATIONS
 
 
 def substitute(value, request_id):
@@ -1213,6 +1225,16 @@ def validation_cases() -> list[dict]:
 
     for operation in sorted(valid):
         case("valid/" + operation, operation)
+    # Additive metadata-only project ABI, including byte bounds and no launch fields.
+    for operation in sorted(session_projects.OPERATIONS):
+        for field in ["directory","add_folder","project_folder_id","archive_id","agent_id","organization"]:
+            case(operation+"/forbidden-"+field,operation,change=put(**{field:"foreign"}))
+        case(operation+"/machine-nil",operation,change=put(expected_machine_id=NIL))
+        case(operation+"/empty-conversation",operation,change=put(expected_conversation_id=""))
+    case("project_assignment/cursor", "project_assignment", change=put(cursor="b"*64+":100"))
+    case("project_assignment/mutation-field", "project_assignment", change=put(project_id="logical"))
+    case("project_assign/short-proof", "project_assign", change=put(membership_token="a"*63))
+    case("project_assign/cursor", "project_assign", change=put(cursor="b"*64+":100"))
     # Session and envelope rules shared by every session operation.
     case("session/unknown", "send", session="codex/example/other")
     case("session/dash", "inspect", session="-help")
@@ -1294,6 +1316,12 @@ def validation_cases() -> list[dict]:
     # context commands
     case("compact_context/extra-field", "compact_context", identity(path="/example"))
     case("clear_context/run-empty", "clear_context", identity(expected_run_id=""))
+    dismiss_source = "test_bb_dismiss_prompt.DismissPromptTests"
+    for label, value in (("true", True), ("false", False), ("null", None),
+                         ("integer-zero", 0), ("integer-one", 1), ("string", "true"), ("array", [])):
+        case("clear_context/dismiss-" + label, "clear_context", identity(dismiss_prompt=value), source=dismiss_source)
+    for value in (True, False):
+        case("compact_context/dismiss-" + str(value).lower(), "compact_context", identity(dismiss_prompt=value), source=dismiss_source)
     # lifecycle
     actions = "test_mobile_actions.LifecycleTransportTests.test_old_cli_and_invalid_payload_never_invoke_mutator"
     case("pause/action-field", "pause", identity(action="terminate"), source=actions)
@@ -1478,7 +1506,8 @@ def live_oracle(submission: dict) -> dict:
 
 VALIDATION_FAMILIES = {
     "conversation": {"inspect", "send", "answer", "interrupt", "send_now", "settings", "process_output", "process_stop",
-                     "compact_context", "clear_context", "mark_read", "attachment_read", "file_read"},
+                     "compact_context", "clear_context", "mark_read", "attachment_read", "file_read", "hooks_status"},
+    "project": set(session_projects.OPERATIONS),
     "control": set(context.LIFECYCLE_OPERATIONS | context.TERMINAL_OPERATIONS | {"history", "recovery_action"}),
     "speech": set(voice.OPERATIONS | speech.OPERATIONS | speech_config.OPERATIONS),
     "launch": set(context.LAUNCH_OPERATIONS | context.COMPUTER_OPERATIONS),
@@ -1948,7 +1977,7 @@ def session_request(operation, payload, name, *, session=SESSION, **extra):
 
 def capable(node: Connector) -> None:
     for flag in ("lifecycle", "terminal", "recovery", "history", "launch", "project_launch", "worktree", "directory_create",
-                 "read", "preference", "attachment_read", "file_read", "speech", "speech_config", "voice"):
+                 "read", "preference", "attachment_read", "file_read", "speech", "speech_config", "voice", "session_projects"):
         setattr(node, flag + "_supported", True)
     node.sessions = {SESSION, DSH_SESSION}
     node.archives = {(SESSION, ARCHIVE)}
@@ -2019,6 +2048,9 @@ def execute_cases():
         ("directory-create-route-mismatch", session_request("directory_create", valid["directory_create"], "directory-route", session="",
                                                             computer_id=COMPUTER, gateway_route={"computer_id": ident("other")}), {}),
     ]
+    for operation in sorted(session_projects.OPERATIONS):
+        cases.append((operation+"-confirmed",session_request(operation,valid[operation],operation+"-confirmed"),
+            {("swarm","assign-session" if operation=="project_assign" else "session-project","--json"): "$project"}))
     cases.append(("file-read-snapshot", session_request("file_read", valid["file_read"], "file-read-snapshot"),
                   {("file-read", SESSION, "--json"): "$file:snapshot"}))
     return cases
@@ -2047,6 +2079,13 @@ def resolve_answer(answer, request):
         return {"request_id":request["request_id"],"name":SESSION,"run_id":RUN,"conversation_id":CONVERSATION,
                 "requested_path":path,"path":path,"file_name":path.rsplit("/",1)[-1],"mime":"application/octet-stream",
                 "bytes":len(data),"sha256":hashlib.sha256(data).hexdigest(),"data_base64":base64.b64encode(data).decode()}
+    if answer == "$project":
+        mutation=request["operation"]=="project_assign"
+        raw={"schema":1,"request_id":request["request_id"],"status":"assigned" if mutation else "ok","name":SESSION,"run_id":RUN,"conversation_id":CONVERSATION,
+             "machine_id":payload["expected_machine_id"],"swarm_id":ident("project-swarm"),"membership_token":"a"*64,"catalog_epoch":"b"*64,"current_project_id":"logical"}
+        if mutation:raw["project_id"]=payload["project_id"]
+        else:raw.update(projects=[{"id":"logical","name":"Logical grouping","color":"#123456"}],next_cursor=None)
+        return raw
     if answer == "$speech":
         return {"schema": 1, "job_id": request["request_id"], "state": "completed", "text": "private transcript"}
     return answer

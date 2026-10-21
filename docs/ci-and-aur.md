@@ -27,7 +27,7 @@ can select a PR head or another exact revision.
 | Job | Automatic CI | Checks |
 | --- | --- | --- |
 | Resolve commit | Always | Exact test commit and suite selection for every other job |
-| Quick checks | Always | Privacy, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.99 unit tests, the replica crate (format, clippy, tests, golden vectors), Rust license notices |
+| Quick checks | Always | Privacy, Gitleaks 8.30.1 on the tree and every fetched branch and tag, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.99 unit tests, the replica crate (format, clippy, tests, golden vectors), Rust license notices |
 | Rust relay | Always | Rust 1.99 format, clippy, and every storage contract (cross-worker ones included) on its own PostgreSQL database; every `services/mobile/tests` module, with the Rust relay fixtures on per-test PostgreSQL databases and no skips; the speech suites against the Python reference relay; the deployment image and its 256 MiB envelope |
 | Rust mobile connector | Always | Rust 1.99 format, clippy, vector, binary and journal handoff tests; the black-box suites against the Python and Rust connectors concurrently with differential traces compared against the reviewed allowlist, and a 300 s soak of the Rust build (`services/mobile/tests/BLACKBOX.md`) |
 | Rust mobile connector on macOS | Always | Cold Rust 1.99 build, unit, vector and binary tests, and the black-box modules that need no real `hgs`, journal handoffs with the Python connector included |
@@ -536,7 +536,8 @@ locates Visual Studio with `vswhere` and applies `vcvars64.bat` (with its CMake
 and Ninja first on `PATH`) to that build only, then builds with Ninja and `cl` and
 runs every CTest suite offscreen.
 
-`scripts/package-windows.py` bundles the exact tested `hgs.exe` and `hgs-tray.exe`
+`scripts/package-windows.py` bundles the exact tested `hgs.exe`, `hgs-tray.exe`
+and `zerus-mobile-connector.exe`
 into `zerus-windows-x86_64.zip` with one top-level `zerus-windows-x86_64/` folder:
 
 - `windeployqt` adds Qt, its plugins (including the SVG image and icon plugins
@@ -685,13 +686,16 @@ accounts in private configuration.
    reachable from the PC, for example through a loopback-only tunnel.
 2. **Isolation on the PC.** Use the executables from the extracted zip and point
    `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `HGS_CONFIG_DIR`
-   and `HGS_STATE_DIR` at a scratch folder. That isolates `hgs.exe` and the desktop
-   app's `tray.conf`, not the rest of `hgs-tray.exe`: Qt finds its settings,
-   drafts and single-instance lock through the Windows known folders, which ignore
-   `APPDATA` and `LOCALAPPDATA`, and names its single-instance pipe after the
-   account's profile folder, whatever `USERPROFILE` says. No other Zerus tray may
-   run during the desktop part (a second tray only activates the running one);
-   otherwise run that part under a separate Windows test account. Before changing
+   and `HGS_STATE_DIR` at a scratch folder. Verify the resolved CLI state, desktop
+   `tray.conf`, Qt settings, drafts, single-instance lock and pipe identities before
+   launching the desktop. In the Windows 0.45.0 qualification, a per-process
+   `USERPROFILE` override placed Qt settings and the lock below the scratch profile
+   while the corresponding real files stayed unchanged. That observation does not
+   establish full-account isolation or how every Windows/Qt build resolves known
+   folders; verify the actual paths instead of assuming environment overrides are
+   always honored or ignored. Use a separate Windows test account if those desktop
+   identities cannot be verified private; an unisolated second tray may only
+   activate the running one. Before changing
    the variables, back up `hgdev\hgs-tray.ini` and the `hgs-tray.ini.drafts`
    folder next to it in the real Roaming AppData folder, and `hgdev\hgs-tray` in
    the real Local AppData folder, when they exist
@@ -804,6 +808,27 @@ version, a missing required route, a live registration that never answers, and t
 explicit Start OpenCode action with its allowlisted catalog. Each test stops its
 private service with `opencode service stop`; the suite then fails if any process
 carrying its private root outlived it.
+
+The macOS Claude matrix schedules its unchanged named unittest suites across two
+private Python workers under the same original 900-second wall end, including
+discovery, both starts, collection and a ten-second cleanup reserve. Each worker
+gets short private HOME/XDG/TMP/state/config paths before importing fixtures and
+cannot write shared source bytecode. The workers read same-byte, mode-0500 copies
+of the already reviewed CLI and Claude image; neither caller binary is chmodded.
+Both workers must discover the same full ordered suite inventory before either
+runs. Whole original suite subtrees keep every occurrence, including imported
+duplicate Clear coverage. Qualification requires the exact assigned START/END
+orders, zero failures/errors/skips, agreeing result artifacts, and both direct
+worker exits. Per-worker raw logs and `default.workers.json` retain this proof;
+only the validated aggregate uses `ZERUS_NATIVE_RESULT`.
+
+Timeout, cancellation, partial startup, incomplete reports and cleanup errors fail
+the gate without replay. Cooperative cancellation runs the fixtures' existing
+owned cleanups inside that same wall end. Killing a Python worker never proves
+that a detached tmux/provider descendant exited; failed or unknown private roots
+are retained. This scheduling change identifies no particular cause of slow
+native startup, establishes no opaque provider-global-service isolation, and
+changes no Linux, Windows, Codex or OpenCode suite or assertion.
 
 Real native checks run at 95x47 and 110x35 terminal sizes with animations explicitly
 enabled and disabled. Animated 95x47 checks require the actual released settled

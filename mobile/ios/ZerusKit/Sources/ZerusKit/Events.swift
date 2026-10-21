@@ -26,11 +26,17 @@ public struct Event: Codable, Hashable, Sendable, Identifiable {
     /// A message the native agent has not admitted yet: "queued" or "not_delivered" (OpenCode). It is shown only
     /// from the current inspection and never becomes history. Optional so older cached rows still decode.
     public var deliveryState: String?
+    /// A notice's journal origin, its declared sender and a subagent's collapsed report
+    /// (ActivityNotices). Optional so older cached rows still decode.
+    public var origin: String?
+    public var sender: String?
+    public var report: String?
 
     public init(id: String, role: String, text: String, time: String, at: Double = 0, requestId: String = "", attachments: [DisplayedAttachment] = [],
                 source: String = "", delivery: String = "", outgoingId: String = "", nativeType: String = "", submittedText: String = "",
                 originalId: String = "", historyId: String = "", historyCursor: String = "", historyEpoch: String = "", incomingSeq: Int64? = nil,
-                originalIds: [String] = [], detailTruncated: Bool = false, voice: VoiceMessage? = nil, deliveryState: String? = nil) {
+                originalIds: [String] = [], detailTruncated: Bool = false, voice: VoiceMessage? = nil, deliveryState: String? = nil,
+                origin: String? = nil, sender: String? = nil, report: String? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -52,14 +58,21 @@ public struct Event: Codable, Hashable, Sendable, Identifiable {
         self.detailTruncated = detailTruncated
         self.voice = voice
         self.deliveryState = deliveryState
+        self.origin = origin
+        self.sender = sender
+        self.report = report
     }
+
+    /// The request of a row Zerus recorded itself: a delivery or voice receipt, or this phone's outbox. A native OpenCode
+    /// prompt names the request that sent it only so `ConversationMerge` can match this phone's message; it stays a native row.
+    public var receiptRequestId: String { role != "You" || source == "opencode_native" ? "" : requestId }
 
     /// Serialized-size estimate used for the bounded history window.
     public var approximateBytes: Int {
         // Separate statements: one long `+` chain takes the type checker tens of seconds.
         var size = 260
         let fields: [String] = [id, role, text, time, requestId, source, delivery, outgoingId, nativeType, submittedText, originalId,
-                                historyId, historyCursor, historyEpoch, deliveryState ?? ""]
+                                historyId, historyCursor, historyEpoch, deliveryState ?? "", origin ?? "", sender ?? "", report ?? ""]
         for field in fields { size += field.utf8.count }
         for value in originalIds { size += value.utf8.count + 3 }
         for file in attachments {
@@ -93,6 +106,8 @@ public struct Choice: Codable, Hashable, Sendable {
     public var id: String
     public var label: String
     public var description: String
+    /// An approval option's reach: "once" for this request or "broader" for more; empty elsewhere.
+    public var scope = ""
 }
 
 public struct Prompt: Codable, Hashable, Sendable {
@@ -115,6 +130,9 @@ public struct Prompt: Codable, Hashable, Sendable {
     public var defaultOptionIds: [String] = []
     /// The prefilled answer of a native OpenCode text item (`default_text`), bounded like a typed answer; "" otherwise.
     public var defaultText = ""
+    /// An item of an OpenCode form (not a permission): its text reaches the native form reply, never a terminal, so text
+    /// starting with / or ! is an ordinary answer. Every other card keeps such text on the computer.
+    public var literalText = false
 }
 
 public struct NativeQuestionAnswer: Codable, Hashable, Sendable {
@@ -158,10 +176,14 @@ public struct Question: Codable, Hashable, Sendable, Identifiable {
     public var conversation: String
     public var toolCallId: String
     public var answerDelivery: NativeQuestionDelivery?
+    /// An approval answered with the agent's own options (`approval_choices`), such as a Claude terminal panel or a Kimi
+    /// tool approval; see `QuestionPolicies.nativeChoices`.
+    public var approvalChoices: Bool
 
     public init(id: String, hash: String, prompts: [Prompt], canAnswer: Bool, canSkip: Bool, optional: Bool, delivery: String,
                 createdAt: Double = 0, source: String = "", approval: Bool = false, trustRequest: Bool = false, unavailableReason: String = "",
-                run: String = "", conversation: String = "", toolCallId: String = "", answerDelivery: NativeQuestionDelivery? = nil) {
+                run: String = "", conversation: String = "", toolCallId: String = "", answerDelivery: NativeQuestionDelivery? = nil,
+                approvalChoices: Bool = false) {
         self.id = id
         self.hash = hash
         self.prompts = prompts
@@ -178,6 +200,7 @@ public struct Question: Codable, Hashable, Sendable, Identifiable {
         self.conversation = conversation
         self.toolCallId = toolCallId
         self.answerDelivery = answerDelivery
+        self.approvalChoices = approvalChoices
     }
 }
 
@@ -385,6 +408,11 @@ public enum NativeEvents {
             let type = value.string("type")
             guard eventTypes.contains(type), inScope(value) else { return nil }
             let role = type == "QuestionAnswered" ? "You (answer)" : (userTypes.contains(type) ? "You" : "AgentMessage")
+            // A native prompt the person did not write is a notice, as on desktop. Identities
+            // keep the native role, so cached rows stay the same rows.
+            let marked = value.string("origin")
+            let origin = ActivityNotices.origins.contains(marked) && userTypes.contains(type) ? marked : ""
+            let shown = origin.isEmpty ? role : ActivityNotices.role
             let sourceValue = value.string("source")
             let source = sourceValue.isEmpty ? stream : sourceValue
             let voice = source == "hgs_voice" ? value.object("voice").flatMap { try? VoiceProtocol.message($0) } : nil
@@ -394,8 +422,10 @@ public enum NativeEvents {
                 return DisplayedAttachment(name: file.string("name"), mime: file.string("mime"), bytes: file.int64("bytes"),
                                            reference: file.string("reference"), messageId: file.string("request_id"), index: index)
             }
-            let text = source == "hgs_delivery" && !files.isEmpty ? (value["detail"]?.textValue ?? "")
+            // Fallback identity belongs to the original native row, not its display label/body.
+            let identityText = source == "hgs_delivery" && !files.isEmpty ? (value["detail"]?.textValue ?? "")
                 : value.string("detail", "text", "message", "prompt", "submitted_text")
+            let text = !origin.isEmpty ? ActivityNotices.body(origin: origin, detail: value.string("detail"), report: value.string("report")) : identityText
             if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && files.isEmpty && voice == nil { return nil }
             let atValue = value.double("at", default: 0)
             let at = atValue.isFinite ? atValue : 0
@@ -403,7 +433,7 @@ public enum NativeEvents {
             let fallback: String
             if nativeId.isEmpty {
                 // Count only indistinguishable rows, rather than the whole array.
-                let identity: JSON = [.string(type), .string(role), .string(source), .double(at), .string(value.string("timestamp")), .string(text),
+                let identity: JSON = [.string(type), .string(role), .string(source), .double(at), .string(value.string("timestamp")), .string(identityText),
                                       .array(files.map { [.string($0.name), .string($0.mime), .int($0.bytes), .string($0.reference)] })]
                 let digest = SHA256.hash(data: Data(identity.compact.utf8)).map { String(format: "%02x", $0) }.joined()
                 let key = "\(stream):\(source):\(role):\(digest)"
@@ -422,13 +452,19 @@ public enum NativeEvents {
                 if case .string(let id) = item { return id }
                 return nil
             }
-            return Event(id: historyId.isEmpty ? originalId : "history:\(historyId)", role: role, text: text, time: value.string("at", "timestamp"), at: at,
-                         requestId: ["hgs_delivery", "hgs_voice"].contains(source) && role == "You" ? value.string("message_id") : "",
+            // A prompt Zerus sent to OpenCode names its request: OpenCode dates a queued prompt by its delivery, so text and time cannot match it.
+            var requestId = ""
+            if shown == "You" && ["hgs_delivery", "hgs_voice"].contains(source) { requestId = value.string("message_id") }
+            if shown == "You" && source == "opencode_native" && AttachmentPolicy.validId(value.string("request_id")) { requestId = value.string("request_id") }
+            return Event(id: historyId.isEmpty ? originalId : "history:\(historyId)", role: shown, text: text, time: value.string("at", "timestamp"), at: at,
+                         requestId: requestId,
                          attachments: files, source: source, nativeType: type,
                          submittedText: source == "hgs_delivery" ? value.string("submitted_text") : "", originalId: originalId, historyId: historyId,
                          historyCursor: value.string("history_cursor"), historyEpoch: raw.string("history_epoch"), incomingSeq: incoming,
                          originalIds: originalIds, detailTruncated: value.bool("detail_truncated"), voice: voice,
-                         deliveryState: QueuedDelivery.states.contains(value.string("delivery_state")) ? value.string("delivery_state") : nil)
+                         deliveryState: shown == "You" && QueuedDelivery.states.contains(value.string("delivery_state")) ? value.string("delivery_state") : nil,
+                         origin: origin.isEmpty ? nil : origin, sender: origin == "peer_message" ? value.string("sender") : nil,
+                         report: origin.isEmpty ? nil : ActivityNotices.report(origin: origin, report: value.string("report")))
         }
         func replaces(_ provider: JSONObject, _ hook: JSONObject) -> Bool {
             provider.string("type") == "AgentMessage" && inScope(provider) && inScope(hook) && hook.string("type") == "Stop" &&
@@ -447,7 +483,7 @@ public enum NativeEvents {
         let receipts = raw.objects("attachment_messages").compactMap { parse($0, "attachment") }
         for metadata in receipts {
             let candidates = rows.indices.filter { index in
-                !used.contains(index) && rows[index].role == "You" && rows[index].requestId.isEmpty && userTypes.contains(rows[index].nativeType) &&
+                !used.contains(index) && rows[index].role == "You" && rows[index].receiptRequestId.isEmpty && userTypes.contains(rows[index].nativeType) &&
                     AttachmentReceiptMatch.matches(metadata, rows[index])
             }
             if candidates.count == 1, receipts.filter({ AttachmentReceiptMatch.matches($0, rows[candidates[0]]) }).count == 1 {
@@ -457,7 +493,7 @@ public enum NativeEvents {
                 replaced.at = rows[exact].at
                 replaced.originalIds = Array(unique(metadata.originalIds + [rows[exact].id]).prefix(8))
                 rows[exact] = replaced
-            } else if !rows.contains(where: { $0.role == "You" && $0.requestId == metadata.requestId && !metadata.requestId.isEmpty }) {
+            } else if !rows.contains(where: { $0.role == "You" && $0.receiptRequestId == metadata.requestId && !metadata.requestId.isEmpty }) {
                 rows.append(metadata)
             }
         }
@@ -573,20 +609,23 @@ public enum NativeEvents {
             return Question(id: card.string("question_id"), hash: card.string("question_hash"),
                             prompts: card.objects("questions").map { prompt in
                                 Prompt(id: prompt.string("id"), text: prompt.string("question", "prompt"),
-                                       choices: prompt.objects("options").map { Choice(id: $0.string("id"), label: $0.string("label"), description: $0.string("description")) },
+                                       choices: prompt.objects("options").map {
+                                           Choice(id: $0.string("id"), label: $0.string("label"), description: $0.string("description"), scope: $0.string("scope"))
+                                       },
                                        multi: prompt.bool("multi_select"), required: prompt.bool("required", default: true),
                                        other: prompt.bool("allow_other"), header: prompt.string("header"), body: prompt.string("body"),
                                        otherLabel: prompt.string("other_label"), otherDescription: prompt.string("other_description"),
                                        inputKind: ["choice", "text"].contains(prompt.string("input_kind")) ? prompt.string("input_kind") : "",
                                        minLength: limit(prompt, "min_length"), maxLength: limit(prompt, "max_length"),
                                        minItems: limit(prompt, "min_items"), maxItems: limit(prompt, "max_items"),
-                                       defaultOptionIds: prompt.strings("default_option_ids"), defaultText: defaultText(prompt, source: card.string("source")))
+                                       defaultOptionIds: prompt.strings("default_option_ids"), defaultText: defaultText(prompt, source: card.string("source")),
+                                       literalText: card.string("source") == "opencode_native" && !card.bool("approval"))
                             },
                             canAnswer: card.bool("can_answer"), canSkip: card.bool("can_skip"), optional: card.bool("optional"),
                             delivery: delivery?.status ?? "", createdAt: created, source: card.string("source"), approval: card.bool("approval"),
                             trustRequest: card.bool("trust_request"), unavailableReason: card.string("answer_unavailable_reason", "unavailable_reason"),
                             run: card.string("run_id"), conversation: card.string("conversation_id"), toolCallId: card.string("tool_call_id"),
-                            answerDelivery: delivery)
+                            answerDelivery: delivery, approvalChoices: card.bool("approval_choices"))
         }
     }
 }

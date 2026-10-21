@@ -134,16 +134,16 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let _guard=lock(None)?;
     let record=read(&args[0])?;
     if record["run_id"]!=request.expected_run_id || record["conversation_id"]!=request.expected_conversation_id || !eligible(&record) {
-        return Err("Session changed or is no longer working; refresh Activity".into());
+        return Err("Session changed or is no longer working; nothing was sent".into());
     }
     let path=absolute_root()?.join("queue_receipts").join(format!("{uuid}.json"));
-    if path.exists() {return Err("This send-now request was already attempted. Refresh Activity before trying again".into());}
+    if path.exists() {return Err("This send-now request was already attempted; nothing was sent again".into());}
     let current=kimi_tui_choice::identity(&record)?;
     input::checked_terminal(&current,true)?;
     let screen=kimi_tui_choice::capture(&current)?;
-    let queue=parse(string(&current,"agent"),&screen).ok_or("The native queue is no longer visible; refresh Activity")?;
+    let queue=parse(string(&current,"agent"),&screen).ok_or("The native queue is no longer visible; nothing was sent")?;
     let data=snapshot(&current,&queue);
-    if data["id"]!=request.queue_id || data["can_send_now"]!=true {return Err("The queue changed or cannot be sent now; refresh Activity".into());}
+    if data["id"]!=request.queue_id || data["can_send_now"]!=true {return Err("The queue changed or cannot be sent now; nothing was sent".into());}
     let receipt=json!({"request_id":request.request_id,"name":args[0],"run_id":request.expected_run_id,
         "conversation_id":request.expected_conversation_id,"queue_id":request.queue_id,"status":"submitted"});
     atomic(&path,&json!({"status":"in_progress"}).to_string())?;

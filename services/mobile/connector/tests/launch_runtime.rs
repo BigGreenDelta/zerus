@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Launch, folder, worktree, archive and account behaviour that needs an
 //! injected clock or a stop in the middle of a native call: the 5 s launch
 //! verification and its project assignment, the 45 s archive snapshot rule,

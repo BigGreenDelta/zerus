@@ -69,7 +69,7 @@ public enum RollingConversationHistory {
         var replaced = Set<String>()
         for receipt in reconciled where receipt.source == "hgs_delivery" && receipt.role == "You" && !receipt.requestId.isEmpty && !receipt.submittedText.isEmpty {
             let candidates = reconciled.filter {
-                !replaced.contains($0.id) && $0.role == "You" && $0.requestId.isEmpty && NativeEvents.userTypes.contains($0.nativeType) &&
+                !replaced.contains($0.id) && $0.role == "You" && $0.receiptRequestId.isEmpty && NativeEvents.userTypes.contains($0.nativeType) &&
                     AttachmentReceiptMatch.matches(receipt, $0)
             }
             guard candidates.count == 1 else { continue }
@@ -120,10 +120,15 @@ public enum ConversationMerge {
             .enumerated().sorted { $0.element.createdAt != $1.element.createdAt ? $0.element.createdAt < $1.element.createdAt : $0.offset < $1.offset }
             .map(\.element)
         for message in mine {
-            // Only a user row from durable native receipt metadata is authoritative by request ID.
-            var match = result.indices.first { index in
-                !used.contains(index) && result[index].role == "You" && result[index].source == "hgs_delivery" && result[index].requestId == message.requestId
+            // Only a user row from durable native receipt metadata, or a native OpenCode prompt naming the request that
+            // sent it, is authoritative by request ID; a receipt comes first. Only a canonical request names a row.
+            func named(_ source: String) -> Int? {
+                guard AttachmentPolicy.validId(message.requestId) else { return nil }
+                return result.indices.first { index in
+                    !used.contains(index) && result[index].role == "You" && result[index].source == source && result[index].requestId == message.requestId
+                }
             }
+            var match = named("hgs_delivery") ?? named("opencode_native")
             if match == nil, ["submitted", "recorded"].contains(message.status), message.submittedAt > 0 {
                 let text = (message.submittedText.isEmpty ? message.text : message.submittedText).trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty {
@@ -219,9 +224,10 @@ public struct HistoryPage: Sendable {
     public var complete: Bool
     public var indexing: Bool
     public var truncated: Bool
+    public var projectionApplied: Int64
 
     public init(target: Target, epoch: String, events: [Event], before: String?, after: String?, hasBefore: Bool, hasAfter: Bool,
-                latestIncoming: Int64?, totalIncoming: Int64?, complete: Bool, indexing: Bool, truncated: Bool) {
+                latestIncoming: Int64?, totalIncoming: Int64?, complete: Bool, indexing: Bool, truncated: Bool, projectionApplied: Int64 = 0) {
         self.target = target
         self.epoch = epoch
         self.events = events
@@ -234,6 +240,7 @@ public struct HistoryPage: Sendable {
         self.complete = complete
         self.indexing = indexing
         self.truncated = truncated
+        self.projectionApplied = projectionApplied
     }
 
     public static func parse(target: Target, id: String, raw: JSONObject) throws -> HistoryPage {
@@ -276,7 +283,8 @@ public struct HistoryPage: Sendable {
         try require(!hasBefore || before != nil)
         try require(!hasAfter || after != nil)
         return HistoryPage(target: target, epoch: epoch, events: events, before: before, after: after, hasBefore: hasBefore, hasAfter: hasAfter,
-                           latestIncoming: latest, totalIncoming: total, complete: complete, indexing: raw.bool("indexing"), truncated: raw.bool("truncated"))
+                           latestIncoming: latest, totalIncoming: total, complete: complete, indexing: raw.bool("indexing"), truncated: raw.bool("truncated"),
+                           projectionApplied: complete ? try HistoryProjection.generation(raw) : 0)
     }
 }
 
@@ -290,10 +298,11 @@ public struct HistoryWindow: Hashable, Sendable {
     public var hasBefore: Bool
     public var hasAfter: Bool
     public var atHead: Bool
+    public var projectionApplied: Int64 = 0
 
     public static func from(_ page: HistoryPage) -> HistoryWindow {
         HistoryWindow(target: page.target, epoch: page.epoch, events: page.events, before: page.before, after: page.after,
-                      hasBefore: page.hasBefore, hasAfter: page.hasAfter, atHead: !page.hasAfter)
+                      hasBefore: page.hasBefore, hasAfter: page.hasAfter, atHead: !page.hasAfter, projectionApplied: page.projectionApplied)
     }
 
     public func merge(_ page: HistoryPage, direction: String, maxEvents: Int = 500, maxBytes: Int = 2 * 1024 * 1024) -> HistoryWindow {
@@ -320,12 +329,13 @@ public struct HistoryWindow: Hashable, Sendable {
                              before: direction == "before" ? page.before : (dropped ? rows.first?.historyCursor : before),
                              after: direction == "after" ? page.after : (dropped ? rows.last?.historyCursor : after),
                              hasBefore: direction == "before" ? page.hasBefore : (hasBefore || dropped),
-                             hasAfter: nextHasAfter, atHead: !nextHasAfter)
+                             hasAfter: nextHasAfter, atHead: !nextHasAfter, projectionApplied: min(projectionApplied, page.projectionApplied))
     }
 
     /// Inspection rows that update or extend a head window; canonical rows stay in journal arrival order. Queued and
     /// not-delivered rows are never history: only the current inspection's are shown, appended after the canonical rows.
-    public func inspection(_ incoming: [Event], previous previousInspection: [Event] = []) -> HistoryWindow {
+    /// `scope` is the target `incoming` was inspected for; only this window's own inspection names requests on its rows.
+    public func inspection(_ incoming: [Event], previous previousInspection: [Event] = [], scope: Target? = nil) -> HistoryWindow {
         guard atHead else { return self }
         let pending = incoming.filter { $0.deliveryState != nil }
         let events = self.events.filter { $0.deliveryState == nil }
@@ -333,13 +343,16 @@ public struct HistoryWindow: Hashable, Sendable {
         let updated = events.map { canonical -> Event in
             let identities = HistoryInspection.identities(canonical)
             let exact = incoming.filter { identities.contains($0.id) && $0.source == canonical.source && $0.nativeType == canonical.nativeType && $0.role == canonical.role }
-            guard exact.count == 1, !exact[0].detailTruncated || canonical.detailTruncated else { return canonical }
+            guard exact.count == 1 else { return canonical }
             var copy = canonical
-            let voice = exact[0].voice.map { VoiceProtocol.newer(canonical.voice, $0) } ?? canonical.voice
-            copy.text = voice?.transcript ?? exact[0].text
-            copy.attachments = voice.map { [$0.audio] } ?? exact[0].attachments
-            copy.detailTruncated = exact[0].detailTruncated
-            copy.voice = voice
+            if !exact[0].detailTruncated || canonical.detailTruncated {
+                let voice = exact[0].voice.map { VoiceProtocol.newer(canonical.voice, $0) } ?? canonical.voice
+                copy.text = voice?.transcript ?? exact[0].text
+                copy.attachments = voice.map { [$0.audio] } ?? exact[0].attachments
+                copy.detailTruncated = exact[0].detailTruncated
+                copy.voice = voice
+            }
+            if scope == target, let request = HistoryInspection.request(canonical, named: exact[0]) { copy.requestId = request }
             return copy
         }
         let watermark = HistoryInspection.journalWatermark(events + previousInspection)
@@ -351,7 +364,7 @@ public struct HistoryWindow: Hashable, Sendable {
         if !newer.isEmpty {
             let cursor = events.last { !$0.historyCursor.isEmpty }?.historyCursor ?? after
             let page = HistoryPage(target: target, epoch: epoch, events: newer, before: before, after: cursor, hasBefore: hasBefore, hasAfter: false,
-                                   latestIncoming: nil, totalIncoming: nil, complete: false, indexing: false, truncated: false)
+                                   latestIncoming: nil, totalIncoming: nil, complete: false, indexing: false, truncated: false, projectionApplied: projectionApplied)
             copy = copy.merge(page, direction: "after")
         }
         let shown = Set(copy.events.map(\.id))
@@ -409,15 +422,27 @@ public enum HistoryInspection {
     public static func journalSequence(_ row: Event) -> Int64? { identities(row).compactMap(sequence).max() }
     public static func journalWatermark(_ rows: [Event]) -> Int64? { rows.compactMap(journalSequence).max() }
 
+    /// The request a canonical OpenCode prompt naming none takes from its own inspection row. A prompt indexed before hgs
+    /// named requests keeps none in history; the inspection row of the exact same OpenCode message (`msg_` ID) may name
+    /// it now, which hgs does only while the message text equals what the request sent. No text or clock heuristic.
+    static func request(_ canonical: Event, named row: Event) -> String? {
+        guard canonical.source == "opencode_native", row.source == canonical.source, canonical.role == "You", row.role == canonical.role,
+              NativeEvents.userTypes.contains(canonical.nativeType), row.nativeType == canonical.nativeType, canonical.requestId.isEmpty,
+              AttachmentPolicy.validId(row.requestId), let range = row.originalId.range(of: ":native:", options: .backwards),
+              row.originalId[range.upperBound...].hasPrefix("msg_"), identities(canonical).contains(row.originalId) else { return nil }
+        return row.requestId
+    }
+
     /// Queued and not-delivered rows are not canonical history and never change it.
     public static func changed(_ window: HistoryWindow, _ incoming: [Event], _ previous: [Event]) -> Bool {
         let known = Set((window.events + previous).flatMap(identities))
         return incoming.contains { row in row.deliveryState == nil && !identities(row).contains(where: known.contains) }
     }
 
-    public static func retain(_ current: HistoryWindow, _ candidate: HistoryWindow?, _ incoming: [Event], _ previous: [Event]) -> HistoryWindow {
+    public static func retain(_ current: HistoryWindow, _ candidate: HistoryWindow?, _ incoming: [Event], _ previous: [Event],
+                              scope: Target? = nil) -> HistoryWindow {
         if current == candidate { return current }
-        return current.atHead ? current.inspection(incoming, previous: previous) : current
+        return current.atHead ? current.inspection(incoming, previous: previous, scope: scope) : current
     }
 }
 

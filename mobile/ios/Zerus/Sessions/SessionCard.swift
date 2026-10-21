@@ -23,6 +23,9 @@ struct SessionCard: View {
                             .lineLimit(1)
                             .foregroundStyle(Theme.onSurface)
                         Spacer(minLength: 4)
+                        if SessionNotificationPreferences.muted(session) {
+                            Image(systemName:"bell.slash").foregroundStyle(Theme.muted).accessibilityLabel("Notifications muted on all devices")
+                        }
                     }
                     HStack(spacing: 8) {
                         SessionStatusBadge(session: session, online: online)
@@ -55,7 +58,7 @@ struct SessionCard: View {
             if expanded {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(children.enumerated()), id: \.element.id) { index, child in
-                        SubagentRow(child: child, last: index == children.count - 1)
+                        SubagentRow(child: child, last: index == children.count - 1,notificationsMuted:SessionNotificationPreferences.muted(session))
                     }
                 }
             }
@@ -113,9 +116,10 @@ private struct SubagentCounterButton: View {
 private struct SubagentRow: View {
     let child: SessionCardChild
     let last: Bool
+    let notificationsMuted: Bool
 
     var body: some View {
-        let colors = DesktopSessionPalette.colors(child.kind, dark: true)
+        let colors = DesktopSessionPalette.colors(notificationsMuted && [.attention,.unread].contains(child.kind) ? .neutral : child.kind, dark: true)
         HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 7) {
@@ -203,6 +207,7 @@ struct SessionCopyMenu: View {
 
     static func icon(_ id: String) -> String {
         switch id {
+        case SessionNotificationPreferences.operation: "bell.slash"
         case "terminal": "apple.terminal"
         case "mark_read": "checkmark.circle"
         case "clear_reminder": "bell.slash"

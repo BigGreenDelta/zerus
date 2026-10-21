@@ -21,7 +21,12 @@ fun Target.resolvesTo(current: Target): Boolean = agentId.isBlank() && current.a
 data class MessageState(val drafts: List<Draft> = emptyList(), val outgoing: List<OutgoingMessage> = emptyList(), val pickerDraft: Draft? = null, val pickerId: String = "", val contextOperations: List<ContextOperation> = emptyList(), val sessionActions: List<SessionAction> = emptyList(), val conversationIndex: List<IndexedConversation> = emptyList(), val terminalBuffers:List<TerminalBuffer> = emptyList(), val machineAliases:List<MachineAlias> = emptyList(), val machineColors:List<MachineColorOverride> = emptyList(), val speechAppliedIds:List<String> = emptyList()) {
     fun action(action: SessionAction): MessageState {
         val next = sessionActions.filterNot { it.requestId == action.requestId } + action
-        return copy(sessionActions = next.filter { it.blocksSending || it.status == "scheduled" || it.needsProjectReview } + next.filterNot { it.blocksSending || it.status == "scheduled" || it.needsProjectReview }.takeLast(100))
+        // Only confirmed scheduled apply children enter the terminal retention pool.
+        // Keep the latest child referenced by a live original authorization.
+        val referenced=next.filter { it.operation=="settings" && it.status=="scheduled" && ScheduledSettingsAttempt.expectedPendingId(it)==null }.map { it.applyAttemptId }.toSet()
+        fun retain(value:SessionAction)=value.blocksSending || value.needsProjectReview || value.status=="scheduled" &&
+            (value.operation!="settings" || ScheduledSettingsAttempt.expectedPendingId(value)==null || value.requestId in referenced)
+        return copy(sessionActions = SessionNotificationPreferences.boundedProofs(next.filter(::retain) + next.filterNot(::retain).takeLast(100)))
     }
     fun context(operation: ContextOperation): MessageState {
         val next = contextOperations.filterNot { it.requestId == operation.requestId } + operation
@@ -82,17 +87,34 @@ object MessageCodec {
     fun outgoingJson(message: OutgoingMessage) = targetJson(message.target).put("request", message.requestId).put("text", message.text)
         .put("attachments", JSONArray(message.attachments.map(Attachment::toJson))).put("created", message.createdAt).put("status", message.status)
         .put("submitted", message.submittedAt).put("submitted_text", message.submittedText).put("error", message.error)
+    private fun contextOperation(value: JSONObject): ContextOperation {
+        val operation = value.getString("operation")
+        val dismiss = if (value.has("dismiss_prompt")) {
+            val flag = value.opt("dismiss_prompt")
+            require(flag is Boolean && operation == "clear_context") { "Invalid saved context dismissal metadata." }
+            flag
+        } else null
+        return ContextOperation(value.getString("request"), target(value), operation, value.getString("status"), value.optLong("created"),
+            value.string("error"), value.string("resolved_conversation"), dismiss).recover()
+    }
+    private fun contextOperationJson(operation: ContextOperation): JSONObject {
+        require(operation.dismissPrompt == null || operation.operation == "clear_context") { "Only clear context can dismiss a prompt." }
+        return targetJson(operation.target).put("request", operation.requestId).put("operation", operation.operation).put("status", operation.status)
+            .put("created", operation.createdAt).put("error", operation.error).put("resolved_conversation", operation.resolvedConversation).also { value ->
+                operation.dismissPrompt?.let { value.put("dismiss_prompt", it) }
+            }
+    }
     fun state(value: JSONObject) = MessageState(value.optJSONArray("drafts")?.objects().orEmpty().map(::draft),
         value.optJSONArray("outgoing")?.objects().orEmpty().map(::outgoing), value.optJSONObject("picker")?.let(::draft), value.string("picker_id"),
-        value.optJSONArray("context_operations")?.objects().orEmpty().map { ContextOperation(it.getString("request"), target(it), it.getString("operation"), it.getString("status"), it.optLong("created"), it.string("error"), it.string("resolved_conversation")).recover() },
-        value.optJSONArray("session_actions")?.objects().orEmpty().map { SessionAction(it.getString("request"), target(it), it.getString("operation"), it.getString("arguments"), it.getString("status"), it.optLong("created"), it.string("error"), it.optJSONObject("result_target")?.let(::target), it.string("pending_id"),it.string("apply_attempt_id"),it.string("result_path")).recover() }, value.optJSONArray("conversation_index")?.objects().orEmpty().take(1000).map(ConversationIndex::decode),value.optJSONArray("terminal_buffers")?.objects().orEmpty().map(TerminalBuffers::decode),value.optJSONArray("machine_aliases")?.objects().orEmpty().map(MachineNames::decode),MachineColors.decodeArray(value.optJSONArray("machine_colors")), value.optJSONArray("speech_applied_ids")?.let { ids -> (0 until ids.length()).map { ids.getString(it) }.takeLast(100) }.orEmpty())
+        value.optJSONArray("context_operations")?.objects().orEmpty().map(::contextOperation),
+        SessionNotificationPreferences.boundedProofs(value.optJSONArray("session_actions")?.objects().orEmpty().map { SessionAction(it.getString("request"), target(it), it.getString("operation"), it.getString("arguments"), it.getString("status"), it.optLong("created"), it.string("error"), it.optJSONObject("result_target")?.let(::target), it.string("pending_id"),it.string("apply_attempt_id"),it.string("result_path"),it.string("confirmed_notification_preference")).recover() }), value.optJSONArray("conversation_index")?.objects().orEmpty().take(1000).map(ConversationIndex::decode),value.optJSONArray("terminal_buffers")?.objects().orEmpty().map(TerminalBuffers::decode),value.optJSONArray("machine_aliases")?.objects().orEmpty().map(MachineNames::decode),MachineColors.decodeArray(value.optJSONArray("machine_colors")), value.optJSONArray("speech_applied_ids")?.let { ids -> (0 until ids.length()).map { ids.getString(it) }.takeLast(100) }.orEmpty())
     fun stateJson(state: MessageState) = JSONObject().put("drafts", JSONArray(state.drafts.map(::draftJson)))
-        .put("outgoing", JSONArray(state.outgoing.map(::outgoingJson))).put("picker", state.pickerDraft?.let(::draftJson) ?: JSONObject.NULL).put("picker_id", state.pickerId).put("context_operations", JSONArray(state.contextOperations.map {
-            targetJson(it.target).put("request", it.requestId).put("operation", it.operation).put("status", it.status).put("created", it.createdAt).put("error", it.error).put("resolved_conversation", it.resolvedConversation)
-        })).put("session_actions", JSONArray(state.sessionActions.map { action ->
+        .put("outgoing", JSONArray(state.outgoing.map(::outgoingJson))).put("picker", state.pickerDraft?.let(::draftJson) ?: JSONObject.NULL).put("picker_id", state.pickerId).put("context_operations", JSONArray(state.contextOperations.map(::contextOperationJson)))
+        .put("session_actions", JSONArray(state.sessionActions.map { action ->
             targetJson(action.target).put("request", action.requestId).put("operation", action.operation).put("arguments", action.arguments)
                 .put("status", action.status).put("created", action.createdAt).put("error", action.error)
                 .put("result_target", action.resultTarget?.let(::targetJson) ?: JSONObject.NULL).put("pending_id", action.pendingId).put("apply_attempt_id",action.applyAttemptId).put("result_path",action.resultPath)
+                .put("confirmed_notification_preference",action.confirmedNotificationPreference)
         })).put("conversation_index", JSONArray(state.conversationIndex.map(ConversationIndex::encode))).put("terminal_buffers",JSONArray(state.terminalBuffers.map(TerminalBuffers::encode))).put("machine_aliases",JSONArray(state.machineAliases.map(MachineNames::encode))).put("machine_colors",JSONArray(state.machineColors.map(MachineColors::encode))).put("speech_applied_ids", JSONArray(state.speechAppliedIds))
 }
 
@@ -103,9 +125,12 @@ object ConversationMerge {
         val used = mutableSetOf<Int>()
         val recorded = mutableSetOf<String>()
         outgoing.filter { it.belongsTo(target) && it.status != "reviewed" }.sortedBy { it.createdAt }.forEach { message ->
-            // Only a user row from durable native receipt metadata is authoritative by request ID.
-            var match = result.indices.firstOrNull { index -> index !in used && result[index].role == "You" &&
-                result[index].source == "hgs_delivery" && result[index].requestId == message.requestId }
+            // Only a user row from durable native receipt metadata is authoritative by request ID,
+            // then an OpenCode prompt naming the exact request that sent it: OpenCode dates a
+            // queued prompt by its delivery, which can be far outside the text and time window.
+            fun named(source: String) = result.indices.firstOrNull { index -> index !in used && result[index].role == "You" &&
+                result[index].source == source && result[index].requestId.isNotBlank() && result[index].requestId == message.requestId }
+            var match = named("hgs_delivery") ?: named("opencode_native")
             if (match == null && message.status in listOf("submitted", "recorded") && message.submittedAt > 0) {
                 val text = message.submittedText.ifBlank { message.text }.trim()
                 if (text.isNotBlank()) match = result.indices.filter { index ->

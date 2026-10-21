@@ -1,15 +1,27 @@
 //! OpenCode 2's shared background service, authenticated on loopback.
 //! Bindings hold Zerus and session identities, never provider keys.
 use super::*;
-#[allow(dead_code)] // the OpenCode 2 gate is consumed by later phase 1 tasks
+#[cfg_attr(not(unix), allow(dead_code))]
 mod catalog;
+#[cfg_attr(not(unix), allow(dead_code))]
+mod favorites;
 mod forms;
 mod history;
+#[cfg_attr(not(unix), allow(dead_code))]
+mod providers;
 mod service;
-pub(crate) use catalog::catalog;
-// Accounts reads the install state and starts the service only on Unix.
+#[cfg_attr(not(unix), allow(dead_code))]
+mod shortlist;
 #[cfg(unix)]
-pub(crate) use catalog::{install_state, start_from_accounts};
+pub(crate) use favorites::set_favorite;
+// Every platform validates a favorite change, so --dry-run answers alike.
+pub(crate) use favorites::validate as validate_favorite;
+// Accounts reads the catalog, the install state and starts the service only on Unix.
+#[cfg(unix)]
+pub(crate) use catalog::{catalog, install_state, models, start_from_accounts};
+// Accounts fits the OpenCode row only on Unix.
+#[cfg(unix)]
+pub(crate) use shortlist::{fit_row, ROW_BUDGET};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -20,6 +32,49 @@ fn bindings() -> PathBuf {
 }
 fn binding_path(name: &str) -> PathBuf {
     bindings().join(format!("{:x}.json", Sha256::digest(name.as_bytes())))
+}
+thread_local! {
+    /// Whether this thread holds opencode/bindings.lock. Code running under
+    /// an action's own lock (its inspection, an adoption) never waits on it.
+    static BINDINGS_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// opencode/bindings.lock, released when dropped. A guard taken while this
+/// thread already holds the lock holds nothing more. It stays on the thread
+/// that took it, whose flag it clears.
+pub(super) struct Bindings(Option<Guard>, std::marker::PhantomData<*const ()>);
+impl Drop for Bindings {
+    fn drop(&mut self) {
+        if self.0.take().is_some() {
+            BINDINGS_HELD.with(|held| held.set(false));
+        }
+    }
+}
+fn bindings_lock() -> PathBuf {
+    root().join("opencode/bindings.lock")
+}
+/// The bindings lock, waiting as long as another process holds it.
+pub(super) fn lock_bindings() -> Result<Bindings> {
+    lock_bindings_at(&bindings_lock())
+}
+fn lock_bindings_at(path: &Path) -> Result<Bindings> {
+    if BINDINGS_HELD.with(std::cell::Cell::get) {
+        return Ok(Bindings(None, std::marker::PhantomData));
+    }
+    let guard = lock(Some(path))?;
+    BINDINGS_HELD.with(|held| held.set(true));
+    Ok(Bindings(Some(guard), std::marker::PhantomData))
+}
+/// The bindings lock within `wait`, or None while another process holds it.
+pub(super) fn try_bindings(wait: Duration) -> Option<Bindings> {
+    try_bindings_at(&bindings_lock(), wait)
+}
+fn try_bindings_at(path: &Path, wait: Duration) -> Option<Bindings> {
+    if BINDINGS_HELD.with(std::cell::Cell::get) {
+        return Some(Bindings(None, std::marker::PhantomData));
+    }
+    let guard = lock_until(path, Instant::now() + wait).ok()??;
+    BINDINGS_HELD.with(|held| held.set(true));
+    Some(Bindings(Some(guard), std::marker::PhantomData))
 }
 pub(crate) fn exists(name: &str) -> bool {
     binding_path(name).is_file()
@@ -268,8 +323,7 @@ fn save_verdicts(keys: &[String]) {
 /// Rewrite an adopted binding so it is never checked again. Skipped when the
 /// binding lock is busy; the next poll tries again.
 fn adopt_binding(name: &str, conversation_id: &str) {
-    let deadline = Instant::now() + Duration::from_millis(200);
-    let Ok(Some(_guard)) = lock_until(&root().join("opencode/bindings.lock"), deadline) else {
+    let Some(_guard) = try_bindings(Duration::from_millis(200)) else {
         return;
     };
     if let Ok(mut record) = binding(name) {
@@ -348,7 +402,7 @@ pub(crate) fn launch(
         return Ok(());
     }
     let _writer = lock(None)?;
-    let _guard = lock(Some(&root().join("opencode/bindings.lock")))?;
+    let _guard = lock_bindings()?;
     if record_path(name).exists() || live()?.contains_key(name) {
         return Err(
             "This name belongs to an existing terminal session; it was left untouched".into(),
@@ -485,6 +539,9 @@ struct Observed {
     inbox: Value,
     forms: Value,
     permissions: Value,
+    /// The Zerus request that sent each of the newest user messages, from the
+    /// receipt index (message ID to request ID).
+    requests: std::collections::HashMap<String, String>,
 }
 /// The status of one binding; `None` when the service could not be read,
 /// which keeps native state unknown rather than stopped.
@@ -563,6 +620,15 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
     let idle = available && pending.is_empty();
     let mut events = delivered.clone();
     events.extend(queued);
+    // A prompt Zerus sent names its request, so a client can match its own
+    // message even when OpenCode dates a queued prompt by its delivery.
+    if let Some(observed) = observed {
+        for row in events.iter_mut().filter(|e| e["type"] == "UserPromptSubmit") {
+            if let Some(request) = observed.requests.get(string(row, "message_id")) {
+                row["request_id"] = json!(request);
+            }
+        }
+    }
     let mut value = json!({"name":record["name"],"cmd":"opencode","agent":"opencode","backend":"opencode","project":parts.get(1),"tag":parts.get(2),"run_id":record["run_id"],"conversation_id":record["conversation_id"],"launch_id":record["launch_id"],"created":record["created"],"cwd":record["cwd"],"cwd_source":"native_session","tracked":true,"resumable":true,"attached":0,"clients":[],
         "state":state,"process_state":process_state,"runtime_state":runtime_state,"conversation_state":"active","phase":phase,"activity":activity,"activity_summary":summary,
         "activity_detail":reply.map(|r|r["detail"].clone()),"prompt":prompt.map(|r|r["detail"].clone()),"reply_id":reply.map(|r|r["reply_id"].clone()),"reply_at":reply.map(|r|r["at"].clone()),
@@ -658,6 +724,7 @@ fn observe(
     record: &Value,
     active: &Value,
     history: impl FnOnce() -> Result<history::Page>,
+    requests: bool,
 ) -> Result<Observed> {
     let session = exact_session(record, get(native, &session_path(record, ""))?)?;
     let forms = pending_requests(native, record, "/form")?;
@@ -669,6 +736,12 @@ fn observe(
         return Err("Invalid OpenCode inbox".into());
     }
     let page = history()?;
+    // Only a full inspection shows events; listings and actions drop them.
+    let requests = if requests {
+        sent_requests(&Ledger::current(), record, &page.messages, &inbox)
+    } else {
+        Default::default()
+    };
     Ok(Observed {
         session,
         active: active.get(string(record, "conversation_id")).is_some(),
@@ -676,7 +749,54 @@ fn observe(
         inbox,
         forms,
         permissions,
+        requests,
     })
+}
+/// At most this many of the newest user messages are looked up.
+const SENT_LOOKUPS: usize = 100;
+/// A receipt larger than this is not read for attribution.
+const RECEIPT_READ: u64 = 512 * 1024;
+/// The Zerus requests that sent the newest user messages of this session:
+/// queued ones first, then history newest first. A message is attributed
+/// only when its body is exactly the text its receipt sent, as `reconcile`
+/// requires; the same ID with another body stays unattributed.
+fn sent_requests(
+    ledger: &Ledger,
+    record: &Value,
+    messages: &[Value],
+    inbox: &Value,
+) -> std::collections::HashMap<String, String> {
+    // A message delivered between the inbox and history reads is judged by
+    // its delivered copy only.
+    let delivered: std::collections::HashSet<&str> =
+        messages.iter().map(|m| string(m, "id")).collect();
+    let queued = inbox["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| !delivered.contains(string(item, "id")))
+        .map(|item| (item, &item["payload"]["text"]));
+    queued
+        .chain(messages.iter().rev().map(|message| (message, &message["text"])))
+        .filter(|(m, _)| m["type"] == "user")
+        .map(|(m, text)| (string(m, "id"), text))
+        .filter(|(id, _)| native_id(id, "msg_"))
+        .take(SENT_LOOKUPS)
+        .filter_map(|(id, text)| {
+            let index = ledger.indexed(id)?;
+            if index["conversation_id"] != record["conversation_id"] {
+                return None;
+            }
+            let request = string(&index, "request_id");
+            let receipt = ledger.sent(request)?;
+            (receipt["native_message_id"] == id
+                && receipt["conversation_id"] == record["conversation_id"]
+                && receipt["run_id"] == record["run_id"]
+                && text.is_string()
+                && receipt["text"] == *text)
+                .then(|| (id.to_owned(), request.to_owned()))
+        })
+        .collect()
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Detail {
@@ -696,7 +816,13 @@ fn parent_view(
     active: &Value,
     detail: Detail,
 ) -> Result<Value> {
-    let observed = observe(service, record, active, || history::fetch(service, record))?;
+    let observed = observe(
+        service,
+        record,
+        active,
+        || history::fetch(service, record),
+        detail == Detail::Full,
+    )?;
     let mut result = normalize(record, Some(&observed));
     if detail != Detail::Listing {
         result["attachment_messages"] = attachments::messages(record, "");
@@ -704,8 +830,16 @@ fn parent_view(
             conversation_history::inspected_voice_messages(record, &result, None);
     }
     if detail == Detail::Full {
-        let cwd = PathBuf::from(string(record, "cwd"));
-        result["model_options"] = catalog(Some(&cwd))["model_options"].clone();
+        let pinned: Vec<String> = ["settings_model", "pending_model"]
+            .iter()
+            .filter_map(|key| result[*key].as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let pinned: Vec<&str> = pinned.iter().map(String::as_str).collect();
+        let options = catalog::session_options(&PathBuf::from(string(record, "cwd")), &pinned);
+        result["model_options"] = options["model_options"].clone();
+        result["model_options_truncated"] = options["model_options_truncated"].clone();
     }
     let questions = result["pending_questions"]
         .as_array()
@@ -719,26 +853,72 @@ fn parent_view(
     );
     Ok(result)
 }
+
+/// GET-only preference baseline. Never adopts a legacy binding or starts a service.
+pub(super) fn notification_snapshot(record: &Value) -> Result<(Value, Option<Vec<Value>>)> {
+    if record["service"] != "opencode2" { return Err("baseline_unavailable".into()); }
+    let service = service::connect().map_err(|_| "baseline_unavailable")?;
+    notification_snapshot_with(&service, record, || history::fetch(&service, record))
+}
+fn notification_snapshot_with(native: &dyn Native, record: &Value, history: impl FnOnce() -> Result<history::Page>) -> Result<(Value, Option<Vec<Value>>)> {
+    let active = active_sessions(native)?;
+    let observed = observe(native, record, &active, history, false)?;
+    let result = normalize(record, Some(&observed));
+    let questions = result["pending_questions"].as_array().cloned();
+    Ok((result, questions))
+}
+
+/// The short list a full answer carries when the session cannot be read.
+type CachedOptions = fn(&service::Unavailable, &Path, &[&str]) -> Value;
+/// An answer without the session's own state. A full one still carries the
+/// short list from the last home catalog, never read from the service, so
+/// clients do not mistake these details for an older hgs's.
+fn without_session(
+    record: &Value,
+    why: &service::Unavailable,
+    reason: String,
+    detail: Detail,
+    cached_options: CachedOptions,
+) -> Value {
+    let mut row = unavailable(record, reason);
+    if detail == Detail::Full {
+        let pinned: Vec<String> = ["settings_model", "pending_model"]
+            .iter()
+            .filter_map(|key| row[*key].as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let pinned: Vec<&str> = pinned.iter().map(String::as_str).collect();
+        let options = cached_options(why, &PathBuf::from(string(record, "cwd")), &pinned);
+        row["model_options"] = options["model_options"].clone();
+        row["model_options_truncated"] = options["model_options_truncated"].clone();
+    }
+    row
+}
 /// Inspects bindings against one service connection: at most one
 /// `/api/session/active` and one migration check per instance.
 struct Inspector {
     service: std::result::Result<service::Service, service::Unavailable>,
-    computer: String,
+    /// Named only when a reason needs it.
+    computer: Option<String>,
     active: Option<Result<Value>>,
     migration: Option<Reply>,
     verdicts: Option<Vec<String>>,
     verdicts_changed: bool,
+    /// The cached home short list; tests stand in for the cache.
+    cached_options: CachedOptions,
 }
 impl Inspector {
     /// Never starts the service.
     fn connect() -> Self {
         Inspector {
             service: service::connect(),
-            computer: crate::platform::hostname(),
+            computer: None,
             active: None,
             migration: None,
             verdicts: None,
             verdicts_changed: false,
+            cached_options: catalog::stopped_options,
         }
     }
     fn row(&mut self, record: &Value, detail: Detail) -> Value {
@@ -749,8 +929,13 @@ impl Inspector {
         row
     }
     fn view(&mut self, record: &Value, detail: Detail) -> Value {
+        let cached_options = self.cached_options;
         let service = match &self.service {
-            Err(why) => return unavailable(record, why.reason(&self.computer)),
+            Err(why) => {
+                let computer = self.computer.get_or_insert_with(service::computer);
+                let reason = why.reason(computer);
+                return without_session(record, why, reason, detail, cached_options);
+            }
             Ok(service) => service,
         };
         let key = verdict_key(record, &service.reg);
@@ -765,8 +950,13 @@ impl Inspector {
             legacy_state(service, record, &mut self.migration)
         };
         let mut current = record.clone();
+        // A failed read keeps the cached short list, like a stopped service.
+        let failed = |reason: String| {
+            let why = service::Unavailable::Unreachable(reason.clone());
+            without_session(record, &why, reason, detail, cached_options)
+        };
         match state {
-            Err(reason) => return unavailable(record, reason),
+            Err(reason) => return failed(reason),
             Ok((Legacy::Unsupported, settled)) => {
                 if settled && !known {
                     let keys = self.verdicts.get_or_insert_with(load_verdicts);
@@ -786,10 +976,9 @@ impl Inspector {
         }
         let active = match self.active.get_or_insert_with(|| active_sessions(service)) {
             Ok(active) => active,
-            Err(reason) => return unavailable(record, reason.clone()),
+            Err(reason) => return failed(reason.clone()),
         };
-        parent_view(service, &current, active, detail)
-            .unwrap_or_else(|reason| unavailable(record, reason))
+        parent_view(service, &current, active, detail).unwrap_or_else(failed)
     }
     fn finish(self) {
         if self.verdicts_changed {
@@ -804,6 +993,7 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     }
     let mut inspector = Inspector::connect();
     let mut value = inspector.row(&record, Detail::Full);
+    notifications::enrich(&mut value, notifications::load().as_ref(), journal::journal_name(&record));
     inspector.finish();
     waits::decorate(std::slice::from_mut(&mut value));
     Ok(value)
@@ -833,8 +1023,10 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
     }
     let mut inspector = Inspector::connect();
     let mut rows = Vec::new();
+    let preferences = notifications::load();
     for record in &records {
         let mut row = inspector.row(record, Detail::Listing);
+        notifications::enrich(&mut row, preferences.as_ref(), journal::journal_name(record));
         if let Some(map) = row.as_object_mut() {
             for key in [
                 "events",
@@ -842,6 +1034,7 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
                 "attachment_messages",
                 "processes",
                 "model_options",
+                "model_options_truncated",
             ] {
                 map.remove(key);
             }
@@ -1018,9 +1211,31 @@ impl Ledger {
             &json!({ "removals": entries }).to_string(),
         )
     }
+    /// The receipt of one send, read within a bound; None when absent or
+    /// unreadable.
+    fn sent(&self, request_id: &str) -> Option<Value> {
+        let mut bytes = Vec::new();
+        fs::File::open(self.receipt(request_id))
+            .ok()?
+            .take(RECEIPT_READ + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > RECEIPT_READ {
+            return None;
+        }
+        serde_json::from_slice(&bytes).ok()
+    }
     /// The request ID and session that sent a native message, if indexed.
     fn indexed(&self, message_id: &str) -> Option<Value> {
-        let bytes = fs::read(self.index(message_id)).ok()?;
+        let mut bytes = Vec::new();
+        fs::File::open(self.index(message_id))
+            .ok()?
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > 4096 {
+            return None;
+        }
         let value: Value = serde_json::from_slice(&bytes).ok()?;
         uuid::Uuid::parse_str(string(&value, "request_id")).ok()?;
         Some(value)
@@ -1115,7 +1330,7 @@ fn reconcile(
 }
 fn running_service() -> Result<service::Service> {
     // Sending is explicit, but phase 1 does not start the service for it.
-    service::connect().map_err(|why| why.reason(&crate::platform::hostname()))
+    service::connect().map_err(|why| why.reason(&service::computer()))
 }
 fn check_receipt_identity(record: &Value, receipt: &Value) -> Result<()> {
     if !native_id(string(receipt, "native_message_id"), "msg_")
@@ -1304,7 +1519,9 @@ fn deliver(
         Ok(answer) if (400..500).contains(&answer.status) => {
             let reason = refusal_reason(&answer);
             receipt["status"] = json!("refused");
-            receipt["reason"] = json!(reason);
+            // Keep the detailed first refusal local; a durable delivery
+            // record needs only the confirmed HTTP status, not provider text.
+            receipt["reason"] = json!(format!("HTTP {}", answer.status));
             atomic(path, &receipt.to_string())?;
             return Err(refused(&reason));
         }
@@ -1434,7 +1651,7 @@ fn answer_with(
     Ok(receipt)
 }
 pub(crate) fn interrupt(record: &Value) -> Result<()> {
-    let _guard = lock(Some(&root().join("opencode/bindings.lock")))?;
+    let _guard = lock_bindings()?;
     let original = binding(string(record, "name"))?;
     if record["run_id"] != original["run_id"]
         || record["conversation_id"] != original["conversation_id"]
@@ -1467,10 +1684,16 @@ fn interrupt_with(native: &dyn Native, record: &Value) -> Result<()> {
     ))
 }
 const NOT_QUEUED: &str = "This message is no longer queued";
+/// The message a `remove_queued` request may name: `msg_` and 1-124 ASCII
+/// letters, digits, `_` or `-`, the shape the relay and the mobile connector
+/// check too (`tests/fixtures/opencode-queued-message-ids.json`).
+pub(super) fn queued_message_id(id: &str) -> bool {
+    id.len() > "msg_".len() && native_id(id, "msg_")
+}
 /// The exact native message ID of a `remove_queued` request.
 fn queued_id(request: &Value) -> Result<String> {
     let id = string(request, "message_id");
-    if !native_id(id, "msg_") {
+    if !queued_message_id(id) {
         return Err("Choose the exact queued OpenCode message".into());
     }
     Ok(id.to_owned())
@@ -1603,15 +1826,103 @@ fn change_title(native: &dyn Native, record: &Value, title: &str) -> Result<()> 
     Ok(())
 }
 const NO_PROCESS: &str = "OpenCode sessions have no separate process to pause";
+
+fn validate_rename(old: &str, new: &str) -> Result<()> {
+    let a = old.split('/').collect::<Vec<_>>();
+    let b = new.split('/').collect::<Vec<_>>();
+    if a.len() != 3
+        || b.len() != 3
+        || a[..2] != b[..2]
+        || b.iter().any(|p| {
+            p.is_empty()
+                || p.trim() != *p
+                || p.contains([':', '.'])
+                || p.chars().any(char::is_control)
+        })
+    {
+        return Err("Rename must preserve provider and project".into());
+    }
+    Ok(())
+}
+
+struct ActionGuard {
+    // Drop bindings before read marks, in reverse acquisition order.
+    _bindings: Bindings,
+    rename_marks: Option<read_marks::RenameGuard>,
+}
+fn lock_action(
+    rename: bool,
+    read_lock: impl FnOnce() -> Result<read_marks::RenameGuard>,
+    binding_lock: impl FnOnce() -> Result<Bindings>,
+) -> Result<ActionGuard> {
+    let rename_marks = if rename { Some(read_lock()?) } else { None };
+    let bindings = binding_lock()?;
+    Ok(ActionGuard {
+        _bindings: bindings,
+        rename_marks,
+    })
+}
+fn renames_owner(action: &str, name: &str, new: Option<&str>) -> Result<bool> {
+    let Some(new) = new.filter(|new| action == "rename" && *new != name) else {
+        return Ok(false);
+    };
+    validate_rename(name, new)?;
+    Ok(true)
+}
+fn dispatch_renames_owner(command: &str, name: &str, args: &[String]) -> Result<bool> {
+    if args.iter().any(|v| v == "--dry-run" || v == "--archive") {
+        return Ok(false);
+    }
+    renames_owner(command, name, args.get(1).filter(|v| !v.starts_with('-')).map(String::as_str))
+}
+
+struct ActionStorage<'a> {
+    ledger: &'a Ledger,
+    rename_marks: Option<&'a mut read_marks::RenameGuard>,
+}
+
+/// Once native title identity is confirmed, publish the new binding and marks
+/// before retiring the old binding. Any failure remains uncertain; no rollback
+/// or second native PATCH is inferred from a partially published local rename.
+fn rename_with<N: Native>(
+    record: &mut Value,
+    new: &str,
+    scope: Option<&session_action::Scope>,
+    connect: impl FnOnce() -> Result<N>,
+    save: impl FnOnce(&Value) -> Result<()>,
+    marks: impl FnOnce(&str, &str) -> Result<()>,
+    retire: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    let old = string(record, "name").to_owned();
+    if let Some(scope) = scope {
+        scope.changing();
+    }
+    change_title(&connect()?, record, new.rsplit('/').next().unwrap_or(new))?;
+    notifications::anchor(record);
+    record["name"] = json!(new);
+    save(record)?;
+    if old != new {
+        marks(&old, new)?;
+        retire(&old)?;
+    }
+    if let Some(scope) = scope {
+        scope.result_record(record);
+    }
+    Ok(())
+}
 fn action(
     record: &mut Value,
     action: &str,
     new_name: Option<&str>,
     message_id: Option<&str>,
     scope: Option<&session_action::Scope>,
+    rename_marks: Option<&mut read_marks::RenameGuard>,
 ) -> Result<()> {
     action_in(
-        &Ledger::current(),
+        ActionStorage {
+            ledger: &Ledger::current(),
+            rename_marks,
+        },
         running_service,
         record,
         action,
@@ -1622,7 +1933,7 @@ fn action(
 }
 /// Core of `action`, against any native service and private state.
 fn action_in<N: Native>(
-    ledger: &Ledger,
+    storage: ActionStorage<'_>,
     connect: impl FnOnce() -> Result<N>,
     record: &mut Value,
     action: &str,
@@ -1649,7 +1960,7 @@ fn action_in<N: Native>(
     let old = string(record, "name").to_owned();
     if action == "remove_queued" {
         let id = queued_id(&json!({"message_id": message_id}))?;
-        remove_queued_with(&connect()?, ledger, record, &id, || {
+        remove_queued_with(&connect()?, storage.ledger, record, &id, || {
             if let Some(scope) = scope {
                 scope.changing();
             }
@@ -1661,39 +1972,36 @@ fn action_in<N: Native>(
     }
     if action == "rename" {
         let new = new_name.ok_or("Choose a new OpenCode name")?;
-        let a = old.split('/').collect::<Vec<_>>();
-        let b = new.split('/').collect::<Vec<_>>();
-        if a.len() != 3
-            || b.len() != 3
-            || a[..2] != b[..2]
-            || b.iter().any(|p| {
-                p.is_empty()
-                    || p.trim() != *p
-                    || p.contains([':', '.'])
-                    || p.chars().any(char::is_control)
-            })
-        {
-            return Err("Rename must preserve provider and project".into());
-        }
+        validate_rename(&old, new)?;
         if new != old && exists(new) {
             return Err("This name is already used".into());
         }
-        if let Some(scope) = scope {
-            scope.changing();
+        if new != old && storage.rename_marks.is_none() {
+            return Err("OpenCode rename requires the ordered shared read-mark writer".into());
         }
-        change_title(&connect()?, record, b[2])?;
-        record["name"] = json!(new);
+        return rename_with(
+            record,
+            new,
+            scope,
+            connect,
+            save,
+            |old, new| {
+                storage
+                    .rename_marks
+                    .ok_or("Missing shared read-mark writer")?
+                    .transfer(old, new)
+            },
+            |old| archive::remove_synced(&binding_path(old)),
+        );
     } else if let Some(scope) = scope {
         scope.changing();
     }
     if action == "forget" {
         archive::remove_synced(&binding_path(&old))?;
+        history::forget(record);
         return Ok(());
     }
     save(record)?;
-    if action == "rename" && new_name != Some(old.as_str()) {
-        archive::remove_synced(&binding_path(&old))?;
-    }
     if let Some(scope) = scope {
         scope.result_record(record);
     }
@@ -1706,14 +2014,30 @@ pub(super) fn session_action(
     message_id: Option<&str>,
     scope: &session_action::Scope,
 ) -> Result<()> {
-    let _guard = lock(Some(&root().join("opencode/bindings.lock")))?;
+    let mut guard = lock_action(
+        renames_owner(kind, name, new_name)?,
+        read_marks::lock_rename,
+        lock_bindings,
+    )?;
     let mut record = binding(name)?;
-    action(&mut record, kind, new_name, message_id, Some(scope))
+    action(
+        &mut record,
+        kind,
+        new_name,
+        message_id,
+        Some(scope),
+        guard.rename_marks.as_mut(),
+    )
 }
 pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     let name = args.first().ok_or("Choose an OpenCode session")?;
-    let _guard = if command != "inspect" && command != "exists" {
-        Some(lock(Some(&root().join("opencode/bindings.lock")))?)
+    let mut guard = if command != "inspect" && command != "exists" {
+        let renames = dispatch_renames_owner(command, name, args)?;
+        Some(lock_action(
+            renames,
+            read_marks::lock_rename,
+            lock_bindings,
+        )?)
     } else {
         None
     };
@@ -1797,6 +2121,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                     .map(String::as_str),
                 None,
                 None,
+                guard.as_mut().and_then(|guard| guard.rename_marks.as_mut()),
             )?;
         }
         _ => {
@@ -1811,6 +2136,287 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    struct RenameNative {
+        patches: std::cell::Cell<usize>,
+        reads: std::cell::Cell<usize>,
+        refused: bool,
+        mismatched: bool,
+        title: String,
+    }
+    impl Native for &RenameNative {
+        fn raw(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Response> {
+            assert_eq!(path, "/api/session/ses_A");
+            match method {
+                "PATCH" => {
+                    self.patches.set(self.patches.get() + 1);
+                    assert_eq!(body.unwrap(), &json!({"title":self.title}));
+                    Ok(Response {
+                        status: if self.refused { 500 } else { 204 },
+                        body: json!(null),
+                    })
+                }
+                "GET" => {
+                    self.reads.set(self.reads.get() + 1);
+                    Ok(Response {
+                        status: 200,
+                        body: json!({"data":{"id":"ses_A","location":{"directory":"/x"},
+                        "title":if self.mismatched { "another" } else { &self.title }}}),
+                    })
+                }
+                _ => panic!("Unexpected native request"),
+            }
+        }
+    }
+    fn rename_native(title: &str) -> RenameNative {
+        RenameNative {
+            patches: Default::default(),
+            reads: Default::default(),
+            refused: false,
+            mismatched: false,
+            title: title.into(),
+        }
+    }
+    fn rename_marks(old: &str) -> Value {
+        json!({"version":1,"sessions":{old:{"ses_A":{"conversation_id":"ses_A","reply_id":"msg_reply",
+            "attention_signature":null,"at":20.0},"ses_previous":{"conversation_id":"ses_previous","reply_id":"msg_before","at":10.0}},
+            "claude/other/session":{"conversation":{"reply_id":"untouched","at":30.0}}}})
+    }
+    fn marks_at(path: &Path) -> Value {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+    #[test]
+    fn renamed_opencode_owner_keeps_the_same_v1_read_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, new) = ("opencode/p/old", "opencode/p/new");
+        let marks = dir.path().join("read-marks.json");
+        let before = rename_marks(old);
+        atomic(&marks, &before.to_string()).unwrap();
+        let mut guard = read_marks::RenameGuard::at(&marks).unwrap();
+        let old_binding = dir.path().join("old.json");
+        let new_binding = dir.path().join("new.json");
+        let mut record = json!({"name":old,"run_id":"r1","conversation_id":"ses_A","cwd":"/x"});
+        atomic(&old_binding, &record.to_string()).unwrap();
+        let scope = session_action::Scope::expecting(old, "r1", "ses_A");
+        let native = rename_native("new");
+        rename_with(
+            &mut record,
+            new,
+            Some(&scope),
+            || Ok(&native),
+            |record| {
+                // Publication does not let another reader capture the new name
+                // before this writer has transferred the old owner's marks.
+                atomic(&new_binding, &record.to_string())?;
+                assert!(lock_until(&marks.with_extension("lock"), Instant::now())?.is_none());
+                Ok(())
+            },
+            |old, new| guard.transfer(old, new),
+            |_| archive::remove_synced(&old_binding),
+        )
+        .unwrap();
+        let after = marks_at(&marks);
+        assert_eq!(after["version"], 1);
+        assert!(after["sessions"].get(old).is_none());
+        assert_eq!(after["sessions"][new], before["sessions"][old]);
+        assert_eq!(
+            after["sessions"]["claude/other/session"],
+            before["sessions"]["claude/other/session"]
+        );
+        assert_eq!(
+            read_marks::record(&after["sessions"], new, "ses_A")["reply_id"],
+            "msg_reply"
+        );
+        assert!(!old_binding.exists());
+        let saved = marks_at(&new_binding);
+        assert_eq!(
+            (
+                saved["name"].clone(),
+                saved["run_id"].clone(),
+                saved["conversation_id"].clone()
+            ),
+            (json!(new), json!("r1"), json!("ses_A"))
+        );
+        assert_eq!((native.patches.get(), native.reads.get()), (1, 1));
+        assert!(scope.was_changing() && scope.has_result());
+    }
+    #[test]
+    fn opencode_rename_failure_keeps_a_readable_binding_and_never_claims_a_result() {
+        for failure in ["native", "identity", "save", "marks", "retire"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (old, new) = ("opencode/p/old", "opencode/p/new");
+            let marks = dir.path().join("read-marks.json");
+            let before = rename_marks(old);
+            atomic(&marks, &before.to_string()).unwrap();
+            let mut guard = read_marks::RenameGuard::at(&marks).unwrap();
+            let (old_binding, new_binding) =
+                (dir.path().join("old.json"), dir.path().join("new.json"));
+            let mut record = json!({"name":old,"run_id":"r1","conversation_id":"ses_A","cwd":"/x"});
+            atomic(&old_binding, &record.to_string()).unwrap();
+            let scope = session_action::Scope::expecting(old, "r1", "ses_A");
+            let mut native = rename_native("new");
+            native.refused = failure == "native";
+            native.mismatched = failure == "identity";
+            let result = rename_with(
+                &mut record,
+                new,
+                Some(&scope),
+                || Ok(&native),
+                |record| {
+                    if failure == "save" {
+                        Err("controlled binding write failure".into())
+                    } else {
+                        atomic(&new_binding, &record.to_string())
+                    }
+                },
+                |old, new| {
+                    if failure == "marks" {
+                        Err("controlled read-mark write failure".into())
+                    } else {
+                        guard.transfer(old, new)
+                    }
+                },
+                |_| {
+                    if failure == "retire" {
+                        Err("controlled old-binding removal failure".into())
+                    } else {
+                        archive::remove_synced(&old_binding)
+                    }
+                },
+            );
+            assert!(result.is_err(), "{failure}");
+            assert!(scope.was_changing() && !scope.has_result(), "{failure}");
+            assert_eq!(native.patches.get(), 1, "{failure}");
+            assert!(old_binding.exists(), "{failure}");
+            if failure == "marks" || failure == "retire" {
+                assert!(new_binding.exists(), "{failure}");
+            } else {
+                assert!(!new_binding.exists(), "{failure}");
+            }
+            if failure == "retire" {
+                assert_eq!(marks_at(&marks)["sessions"][new], before["sessions"][old]);
+            } else {
+                assert_eq!(marks_at(&marks), before, "{failure}");
+            }
+        }
+    }
+    #[test]
+    fn opencode_rename_preflight_refuses_bad_marks_before_bindings_or_native_work() {
+        for contents in [
+            "not JSON",
+            "{\"version\":2,\"sessions\":{}}",
+            "{\"version\":1,\"sessions\":null}",
+            "directory",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("read-marks.json");
+            if contents == "directory" {
+                fs::create_dir(&path).unwrap();
+            } else {
+                fs::write(&path, contents).unwrap();
+            }
+            let binding_called = std::cell::Cell::new(false);
+            let native_called = std::cell::Cell::new(false);
+            let result = lock_action(
+                true,
+                || read_marks::RenameGuard::at(&path),
+                || {
+                    binding_called.set(true);
+                    lock_bindings_at(&dir.path().join("bindings.lock"))
+                },
+            )
+            .map(|_| {
+                native_called.set(true);
+            });
+            assert_eq!(
+                result.unwrap_err(),
+                "Shared read marks could not be read; rename was not started"
+            );
+            assert!(!binding_called.get() && !native_called.get());
+            if contents != "directory" {
+                assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+            }
+        }
+    }
+    #[test]
+    fn same_name_dry_run_and_nonrename_need_no_read_mark_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        for flag in ["--dry-run", "--archive"] {
+            let args = ["opencode/p/old", "opencode/p/new", flag].map(str::to_owned);
+            assert!(!dispatch_renames_owner("rename", &args[0], &args).unwrap());
+        }
+        for (kind, name, new) in [
+            ("rename", "opencode/p/same", Some("opencode/p/same")),
+            ("forget", "opencode/p/same", None),
+            ("rename", "opencode/p/old", None),
+        ] {
+            assert!(!renames_owner(kind, name, new).unwrap());
+        }
+        assert!(renames_owner("rename", "opencode/p/old", Some("opencode/p/new")).unwrap());
+        assert!(renames_owner("rename", "opencode/p/old", Some("opencode/other/new")).is_err());
+        let _guard = lock_action(
+            false,
+            || panic!("Read-mark writer must not be opened"),
+            || lock_bindings_at(&dir.path().join("bindings.lock")),
+        )
+        .unwrap();
+        assert!(!dir.path().join("read-marks.lock").exists());
+        let native = rename_native("same");
+        let mut record =
+            json!({"name":"opencode/p/same","run_id":"r1","conversation_id":"ses_A","cwd":"/x"});
+        rename_with(
+            &mut record,
+            "opencode/p/same",
+            None,
+            || Ok(&native),
+            |_| Ok(()),
+            |_, _| panic!("Same name must not transfer marks"),
+            |_| panic!("Same name must not retire binding"),
+        )
+        .unwrap();
+        assert_eq!(native.patches.get(), 1); // Preserve the existing title-confirm/save behavior.
+    }
+    #[test]
+    fn missing_owner_transfer_preserves_every_other_v1_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("read-marks.json");
+        let bytes = b"{\"version\":1, \"sessions\":{\"other\":{\"conversation\":{\"reply_id\":\"same\"}}}}\n";
+        fs::write(&path, bytes).unwrap();
+        let mut guard = read_marks::RenameGuard::at(&path).unwrap();
+        guard.transfer("missing", "new").unwrap();
+        guard.transfer("other", "other").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+    #[test]
+    fn opencode_rename_waits_for_read_marks_before_acquiring_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let marks = dir.path().join("read-marks.json");
+        let binding = dir.path().join("bindings.lock");
+        let held = read_marks::RenameGuard::at(&marks).unwrap();
+        let (waiting, ready) = std::sync::mpsc::channel();
+        let (thread_marks, thread_binding) = (marks.clone(), binding.clone());
+        let writer = std::thread::spawn(move || {
+            lock_action(
+                true,
+                || {
+                    waiting.send(()).unwrap();
+                    read_marks::RenameGuard::at(&thread_marks)
+                },
+                || lock_bindings_at(&thread_binding),
+            )
+            .map(drop)
+        });
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The pending renamer must not own bindings while an earlier read writer
+        // still owns marks and needs to inspect the OpenCode binding.
+        let earlier_read = try_bindings_at(&binding, Duration::ZERO);
+        assert!(earlier_read.is_some(), "renamer acquired bindings before the earlier read writer");
+        let earlier_read = earlier_read.unwrap();
+        drop(earlier_read);
+        drop(held);
+        writer.join().unwrap().unwrap();
+    }
     #[test]
     fn new_ids_match_opencode_and_stored_ids_keep_the_existing_check() {
         for prefix in ["ses_", "msg_"] {
@@ -1999,6 +2605,24 @@ mod tests {
             assert_eq!(expected, format!("{method} {path}"));
             Ok(Response { status, body })
         }
+    }
+    #[test]
+    fn notification_baseline_uses_only_gets_and_retains_current_identity() {
+        let record = json!({"name":"opencode/test/session","service":"opencode2","backend":"opencode","conversation_id":"ses_A","run_id":"run-A","cwd":"/workspace/fixture"});
+        let native = Scripted(std::cell::RefCell::new(vec![
+            ("GET /api/session/active".into(), 200, json!({"data":{}})),
+            ("GET /api/session/ses_A".into(), 200, json!({"data":{"id":"ses_A","location":{"directory":"/workspace/fixture"}}})),
+            ("GET /api/session/ses_A/form".into(), 200, json!({"data":[]})),
+            ("GET /api/session/ses_A/permission".into(), 200, json!({"data":[]})),
+            ("GET /api/session/ses_A/inbox".into(), 200, json!({"data":[]})),
+        ]));
+        let (view, questions) = notification_snapshot_with(&native, &record, || Ok(history::Page { messages: Vec::new(), truncated: false })).unwrap();
+        assert!(native.0.borrow().is_empty());
+        assert_eq!(view["conversation_id"], "ses_A");
+        assert_eq!(view["run_id"], "run-A");
+        assert_eq!(view["phase"], "idle");
+        assert_eq!(questions, Some(Vec::new()));
+        assert_eq!(record["service"], "opencode2");
     }
     fn fixture(bytes: &[u8]) -> Value {
         serde_json::from_slice(bytes).unwrap()
@@ -2285,10 +2909,35 @@ mod tests {
         let saved: Value = serde_json::from_slice(&fs::read(&native.path).unwrap()).unwrap();
         assert_eq!(saved["status"], "refused");
         let retry = live(dir.path(), vec![]);
-        assert_eq!(run(&retry, "d").unwrap_err(), error);
+        assert_eq!(run(&retry, "d").unwrap_err(), "OpenCode refused this message: HTTP 400");
         assert!(retry.posted.borrow().is_empty());
         let other = live(dir.path(), vec![]);
         assert!(run(&other, "e").unwrap_err().contains("already used"));
+    }
+    #[test]
+    fn a_local_refusal_retains_detail_without_copying_it_into_delivery_audit() {
+        let secret = "https://provider.example.invalid/v1?key=fixture-YO85-SEND\u{1b}[31m";
+        let record = session_record();
+        let native = Scripted(std::cell::RefCell::new(vec![(
+            "GET /api/x".into(), 403, json!({"message":secret}),
+        )]));
+        let detail = get(&native, "/api/x").unwrap_err();
+        let local = unavailable(&record, detail);
+        assert!(string(&local, "inspection_reason").contains("fixture-YO85-SEND"));
+        assert_eq!(local["inspection_reason"], local["activity_detail"]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut steps = preflight();
+        steps.push(("POST /api/session/ses_A/prompt", status(403, json!({"message":secret}))));
+        let native = live(dir.path(), steps);
+        assert!(run(&native, "d").unwrap_err().contains("fixture-YO85-SEND"));
+        let stored = fs::read_to_string(&native.path).unwrap();
+        assert!(!stored.contains("provider.example.invalid"));
+        assert!(!stored.contains("fixture-YO85-SEND"));
+        assert_eq!(serde_json::from_str::<Value>(&stored).unwrap()["reason"], "HTTP 403");
+        let retry = live(dir.path(), vec![]);
+        assert_eq!(run(&retry, "d").unwrap_err(), "OpenCode refused this message: HTTP 403");
+        assert!(retry.posted.borrow().is_empty());
     }
     #[test]
     fn a_mismatched_acknowledgement_is_uncertain_without_a_repost() {
@@ -2655,7 +3304,7 @@ mod tests {
                 json!({"name": name, "run_id": "r1", "conversation_id": "ses_A", "cwd": "/x"});
             let connected = std::cell::Cell::new(false);
             let error = action_in(
-                &ledger,
+                ActionStorage { ledger: &ledger, rename_marks: None },
                 || {
                     connected.set(true);
                     Ok(&fake)
@@ -2817,6 +3466,7 @@ mod tests {
             inbox,
             forms: json!([]),
             permissions: json!([]),
+            requests: Default::default(),
         }
     }
     fn status_record(id: &str) -> Value {
@@ -2893,6 +3543,154 @@ mod tests {
         assert_eq!(value["allowed_actions"], json!(["rename", "forget"]));
         // Queued text is not the prompt the agent is working on.
         assert_eq!(value["prompt"], "hello");
+    }
+    #[test]
+    fn prompts_zerus_sent_name_their_request() {
+        let mut observed = observed("messages", true, opencode2("inbox_busy"));
+        observed.requests = [
+            ("msg_6kezDqwZEklnh8eFGVy3UbP6iX", "request-delivered"),
+            ("msg_gVmstesSuU81H2vTHdmxp65tNI", "request-queued"),
+            ("msg_14bb2d63e001NhfRTKy4frROM8", "request-not-a-prompt"),
+        ]
+        .map(|(id, request)| (id.to_owned(), request.to_owned()))
+        .into();
+        let value = normalize(&status_record("ses_A"), Some(&observed));
+        let named: Vec<(&str, &str, &str)> = value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (string(e, "type"), string(e, "message_id"), string(e, "request_id")))
+            .filter(|(_, _, request)| !request.is_empty())
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("UserPromptSubmit", "msg_6kezDqwZEklnh8eFGVy3UbP6iX", "request-delivered"),
+                ("UserPromptSubmit", "msg_gVmstesSuU81H2vTHdmxp65tNI", "request-queued"),
+            ]
+        );
+    }
+    #[test]
+    fn sent_requests_come_only_from_this_sessions_receipt_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let index = |id: &str, request: &str, conversation: &str| {
+            atomic(
+                &ledger.index(id),
+                &json!({"request_id": request, "conversation_id": conversation}).to_string(),
+            )
+            .unwrap()
+        };
+        // Receipts with the exact bodies OpenCode shows.
+        let receipt = |id: &str, request: &str, text: &str| {
+            atomic(
+                &ledger.receipt(request),
+                &json!({"request_id": request, "conversation_id": "ses_A", "run_id": "run",
+                    "native_message_id": id, "text": text})
+                .to_string(),
+            )
+            .unwrap()
+        };
+        let a = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a01";
+        let b = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a02";
+        index("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "ses_A");
+        index("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "ses_A");
+        receipt("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "hello");
+        receipt("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "queued later");
+        // User messages whose index names another session or no request.
+        index("msg_otherSession00000000000000", a, "ses_B");
+        index("msg_notARequest000000000000000", "not-a-uuid", "ses_A");
+        let observed = observed("messages", true, opencode2("inbox_busy"));
+        let mut messages = observed.page.messages.clone();
+        messages.push(json!({"id": "msg_otherSession00000000000000", "type": "user"}));
+        messages.push(json!({"id": "msg_notARequest000000000000000", "type": "user"}));
+        let found = sent_requests(&ledger, &status_record("ses_A"), &messages, &observed.inbox);
+        let expected: std::collections::HashMap<String, String> = [
+            ("msg_6kezDqwZEklnh8eFGVy3UbP6iX".to_owned(), a.to_owned()),
+            ("msg_gVmstesSuU81H2vTHdmxp65tNI".to_owned(), b.to_owned()),
+        ]
+        .into();
+        assert_eq!(found, expected);
+        // Only the newest user messages are looked up: the queued one first.
+        let many: Vec<Value> = (0..SENT_LOOKUPS + 5)
+            .map(|n| json!({"id": format!("msg_{n:026}"), "type": "user", "text": format!("t{n}")}))
+            .collect();
+        for n in 0..SENT_LOOKUPS + 5 {
+            let request = format!("6f0e3f43-4b4c-4f2d-9f43-{n:012}");
+            index(&format!("msg_{n:026}"), &request, "ses_A");
+            receipt(&format!("msg_{n:026}"), &request, &format!("t{n}"));
+        }
+        let found = sent_requests(&ledger, &status_record("ses_A"), &many, &observed.inbox);
+        assert_eq!(found.len(), SENT_LOOKUPS);
+        assert!(found.contains_key("msg_gVmstesSuU81H2vTHdmxp65tNI"));
+        assert!(found.contains_key(&format!("msg_{:026}", SENT_LOOKUPS + 4)));
+        assert!(!found.contains_key(&format!("msg_{:026}", 5)));
+    }
+    #[test]
+    fn the_bindings_lock_never_waits_on_this_threads_own_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bindings.lock");
+        let held = lock_bindings_at(&path).unwrap();
+        // An action's own inspection: granted at once, holding nothing more.
+        let started = Instant::now();
+        let inner = try_bindings_at(&path, Duration::from_secs(5)).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(inner);
+        // Another thread (as another process would) waits and gives up.
+        let other = path.clone();
+        let busy = std::thread::spawn(move || {
+            try_bindings_at(&other, Duration::from_millis(50)).is_none()
+        });
+        assert!(busy.join().unwrap());
+        drop(held);
+        let other = path.clone();
+        let free = std::thread::spawn(move || {
+            try_bindings_at(&other, Duration::from_millis(50)).is_some()
+        });
+        assert!(free.join().unwrap());
+    }
+    #[test]
+    fn a_request_is_attributed_only_to_its_exact_message_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger(dir.path().into());
+        let sent = |id: &str, request: &str, text: &str| {
+            atomic(
+                &ledger.index(id),
+                &json!({"request_id": request, "conversation_id": "ses_A"}).to_string(),
+            )
+            .unwrap();
+            atomic(
+                &ledger.receipt(request),
+                &json!({"request_id": request, "conversation_id": "ses_A", "run_id": "run",
+                    "native_message_id": id, "text": text, "status": "uncertain"})
+                .to_string(),
+            )
+            .unwrap();
+        };
+        let a = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a01";
+        let b = "6f0e3f43-4b4c-4f2d-9f43-3d6b6c1f1a02";
+        // The same message ID with another body is not this request, as
+        // reconcile leaves it uncertain.
+        sent("msg_6kezDqwZEklnh8eFGVy3UbP6iX", a, "not what OpenCode shows");
+        // A message dated by its late delivery, with the exact body, is.
+        sent("msg_gVmstesSuU81H2vTHdmxp65tNI", b, "queued later");
+        let observed = observed("messages", true, opencode2("inbox_busy"));
+        let found = sent_requests(&ledger, &status_record("ses_A"), &observed.page.messages, &observed.inbox);
+        let expected: std::collections::HashMap<String, String> =
+            [("msg_gVmstesSuU81H2vTHdmxp65tNI".to_owned(), b.to_owned())].into();
+        assert_eq!(found, expected);
+        // A message in both reads is judged by its delivered copy: an edited
+        // delivered body is not attributed even though the queued copy matched.
+        let edited = vec![json!({"id": "msg_gVmstesSuU81H2vTHdmxp65tNI", "type": "user", "text": "edited on delivery"})];
+        assert!(sent_requests(&ledger, &status_record("ses_A"), &edited, &observed.inbox).is_empty());
+        // Another run of the same conversation is not this receipt's.
+        let mut other_run = status_record("ses_A");
+        other_run["run_id"] = json!("another-run");
+        assert!(sent_requests(&ledger, &other_run, &observed.page.messages, &observed.inbox).is_empty());
+        // The delivered copy of the same message, with its exact body, too.
+        let delivered = vec![json!({"id": "msg_gVmstesSuU81H2vTHdmxp65tNI", "type": "user", "text": "queued later"})];
+        let found = sent_requests(&ledger, &status_record("ses_A"), &delivered, &json!({"data": []}));
+        assert_eq!(found, expected);
     }
     #[test]
     fn after_stop_queued_messages_are_not_delivered_and_removable() {
@@ -3169,9 +3967,13 @@ mod tests {
         ]));
         let active = opencode2("active_busy")["data"].clone();
         let cache = dir.path().join("history.json");
-        let seen = observe(&native, &record, &active, || {
-            history::fetch_at(&native, &record, &cache)
-        })
+        let seen = observe(
+            &native,
+            &record,
+            &active,
+            || history::fetch_at(&native, &record, &cache),
+            false,
+        )
         .unwrap();
         assert!(native.0.borrow().is_empty());
         assert!(seen.active);
@@ -3201,9 +4003,13 @@ mod tests {
                 opencode2("messages"),
             ),
         ]));
-        let seen = observe(&native, &record, &json!({}), || {
-            history::fetch_at(&native, &record, &cache)
-        })
+        let seen = observe(
+            &native,
+            &record,
+            &json!({}),
+            || history::fetch_at(&native, &record, &cache),
+            false,
+        )
         .unwrap();
         assert!(native.0.borrow().is_empty());
         assert!(!seen.active);
@@ -3218,7 +4024,7 @@ mod tests {
             json!({"data":{"id":"ses_A","location":{"directory":"/elsewhere"}}}),
         )]));
         let none = || -> Result<history::Page> { panic!("no history read") };
-        assert!(observe(&moved, &record, &json!({}), none).is_err());
+        assert!(observe(&moved, &record, &json!({}), none, false).is_err());
         let invalid = Scripted(std::cell::RefCell::new(vec![
             (
                 "GET /api/session/ses_A".into(),
@@ -3231,7 +4037,7 @@ mod tests {
                 json!({"data": {}}),
             ),
         ]));
-        assert!(observe(&invalid, &record, &json!({}), none).is_err());
+        assert!(observe(&invalid, &record, &json!({}), none, false).is_err());
         let refused = Scripted(std::cell::RefCell::new(vec![(
             "GET /api/session/active".into(),
             500,
@@ -3274,9 +4080,11 @@ mod tests {
     }
     #[test]
     fn settings_validate_effort_against_the_model_variants() {
-        let rows = catalog::project(&fixture(include_bytes!(
-            "../../tests/fixtures/opencode2/models.json"
-        )));
+        let rows = catalog::project_all(
+            &fixture(include_bytes!("../../tests/fixtures/opencode2/models.json")),
+            &HashMap::new(),
+        )
+        .0;
         assert_eq!(
             catalog::model_ref(&rows, "fixture/local", "high").unwrap(),
             json!({"providerID": "fixture", "id": "local", "variant": "high"})
@@ -3293,6 +4101,19 @@ mod tests {
         assert!(queued_id(&json!({"message_id": "msg_gVmstesSuU81H2vTHdmxp65tNI"})).is_ok());
         assert!(queued_id(&json!({"message_id": "../x"})).is_err());
         assert!(queued_id(&json!({})).is_err());
+        // The shape the relay and the mobile connector check too.
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/opencode-queued-message-ids.json"
+        ))
+        .unwrap();
+        for (kind, valid) in [("accept", true), ("reject", false)] {
+            let ids = fixture[kind].as_array().unwrap();
+            assert!(!ids.is_empty(), "{kind}");
+            for id in ids {
+                assert_eq!(queued_id(&json!({"message_id": id})).is_ok(), valid, "{id}");
+                assert_eq!(queued_message_id(id.as_str().unwrap()), valid, "{id}");
+            }
+        }
     }
     #[test]
     fn interrupt_succeeds_when_acknowledged_or_already_stopped() {
@@ -3475,12 +4296,91 @@ mod tests {
         ]);
         assert!(change_title(&stale, &bound(), "new").is_err());
     }
+    /// Stands in for the cached home short list and echoes the folder asked for.
+    fn cached_stub(_: &service::Unavailable, location: &Path, _: &[&str]) -> Value {
+        json!({"model_options": [{"value": "cache/stub", "location": location}],
+            "model_options_truncated": false})
+    }
+    fn inspector(
+        service: std::result::Result<service::Service, service::Unavailable>,
+        migration: Option<Reply>,
+        active: Option<Result<Value>>,
+    ) -> Inspector {
+        Inspector {
+            service,
+            computer: Some("build-01".into()),
+            active,
+            migration,
+            verdicts: Some(Vec::new()),
+            verdicts_changed: false,
+            cached_options: cached_stub,
+        }
+    }
+    /// A registered service that refuses every connection before a byte is sent.
+    fn refusing() -> service::Service {
+        service::Service {
+            reg: service::Registration {
+                id: "a".into(),
+                version: "2.0.32".into(),
+                port: 0,
+                pid: 5,
+                password: None,
+            },
+        }
+    }
+    /// Clients take full details without `model_options_truncated` for an
+    /// older hgs, so every unavailable answer keeps the short-list keys.
+    #[test]
+    fn every_unavailable_session_detail_keeps_the_short_list_keys() {
+        let legacy = json!({"backend": "opencode", "name": "opencode/workspace/a",
+            "conversation_id": "ses_A", "cwd": "/home/example/project"});
+        let mut current = legacy.clone();
+        current["service"] = json!("opencode2");
+        let cases = [
+            (
+                "service stopped",
+                inspector(Err(service::Unavailable::NotRunning), None, None),
+                &current,
+            ),
+            (
+                "migration check failed",
+                inspector(Ok(refusing()), Some(Err("refused".into())), None),
+                &legacy,
+            ),
+            (
+                "activity read failed",
+                inspector(Ok(refusing()), None, Some(Err("OpenCode HTTP 500".into()))),
+                &current,
+            ),
+            (
+                "session read failed",
+                inspector(Ok(refusing()), None, Some(Ok(json!({})))),
+                &current,
+            ),
+        ];
+        let cached = json!([{"value": "cache/stub", "location": "/home/example/project"}]);
+        let mut wrong = Vec::new();
+        for (case, mut inspector, record) in cases {
+            let full = inspector.view(record, Detail::Full);
+            // Actions and listings never carry a model list.
+            let own = inspector.view(record, Detail::Own);
+            if full["inspection_unavailable"] != true
+                || full["model_options"] != cached
+                || full["model_options_truncated"] != false
+                || own["inspection_unavailable"] != true
+                || own.get("model_options_truncated").is_some()
+            {
+                wrong.push(case);
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
     #[test]
     fn pause_and_resume_explain_that_there_is_no_process() {
         let mut record = bound();
         for kind in ["pause", "resume"] {
             assert_eq!(
-                action(&mut record, kind, None, None, None).unwrap_err(),
+                action(&mut record, kind, None, None, None, None).unwrap_err(),
                 NO_PROCESS
             );
         }

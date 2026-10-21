@@ -12,13 +12,22 @@ import asyncio
 import json
 import uuid
 
-from connector_harness import SERVICE, BlackBoxCase, HELP_TEXT, canonical_uuid, default_rules, listing, session_row
+from connector_harness import (IMPLEMENTATION, SERVICE, BlackBoxCase, HELP_TEXT, canonical_uuid, default_rules, listing,
+                               session_row)
 
 VECTORS = SERVICE / "vectors"
 OPERATIONS = json.loads((VECTORS / "operations.json").read_text())
 _ERRORS = json.loads((VECTORS / "errors.json").read_text())
 _RECEIPTS = json.loads((VECTORS / "receipts.json").read_text())
 _MARKERS = {marker["name"]: marker for marker in OPERATIONS["capabilities"]["markers"]}
+# Operations only the Rust connector executes, each with the marker that gates
+# it there (`CONNECTOR_ONLY` in capabilities.rs). The Python connector, whose
+# tables the vectors freeze, never advertises them; a marker the vectors do not
+# know brings its own help line and gates nothing in Python.
+_RUST_ONLY = json.loads((SERVICE / "tests" / "rust-only-operations.json").read_text())
+RUST_ONLY = {row["operation"]: row["marker"] for row in _RUST_ONLY["operations"]}
+_MARKERS.update({name: {"name": name, "help_line": line, "operations": [], "features": [], "reasons": {}}
+                 for name, line in _RUST_ONLY["markers"].items() if name not in _MARKERS})
 _TEXTS = ({row["message"] for row in _ERRORS["raises"]} | {row["message"] for row in _ERRORS["library_messages"]}
           | {row["error"] for row in _RECEIPTS["receipts"].values()})
 # The connector's own listing, help probe and catalog reads.
@@ -72,11 +81,15 @@ def help_text(*markers: str) -> str:
 
 def advertised(*markers: str) -> list[str]:
     """The operations a connector advertises with exactly these markers: an
-    optional operation needs every marker that lists it."""
+    optional operation needs every marker that lists it. A Rust connector adds
+    its own operations under their markers."""
     needed: dict[str, set[str]] = {}
     for marker in _MARKERS.values():
         for operation in marker["operations"]:
             needed.setdefault(operation, set()).add(marker["name"])
+    if IMPLEMENTATION != "python":
+        for operation, marker in RUST_ONLY.items():
+            needed[operation] = {marker}
     return sorted(set(OPERATIONS["capabilities"]["none"]["operations"])
                   | {operation for operation, names in needed.items() if names <= set(markers)})
 

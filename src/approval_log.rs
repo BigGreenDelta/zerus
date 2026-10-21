@@ -44,6 +44,9 @@ fn string<'a>(value: &'a Value, key: &str, max: usize) -> Result<&'a str> {
 
 // Select only reviewed one-request grants. Never infer consent from position,
 // a default selection, an arbitrary Yes label or a persistent permission option.
+// Claude's permission hook (`claude_hook`) carries the same grant as the keys
+// do, only for a card whose complete native panel was verified; its free-text
+// field denies with feedback and is never chosen here.
 fn answers(question: &Value) -> Option<Value> {
     if question["approval"] != true
         || question["can_answer"] != true
@@ -51,8 +54,14 @@ fn answers(question: &Value) -> Option<Value> {
     {
         return None;
     }
+    let hook = question["source"] == "claude_tool_approval"
+        && question["answer_transport"] == "claude_hook"
+        && question["panel_verified"] == true;
     let items = question["questions"].as_array()?;
-    if items.len() != 1 || items[0]["multi_select"] == true || items[0]["allow_other"] == true {
+    if items.len() != 1
+        || items[0]["multi_select"] == true
+        || (items[0]["allow_other"] == true && !hook)
+    {
         return None;
     }
     let item = &items[0];
@@ -61,7 +70,7 @@ fn answers(question: &Value) -> Option<Value> {
         .iter()
         .filter(|option| match question["source"].as_str() {
             Some("claude_tool_approval") => {
-                question["answer_transport"] == "claude_tui"
+                (question["answer_transport"] == "claude_tui" || hook)
                     && question["approval_choices"] == true
                     && item["id"] == "approval"
                     && option["scope"] == "once"
@@ -387,12 +396,48 @@ mod tests {
             .unwrap()
             .push(duplicate);
         assert!(answers(&changed).is_none());
+        // Through Claude's permission hook only with the verified native panel.
+        let mut hook = question();
+        hook["answer_transport"] = json!("claude_hook");
+        assert!(
+            answers(&hook).is_none(),
+            "an unverified panel is no reviewed grant"
+        );
+        hook["panel_verified"] = json!(true);
+        assert_eq!(answers(&hook), answers(&question()));
+        hook["questions"][0]["allow_other"] = json!(true);
+        assert_eq!(
+            answers(&hook),
+            answers(&question()),
+            "feedback is never chosen"
+        );
+        for (field, value) in [
+            ("panel_verified", json!("true")),
+            ("answer_transport", json!("claude_hooks")),
+            ("can_answer", json!(false)),
+            ("approval_choices", json!(false)),
+            ("source", json!("claude_terminal_safety")),
+        ] {
+            let mut changed = hook.clone();
+            changed[field] = value;
+            assert!(answers(&changed).is_none(), "{field}");
+        }
+        for (label, scope) in [
+            ("Yes", "broader"),
+            ("Yes, and don't ask again", "once"),
+            ("No", "once"),
+        ] {
+            let mut changed = hook.clone();
+            changed["questions"][0]["options"] = json!([{"id":"1","label":label,"scope":scope},{"id":"2","label":"No","scope":"once"}]);
+            assert!(answers(&changed).is_none(), "{label} {scope}");
+        }
         let mut opencode = q;
         opencode["source"] = json!("opencode_native");
         opencode["answer_transport"] = json!("native_opencode");
         opencode["kind"] = json!("opencode_permission");
         opencode["questions"][0]["id"] = json!("permission");
-        opencode["questions"][0]["options"] = json!([{"id":"once","label":"Allow once"},{"id":"always","label":"Always allow"},{"id":"reject","label":"Reject"}]);
+        opencode["approval_choices"] = json!(true);
+        opencode["questions"][0]["options"] = json!([{"id":"once","label":"Allow once","scope":"once"},{"id":"always","label":"Always allow","scope":"broader"},{"id":"reject","label":"Reject","scope":"once"}]);
         assert_eq!(
             answers(&opencode).unwrap()[0]["selected_option_ids"],
             json!(["once"])
@@ -448,6 +493,22 @@ mod tests {
         let mut next = payload();
         next["question"]["question_hash"] = json!("b".repeat(64));
         assert_eq!(begin(&mut db, &next).unwrap()["fresh"], true);
+    }
+
+    #[test]
+    fn kimi_tool_approvals_are_never_answered_automatically() {
+        let mut q = question();
+        q["source"] = json!("kimi_tool_approval");
+        q["answer_transport"] = json!("kimi_tui");
+        q["questions"][0]["options"] = json!([{"id":"1","label":"Approve once","scope":"once"},
+            {"id":"2","label":"Approve for this session","scope":"broader"},{"id":"3","label":"Reject","scope":"once"}]);
+        assert!(answers(&q).is_none());
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = open(&directory.path().join("audit")).unwrap();
+        for provider in ["kimi", "claude"] {
+            let p = json!({"host":"desktop-a","session":"kimi/sample/review","provider":provider,"question":q});
+            assert_eq!(begin(&mut db, &p).unwrap()["eligible"], false);
+        }
     }
 
     #[test]

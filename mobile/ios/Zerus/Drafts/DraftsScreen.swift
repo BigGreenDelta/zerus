@@ -50,10 +50,12 @@ struct DraftsScreen: View {
                 if app.voice.draft != nil || app.voice.recording || app.voice.savingRecording {
                     Section("Voice recording") { VoiceComposerStatus() }
                 }
-                if !app.voice.outgoing.isEmpty {
+                // Confirmed submitted recordings stay in conversation history and leave Saved drafts.
+                let reviewable = app.voice.outgoing.contains(where: \.needsDraftReview)
+                if reviewable {
                     Section("Voice and video messages") { VoiceSavedMessages() }
                 }
-                if unsent.isEmpty && unresolved.isEmpty && contexts.isEmpty && actions.isEmpty && app.voice.outgoing.isEmpty && app.voice.draft == nil {
+                if unsent.isEmpty && unresolved.isEmpty && contexts.isEmpty && actions.isEmpty && !reviewable && app.voice.draft == nil {
                     ContentUnavailableView("No saved drafts", systemImage: "square.and.pencil",
                                            description: Text("Your unsent messages will appear here."))
                         .listRowBackground(Color.clear)
@@ -186,7 +188,7 @@ struct DraftsScreen: View {
                 if message.status == "uncertain" {
                     Button("Check delivery") { Task { await model.checkOutgoing(message) } }.disabled(flight)
                 }
-                if ["failed", "uncertain"].contains(message.status) { Button("Review") { reviewOutgoing = message }.disabled(flight) }
+                if message.recoverable { Button("Review") { reviewOutgoing = message }.disabled(flight) }
             }
             .buttonStyle(.borderless)
             .font(.footnote.weight(.semibold))

@@ -23,7 +23,8 @@
 //! - `backend '<operation>'`: one operation of the terminal backend hgs uses
 //!   for this computer's sessions (`state::backend::host`), for tests, as
 //!   `{"op": "listing"}`, `panes`, `pane_info` (`target`, `fields` named as
-//!   `PaneField`s in snake case), `capture` (`pane`, `styled`), `send` (`pane`,
+//!   `PaneField`s in snake case), `capture` (`pane`, `styled`), `grow_unviewed`
+//!   (`pane`, `rows`), `send` (`pane`,
 //!   `keys`), `paste` (`pane`, `text`, `mode`: `composer`, `terminal` or
 //!   `terminal_bracketed`; staged and pasted as message input does),
 //!   `set_run_marker` (`name`, `run_id`), `rename` (`id`, `name`),
@@ -281,6 +282,10 @@ enum BackendOp {
         #[serde(default)]
         styled: bool,
     },
+    GrowUnviewed {
+        pane: String,
+        rows: u16,
+    },
     Send {
         pane: String,
         keys: Vec<Key>,
@@ -401,6 +406,9 @@ fn backend(operation: &str) -> i32 {
                 },
             )
             .map(|bytes| json!({"text": String::from_utf8_lossy(&bytes)})),
+        BackendOp::GrowUnviewed { pane, rows } => terminal
+            .grow_unviewed(&pane, rows)
+            .map(|grown| json!({"grown": grown})),
         BackendOp::Send { pane, keys } => {
             let keys: Vec<_> = keys
                 .iter()

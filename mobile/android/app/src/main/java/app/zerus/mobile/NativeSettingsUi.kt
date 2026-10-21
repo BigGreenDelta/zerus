@@ -48,8 +48,10 @@ import kotlinx.coroutines.flow.first
     val modelsScroll = rememberLazyListState()
     val effortsScroll = rememberLazyListState()
     val currentScroll = if(effortPage) effortsScroll else modelsScroll
+    val groupedModels = settings.models.any { it.provider.isNotBlank() }
     val selectedIndex = if(effortPage) efforts.indexOf(selectedEffort) else settings.models.indexOfFirst { it.id == selectedModel }
-    LaunchedEffect(effortPage,selectedIndex) {
+    LaunchedEffect(effortPage,selectedIndex,groupedModels) {
+        if(!effortPage && groupedModels) return@LaunchedEffect
         if(selectedIndex >= 0) {
             snapshotFlow { currentScroll.layoutInfo.totalItemsCount }.first { it > selectedIndex }
             val layout = currentScroll.layoutInfo
@@ -78,13 +80,20 @@ import kotlinx.coroutines.flow.first
             }
             if(effortPage) Text(modelLabel,style = MaterialTheme.typography.labelLarge)
         }
-        LazyColumn(Modifier.fillMaxWidth().weight(1f,fill = false).clip(RoundedCornerShape(16.dp)).selectableGroup(),
+        if(!effortPage && groupedModels) {
+            val models=settings.models.map { option -> OpenCodeModel(option.id,option.label,option.provider,option.providerLabel,
+                option.free,option.favorite,option.isDefault,option.efforts.map { NativeEffort(it,option.effortLabels[it]) }) }
+            OpenCodeModelList(models,selectedModel,onModelChange,Modifier.fillMaxWidth().weight(1f,fill=false))
+        } else LazyColumn(Modifier.fillMaxWidth().weight(1f,fill = false).clip(RoundedCornerShape(16.dp)).selectableGroup(),
             state = currentScroll,verticalArrangement = Arrangement.spacedBy(2.dp)) {
             if(effortPage) itemsIndexed(efforts) { _,effort ->
                 NativeSettingsRow(effortLabel(effort),"Effort, ${effortLabel(effort)}",selectedEffort == effort) { onEffortChange(effort) }
             } else itemsIndexed(settings.models) { _,option ->
                 NativeSettingsRow(option.label,"Model, ${option.label}",selectedModel == option.id) { onModelChange(option.id) }
             }
+        }
+        if(!effortPage) OpenCodeCatalog.truncationMessage(settings.modelsTruncated,false).takeIf(String::isNotBlank)?.let {
+            Text(it,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if(!effortPage) Surface(onClick = { effortPage = true },enabled = efforts.size > 1 || selectedEffort.isNotBlank(),
             shape = RoundedCornerShape(16.dp),color = MaterialTheme.colorScheme.surfaceContainer,

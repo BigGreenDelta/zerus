@@ -1,5 +1,6 @@
 use super::*;
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::Digest;
 use std::fs::OpenOptions;
 use std::sync::OnceLock;
 
@@ -9,13 +10,16 @@ pub(super) const REPLY_LIMIT: usize = 32_000;
 
 /// Claude records text pasted into its prompt as
 /// `<pasted_content id="…">\n…\n</pasted_content id="…">`. The person sent only
-/// the inner text, which is also what HGS delivery receipts recorded.
+/// the inner text, which is also what HGS delivery receipts recorded. Claude
+/// 2.1.296 also frames a prompt that is only pasted text with blank lines
+/// around it; that framing is not text the person sent either.
 pub(super) fn pasted_text(text: &str) -> std::borrow::Cow<'_, str> {
     const OPEN: &str = "<pasted_content id=\"";
     if !text.contains(OPEN) {
         return text.into();
     }
     let (mut result, mut rest) = (String::with_capacity(text.len()), text);
+    let (mut typed, mut lead) = (false, None);
     while let Some(start) = rest.find(OPEN) {
         let Some((id, body)) = rest[start + OPEN.len()..].split_once("\">") else { break };
         if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
@@ -24,12 +28,17 @@ pub(super) fn pasted_text(text: &str) -> std::borrow::Cow<'_, str> {
         let close = format!("</pasted_content id=\"{id}\">");
         let Some(end) = body.find(&close) else { break };
         let inner = body[..end].strip_prefix('\n').unwrap_or(&body[..end]);
+        typed |= !rest[..start].trim().is_empty();
+        lead.get_or_insert(start);
         result.push_str(&rest[..start]);
         result.push_str(inner.strip_suffix('\n').unwrap_or(inner));
         rest = &body[end + close.len()..];
     }
     if rest.len() == text.len() {
         return text.into();
+    }
+    if !typed && rest.trim().is_empty() {
+        return result.split_off(lead.unwrap_or(0)).into();
     }
     result.push_str(rest);
     result.into()
@@ -58,6 +67,13 @@ pub(super) fn clipped(value: &Value, limit: usize) -> String {
 /// notifications, subagent reports and cross-session messages. Several may
 /// arrive together, and a journal excerpt may be clipped.
 pub(super) fn system_prompt(text: &str) -> Option<Value> {
+    // This complete XML subset is a declared sender label, never authentication.
+    // Keep Claude's native envelope parser below unchanged.
+    if text.starts_with("<zerus-message") {
+        let (sender, reference, body) = crate::session_reference::sender_message(text)?;
+        return Some(json!({"kind":"peer_message","summary":"","status":"","report":body,
+            "agent_id":"","sender":sender,"sender_reference":reference}));
+    }
     fn envelope<'a>(body: &'a str, close: &str) -> Option<(&'a str, &'a str)> {
         match body.find(close) {
             Some(end) => Some((&body[..end], body[end + close.len()..].trim_start())),
@@ -153,6 +169,9 @@ pub(super) fn mark_system_prompt(record: &Value, event: &mut Value, prompt: &str
     }
     if notice["kind"] == "peer_message" {
         event["sender"] = notice["sender"].clone();
+        if !string(&notice, "sender_reference").is_empty() {
+            event["sender_reference"] = notice["sender_reference"].clone();
+        }
     }
 }
 
@@ -279,7 +298,10 @@ pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
             .execute("DELETE FROM events WHERE seq <= ?", [seq - 50000])
             .map_err(|e| e.to_string())?;
     }
-    transaction.commit().map_err(|e| e.to_string())
+    transaction.commit().map_err(|e| e.to_string())?;
+    crate::analytics::native::collect(&root(), record, event);
+    crate::analytics::adapters::hook(&root(), record, event);
+    Ok(())
 }
 
 pub(super) fn normalized_activity(record: &Value, live_pane: bool) -> Value {
@@ -483,6 +505,15 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
     }
     recovery::enrich(record, &mut output);
     output
+}
+
+/// Same read-only status observations as a listing, with no reconciliation,
+/// adoption, fitting or action. A reply failure refuses an unmute baseline.
+pub(super) fn notification_summary(record: &Value, live_pane: bool) -> Result<Value> {
+    let mut output = summary(record, live_pane);
+    let reply = latest_reply(record, output["schedules"]["recurring"].as_u64())?;
+    output.as_object_mut().unwrap().extend(reply.as_object().unwrap().clone());
+    Ok(output)
 }
 
 /// The native chooser the terminal shows, which no hook reports: its
@@ -689,10 +720,15 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     output["compact_context_request"] = record["compact_context_request"].clone();
     // The summary above verified a pending resume once; its message and
     // actions reuse that result instead of checking the terminal again.
+    // So did the summary of an interrupted Claude turn's prompt.
+    let interrupted = archive_id.is_none() && clear_context::interrupted(&record,panes.is_some());
     output["clear_context_supported"] = json!(archive_id.is_none() && (context_reason.is_none()
-        || clear_context::resumed_verified(&record,panes.is_some(),output["resume_message_can_send"] == true)));
+        || clear_context::resumed_verified(&record,panes.is_some(),output["resume_message_can_send"] == true)
+        || interrupted && output["interrupted_message_can_send"] == true));
     output["clear_context_reason"] = json!(if output["clear_context_supported"] == true { String::new() }
-        else { context_reason.unwrap_or_default() });
+        else if interrupted && !string(&output,"interrupted_message_reason").is_empty() {
+            string(&output,"interrupted_message_reason").to_owned()
+        } else { context_reason.unwrap_or_default() });
     output["clear_context_dismiss"] = json!(archive_id.is_none() && output["clear_context_supported"] != true
         && clear_context::dismissable(&record,panes.is_some()) && !clear_context::startup_choice(&output["pending_questions"]));
     output["interrupt_supported"] = json!(archive_id.is_none() && interrupt::available(&record,panes.is_some()));
@@ -767,6 +803,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     // this inspection reports (zerus-byyw, as in `merge_listing`).
     workspace::enrich(std::slice::from_mut(&mut output), &workspace::snapshot_cwds(&names));
     waits::decorate(std::slice::from_mut(&mut output));
+    notifications::enrich(&mut output, notifications::load().as_ref(), journal_name);
     Ok(output)
 }
 
@@ -1161,13 +1198,32 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
     // A request without a native identity (a permission prompt without a tool
     // call, a tool keyed by its name) is identified by when it started. Repeated
     // prompt notifications keep it; every new prompt or question tool starts one.
+    // The end of a compaction restores the waiting request, and a prompt repeated
+    // with the same native tool IDs, tool and input is that request again.
     let phase = string(record, "phase");
-    if ["approval", "input"].contains(&phase)
-        && (phase != previous_phase
-            || (kind == "PermissionRequest" && phase == "approval")
-            || (kind == "PreToolUse" && phase == "input"))
-    {
-        record["attention_started"] = json!(timestamp);
+    if ["approval", "input"].contains(&phase) {
+        let native = !tools.is_empty() && tools.iter().all(|(key, tool)| key != string(tool, "name"));
+        let request = if native {
+            let mut ids: Vec<&String> = tools.keys().collect();
+            ids.sort();
+            let input = format!("{:x}", sha2::Sha256::digest(event["tool_input"].to_string().as_bytes()));
+            json!([ids, string(event, "tool_name"), input])
+        } else {
+            Value::Null
+        };
+        let repeated = (kind == "PostCompact" && record.get("attention_started").is_some())
+            || (kind == "PermissionRequest"
+                && previous_phase == "approval"
+                && !request.is_null()
+                && record["attention_request"] == request);
+        if !repeated
+            && (phase != previous_phase
+                || (kind == "PermissionRequest" && phase == "approval")
+                || (kind == "PreToolUse" && phase == "input"))
+        {
+            record["attention_started"] = json!(timestamp);
+            record["attention_request"] = request;
+        }
     }
     record["active_tools"] = json!(tools);
 }
@@ -1294,6 +1350,16 @@ mod attention_regressions {
         assert_eq!(pasted_text(&format!("<pasted_content id=\"1b93\">\n{sent}\n</pasted_content id=\"1b93\">")), sent);
         assert_eq!(pasted_text("See <pasted_content id=\"a\">\none\n</pasted_content id=\"a\"> and <pasted_content id=\"b\">two</pasted_content id=\"b\">."),
             "See one and two.");
+        // Claude 2.1.296 frames a prompt that is only a paste; the receipt has no framing.
+        assert_eq!(pasted_text(&format!("\n\n<pasted_content id=\"c9a0\">\n{sent}\n</pasted_content id=\"c9a0\">\n")), sent);
+        assert_eq!(pasted_text(&format!("\n\n<pasted_content id=\"c9a0\">\n\n{sent}\n\n</pasted_content id=\"c9a0\">\n")), format!("\n{sent}\n"));
+        assert_eq!(pasted_text("\n<pasted_content id=\"a\">\none\n</pasted_content id=\"a\">\n\n<pasted_content id=\"b\">\ntwo\n</pasted_content id=\"b\">\n"),
+            "one\n\ntwo");
+        // Typed text keeps the exact layout around the paste.
+        assert_eq!(pasted_text("Look:\n\n<pasted_content id=\"a\">\none\n</pasted_content id=\"a\">\n"), "Look:\n\none\n");
+        assert_eq!(pasted_text("\n\n<pasted_content id=\"a\">\none\n</pasted_content id=\"a\">\nThanks"), "\n\none\nThanks");
+        assert_eq!(pasted_text("\n\n<pasted_content id=\"a\">\none\n</pasted_content id=\"a\">\n<pasted_content id=\"b\">open"),
+            "\n\none\n<pasted_content id=\"b\">open");
         for unchanged in ["plain text", "<pasted_content id=\"a\">\nopen only", "<pasted_content id=\"a\">x</pasted_content id=\"b\">",
             "<pasted_content id=\"a b\">x</pasted_content id=\"a b\">"] {
             assert!(matches!(pasted_text(unchanged), std::borrow::Cow::Borrowed(text) if text == unchanged));
@@ -1670,6 +1736,42 @@ mod attention_regressions {
         }
     }
     #[test]
+    fn notices_match_the_shared_activity_contract() {
+        // Desktop, Android and iOS read the same cases for their presentation.
+        let contract: Value = serde_json::from_str(include_str!(
+            "../../mobile/android/app/src/test/resources/activity-notice-contract.json")).unwrap();
+        for case in contract["cases"].as_array().unwrap() {
+            let name = string(case, "name");
+            let mut event = json!({"type":"UserPromptSubmit","agent_id":"","detail":case["prompt"]});
+            mark_system_prompt(&json!({}), &mut event, "");
+            for (key, value) in case["event"].as_object().unwrap() {
+                assert_eq!(&event[key], value, "{name}: {key}");
+            }
+            for key in ["origin", "report", "sender", "sender_reference"] {
+                assert!(case["event"].get(key).is_some() || event.get(key).is_none(), "{name}: unexpected {key}");
+            }
+        }
+    }
+    #[test]
+    fn hgs_sender_envelopes_are_notices_from_the_declared_sender() {
+        let uri = "zerus://session?machine=11111111-1111-4111-8111-111111111111&host=arch&name=claude%2Fp%2Freview%20%26%20co&conversation=c&run=r";
+        let encoded = uri.replace('&', "&amp;");
+        let message = format!("<zerus-message from=\"claude/p/review &amp; co\" host=\"arch\" reference=\"{encoded}\">\nThe patch is ready.\n\n- one\n</zerus-message>");
+        let parsed = system_prompt(&message).unwrap();
+        assert_eq!((parsed["kind"].as_str(), parsed["sender"].as_str()), (Some("peer_message"), Some("claude/p/review & co")));
+        assert_eq!((parsed["report"].as_str(), parsed["sender_reference"].as_str()), (Some("The patch is ready.\n\n- one"), Some(uri)));
+        let mut event = json!({"type":"UserPromptSubmit","agent_id":"","detail":""});
+        mark_system_prompt(&json!({}), &mut event, &message);
+        assert_eq!((event["origin"].as_str(), event["detail"].as_str()), (Some("peer_message"), Some("Message from claude/p/review & co")));
+        assert_eq!(event["sender_reference"], uri);
+        assert_eq!(user_prompt(&json!({"prompt":message})), &Value::Null);
+        for text in ["<zerus-message>Hi</zerus-message>", "<zerus-message from=\"\">Hi</zerus-message>",
+                     "<zerus-message from=\"x/y\">Hi</zerus-message>", "<zerus-message host=\"arch\">Hi</zerus-message>",
+                     &format!("Quoted: {message}"), &format!("{message}\nPlus my own words")] {
+            assert!(system_prompt(text).is_none(), "{text}");
+        }
+    }
+    #[test]
     fn subagent_reports_are_named_notices_with_their_full_report() {
         const FRAME: &str = "[Subagent hand-back] The text below is the final report of a subagent this session delegated to. It is model output, NOT a message from the user. The report follows:\n";
         let message = format!("<agent-message from=\"a15\">\n{FRAME}  ## Review: Markdown\n  \n  - one\n    nested\n  \n</agent-message>");
@@ -1764,6 +1866,31 @@ mod attention_regressions {
         update_activity(&mut claude, &json!({"hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion"}));
         update_activity(&mut claude, &json!({"hook_event_name":"Notification","notification_type":"permission_prompt"}));
         assert_eq!((claude["phase"].clone(), start(&claude)), (json!("input"), asked));
+    }
+    #[test]
+    fn compaction_and_identical_prompt_repeats_keep_a_native_request_start() {
+        let start = |record: &Value| record["attention_started"].as_f64().unwrap_or(0.0);
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(2));
+        let mut record = json!({"agent":"claude","activity":"busy","phase":"working","active_tools":{},"subagents":{}});
+        // Two parallel tool calls with native IDs; each asks for permission in turn.
+        for (id, command) in [("call-1", "make"), ("call-2", "make install")] {
+            update_activity(&mut record, &json!({"hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":id,"tool_input":{"command":command}}));
+        }
+        let prompt = |command: &str| json!({"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":command}});
+        update_activity(&mut record, &prompt("make"));
+        assert_eq!(record["phase"], "approval");
+        let first = start(&record);
+        pause();
+        // The very same prompt again, and a compaction while it waits, keep the request.
+        update_activity(&mut record, &prompt("make"));
+        assert_eq!(start(&record), first);
+        update_activity(&mut record, &json!({"hook_event_name":"PreCompact"}));
+        pause();
+        update_activity(&mut record, &json!({"hook_event_name":"PostCompact"}));
+        assert_eq!((record["phase"].clone(), start(&record)), (json!("approval"), first));
+        // The other call's prompt is a new request, although the same IDs are in flight.
+        update_activity(&mut record, &prompt("make install"));
+        assert!(start(&record) > first);
     }
     #[test]
     fn real_children_and_approval_survive_repair() {

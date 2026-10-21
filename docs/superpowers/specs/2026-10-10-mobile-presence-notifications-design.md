@@ -115,7 +115,10 @@ read marks and the preference) and on a maintenance tick about every 15 s. The
 relay worker that accepted a changed snapshot or new presence evaluates that
 workspace inline; an advisory-elected maintenance pass rechecks due candidates.
 Several workers may evaluate the same candidate: deleting the candidate row in
-the transaction that appends its `alert` event delivers it once.
+the transaction that appends its `alert` event delivers it once. A computer
+reachable directly and through a gateway is evaluated against the route the
+catalog shows (available before stale, local before a gateway), never against
+a snapshot from its other, possibly lagging, route.
 
 1. Drop the candidate when:
    - the session is gone or archived, or its run or conversation changed;

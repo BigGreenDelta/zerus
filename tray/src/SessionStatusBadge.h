@@ -3,7 +3,8 @@
 #include <QPainter>
 
 namespace SessionStatusBadge {
-enum Kind { Neutral, Working, Attention, Error, Paused, Unread, Draft, Scheduled, Background, Waiting };
+enum Kind { Neutral, Working, Attention, Error, Paused, Unread, Draft, Scheduled, Background, Waiting, MutedAttention, MutedUnread };
+inline QColor mutedTone(bool dark) { return QColor(dark ? "#c4ccd5" : "#637080"); }
 inline QFont font(QFont base) { base.setPixelSize(11); base.setWeight(QFont::Medium); return base; }
 // The state's color for a frame around the session; invalid for Neutral.
 inline QColor edge(Kind kind, bool dark) {
@@ -11,6 +12,7 @@ inline QColor edge(Kind kind, bool dark) {
     case Working: return QColor(dark ? "#4cc98a" : "#2a9d63");
     case Background: return QColor(dark ? "#86a9d3" : "#466b99");
     case Attention: case Unread: return QColor(dark ? "#ffda76" : "#e0a82e");
+    case MutedAttention: case MutedUnread: return mutedTone(dark);
     case Error: return QColor(dark ? "#ff8fa0" : "#c7405a");
     case Paused: return QColor(dark ? "#a988d6" : "#9474c0");
     case Draft: return QColor(dark ? "#6b9bd8" : "#5b8cc9");
@@ -58,7 +60,7 @@ inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind
         p->setBrush(foreground); p->drawEllipse(center, 2.5, 2.5);
     } else if (kind == Background) {
         p->setPen(Qt::NoPen);p->setBrush(foreground);p->drawEllipse(center,2.5,2.5);
-    } else if (kind == Attention || kind == Error) {
+    } else if (kind == Attention || kind == Error || kind == MutedAttention) {
         auto bold = p->font(); bold.setBold(true); p->setFont(bold);
         CachedText::draw(p, QRectF(center.x() - 5, rect.y(), 10, rect.height()), Qt::AlignCenter, QStringLiteral("!"));
     } else if (kind == Paused) {
@@ -77,7 +79,7 @@ inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind
         p->drawEllipse(center, 4.5, 4.5);
         p->drawLine(center, center + QPointF(0, -2.8));
         p->drawLine(center, center + QPointF(2.2, 0));
-    } else if (kind == Unread) {
+    } else if (kind == Unread || kind == MutedUnread) {
         p->setPen(QPen(foreground, 1)); p->setBrush(Qt::NoBrush);
         p->drawRoundedRect(QRectF(center.x() - 4, center.y() - 3, 8, 6), 1, 1);
         p->drawLine(center + QPointF(-4, -3), center); p->drawLine(center, center + QPointF(4, -3));

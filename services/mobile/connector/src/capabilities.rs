@@ -4,7 +4,8 @@
 //!
 //! An operation is advertised only when the native CLI offers it, as in
 //! Python, and this connector implements it; a later slice adds to
-//! [`IMPLEMENTED`]. Python resets every flag before probing, so a failed
+//! [`IMPLEMENTED`]. [`CONNECTOR_ONLY`] operations follow their own native
+//! gates and are never Python's. Python resets every flag before probing, so a failed
 //! probe disables everything for 300 s; here a probe that fails keeps the
 //! previous flags (divergence a).
 use serde_json::{json, Map, Value};
@@ -15,21 +16,65 @@ use zerus_relay::protocol::OPERATIONS;
 pub const REPROBE_SECONDS: f64 = 300.0;
 /// `hgs --help` budget (seconds).
 pub const PROBE_TIMEOUT: f64 = 3.0;
+/// Windows v1 deliberately excludes POSIX paths, one-hop routing, native
+/// providers absent from the host, speech and voice. Same table drives
+/// advertisement and dispatch refusal, after durable duplicate handling.
+pub const WINDOWS_HELP_MARKER: &str = "Mobile gateway ABI: windows-local-v1";
+pub const WINDOWS_PROVIDER_REFUSAL: &str = "provider is unavailable on a Windows local gateway";
+pub fn windows_provider(provider: &Value) -> bool {
+    matches!(provider.as_str(), Some("codex" | "claude" | "kimi"))
+}
+pub const WINDOWS_OPERATIONS: &[&str] = &[
+    "inspect",
+    "history",
+    "archive_list",
+    "send",
+    "answer",
+    "interrupt",
+    "send_now",
+    "settings",
+    "clear_context",
+    "compact_context",
+    "mark_read",
+    "session_notifications",
+    "terminal_snapshot",
+    "terminal_input",
+    "hooks_status",
+    "process_output",
+    "process_stop",
+    "archive",
+    "forget",
+    "fork",
+    "pause",
+    "remove_queued",
+    "rename",
+    "restore",
+    "resume",
+    "terminate",
+];
+pub const CLEAR_CONTEXT_DISMISS_HELP_MARKER: &str = "Mobile clear-context ABI: dismiss-prompt-v1";
 
 /// Operations this connector executes, with the session mutations of
 /// [`crate::mutations::OPERATIONS`] and the creations of
 /// [`crate::launch::OPERATIONS`]. Every other known operation is refused
 /// as unsupported and never advertised.
 pub const IMPLEMENTED: &[&str] = &[
+    "analytics_read",
     "archive_list",
     "attachment_read",
     "catalog",
     "dirs",
     "file_read",
+    "git_status",
     "history",
+    "history_projection",
+    "hooks_status",
     "inspect",
     "mark_read",
+    "session_notifications",
     "process_output",
+    "project_assignment",
+    "project_assign",
     "speech_cancel",
     "speech_config",
     "speech_config_status",
@@ -62,6 +107,7 @@ pub fn implemented(operation: &str) -> bool {
 /// Python's `FEATURES | {"accounts_snapshot"}` and the conditional features,
 /// each with the operation it needs.
 const FEATURE_OPERATIONS: &[(&str, &str)] = &[
+    ("clear_context_dismiss", "clear_context"),
     ("voice_video", "voice_submit"),
     ("accounts_snapshot", "inspect"),
     ("inspect_after", "inspect"),
@@ -69,8 +115,120 @@ const FEATURE_OPERATIONS: &[(&str, &str)] = &[
     ("send_agent", "send"),
     ("directory_create_v1", "directory_create"),
     ("launch_project", "launch"),
+    (crate::session_projects::FEATURE, "project_assign"),
     ("gateway_one_hop", "send"),
 ];
+
+/// Whether an operation only reads native state or may change it. The relay
+/// classifies it the same way (`READS`), and a mutation keeps its journal
+/// identity and recovers as uncertain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    Read,
+    Mutation,
+}
+
+/// The native help marker that gates a [`CONNECTOR_ONLY`] operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    /// `session-action <session> --json`, the scoped session actions.
+    Lifecycle,
+    /// The bounded, computer-scoped Git checkout projection.
+    GitStatus,
+    /// The phone's task exchange and the projects' tasks digests.
+    TaskExchange,
+    /// The phone's Send now, Cancel and Done list.
+    TaskActions,
+}
+
+impl Gate {
+    /// Whether the native CLI offers it.
+    pub fn open(self, flags: &Flags) -> bool {
+        match self {
+            Gate::Lifecycle => flags.lifecycle,
+            Gate::GitStatus => flags.git_status,
+            Gate::TaskExchange => flags.task_exchange,
+            Gate::TaskActions => flags.task_actions,
+        }
+    }
+
+    /// Its marker name in `services/mobile/tests/rust-only-operations.json`,
+    /// which is also the frozen marker's name in `operations.json`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Gate::Lifecycle => "lifecycle",
+            Gate::GitStatus => "git_status",
+            Gate::TaskExchange => "task_exchange",
+            Gate::TaskActions => "task_actions",
+        }
+    }
+
+    /// A help line that offers it.
+    pub fn help_line(self) -> &'static str {
+        match self {
+            Gate::Lifecycle => "hgs session-action <session> --json",
+            Gate::GitStatus => crate::git_status::HELP_MARKER,
+            Gate::TaskExchange => "hgs task exchange|digests --json",
+            Gate::TaskActions => "hgs task mobile-send|mobile-cancel|mobile-done --json",
+        }
+    }
+}
+
+/// An operation of the relay's set that only this connector executes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectorOnly {
+    pub operation: &'static str,
+    pub gate: Gate,
+    pub class: Class,
+}
+
+/// The operations of the relay's set that only this connector executes, each
+/// advertised exactly when its native marker is offered. The Python connector
+/// never lists or advertises them, so they are outside
+/// [`Flags::python_operations`]. The tests of the relay, of this connector and
+/// of the black-box suites read the same table from
+/// `services/mobile/tests/rust-only-operations.json`.
+pub const CONNECTOR_ONLY: &[ConnectorOnly] = &[
+    ConnectorOnly {
+        // The session-action marker predates queue removal: an older hgs prints it
+        // and refuses the request. Only `remove_queued` in the session's
+        // `allowed_actions` shows that hgs can remove the message.
+        operation: "remove_queued",
+        gate: Gate::Lifecycle,
+        class: Class::Mutation,
+    },
+    ConnectorOnly {
+        operation: "git_status",
+        gate: Gate::GitStatus,
+        class: Class::Read,
+    },
+    // The phone's tasks (docs/superpowers/specs/2026-10-18-task-replication-loro-design.md, "Phone").
+    ConnectorOnly {
+        operation: "task_exchange",
+        gate: Gate::TaskExchange,
+        class: Class::Read,
+    },
+    ConnectorOnly {
+        operation: "task_send",
+        gate: Gate::TaskActions,
+        class: Class::Mutation,
+    },
+    ConnectorOnly {
+        operation: "task_cancel",
+        gate: Gate::TaskActions,
+        class: Class::Mutation,
+    },
+    ConnectorOnly {
+        operation: "task_done",
+        gate: Gate::TaskActions,
+        class: Class::Read,
+    },
+];
+
+/// Whether only this connector executes the operation.
+pub fn connector_only(operation: &str) -> bool {
+    CONNECTOR_ONLY.iter().any(|row| row.operation == operation)
+}
 
 pub const LIFECYCLE: &[&str] = &[
     "archive",
@@ -117,19 +275,27 @@ pub const SPEECH_CONFIG: &[&str] = &[
 /// What the native CLI offers, from its help text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Flags {
+    pub windows_gateway: bool,
+    pub analytics: bool,
     pub archive: bool,
     pub lifecycle: bool,
     pub terminal: bool,
     pub recovery: bool,
     pub history: bool,
+    pub history_projection: bool,
+    pub hook_health: bool,
+    pub session_projects: bool,
     pub launch: bool,
     pub project_launch: bool,
     pub worktree: bool,
     pub directory_create: bool,
     pub read: bool,
+    pub session_notifications: bool,
     pub preference: bool,
     pub attachment_read: bool,
     pub file_read: bool,
+    pub git_status: bool,
+    pub clear_context_dismiss: bool,
     pub speech: bool,
     pub voice: bool,
     pub voice_video: bool,
@@ -146,7 +312,9 @@ impl Flags {
     /// The frozen help markers (`operations.json` `capabilities.markers`).
     pub fn from_help(help: &str) -> Flags {
         let has = |marker: &str| help.contains(marker);
-        Flags {
+        let flags = Flags {
+            windows_gateway: help.lines().any(|line| line.trim() == WINDOWS_HELP_MARKER),
+            analytics: has("hgs [@host] analytics --json"),
             archive: has("archives --json"),
             lifecycle: help
                 .lines()
@@ -154,14 +322,26 @@ impl Flags {
             terminal: has("terminal <session> --json"),
             recovery: has("recovery action --scoped-json"),
             history: has("history <session> --json"),
+            history_projection: has("history-projection <session> --json"),
+            hook_health: has(crate::hook_health::HELP_MARKER),
+            session_projects: crate::session_projects::from_help(help),
             launch: has("--launch-id"),
             project_launch: has("swarm assign-launch --json"),
             worktree: has("Mobile worktree ABI: worktrees-v1"),
             directory_create: has("dirs --create <path>"),
             read: has("read <session> --json"),
+            session_notifications: help
+                .lines()
+                .any(|line| line.trim() == crate::session_notifications::HELP_MARKER),
             preference: has("swarm preference set mobile_delivery"),
             attachment_read: has("attachment <session> --request ID --index N"),
             file_read: has("file-read <session> --json"),
+            git_status: help
+                .lines()
+                .any(|line| line.trim() == crate::git_status::HELP_MARKER),
+            clear_context_dismiss: help
+                .lines()
+                .any(|line| line.trim() == CLEAR_CONTEXT_DISMISS_HELP_MARKER),
             speech: has("speech --json"),
             voice: has("voice <session> --json"),
             voice_video: has("voice-video-v1"),
@@ -169,12 +349,49 @@ impl Flags {
             peers: has("mobile-peers --json") && has("mobile-peer --json"),
             task_exchange: has("hgs task exchange|digests --json"),
             task_actions: has("hgs task mobile-send|mobile-cancel|mobile-done --json"),
+        };
+        if flags.windows_gateway {
+            return flags.windows_local();
         }
+        flags
+    }
+
+    pub fn for_native_platform(self) -> Self {
+        if cfg!(windows) {
+            self.windows_local()
+        } else {
+            self
+        }
+    }
+    pub fn windows_local(mut self) -> Self {
+        self.windows_gateway = true;
+        self.peers = false;
+        self.voice = false;
+        self.voice_video = false;
+        self.speech = false;
+        self.speech_config = false;
+        self.launch = false;
+        self.project_launch = false;
+        self.worktree = false;
+        self.directory_create = false;
+        self.file_read = false;
+        self.attachment_read = false;
+        self.git_status = false;
+        self.analytics = false;
+        self
     }
 
     /// Python's advertised operations, before this build's own filter.
     /// `fleet` is whether a fleet exists (always in the connector).
     pub fn python_operations(&self, fleet: bool) -> BTreeSet<&'static str> {
+        let mut operations = self.offered(fleet);
+        operations.retain(|operation| !connector_only(operation));
+        operations
+    }
+
+    /// The relay's operations the native CLI offers, by Python's formula,
+    /// and [`CONNECTOR_ONLY`] under their own gates.
+    fn offered(&self, fleet: bool) -> BTreeSet<&'static str> {
         let mut removed: BTreeSet<&str> = BTreeSet::new();
         let mut remove = |gate: bool, operations: &[&'static str]| {
             if !gate {
@@ -182,6 +399,7 @@ impl Flags {
             }
         };
         remove(self.worktree, WORKTREES);
+        remove(self.analytics, &["analytics_read"]);
         remove(self.archive, &["archive_list"]);
         remove(self.directory_create, &["directory_create"]);
         remove(self.lifecycle, LIFECYCLE);
@@ -193,20 +411,26 @@ impl Flags {
             .collect();
         remove(self.launch, &launch);
         remove(self.history, &["history"]);
+        remove(self.history_projection, &["history_projection"]);
+        remove(self.hook_health, &["hooks_status"]);
+        remove(self.session_projects, crate::session_projects::OPERATIONS);
         remove(self.recovery, &["recovery_action"]);
         remove(self.read, &["mark_read"]);
+        remove(self.session_notifications, &["session_notifications"]);
         remove(self.attachment_read, &["attachment_read"]);
         remove(self.file_read, &["file_read"]);
         remove(self.preference && fleet, &["set_mobile_delivery"]);
         remove(self.speech, SPEECH);
         remove(self.voice, VOICE);
         remove(self.speech_config, SPEECH_CONFIG);
-        // Only this connector offers the phone's task exchange.
-        remove(false, zerus_relay::protocol::TASKS);
+        for row in CONNECTOR_ONLY {
+            remove(row.gate.open(self), &[row.operation]);
+        }
         OPERATIONS
             .iter()
             .copied()
             .filter(|operation| !removed.contains(operation))
+            .filter(|operation| !self.windows_gateway || WINDOWS_OPERATIONS.contains(operation))
             .collect()
     }
 
@@ -228,8 +452,14 @@ impl Flags {
         if one_hop {
             features.insert("gateway_one_hop");
         }
+        if self.session_projects {
+            features.insert(crate::session_projects::FEATURE);
+        }
         if self.project_launch {
             features.insert("launch_project");
+        }
+        if self.clear_context_dismiss {
+            features.insert("clear_context_dismiss");
         }
         features
     }
@@ -239,23 +469,15 @@ impl Flags {
         self.advertised_for(true, one_hop)
     }
 
-    /// `mobile_capabilities` as this build advertises it: Python's sets
-    /// limited to implemented operations and the features they carry. A
-    /// peer context has no fleet.
+    /// `mobile_capabilities` as this build advertises it: Python's sets and
+    /// [`CONNECTOR_ONLY`], limited to implemented operations, and the
+    /// features they carry. A peer context has no fleet.
     pub fn advertised_for(&self, fleet: bool, one_hop: bool) -> Value {
-        let mut operations: Vec<&str> = self
-            .python_operations(fleet)
+        let operations: Vec<&str> = self
+            .offered(fleet)
             .into_iter()
             .filter(|operation| implemented(operation))
             .collect();
-        // Connector-only: the phone's tasks, when hgs offers them.
-        if self.task_exchange {
-            operations.push("task_exchange");
-        }
-        if self.task_actions {
-            operations.extend(["task_send", "task_cancel", "task_done"]);
-        }
-        operations.sort_unstable();
         let features: Vec<&str> = self
             .python_features(one_hop)
             .into_iter()
@@ -282,9 +504,21 @@ impl Flags {
         let mut features = features;
         // Connector-only: the Python connector never advertises it, so apps
         // do not send an OpenCode effort to it.
-        if operations.contains(&"launch") {
+        if operations.contains(&"launch") && !self.windows_gateway {
             features.push("opencode_launch_effort");
             features.sort_unstable();
+        }
+        if self.windows_gateway {
+            features.retain(|feature| {
+                ![
+                    "send_agent",
+                    "gateway_one_hop",
+                    "launch_project",
+                    "inspect_agent",
+                ]
+                .contains(feature)
+            });
+            reasons.insert("windows_scope".into(), json!("Existing local Codex, Claude and Kimi sessions; mobile creation, Windows paths, peers, DeepSeek/OpenCode and voice/speech are unavailable"));
         }
         json!({"protocol_version": 1, "operations": operations, "features": features,
                "reasons": reasons})
@@ -330,6 +564,7 @@ mod tests {
                 "pause",
                 "process_output",
                 "process_stop",
+                "remove_queued",
                 "rename",
                 "restore",
                 "resume",
@@ -372,5 +607,68 @@ mod tests {
             ])
         );
         assert_eq!(none["reasons"].as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn connector_only_operations_follow_their_gate_and_are_never_pythons() {
+        let advertises = |flags: Flags, fleet: bool, operation: &str| {
+            flags.advertised_for(fleet, false)["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|advertised| advertised == operation)
+        };
+        for row in CONNECTOR_ONLY {
+            assert!(implemented(row.operation) && OPERATIONS.contains(&row.operation));
+            let open = Flags::from_help(&format!("{}\n", row.gate.help_line()));
+            assert!(row.gate.open(&open) && !row.gate.open(&Flags::default()));
+            for fleet in [false, true] {
+                assert!(advertises(open, fleet, row.operation), "{row:?}");
+                assert!(!advertises(Flags::default(), fleet, row.operation));
+                assert!(!open.python_operations(fleet).contains(row.operation));
+            }
+        }
+    }
+
+    #[test]
+    fn remove_queued_follows_the_session_action_abi_and_is_never_pythons() {
+        let advertises = |flags: Flags| {
+            flags.advertised(false)["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|operation| operation == "remove_queued")
+        };
+        let lifecycle = Flags::from_help("hgs session-action <session> --json\n");
+        assert!(lifecycle.lifecycle && advertises(lifecycle));
+        assert!(lifecycle.advertised_for(false, false)["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation == "remove_queued"));
+        // Every other marker without the session-action ABI never offers it.
+        let others = Flags::from_help(
+            "terminal <session> --json\nhistory <session> --json\n--launch-id\nread <session> --json\nrecovery action --scoped-json\n",
+        );
+        assert!(!others.lifecycle && !advertises(others));
+        assert!(!advertises(Flags::default()));
+        // Python's tables never list it, with or without the ABI.
+        for flags in [lifecycle, others, Flags::default()] {
+            for fleet in [false, true] {
+                assert!(!flags.python_operations(fleet).contains("remove_queued"));
+            }
+        }
+        assert_eq!(
+            CONNECTOR_ONLY
+                .iter()
+                .filter(|row| row.operation == "remove_queued")
+                .copied()
+                .collect::<Vec<_>>(),
+            [ConnectorOnly {
+                operation: "remove_queued",
+                gate: Gate::Lifecycle,
+                class: Class::Mutation
+            }]
+        );
     }
 }

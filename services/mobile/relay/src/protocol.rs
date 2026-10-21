@@ -10,12 +10,17 @@ use uuid::Uuid;
 pub const MIB: usize = 1024 * 1024;
 pub const REQUEST_MAX: usize = 29 * MIB;
 pub const READS: &[&str] = &[
+    "analytics_read",
     "archive_list",
     "speech_config",
     "speech_config_status",
     "inspect",
     "history",
+    "history_projection",
+    "hooks_status",
+    "git_status",
     "process_output",
+    "project_assignment",
     "terminal_snapshot",
     "catalog",
     "dirs",
@@ -78,6 +83,7 @@ pub const MOBILE_DELIVERY: &[&str] = &[
     "away_30",
 ];
 pub const OPERATIONS: &[&str] = &[
+    "analytics_read",
     "archive_list",
     "speech_config",
     "speech_profile_upsert",
@@ -100,14 +106,21 @@ pub const OPERATIONS: &[&str] = &[
     "forget",
     "fork",
     "history",
+    "history_projection",
+    "hooks_status",
+    "git_status",
     "inspect",
     "interrupt",
     "launch",
     "mark_read",
+    "session_notifications",
     "pause",
     "process_output",
+    "project_assignment",
     "process_stop",
+    "project_assign",
     "recovery_action",
+    "remove_queued",
     "rename",
     "restore",
     "resume",
@@ -131,10 +144,12 @@ pub const OPERATIONS: &[&str] = &[
     "task_done",
 ];
 pub const FEATURES: &[&str] = &[
+    "clear_context_dismiss",
     "inspect_after",
     "inspect_agent",
     "opencode_launch_effort",
     "presence_alerts",
+    "session_project_assignment_v1",
     "send_agent",
     "voice_video",
 ];
@@ -152,6 +167,133 @@ pub const ATTACHMENT_FILE_MAX: u64 = 10 * MIB as u64;
 pub const ATTACHMENT_RESULT_TTL: f64 = 60.0;
 pub const ATTACHMENT_READ_GRACE: f64 = 5.0;
 const ID: &[&str] = &["request_id", "expected_run_id", "expected_conversation_id"];
+
+/// A canonical Gregorian UTC calendar date, as a bounded ordinal. No locale,
+/// timestamps or caller-supplied offsets enter aggregate bucket selection.
+fn analytics_day(value: &Value) -> Result<u32> {
+    let bytes = value.as_str().ok_or(Error::BAD)?.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(i, b)| i != 4 && i != 7 && !b.is_ascii_digit())
+    {
+        return Err(Error::BAD);
+    }
+    let number = |part: &[u8]| part.iter().fold(0u32, |n, b| n * 10 + u32::from(b - b'0'));
+    let (year, month, day) = (
+        number(&bytes[..4]),
+        number(&bytes[5..7]),
+        number(&bytes[8..]),
+    );
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let months = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if year == 0 || !(1..=12).contains(&month) || day == 0 || day > months[(month - 1) as usize] {
+        return Err(Error::BAD);
+    }
+    let previous = year - 1;
+    Ok(365 * previous + previous / 4 - previous / 100
+        + previous / 400
+        + months[..(month - 1) as usize].iter().sum::<u32>()
+        + day)
+}
+
+/// Logical session grouping only: no directory, worktree, launch or full
+/// organization replacement can enter this additive, session-scoped ABI.
+pub fn session_project(payload: &Value, request_id: &str, mutation: bool) -> Result<()> {
+    let required = [
+        "request_id",
+        "expected_run_id",
+        "expected_conversation_id",
+        "expected_machine_id",
+    ];
+    let assignment = [
+        "swarm_id",
+        "membership_token",
+        "catalog_epoch",
+        "project_id",
+    ];
+    let mut all = required.to_vec();
+    if mutation {
+        all.extend(assignment);
+    }
+    fields(payload, &all, if mutation { &[] } else { &["cursor"] })?;
+    uuid(&payload["request_id"], true)?;
+    uuid(&payload["expected_machine_id"], true)?;
+    if payload["request_id"] != request_id {
+        return Err(Error::BAD);
+    }
+    let bounded = |key: &str, max: usize, empty: bool| -> Result<()> {
+        let value = payload[key].as_str().ok_or(Error::BAD)?;
+        if value.len() > max || (!empty && value.is_empty()) || value.chars().any(char::is_control)
+        {
+            return Err(Error::BAD);
+        }
+        Ok(())
+    };
+    bounded("expected_run_id", 128, false)?;
+    bounded("expected_conversation_id", 2048, true)?;
+    if mutation {
+        uuid(&payload["swarm_id"], true)?;
+        hex(&payload["membership_token"])?;
+        hex(&payload["catalog_epoch"])?;
+        bounded("project_id", 128, false)?;
+    } else if payload.get("cursor").is_some() {
+        bounded("cursor", 512, false)?;
+    }
+    Ok(())
+}
+
+/// Mobile analytics are strictly read-only and span at most 90 inclusive days.
+pub fn analytics_read(payload: &Value) -> Result<()> {
+    fields(payload, &["schema", "from", "through"], &[])?;
+    if payload["schema"].as_u64() != Some(1) {
+        return Err(Error::BAD);
+    }
+    let from = analytics_day(&payload["from"])?;
+    let through = analytics_day(&payload["through"])?;
+    if through < from || through - from >= 90 {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
+
+/// Check the native summary envelope without rewriting its aggregate buckets.
+pub fn analytics_summary(value: &Value, payload: &Value, machine: Option<&str>) -> Result<()> {
+    uuid(&value["machine_id"], true)?;
+    uuid(&value["source_epoch"], false)?;
+    if value["schema"].as_u64() != Some(1)
+        || value["source"] != "agent"
+        || machine.is_some_and(|expected| value["machine_id"] != expected)
+        || value["range"] != json!({"from": payload["from"], "through": payload["through"]})
+        || value["revision"].as_u64().is_none()
+        || !value["generated_at"]
+            .as_f64()
+            .is_some_and(|at| at.is_finite() && at >= 0.0)
+        || !value["collection"].is_object()
+        || !value["coverage"].is_object()
+        || !value["buckets"].is_array()
+    {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
+
 pub fn fields(v: &Value, required: &[&str], optional: &[&str]) -> Result<()> {
     let o = v.as_object().ok_or(Error::BAD)?;
     if required.iter().any(|k| !o.contains_key(*k))
@@ -320,13 +462,34 @@ pub fn request(v: &Value) -> Result<()> {
     text(
         &v["session"],
         1024,
-        op == "archive_list"
+        op == "git_status"
+            || op == "analytics_read"
+            || op == "archive_list"
             || LAUNCH.contains(&op)
             || COMPUTER.contains(&op)
             || SPEECH.contains(&op)
             || TASKS.contains(&op),
     )?;
-    if op == "archive_list" {
+    if op == "git_status" {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        fields(p, &["request_id", "path"], &[])?;
+        let path = p["path"].as_str().ok_or(Error::BAD)?;
+        if p["request_id"] != id
+            || path.is_empty()
+            || path.len() > 4096
+            || !path.starts_with('/')
+            || path.chars().any(char::is_control)
+        {
+            return Err(Error::BAD);
+        }
+    } else if op == "analytics_read" {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        analytics_read(p)?;
+    } else if op == "archive_list" {
         if v["session"] != "" {
             return Err(Error::BAD);
         }
@@ -376,6 +539,8 @@ pub fn request(v: &Value) -> Result<()> {
         if v["session"] != "" || !MOBILE_DELIVERY.iter().any(|x| p["value"] == *x) {
             return Err(Error::BAD);
         }
+    } else if matches!(op, "project_assignment" | "project_assign") {
+        session_project(p, id, op == "project_assign")?;
     } else if op == "inspect" {
         fields(
             p,
@@ -414,6 +579,21 @@ pub fn request(v: &Value) -> Result<()> {
         if p.get("archive_id").is_some() {
             uuid(&p["archive_id"], false)?;
         }
+    } else if op == "session_notifications" {
+        fields(
+            p,
+            &["run_id", "conversation_id", "muted", "expected_revision"],
+            &[],
+        )?;
+        for (key, maximum) in [("run_id", 128), ("conversation_id", 256)] {
+            let value = text(&p[key], maximum, false)?;
+            if value.len() > maximum {
+                return Err(Error::BAD);
+            }
+        }
+        if !p["muted"].is_boolean() || !p["expected_revision"].as_i64().is_some_and(|r| r >= 0) {
+            return Err(Error::BAD);
+        }
     } else if op == "mark_read" {
         // C4: exact host read-mark identity; the host decides what is current.
         fields(
@@ -437,6 +617,7 @@ pub fn request(v: &Value) -> Result<()> {
     } else {
         let extras: &[&str] = match op {
             "send" => &["text", "attachments", "expected_compaction_id", "agent_id"],
+            "clear_context" => &["dismiss_prompt"],
             "voice_submit" => &["speech", "audio", "video", "message_id", "rejection"],
             "voice_status" | "voice_cancel" => &["message_id"],
             "answer" => &["question_id", "expected_question_hash", "answers"],
@@ -445,6 +626,13 @@ pub fn request(v: &Value) -> Result<()> {
             "settings" => &["model", "effort", "expected_pending_id"],
             "process_output" => &["process_id", "generation", "archive_id"],
             "process_stop" => &["process_id", "generation"],
+            "history_projection" => &[
+                "archive_id",
+                "agent_id",
+                "history_epoch",
+                "projection_after",
+                "projection_until",
+            ],
             "history" => &[
                 "archive_id",
                 "agent_id",
@@ -459,6 +647,7 @@ pub fn request(v: &Value) -> Result<()> {
             "rename" => &["new_name", "archive_id"],
             "fork" => &["tag", "archive_id"],
             "restore" | "forget" => &["archive_id"],
+            "remove_queued" => &["message_id"],
             "terminal_input" => &["terminal_binding_id", "text", "enter", "key"],
             "file_read" => &[
                 "path",
@@ -483,9 +672,11 @@ pub fn request(v: &Value) -> Result<()> {
             p,
             id,
             ![
+                "hooks_status",
                 "compact_context",
                 "clear_context",
                 "history",
+                "history_projection",
                 "recovery_action",
                 "send_now",
                 "attachment_read",
@@ -493,6 +684,7 @@ pub fn request(v: &Value) -> Result<()> {
                 "voice_submit",
                 "voice_status",
                 "voice_cancel",
+                "remove_queued",
             ]
             .contains(&op),
         )?;
@@ -536,6 +728,11 @@ pub fn request(v: &Value) -> Result<()> {
             }
             "voice_status" | "voice_cancel" => {
                 uuid(&p["message_id"], true)?;
+            }
+            "clear_context" => {
+                if p.get("dismiss_prompt").is_some_and(|v| !v.is_boolean()) {
+                    return Err(Error::BAD);
+                }
             }
             "send" => send(p)?,
             "answer" => {
@@ -586,6 +783,7 @@ pub fn request(v: &Value) -> Result<()> {
                 }
             }
             "history" => history(p)?,
+            "history_projection" => history_projection(p)?,
             "recovery_action" => {
                 uuid(&p["job_id"], true)?;
                 if p["action"] != "now" && p["action"] != "cancel" {
@@ -606,6 +804,7 @@ pub fn request(v: &Value) -> Result<()> {
             "restore" => {
                 uuid(&p["archive_id"], true)?;
             }
+            "remove_queued" => queued_message(&p["message_id"])?,
             "terminal_input" => terminal(p)?,
             "attachment_read" => attachment_read(p)?,
             "file_read" => file_read(p)?,
@@ -746,6 +945,22 @@ fn task_project(p: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// The OpenCode message a `remove_queued` names: `msg_` and 1-124 ASCII
+/// letters, digits, `_` or `-`, as hgs and the connector check it
+/// (`tests/fixtures/opencode-queued-message-ids.json`). The computer decides
+/// whether it is still queued and was never delivered.
+fn queued_message(v: &Value) -> Result<()> {
+    let s = v.as_str().ok_or(Error::BAD)?;
+    if !(5..=128).contains(&s.len())
+        || !s.starts_with("msg_")
+        || !s
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+    {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
 /// A Send now or Cancel: the project and the task's UUID.
 fn task_request(p: &Value) -> Result<()> {
     task_project(p)?;
@@ -797,6 +1012,49 @@ fn tag(v: &Value, launch: bool) -> Result<()> {
     }
     Ok(())
 }
+/// The new projection ABI has byte-bounded native identities and literal i64 positions.
+/// It never borrows ordinary history's optional selectors or coerces JSON numbers.
+pub fn history_projection(p: &Value) -> Result<()> {
+    fields(
+        p,
+        &[
+            "request_id",
+            "expected_run_id",
+            "expected_conversation_id",
+            "history_epoch",
+            "projection_after",
+            "projection_until",
+        ],
+        &["archive_id", "agent_id"],
+    )?;
+    uuid(&p["request_id"], true)?;
+    let native_text = |value: &Value, maximum: usize| {
+        value.as_str().is_some_and(|s| {
+            !s.is_empty() && s.len() <= maximum && !s.chars().any(char::is_control)
+        })
+    };
+    if !native_text(&p["expected_run_id"], 128)
+        || !native_text(&p["expected_conversation_id"], 256)
+        || !native_text(&p["history_epoch"], 128)
+    {
+        return Err(Error::BAD);
+    }
+    if let Some(value) = p.get("agent_id") {
+        if !native_text(value, 160) || value.as_str().is_some_and(|s| s.contains(['/', '\\'])) {
+            return Err(Error::BAD);
+        }
+    }
+    if let Some(value) = p.get("archive_id") {
+        uuid(value, true)?;
+    }
+    let after = p["projection_after"].as_i64().ok_or(Error::BAD)?;
+    let until = p["projection_until"].as_i64().ok_or(Error::BAD)?;
+    if after < 0 || until < after {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
+
 fn history(p: &Value) -> Result<()> {
     if let Some(v) = p.get("limit") {
         if v.as_i64().is_none_or(|n| !(1..=100).contains(&n)) {

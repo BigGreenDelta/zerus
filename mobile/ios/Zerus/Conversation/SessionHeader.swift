@@ -4,6 +4,7 @@ import ZerusKit
 enum ActionText {
     static func label(_ operation: String, _ target: Target? = nil) -> String {
         switch operation {
+        case SessionNotificationPreferences.operation: "Shared notification settings"
         case "pause": "Pause"
         case "resume": "Resume"
         case "archive": "Archive"
@@ -165,6 +166,9 @@ struct SessionHeaderTools: View {
                     .accessibilityValue(review > 0 ? "\(review) In review" : "")
                     .task(id: key) { app.tasks.refreshReviewCount(key) }
                 }
+                if SessionNotificationPreferences.parse(model.activity ?? session.raw,target)?.muted == true {
+                    Image(systemName:"bell.slash").foregroundStyle(Theme.muted).accessibilityLabel("Notifications muted on all devices")
+                }
                 menu(model: model, target: target)
             }
             .padding(.horizontal, 10)
@@ -206,6 +210,12 @@ struct SessionHeaderTools: View {
         return Menu {
             Button("Search loaded messages", systemImage: "magnifyingglass") { search = true }
             Button("Refresh", systemImage: "arrow.clockwise") { model.refreshActivity(explicit: true) }
+            let preference = SessionNotificationPreferences.parse(model.activity ?? session.raw,target)
+            let notificationReason = model.actionReason(target,SessionNotificationPreferences.operation)
+            Button { request = SessionNotificationPreferences.operation } label: {
+                Label(SessionNotificationPreferences.label(preference),systemImage:preference?.muted == true ? "bell" : "bell.slash")
+                if !notificationReason.isEmpty { Text(notificationReason) }
+            }.disabled(!notificationReason.isEmpty)
             if let evidence {
                 Section {
                     let emptyReminder = model.reviewLater(target) && !evidence.authoritative && evidence.loadedIds.isEmpty
@@ -259,7 +269,7 @@ struct NativeRecoveryCard: View {
 
     var body: some View {
         let model = app.conversation!
-        if let job = RecoveryPresentation.from(model.activity, target, verified: model.activityVerified), job.state != "succeeded" {
+        if let job = RecoveryPresentation.from(model.activity, target, verified: model.activityVerified), job.state != "succeeded", !job.resumed {
             TimelineView(.periodic(from: .now, by: 1)) { timeline in
                 let now = timeline.date.timeIntervalSince1970
                 let nowReason = model.recoveryActionReason(target, jobId: job.id, choice: "now")

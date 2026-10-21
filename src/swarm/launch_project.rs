@@ -206,8 +206,8 @@ pub(super) fn execute(config: &Config, value: Value) -> Value {
 
 // Receipts never expire: eviction could permit an old request to undo a later
 // manual move. At capacity, reject new requests before any assignment write.
-type Receipts = std::collections::BTreeMap<String, Value>;
-fn check_capacity(receipts: &Receipts) -> Result<()> {
+pub(super) type Receipts = std::collections::BTreeMap<String, Value>;
+pub(super) fn check_capacity(receipts: &Receipts) -> Result<()> {
     ensure!(
         receipts.len() < 10_000,
         "Launch assignment receipt capacity reached; no metadata was changed"
@@ -234,7 +234,7 @@ fn read_receipts(path: &Path) -> Result<Receipts> {
     );
     Ok(receipts)
 }
-fn write_receipts(path: &Path, receipts: &Receipts) -> Result<()> {
+pub(super) fn write_receipts(path: &Path, receipts: &Receipts) -> Result<()> {
     use std::io::Write;
     let parent = path
         .parent()

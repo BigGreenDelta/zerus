@@ -19,6 +19,7 @@ class SwarmController;
 #include "FleetState.h"
 #include "HgsClient.h"
 #include "SessionOrganization.h"
+#include "SessionRowPreferences.h"
 
 class QAction;
 class QLabel;
@@ -89,6 +90,8 @@ signals:
     void replyViewed(const QString &host, const QString &name, const QString &conversation, const QString &reply);
     void repliesMarkedRead(const QJsonObject &replies);
     void attentionMarksChanged(const QJsonObject &marks, const QJsonObject &readReplies);
+    void notificationPreferencesChanged(const QString &host, const QString &name, const QString &run,
+                                        const QString &conversation, const QJsonObject &preferences);
     void refreshRequested();
     void sessionActivated(const QString &host, const QString &name, const QString &tty);
     void terminalOpenRequested(const QString &host, const QString &name, const QString &tty);
@@ -117,6 +120,9 @@ private:
     void applyContentScale();
     void applyActivityWidth();
     void saveOrganization();
+    void setSessionRowCollapsed(const Entry &entry, bool collapsed);
+    void saveSessionRowPreferences();
+    void updateSessionRowPresentation();
     void savePendingLaunches();
     void placeLaunchedSessions();
     bool takeEndedLaunch(const QString &launchId, QJsonObject *launch = nullptr);
@@ -169,6 +175,7 @@ private:
     int m_stripLayout = 0, m_stripReserve = 0;
     QWidget *m_stripSpacer = nullptr;
     QPushButton *m_savedDrafts = nullptr;
+    QPushButton *m_markAllReadButton = nullptr;
     QLabel *m_attentionBadge = nullptr;
     int m_attentionCount = 0;
     QTimer m_readTimer;
@@ -192,9 +199,12 @@ private:
     // Native lifecycle cleanup reports its result after Archive or Terminate.
     // Keep a review action for remaining work. Host, session, root, common dir.
     QStringList m_archivedWorktree;
+    QString m_archivedWorktreeRun, m_worktreeCleanupReason;
+    bool m_worktreeCleanupOffered = false, m_worktreeCleanupUnconfirmed = false;
     QPushButton *m_worktreeCleanup = nullptr;
     int m_worktreeCleanupRevision = 0;
     void offerWorktreeCleanup();
+    void updateWorktreeCleanupOffer();
     void cleanUpArchivedWorktree();
     void renameSession();
     void forkSession();
@@ -221,10 +231,13 @@ private:
     QList<Entry> m_selectionQueue;
     SelectionAction m_selectionOperation = SelectionAction::Pause;
     QString m_selectionCommand;
+    // The scoped request of the selected OpenCode binding being forgotten; only
+    // its own result advances the selection.
+    quint64 m_selectionForgetRequest = 0;
     QStringList m_selectionErrors;
     int m_selectionTotal = 0, m_selectionDone = 0, m_selectionFailed = 0;
     bool m_selectionRunning = false;
-    enum class SessionMenuAction { OpenTerminal, OpenProcesses, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyReference, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh };
+    enum class SessionMenuAction { OpenTerminal, OpenProcesses, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyReference, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh, Clear, ToggleMute, CollapseRow, ExpandRow };
     void copySessionReference(const Entry &entry, const QString &agent = {});
     void showSessionMenu(const QString &key, const QPoint &position);
     void clearContext();
@@ -282,6 +295,9 @@ private:
     QString messageBlockReason(const Entry &entry) const;
     QString modelSettingsBlockReason(const Entry &entry) const;
     void changeModelSettings(const QString &key, const QString &model, const QString &effort);
+    // OpenCode's grouped model picker in the composer: catalog and favorite requests.
+    void connectOpenCodeModels();
+    QString openCodeCatalogSession(quint64 request, const QString &host, const QString &location);
     void applyPendingModelSettings();
     void applyQueuedModelSettings();
     void sendMessage(const QString &key, const QString &text, const QList<MessageAttachment> &attachments, const QString &retryId = {}, const QString &compactionId = {}, bool contextChosen = false);
@@ -364,6 +380,14 @@ private:
     qint64 m_cursor = 0;
     QString m_inspectError, m_connectionError, m_childrenHtml;
     quint64 m_settingsRequest = 0;
+    // `account models` requests by the session, computer and folder they were made for,
+    // and the newest one issued per session; favorite changes by their session. Both keep
+    // the composer's picker context (openCodeGeneration) they were made in.
+    struct OpenCodeCatalogRequest { QString key, host, cwd; quint64 context = 0; };
+    QHash<quint64, OpenCodeCatalogRequest> m_openCodeCatalogRequests;
+    QHash<QString, quint64> m_openCodeCatalogLatest;
+    struct OpenCodeFavoriteRequest { QString key, host, value; bool favorite = false; quint64 context = 0; };
+    QHash<quint64, OpenCodeFavoriteRequest> m_openCodeFavoriteRequests;
     QString m_settingsKey, m_settingsRun, m_settingsConversation;
     QString m_settingsHost, m_settingsName;
     bool m_settingsAutomatic = false;
@@ -407,6 +431,7 @@ private:
     DashboardPage *m_dashboard;
     AccountsPage *m_accountsPage;
     SessionOrganization m_organization;
+    SessionRowPreferences m_sessionRowPreferences;
     SwarmController *m_swarm = nullptr;
     QByteArray m_savedOrganization;
     QPushButton *m_sessionsNav, *m_machinesNav, *m_accountsNav;
@@ -451,6 +476,7 @@ private:
     QPushButton *m_shell, *m_fileManager, *m_copyHeaderId, *m_clear, *m_restore, *m_more;
     QAction *m_renameAction, *m_forkAction, *m_openAction, *m_changeAction, *m_freshAction, *m_archiveAction, *m_forgetAction;
     QAction *m_markAllReadAction = nullptr;
+    QAction *m_expandAllRowsAction = nullptr;
     QMenu *m_sessionMenu;
     QTextBrowser *m_children = nullptr, *m_info = nullptr;
     ActivityView *m_activityView = nullptr;
@@ -500,6 +526,8 @@ private:
     void finishSendEvidence(const QString &key);
     struct PendingAnswer { QString key, questionId, questionHash; };
     QHash<quint64, PendingAnswer> m_pendingAnswers;
+    struct PendingNotifications { Entry entry; };
+    QHash<quint64, PendingNotifications> m_pendingNotifications;
     bool m_confirmingQuestionCache = false;
     QStackedWidget *m_detailStack;
     QSplitter *m_splitter;

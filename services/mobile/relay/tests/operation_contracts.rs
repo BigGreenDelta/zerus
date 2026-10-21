@@ -2,7 +2,8 @@
 //! Python reference relay's tests covered: context commands, the input queue,
 //! settings, recovery, processes, worktrees, the terminal window, archives,
 //! speech ownership, attachment budgets and read retention. `ORACLE.md` maps
-//! each Python test to its contract here.
+//! each Python test to its contract here. The OpenCode `remove_queued` contract,
+//! which no Python relay or connector ever had, is here too.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -22,6 +23,12 @@ use support::Server;
 
 const SESSION: &str = "codex/example/mobile";
 const ARCHIVE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+/// The `remove_queued` message ID shape every layer shares with hgs.
+const QUEUED_MESSAGE_IDS: &str =
+    include_str!("../../../../tests/fixtures/opencode-queued-message-ids.json");
+/// Operations only the Rust connector executes: the Python connector, whose
+/// tables the golden vectors freeze, never lists or advertises them.
+const RUST_ONLY: &str = include_str!("../../tests/rust-only-operations.json");
 
 /// A session request with the native identity a mutation carries; `extra`
 /// adds payload fields.
@@ -143,9 +150,9 @@ async fn receipt(f: &Fixture, b: &Value) -> Value {
 async fn context_commands_are_gated_per_operation_and_protocol_version() {
     let f = Fixture::new().await;
     let n = f.node.id.clone();
-    // The relay declares exactly the operations the Python connector
-    // advertises with every capability, as its golden vectors record them,
-    // and the phone's task exchange, which only the Rust connector offers.
+    // The relay declares the current Python operation table plus the
+    // Rust-only operations. The historical all-capabilities help capture
+    // stays frozen and predates additive operations such as projection.
     let vectors: Value =
         serde_json::from_str(include_str!("../../vectors/operations.json")).unwrap();
     let declared = protocol::capabilities(vec![])["operations"].clone();
@@ -156,11 +163,13 @@ async fn context_commands_are_gated_per_operation_and_protocol_version() {
             .map(|op| op.as_str().unwrap().to_string())
             .collect()
     };
-    let mut python = set(&declared);
-    for op in protocol::TASKS {
-        assert!(python.remove(*op));
+    let mut python = set(&vectors["sets"]["OPERATIONS"]);
+    let rust_only: Value = serde_json::from_str(RUST_ONLY).unwrap();
+    for row in rust_only["operations"].as_array().unwrap() {
+        let op = row["operation"].as_str().unwrap();
+        assert!(python.insert(op.to_owned()), "{op}");
     }
-    assert_eq!(python, set(&vectors["capabilities"]["all"]["operations"]));
+    assert_eq!(set(&declared), python);
     assert_eq!(declared, json!(protocol::OPERATIONS));
     let compact = || command(&n, "compact_context", json!({}));
     let clear = || command(&n, "clear_context", json!({}));
@@ -482,6 +491,7 @@ async fn reads_leave_after_an_hour_and_mutations_keep_their_receipts() {
     let mutations = [
         command(&n, "process_stop", json!({"process_id":"job"})),
         command(&n, "send_now", json!({"queue_id":"a".repeat(64)})),
+        command(&n, "remove_queued", json!({"message_id":"msg_Queued01"})),
         computer_command(
             &n,
             "worktree_create",
@@ -691,6 +701,186 @@ fn history_launch_and_lifecycle_wires_refuse_what_the_connector_refuses() {
     ] {
         assert_eq!(wire(&command(&n, op, extra.clone())), 400, "{op} {extra}");
     }
+}
+
+fn queued_message_ids(kind: &str) -> Vec<Value> {
+    let fixture: Value = serde_json::from_str(QUEUED_MESSAGE_IDS).unwrap();
+    let ids = fixture[kind].as_array().unwrap().clone();
+    assert!(
+        ids.iter().all(Value::is_string) && !ids.is_empty(),
+        "{kind}"
+    );
+    ids
+}
+
+/// `remove_queued` removes one OpenCode message that was never delivered: a
+/// session mutation with the exact run and conversation identity and exactly
+/// one `msg_` message ID, in the shape hgs and the connector check
+/// (`tests/fixtures/opencode-queued-message-ids.json`). Any other field is
+/// refused, so it never reaches a computer.
+#[test]
+fn remove_queued_names_one_exact_message_of_an_exact_session() {
+    assert!(protocol::OPERATIONS.contains(&"remove_queued"));
+    let n = Uuid::new_v4().to_string();
+    let remove = |id: Value| command(&n, "remove_queued", json!({"message_id":id}));
+    let valid = remove(json!("msg_gVmstesSuU81H2vTHdmxp65tNI"));
+    assert_eq!(
+        valid["payload"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        [
+            "expected_conversation_id",
+            "expected_run_id",
+            "message_id",
+            "request_id"
+        ]
+    );
+    assert_eq!(wire(&valid), 202);
+    for id in queued_message_ids("accept") {
+        assert_eq!(wire(&remove(id.clone())), 202, "{id}");
+    }
+    for id in queued_message_ids("reject").into_iter().chain([
+        json!(7),
+        json!(true),
+        json!(["msg_A"]),
+        json!({}),
+        Value::Null,
+    ]) {
+        assert_eq!(wire(&remove(id.clone())), 400, "{id}");
+    }
+    let mut empty_session = valid.clone();
+    empty_session["session"] = json!("");
+    let mut no_session = valid.clone();
+    no_session.as_object_mut().unwrap().remove("session");
+    for b in [
+        without(valid.clone(), "message_id"),
+        set(valid.clone(), "text", json!("x")),
+        set(valid.clone(), "queue_id", json!("a".repeat(64))),
+        set(valid.clone(), "archive_id", json!(ARCHIVE)),
+        set(valid.clone(), "agent_id", json!("child")),
+        set(valid.clone(), "expected_turn_started", json!(1.5)),
+        without(valid.clone(), "expected_run_id"),
+        without(valid.clone(), "expected_conversation_id"),
+        set(valid.clone(), "expected_run_id", json!("")),
+        set(valid.clone(), "expected_conversation_id", json!("")),
+        set(valid.clone(), "expected_run_id", json!("x".repeat(129))),
+        set(
+            valid.clone(),
+            "expected_conversation_id",
+            json!("x".repeat(257)),
+        ),
+        set(valid.clone(), "expected_run_id", json!(7)),
+        without(valid.clone(), "request_id"),
+        set(
+            valid.clone(),
+            "request_id",
+            json!(Uuid::new_v4().to_string()),
+        ),
+        empty_session,
+        no_session,
+    ] {
+        assert_eq!(wire(&b), 400, "{b}");
+    }
+}
+
+/// Only a computer that advertises `remove_queued` receives it. It is a
+/// mutation with a durable request identity, like `forget`: the same request
+/// is answered by its receipt and never delivered twice, also after its body
+/// has left retention.
+#[tokio::test]
+async fn remove_queued_is_a_gated_mutation_that_never_replays() {
+    assert!(!protocol::READS.contains(&"remove_queued"));
+    assert!(!protocol::READ_SQL.contains("remove_queued"));
+    assert!(!protocol::SPEECH_READ_SQL.contains("remove_queued"));
+    assert!(protocol::capabilities(vec![])["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "remove_queued"));
+    let f = Fixture::new().await;
+    let b = command(
+        &f.node.id,
+        "remove_queued",
+        json!({"message_id":"msg_Queued01"}),
+    );
+    assert_eq!(status(&f, &b).await, 409);
+    // The other session actions do not stand in for it.
+    advertise(
+        &f,
+        &[
+            "archive",
+            "forget",
+            "fork",
+            "pause",
+            "rename",
+            "restore",
+            "resume",
+            "terminate",
+        ],
+        &[],
+    )
+    .await;
+    assert_eq!(status(&f, &b).await, 409);
+    advertise(&f, &["remove_queued"], &[]).await;
+    assert_eq!(f.submit(&b).await.unwrap()["state"], "queued");
+    let usage = f
+        .store
+        .db
+        .one(
+            "SELECT reads,mutations FROM workspace_usage WHERE workspace_id=?",
+            args![&f.phone.workspace],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((i(&usage, "reads"), i(&usage, "mutations")), (0, 1));
+    let claim = f
+        .store
+        .claim(&f.node, false)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode()
+        .unwrap();
+    let delivered = &claim["requests"][0];
+    assert_eq!(
+        (
+            &delivered["operation"],
+            &delivered["session"],
+            &delivered["payload"]
+        ),
+        (&json!("remove_queued"), &json!(SESSION), &b["payload"])
+    );
+    let result = json!({"state":"completed","result":{"message_id":"msg_Queued01"},"error":null});
+    f.store
+        .result(
+            &f.node,
+            s(&b, "request_id"),
+            &result,
+            Some(&canonical(&result["result"]).unwrap()),
+        )
+        .await
+        .unwrap();
+    // The identity names this removal only: another message under it conflicts.
+    let mut other = b.clone();
+    other["payload"]["message_id"] = json!("msg_Queued02");
+    assert_eq!(status(&f, &other).await, 409);
+    // A computer that stops advertising still answers the existing identity.
+    advertise(&f, &[], &[]).await;
+    assert_eq!(f.submit(&b).await.unwrap()["state"], "completed");
+    // After the retention period only the identity remains, and it never replays.
+    age(&f, "updated", &b, 8.0 * 86400.0).await;
+    f.store.maintain(false).await.unwrap();
+    let tombstone = f.submit(&b).await.unwrap();
+    assert_eq!(
+        (tombstone["state"].clone(), tombstone["result"].clone()),
+        (json!("completed"), Value::Null)
+    );
+    assert!(f.store.claim(&f.node, true).await.unwrap().is_none());
+    f.check_accounting().await;
+    f.close().await;
 }
 
 #[test]

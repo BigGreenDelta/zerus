@@ -29,11 +29,13 @@ mod external_agents;
 mod fork;
 mod goals;
 mod hooks;
+pub(crate) mod hook_health;
 mod input;
 mod input_queue;
 mod journal;
 mod kimi_cache_hint;
 mod kimi_messages;
+mod kimi_approval;
 mod kimi_plan;
 mod kimi_trust;
 mod kimi_tui_choice;
@@ -53,6 +55,7 @@ mod codex_hooks_trust;
 mod codex_update;
 mod codex_goal_resume;
 mod read_marks;
+mod notifications;
 mod recipes;
 mod rename;
 mod resume_input;
@@ -90,6 +93,8 @@ pub(crate) fn worktree_catalog(path: &std::path::Path) -> serde_json::Value {
 }
 mod launch_project;
 pub(crate) use launch_project::with_launch_binding;
+mod session_project;
+pub(crate) use session_project::with_session_project_binding;
 pub(crate) mod launches;
 
 use serde_json::{json, Value};
@@ -331,6 +336,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
         (live_sessions()?, Default::default())
     };
     let marks = read_marks::load();
+    let notification_preferences = notifications::load();
     let sessions = box_value
         .get_mut("sessions")
         .and_then(Value::as_array_mut)
@@ -398,6 +404,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
                     .extend(summary.as_object().ok_or("invalid summary")?.clone());
                 let questions = read_marks::pending_questions(&record, session, true, budget);
                 read_marks::enrich_listing(session, &marks, journal::journal_name(&record), questions);
+                notifications::enrich(session, notification_preferences.as_ref(), journal::journal_name(&record));
             }
             continue;
         }
@@ -421,6 +428,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
                 .clone(),
         );
         read_marks::enrich_listing(&mut session, &marks, journal::journal_name(&record), Ok(Some(Vec::new())));
+        notifications::enrich(&mut session, notification_preferences.as_ref(), journal::journal_name(&record));
         sessions.push(session);
     }
     for record in archived {
@@ -437,6 +445,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
                 .clone(),
         );
         read_marks::enrich_listing(&mut session, &marks, journal::journal_name(&record), Ok(Some(Vec::new())));
+        notifications::enrich(&mut session, notification_preferences.as_ref(), journal::journal_name(&record));
         sessions.push(session);
     }
     sessions.extend(dsh::snapshots()?);
@@ -447,6 +456,12 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
             let owner = string(session, "name").to_owned();
             let questions=if session["agent"]=="opencode" {session["pending_questions"].as_array().cloned().unwrap_or_default()}else{Vec::new()};
             read_marks::enrich_listing(session, &marks, &owner, Ok(Some(questions)));
+        }
+    }
+
+    for session in sessions.iter_mut() {
+        if session.get("notification_preferences").is_none() {
+            session["notification_preferences"] = Value::Null;
         }
     }
 
@@ -682,7 +697,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         return recovery::dispatch(args);
     }
     if command == "read" { return read_marks::dispatch(args); }
+    if command == "notifications" { return notifications::dispatch(args); }
     if command == "history" { return conversation_history::dispatch(args); }
+    if command == "history-projection" { return conversation_history::projection_dispatch(args); }
     if command == "terminal" { return terminal::dispatch(args); }
     if command == "session-action" { return session_action::dispatch(args); }
     if command == "compact-context" { return compact_context::dispatch(args); }

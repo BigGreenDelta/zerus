@@ -103,6 +103,16 @@ class DesktopSessionPaletteTest {
             session("""{"activity":"idle","phase":"idle","recovery":{"state":"blocked"}}"""), true).kind)
     }
 
+    @Test fun resumedRecoveryShowsTheWorkingTurn() {
+        val retrying = session("""{"tracked":true,"activity":"busy","phase":"tool","recovery":{"state":"retrying","acknowledged":true}}""")
+        assertEquals("Retrying", SessionFilters.status(retrying, true))
+        assertEquals(0xFF9AA4B2, DesktopSessionPalette.detailColors(retrying, true, true).foreground)
+        val resumed = session("""{"tracked":true,"activity":"busy","phase":"tool","recovery":{"state":"retrying","acknowledged":true,"resumed_at":125}}""")
+        assertEquals("Using a tool", SessionFilters.status(resumed, true))
+        assertEquals(DesktopBadgeKind.Working, DesktopSessionPalette.badge(resumed, true).kind)
+        assertEquals(0xFF55E39A, DesktopSessionPalette.detailColors(resumed, true, true).foreground)
+    }
+
     @Test fun pausedPurpleAndStoppedArchiveOfflineNeutralIgnoreStaleBusy() {
         assertEquals(DesktopBadgeKind.Paused, DesktopSessionPalette.badge(session("""{"state":"paused","activity":"busy"}"""), true).kind)
         listOf(

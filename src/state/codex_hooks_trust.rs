@@ -103,7 +103,7 @@ pub(super) fn current(record: &Value) -> Option<Value> {
 pub(super) fn available(record: &Value, question: &Value) -> Result<()> {
     let active = kimi_tui_choice::identity(record)?;
     if snapshot(&active, &kimi_tui_choice::capture(&active)?).map(|s| s.0) != Some(question["question_hash"].clone()) {
-        return Err("Codex's hook trust request changed; refresh Activity".into());
+        return Err("Codex's hook trust request changed; nothing was sent".into());
     }
     Ok(())
 }

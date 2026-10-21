@@ -11,8 +11,9 @@ import test_input as fixtures
 FAKE = fixtures.SIGNAL_SAFE_READ + r'''
 import json,os,pathlib,signal,sys,termios,tty
 root=pathlib.Path(os.environ['INPUT_FIXTURE']);fd=0;original=termios.tcgetattr(fd);tty.setraw(fd)
-config=None;draft='';buffer=b''
-def render(*args):
+config=None;draft='';buffer=b'';closed=None
+def shown(current):return bool(current and current.get('panel') and current.get('generation')!=closed)
+def render():
  global config
  config=json.loads((root/'config.json').read_text()) if (root/'config.json').exists() else None
  lines=[]
@@ -20,7 +21,7 @@ def render(*args):
   reply=json.loads((root/'queued').read_text().split('\n')[1])[0]
   lines=['• Messages to be submitted after next tool call (press esc to interrupt and send immediately)',
    '  ↳ '+reply['question']+' → '+reply['answer'],'']
- if config and config.get('panel'):
+ if shown(config):
   lines += [config['title'],'']
   if config.get('options'):
    lines += ['  '+str(i+1)+'. '+v for i,v in enumerate(config['options'])]
@@ -30,24 +31,38 @@ def render(*args):
  else:lines += ['› '+draft]
  if (root/'hyperlinks').exists():
   lines=['Artifact: \x1b]8;id=fixture;https://example.invalid/artifact\x1b\\Download\x1b]8;;\x1b\\','']+lines
- os.write(1,b'\x1b[?2004h\x1b[2J\x1b[H'+'\r\n'.join(lines).encode())
+ # tmux applies output in order: once the pane has this title, the screen is drawn.
+ title='codex-question-'+str(config['generation'] if config else 0)
+ os.write(1,b'\x1b[?2004h\x1b[2J\x1b[H'+'\r\n'.join(lines).encode()+b'\x1b]2;'+title.encode()+b'\x1b\\')
 def handle(value):
- global draft
+ # The test alone writes config.json. One snapshot of the drawn configuration
+ # decides this whole input, including which generation it closes.
+ global draft,closed
+ current=config
  if value==b'\x1d':
-  config['panel']=False;(root/'config.json').write_text(json.dumps(config));(root/'skipped').touch();render();return
+  closed=current['generation'];(root/'skipped').touch();render();return
  if value!=b'\r':return
- if config['panel']:
-  text='<send_user_message_question_reply>\n'+json.dumps([dict(questionItemId=config['native_id'],question=config['title'],answer=draft)])+'\n</send_user_message_question_reply>'
+ if shown(current):
+  text='<send_user_message_question_reply>\n'+json.dumps([dict(questionItemId=current['native_id'],question=current['title'],answer=draft)])+'\n</send_user_message_question_reply>'
  else:text=draft
  if (root/'wrong-ack').exists():text=text.replace('Accepted answer','Different answer')
  if (root/'queue-answer').exists():
-  (root/'queued').write_text(text);(root/'submitted').write_text(text);draft='';config['panel']=False;(root/'config.json').write_text(json.dumps(config));render();return
- with open(config['transcript'],'a') as f:f.write(json.dumps(dict(type='event_msg',timestamp='2026-10-07T15:01:00Z',payload=dict(type='user_message',message=text)))+'\n')
- (root/'submitted').write_text(text);draft='';config['panel']=False;(root/'config.json').write_text(json.dumps(config));render()
-signal.signal(signal.SIGUSR1,render);render();(root/'agent-pid').write_text(str(os.getpid()))
+  (root/'queued').write_text(text);(root/'submitted').write_text(text);draft='';closed=current['generation'];render();return
+ with open(current['transcript'],'a') as f:f.write(json.dumps(dict(type='event_msg',timestamp='2026-10-07T15:01:00Z',payload=dict(type='user_message',message=text)))+'\n')
+ (root/'submitted').write_text(text);draft='';closed=current['generation'];render()
+def next_input():
+ # SIGUSR1 only leaves a byte on the wakeup pipe, and nothing draws in a signal
+ # handler. Drawing after draining the pipe reads every configuration written
+ # before those signals; a later signal leaves a new byte for the next pass.
+ # Pending input is handled first, against the screen it was typed into.
+ while True:
+  ready=select.select([fd,wake],[],[])[0]
+  if fd in ready:return os.read(fd,65536)
+  os.read(wake,4096);render()
+signal.signal(signal.SIGUSR1,lambda *args:None);render();(root/'agent-pid').write_text(str(os.getpid()))
 try:
  while True:
-  value=read_input(fd)
+  value=next_input()
   if not value:break
   with (root/'received').open('ab') as f:f.write(value)
   buffer+=value
@@ -76,12 +91,27 @@ class CodexAsync(unittest.TestCase):
         self.transcript=self.root/('rollout-'+self.conversation_id+'.jsonl')
         self.transcript.write_text(json.dumps(dict(type='session_meta',payload=dict(id=self.conversation_id)))+'\n')
         self.record['transcript']=str(self.transcript);self.write_record()
-        self.configure()
+        self.generation=0;self.configure()
     def configure(self,panel=False,options=None):
         self.options=['One','Two'] if options is None else options
-        config=dict(title='Which option?',options=self.options,panel=panel,transcript=str(self.transcript),native_id='["request_user_input_async","call_one",0]')
-        (self.root/'config.json').write_text(json.dumps(config));os.kill(self.record['pid'],signal.SIGUSR1)
-        self.wait_for(lambda:('ctrl+] skip' in self.tmux('capture-pane','-p','-t',self.pane))==panel)
+        self.generation+=1
+        config=dict(title='Which option?',options=self.options,panel=panel,generation=self.generation,transcript=str(self.transcript),native_id='["request_user_input_async","call_one",0]')
+        # Replace the whole file: the agent may still be reading the previous one.
+        (self.root/'config.tmp').write_text(json.dumps(config));os.replace(self.root/'config.tmp',self.root/'config.json')
+        os.kill(self.record['pid'],signal.SIGUSR1)
+        # The agent titles the pane after each screen, so once the pane has this
+        # generation's title a matching footer cannot belong to an earlier screen.
+        title='codex-question-'+str(self.generation)
+        drawn=lambda:self.title()==title and ('ctrl+] skip' in self.tmux('capture-pane','-p','-t',self.pane))==panel
+        try:self.wait_for(drawn)
+        except self.failureException:self.fail('fixture timed out: '+self.readiness(title))
+    def title(self,check=True):
+        return self.tmux('display-message','-p','-t',self.pane,'#{pane_title}',check=check).strip()
+    def readiness(self,title):
+        try:os.kill(self.record['pid'],0);alive=True
+        except OSError:alive=False
+        rows=[row[:100] for row in self.tmux('capture-pane','-p','-t',self.pane,check=False).splitlines() if row.strip()]
+        return json.dumps(dict(expected=title,title=self.title(check=False)[:100],agent_alive=alive,footer=any('ctrl+] skip' in row for row in rows),screen=rows[-6:]))
     def append(self,event):
         with self.transcript.open('a') as file:file.write(json.dumps(event)+'\n')
     def request(self):

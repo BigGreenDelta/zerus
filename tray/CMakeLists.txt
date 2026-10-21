@@ -34,6 +34,34 @@ if(MSVC)
 endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Multimedia)
+# Qt translations are built from the reviewed source catalog, never a committed
+# binary. lrelease is provided by qt6-tools (the pinned Qt tools on macOS/Windows).
+get_target_property(ZERUS_QMAKE Qt6::qmake IMPORTED_LOCATION)
+get_filename_component(ZERUS_QT_BIN "${ZERUS_QMAKE}" DIRECTORY)
+find_program(ZERUS_LRELEASE NAMES lrelease6 lrelease HINTS "${ZERUS_QT_BIN}" /usr/lib/qt6/bin)
+if(NOT ZERUS_LRELEASE)
+    message(FATAL_ERROR "Qt lrelease is required (qt6-tools or the pinned Qt tools archive)")
+endif()
+find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+set(ZERUS_RU_QM "${CMAKE_CURRENT_BINARY_DIR}/zerus_ru.qm")
+set(ZERUS_TRANSLATIONS_QRC "${CMAKE_CURRENT_BINARY_DIR}/translations.qrc")
+file(WRITE "${ZERUS_TRANSLATIONS_QRC}"
+    "<RCC><qresource prefix=\"/hgs/translations\"><file alias=\"zerus_ru.qm\">zerus_ru.qm</file></qresource></RCC>")
+# One object target owns both generated files. Sharing a generated catalog
+# through independent AUTORCC targets can race rcc against lrelease, or run
+# lrelease twice while its prepared catalog is still being written.
+set(ZERUS_TRANSLATIONS_CPP "${CMAKE_CURRENT_BINARY_DIR}/qrc_translations.cpp")
+add_custom_command(OUTPUT "${ZERUS_TRANSLATIONS_CPP}" "${ZERUS_RU_QM}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/translations/prepare_catalog.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/translations/zerus_ru.ts" "${CMAKE_CURRENT_BINARY_DIR}/zerus_ru.ts"
+    COMMAND "${ZERUS_LRELEASE}" "${CMAKE_CURRENT_BINARY_DIR}/zerus_ru.ts" -nounfinished -qm "${ZERUS_RU_QM}"
+    COMMAND Qt6::rcc -name translations -o "${ZERUS_TRANSLATIONS_CPP}" "${ZERUS_TRANSLATIONS_QRC}"
+    DEPENDS translations/zerus_ru.ts translations/prepare_catalog.py "${ZERUS_TRANSLATIONS_QRC}" VERBATIM)
+add_library(hgs-translations OBJECT "${ZERUS_TRANSLATIONS_CPP}")
+set_target_properties(hgs-translations PROPERTIES AUTOMOC OFF AUTORCC OFF)
+target_link_libraries(hgs-translations PRIVATE Qt6::Core)
+add_custom_target(zerus-translations)
+add_dependencies(zerus-translations hgs-translations)
 # std::thread сторожа главного потока (MainThreadWatchdog) -- на Linux это -lpthread.
 find_package(Threads REQUIRED)
 include(cmake/Terminal.cmake)
@@ -68,9 +96,14 @@ elseif(APPLE)
     target_link_libraries(hgs-external-file PRIVATE "-framework CoreFoundation" "-framework CoreServices")
 endif()
 
-add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h)
+add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h
+    src/WindowsUpdateTrust.cpp src/WindowsUpdateTrust.h)
 target_include_directories(hgs-updates PUBLIC src)
 target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
+if(WIN32)
+    # WindowsUpdateTrust: CNG for the update manifest, WinVerifyTrust for installers.
+    target_link_libraries(hgs-updates PRIVATE bcrypt wintrust crypt32)
+endif()
 
 # The recorder alone serves the macOS microphone permission suite.
 add_library(hgs-speech-recorder STATIC src/speech/SpeechRecorder.cpp)
@@ -111,6 +144,7 @@ include(cmake/BuildVersion.cmake)
 # builds. Each layer adds Qt modules, so a suite that links the lowest layer
 # covering its code keeps its QTEST_MAIN application type.
 add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/HgsClient.cpp src/FleetState.cpp
+    src/AnalyticsClient.cpp src/AnalyticsData.cpp
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
     src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
     src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp src/TaskBoard.cpp
@@ -142,11 +176,13 @@ add_library(hgs-qrcodegen STATIC vendor/qrcodegen/qrcodegen.cpp)
 target_include_directories(hgs-qrcodegen PUBLIC vendor/qrcodegen)
 
 add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp src/DashboardPage.cpp
+    src/AnalyticsSettings.cpp
     src/MachineFilter.cpp src/ProjectFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
     src/ComposerToolbar.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
     src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
     src/ProcessView.cpp src/TaskRow.cpp src/TasksView.cpp src/TaskDialogs.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp
     src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp src/PhonePairing.cpp
+    src/OpenCodeModels.cpp src/OpenCodeModelPicker.cpp
     # Tray icon decorator (QuietTrayIcon.h): portable, but wrapped around the icon
     # only on macOS; makeTrayIcon() in TrayAgent.cpp explains why not on Linux.
     src/QuietTrayIcon.cpp)
@@ -230,6 +266,7 @@ endif()
 # Qt finalization imports macOS permission plugins selected by our Info.plist.
 # A plain add_executable silently leaves QMicrophonePermission without a backend.
 qt_add_executable(hgs-tray MANUAL_FINALIZATION resources.qrc src/main.cpp src/TrayAgent.cpp)
+target_link_libraries(hgs-tray PRIVATE hgs-translations)
 if(APPLE)
     # LSUIElement живёт в Info.plist; без MACOSX_BUNDLE получится голый исполняемый файл.
     # Icon Composer catalog provides native layers/masking; actool also produces
@@ -245,7 +282,8 @@ if(APPLE)
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "com.hgdev.hgs-tray"
+        # Uninstalled/ad-hoc copies must not replace the installed app's TCC identity.
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.hgdev.hgs-tray.local"
         MACOSX_BUNDLE_ICON_FILE "hgs-zerus-swarm.icns"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/packaging/Info.plist"
     )

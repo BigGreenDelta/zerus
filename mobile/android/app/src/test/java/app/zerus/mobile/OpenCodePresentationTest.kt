@@ -6,6 +6,33 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class OpenCodePresentationTest {
+    @Test fun sessionModelSheetReadsMarksAndTruncation() {
+        val contract = JSONObject(checkNotNull(javaClass.getResourceAsStream("/opencode-provider-catalog.json")).bufferedReader().use { it.readText() })
+        val raw = JSONObject().put("settings_model", "fixture/local").put("settings_change_supported", true)
+            .put("model_options", contract.getJSONObject("row").getJSONArray("model_options")).put("model_options_truncated", true)
+        val settings = SessionDetailsPresentation.settings(raw)
+        assertTrue(settings.modelsTruncated)
+        assertEquals("Groq", settings.models.single { it.id == "groq/groq/compound" }.providerLabel)
+        assertTrue(settings.models.single { it.id == "groq/groq/compound" }.free)
+        assertTrue(settings.models.single { it.id == "keyed/paid-model" }.favorite)
+    }
+
+    @Test fun marksAndTruncationInvalidateTheSnapshotButOtherProvidersKeepTheirPlainChoices() {
+        val option = JSONObject().put("value", "p/model").put("provider", "p").put("favorite", false)
+            .put("effort_options", JSONArray(listOf("native-fast", "high")))
+        val raw = JSONObject().put("agent", "opencode").put("model_options", JSONArray().put(option))
+        val original = SessionDetailsPresentation.settings(raw)
+        assertEquals("p/model", original.models.single().id)
+        assertEquals(listOf("", "high"), SessionDetailsPresentation.effortChoices(original, "p/model", false))
+        assertEquals(listOf("", "native-fast", "high"), SessionDetailsPresentation.effortChoices(original, "p/model", true))
+        option.put("favorite", true)
+        assertNotEquals(original.signature, SessionDetailsPresentation.settings(raw).signature)
+        option.put("favorite", false); raw.put("model_options_truncated", true)
+        assertNotEquals(original.signature, SessionDetailsPresentation.settings(raw).signature)
+        raw.put("agent", "codex").put("model_options", JSONArray().put(JSONObject().put("id", "codex-model").put("label", "Codex")))
+        val plain = SessionDetailsPresentation.settings(raw)
+        assertEquals(listOf("codex-model"), plain.models.map { it.id }); assertEquals("", plain.models.single().provider); assertFalse(plain.modelsTruncated)
+    }
     private val target=Target("computer","opencode/project/local","run","native-session","workspace")
     private fun catalog()=JSONObject().put("agents",JSONArray(listOf("codex","opencode","unknown","opencode")))
         .put("accounts",JSONArray().put(JSONObject().put("id","native-opencode").put("provider","opencode").put("label","Native configuration")

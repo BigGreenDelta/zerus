@@ -93,16 +93,43 @@ bool webLink(const QUrl &url)
         && (url.scheme() == "https" || url.scheme() == "http");
 }
 
-QString customAnswerProblem(const QString &text)
+// Terminal agents read an answer starting with / or ! as a command. OpenCode
+// form answers go through its form reply API instead, so they may.
+bool formReplyCard(const QJsonObject &question)
+{
+    return question.value("source") == "opencode_native" && !question.value("approval").toBool();
+}
+
+QString customAnswerProblem(const QString &text, bool formReply)
 {
     if (text.toUtf8().size() > 4096) return QObject::tr("Keep your custom answer under 4 KiB.");
     if (text.contains('\n') || text.contains('\r')) return QObject::tr("Use one line for a custom answer. Multiline input is available in Terminal.");
     for (const auto ch : text) if (ch.unicode() < 0x20 || (ch.unicode() >= 0x7f && ch.unicode() <= 0x9f))
         return QObject::tr("Remove control characters from your custom answer.");
-    if (text.trimmed().startsWith('/') || text.trimmed().startsWith('!'))
+    if (!formReply && (text.trimmed().startsWith('/') || text.trimmed().startsWith('!')))
         return QObject::tr("Use Terminal for answers starting with / or !.");
     return {};
 }
+
+// Keep a preferred body height while allowing the parent to reserve room for
+// queued input and the composer. A fixed height makes Qt overlap the card's
+// status and action rows when the complete Activity pane is constrained.
+class QuestionPages final : public QStackedWidget {
+public:
+    QSize sizeHint() const override {
+        auto size = QStackedWidget::sizeHint(); size.setHeight(m_preferredHeight); return size;
+    }
+    QSize minimumSizeHint() const override {
+        auto size = QStackedWidget::minimumSizeHint(); size.setHeight(0); return size;
+    }
+    void setBodyHeight(int preferred, int minimum) {
+        if (m_preferredHeight == preferred && minimumHeight() == minimum) return;
+        m_preferredHeight = preferred;
+        setMinimumHeight(minimum); setMaximumHeight(preferred); updateGeometry();
+    }
+private:
+    int m_preferredHeight = 0;
+};
 
 class Choice final : public QFrame {
 public:
@@ -174,8 +201,8 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     m_tabs = new QTabBar; m_tabs->setObjectName("questionTabs");
     m_tabs->setExpanding(false); m_tabs->setDrawBase(false); m_tabs->setUsesScrollButtons(true); m_tabs->setElideMode(Qt::ElideNone);
     layout->addWidget(m_tabs);
-    m_pages = new QStackedWidget; m_pages->setObjectName("questionPages");
-    m_pages->setFixedHeight(0); layout->addWidget(m_pages);
+    m_pages = new QuestionPages; m_pages->setObjectName("questionPages");
+    m_pages->setMaximumHeight(0); layout->addWidget(m_pages);
     m_status = new QLabel; m_status->setObjectName("questionStatus"); m_status->setWordWrap(true); m_status->setTextFormat(Qt::PlainText);
     m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     layout->addWidget(m_status);
@@ -556,10 +583,13 @@ void QuestionCard::rebuild()
         const bool listed = !m_question.value("approval").toBool() || m_question.value("approval_choices").toBool();
         for (const auto &optionValue : question.value("options").toArray()) {
             const auto option = optionValue.toObject();
-            const QString description = option.value("scope") == "broader"
-                ? tr("Applies beyond this request. Asks for confirmation.") : option.value("description").toString();
+            // A broader option keeps its own description as reported, such as the
+            // patterns OpenCode's Always allow saves, and says it asks for confirmation.
+            const bool broader = option.value("scope") == "broader";
+            const QString own = option.value("description").toString(), confirmation = tr("Applies beyond this request. Asks for confirmation.");
+            const QString description = !broader ? own : own.isEmpty() ? confirmation : own + '\n' + confirmation;
             auto *choice = new Choice(form.multi, option.value("label").toString(), description, page,
-                literal || description.isEmpty() ? nullptr : markdownText("questionChoiceDescription", description));
+                literal || broader || description.isEmpty() ? nullptr : markdownText("questionChoiceDescription", description));
             choice->button->setObjectName("questionOption"); choice->button->setProperty("optionId", option.value("id").toString());
             choice->button->setProperty("questionId", form.id); group->addButton(choice->button);
             choice->button->setChecked(answer.options.contains(option.value("id").toString()));
@@ -724,7 +754,7 @@ QJsonArray QuestionCard::answers(bool *valid) const
         // hgs counts the chosen options and an Other answer against the bounds.
         const auto count = selected.size() + (text.isEmpty() ? 0 : 1);
         if ((selected.isEmpty() && text.isEmpty()) || (custom && text.isEmpty())
-            || (!form.multi && selected.size() > 1) || !customAnswerProblem(text).isEmpty() || form.id.isEmpty()
+            || (!form.multi && selected.size() > 1) || !customAnswerProblem(text, formReplyCard(m_question)).isEmpty() || form.id.isEmpty()
             || (form.minItems > 0 && count < form.minItems) || (form.maxItems > 0 && count > form.maxItems)) complete = false;
         result.append(QJsonObject{{"question_id", form.id}, {"selected_option_ids", selected}, {"text", text}});
     }
@@ -789,7 +819,7 @@ void QuestionCard::updateControls()
         const bool custom = form.allowOther && (form.options.isEmpty() || answer.other);
         const QString text = custom ? answer.text.trimmed() : QString();
         const bool filled = (!answer.options.isEmpty() || !text.isEmpty())
-            && (!custom || !text.isEmpty()) && customAnswerProblem(text).isEmpty();
+            && (!custom || !text.isEmpty()) && customAnswerProblem(text, formReplyCard(m_question)).isEmpty();
         if (filled) ++answered;
         m_tabs->setTabText(i, (filled ? QStringLiteral("✓ ") : QString()) + m_tabs->tabData(i).toString());
     }
@@ -808,12 +838,12 @@ void QuestionCard::updateControls()
     if (notice.isEmpty()) for (const auto &form : m_forms) {
         const auto answer = draft.answers.value(form.id);
         if (!form.allowOther || (!form.options.isEmpty() && !answer.other)) continue;
-        notice = customAnswerProblem(answer.text.trimmed());
+        notice = customAnswerProblem(answer.text.trimmed(), formReplyCard(m_question));
         if (!notice.isEmpty()) break;
     }
     if (notice.isEmpty() && confirming)
-        notice = tr("“%1” changes Claude's permissions beyond this request. Select Confirm to send it.").arg(broader);
-    if (notice.isEmpty() && choices) notice = tr("Review the request, then choose one of Claude's options.");
+        notice = tr("“%1” changes the agent's permissions beyond this request. Select Confirm to send it.").arg(broader);
+    if (notice.isEmpty() && choices) notice = tr("Review the request, then choose one of the agent's options.");
     if (notice.isEmpty() && planReview && !complete) notice = tr("Review the plan, then choose how the agent continues.");
     if (notice.isEmpty()) notice = approval?tr("Approval applies only to this command. Review it before continuing."):
         optional ? tr("The agent can continue. Answer when ready or skip this question.") :
@@ -847,13 +877,10 @@ void QuestionCard::sizeToContent()
     const int editorHeight = editor && !editor->isHidden()
         ? qMax(editor->minimumHeight(), editor->sizeHint().height()) + page->layout()->spacing() : 0;
     layout()->activate();
-    const int chrome = layout()->totalHeightForWidth(width()) - m_pages->height();
+    const int chrome = layout()->totalHeightForWidth(width()) - m_pages->sizeHint().height();
     const int limit = parentWidget() ? qMin(600, parentWidget()->height() * 60 / 100) : 600;
     const int bodyHeight = qMin(contentHeight + editorHeight, qMax(editorHeight + 40, limit - chrome));
-    if (m_pages->height() != bodyHeight) {
-        m_pages->setFixedHeight(bodyHeight);
-        updateGeometry();
-    }
+    static_cast<QuestionPages *>(m_pages)->setBodyHeight(bodyHeight, qMin(bodyHeight, editorHeight + 40));
 }
 
 bool QuestionCard::event(QEvent *event)

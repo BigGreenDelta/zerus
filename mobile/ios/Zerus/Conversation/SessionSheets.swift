@@ -8,13 +8,16 @@ struct SessionActionSheet: View {
     let session: Session
     let operation: String
     @State private var tag = ""
+    @State private var notificationPreference: SessionNotificationPreference?
 
     var body: some View {
         let model = app.conversation!
         let target = session.target
         let parts = target.session.components(separatedBy: "/")
-        let args: JSONObject = operation == "rename" ? ["new_name": .string(parts.prefix(2).joined(separator: "/") + "/" + tag)]
+        let args: JSONObject = operation == SessionNotificationPreferences.operation ? ["muted":.bool(notificationPreference?.muted != true),"expected_revision":.int(notificationPreference?.revision ?? -1)]
+            : operation == "rename" ? ["new_name": .string(parts.prefix(2).joined(separator: "/") + "/" + tag)]
             : operation == "fork" ? ["tag": .string(tag)] : [:]
+        let label = operation == SessionNotificationPreferences.operation ? SessionNotificationPreferences.label(notificationPreference) : ActionText.label(operation,target)
         let reason: String = model.actionReason(target, operation).nonEmpty ?? SessionControlPresentation.reason(target, operation, model.activity).nonEmpty ?? {
             do {
                 _ = try SessionActionPolicies.arguments(operation, args)
@@ -35,12 +38,12 @@ struct SessionActionSheet: View {
                     if !reason.isEmpty { Text(reason) }
                 }
             }
-            .navigationTitle("\(ActionText.label(operation, target)) \(session.title)?")
+            .navigationTitle(operation == SessionNotificationPreferences.operation ? "\(label) / \(session.title)" : "\(label) \(session.title)?")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(ActionText.label(operation, target), role: ["terminate", "forget"].contains(operation) ? .destructive : nil) {
+                    Button(label, role: ["terminate", "forget"].contains(operation) ? .destructive : nil) {
                         app.flushPrivateState()
                         model.sessionAction(target, operation, args)
                         dismiss()
@@ -54,10 +57,14 @@ struct SessionActionSheet: View {
         .onAppear {
             if operation == "rename" && parts.count == 3 { tag = parts[2] }
         }
+        .onChange(of:model.revision,initial:true) {
+            if notificationPreference == nil && model.activityVerified { notificationPreference = SessionNotificationPreferences.parse(model.activity,target) }
+        }
     }
 
     static func explanation(_ operation: String, _ target: Target) -> String {
         switch operation {
+        case SessionNotificationPreferences.operation: "Applies to this conversation on all devices. Unread replies and pending requests stay unchanged. Unmuting does not replay earlier notifications."
         case "pause": "Pause keeps the exact native conversation for Resume. Open network connections, child processes and unsent terminal input are not kept."
         case "resume": "Start the agent again with its saved native conversation."
         case "archive": "Move this saved session to Archive. Your private drafts stay on this phone."
@@ -82,6 +89,7 @@ struct NativeSettingsSheet: View {
     @State private var selectedModel = ""
     @State private var selectedEffort = ""
     @State private var effortPage = false
+    @State private var modelQuery = ""
 
     var body: some View {
         let model = app.conversation!
@@ -132,14 +140,27 @@ struct NativeSettingsSheet: View {
                         .disabled(!(effortChoices.count > 1 || !selectedEffort.isEmpty))
                         .accessibilityLabel("Choose effort, \(effortLabel)")
                     }
-                    Section("Model") {
-                        ForEach(snapshot.models, id: \.id) { option in
-                            row(option.label, selected: selectedModel == option.id) {
-                                selectedModel = option.id
-                                selectedEffort = snapshot.keptEffort(selectedEffort, model: option.id, effortFeature: effortFeature)
+                    if snapshot.models.contains(where: { !$0.provider.isEmpty }) {
+                        let models = snapshot.models.map { option in
+                            OpenCodeModel(value: option.id, label: option.label, provider: option.provider, providerLabel: option.providerLabel,
+                                free: option.free, favorite: option.favorite, isDefault: option.isDefault)
+                        }
+                        OpenCodeModelSections(models: OpenCodeCatalog.filter(models, query: modelQuery), selected: selectedModel) { value in
+                            selectedModel = value
+                            selectedEffort = snapshot.keptEffort(selectedEffort, model: value, effortFeature: effortFeature)
+                        }
+                    } else {
+                        Section("Model") {
+                            ForEach(snapshot.models, id: \.id) { option in
+                                row(option.label, selected: selectedModel == option.id) {
+                                    selectedModel = option.id
+                                    selectedEffort = snapshot.keptEffort(selectedEffort, model: option.id, effortFeature: effortFeature)
+                                }
                             }
                         }
                     }
+                    let notice = OpenCodeCatalog.truncationMessage(models: snapshot.modelsTruncated, providers: false)
+                    if !notice.isEmpty { Section { Text(notice).font(.footnote).foregroundStyle(Theme.muted) } }
                 }
                 Section {
                     Text(Self.applyText(snapshot.applyWhen)).font(.footnote).foregroundStyle(Theme.muted)
@@ -147,6 +168,7 @@ struct NativeSettingsSheet: View {
                     if !reason.isEmpty { Text(reason).font(.footnote).foregroundStyle(Theme.amber) }
                 }
             }
+            .modifier(OpenCodeModelSearch(enabled: !effortPage && snapshot.models.count > 8 && snapshot.models.contains(where: { !$0.provider.isEmpty }), query: $modelQuery))
             .navigationTitle(effortPage ? "Effort" : "Select model")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

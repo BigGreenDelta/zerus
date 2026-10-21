@@ -225,9 +225,17 @@ pub(crate) fn current(config: &Config, args: &[String]) -> cli::Result<i32> {
         [flag] if flag == "--json" => true,
         _ => return Err(Error::new(1, "usage: hgs self [--json]")),
     };
-    let record = state::session_graph::caller_record().ok_or_else(|| {
-        Error::new(1, "hgs self: no live Zerus session owns this process")
-    })?;
+    let (reference, provider) = caller(config)?
+        .ok_or_else(|| Error::new(1, "hgs self: no live Zerus session owns this process"))?;
+    print(&reference, as_json, json!({"provider": provider}))
+}
+
+/// The reference and provider of the live agent whose process runs this CLI,
+/// under its current name; `None` when no agent's ancestry owns it.
+fn caller(config: &Config) -> cli::Result<Option<(Reference, String)>> {
+    let Some(record) = state::session_graph::caller_record() else {
+        return Ok(None);
+    };
     let text = |key: &str| record[key].as_str().unwrap_or_default().to_owned();
     let reference = Reference {
         machine: swarm::local_node_id(config).map_err(|e| Error::new(1, e.to_string()))?,
@@ -238,7 +246,92 @@ pub(crate) fn current(config: &Config, args: &[String]) -> cli::Result<i32> {
         archive: String::new(),
         agent: String::new(),
     };
-    print(&reference, as_json, json!({"provider": text("agent")}))
+    Ok(Some((reference, text("agent"))))
+}
+
+/// The text a guarded send of the calling agent delivers: `text` inside one
+/// envelope naming the sending session, so the recipient can tell another
+/// agent declared it and inspect or answer that session. The same text and
+/// unchanged sender metadata give the same bytes. A rename or resumed run
+/// changes that metadata: an old request ID then fails the ordinary content
+/// guard, rather than gaining permission to resend uncertain input.
+pub(crate) fn sender_envelope(text: &str) -> Option<String> {
+    // Leave an oversized body to the unchanged input validator; do not expand
+    // a rejected multi-megabyte JSON text into XML first.
+    if text.len() > 64 * 1024 {
+        return None;
+    }
+    let config = Config::load().ok()?;
+    let (reference, _) = caller(&config).ok()??;
+    let uri = reference.uri();
+    Reference::parse(&uri).ok()?;
+    Some(envelope(&reference.name, &reference.host, &uri, text))
+}
+
+fn envelope(name: &str, host: &str, uri: &str, text: &str) -> String {
+    let body = |value: &str| value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let attribute = |value: &str| body(value).replace('"', "&quot;");
+    format!(
+        "<zerus-message from=\"{}\" host=\"{}\" reference=\"{}\">\n{}\n</zerus-message>",
+        attribute(name),
+        attribute(host),
+        attribute(uri),
+        body(text)
+    )
+}
+
+/// Decode only the complete, bounded XML subset hgs emits. The metadata is a
+/// declaration, not authentication: anyone can type this frame. Never use it
+/// as authority to route input or bypass the ordinary target/delivery guards.
+pub(crate) fn sender_message(text: &str) -> Option<(String, String, String)> {
+    if text.len() > 64 * 1024 {
+        return None;
+    }
+    fn attribute(rest: &str) -> Option<(String, &str)> {
+        let (value, rest) = rest.split_once('"')?;
+        Some((xml_text(value)?, rest))
+    }
+    let rest = text.strip_prefix("<zerus-message from=\"")?;
+    let (name, rest) = attribute(rest)?;
+    let (host, rest) = attribute(rest.strip_prefix(" host=\"")?)?;
+    let (uri, rest) = attribute(rest.strip_prefix(" reference=\"")?)?;
+    let body = rest.strip_prefix(">\n")?.strip_suffix("\n</zerus-message>")?;
+    let reference = Reference::parse(&uri).ok()?;
+    if reference.name != name || reference.host != host {
+        return None;
+    }
+    Some((name, uri, xml_text(body)?))
+}
+
+/// Named entities only, decoded once. No DTD, numeric references, nested
+/// markup, bare ampersands or invalid XML characters can enter the text.
+fn xml_text(value: &str) -> Option<String> {
+    let mut decoded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(at) = rest.find('&') {
+        let plain = &rest[..at];
+        if !xml_plain(plain) {
+            return None;
+        }
+        decoded.push_str(plain);
+        let entity = &rest[at..];
+        let (encoded, character) = [("&amp;", '&'), ("&lt;", '<'), ("&gt;", '>'), ("&quot;", '"')]
+            .into_iter()
+            .find(|(encoded, _)| entity.starts_with(*encoded))?;
+        decoded.push(character);
+        rest = &entity[encoded.len()..];
+    }
+    if !xml_plain(rest) {
+        return None;
+    }
+    decoded.push_str(rest);
+    Some(decoded)
+}
+
+fn xml_plain(value: &str) -> bool {
+    !value.contains('<') && value.chars().all(|character| {
+        matches!(character, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}')
+    })
 }
 pub(crate) fn inspect(config: &Config, reference: &Reference) -> cli::Result<Value> {
     if swarm::local_node_id(config).map_err(|e| Error::new(1, e.to_string()))? != reference.machine
@@ -279,5 +372,68 @@ mod tests {
         ] {
             assert!(Reference::parse(&(uri.clone() + tail)).is_err(), "{tail}");
         }
+    }
+
+    #[test]
+    fn the_sender_envelope_names_an_exact_copyable_reference() {
+        let reference = Reference {
+            machine: "11111111-1111-4111-8111-111111111111".into(),
+            host: "arch".into(),
+            name: "claude/p/\"<review>\" & co".into(),
+            conversation: "conversation".into(),
+            run: "run".into(),
+            archive: String::new(),
+            agent: String::new(),
+        };
+        let uri = reference.uri();
+        let text = envelope(&reference.name, &reference.host, &uri, "Line one.\n\nLine two.");
+        let encoded_uri = uri.replace('&', "&amp;");
+        assert_eq!(text, format!("<zerus-message from=\"claude/p/&quot;&lt;review&gt;&quot; &amp; co\" \
+            host=\"arch\" reference=\"{encoded_uri}\">\nLine one.\n\nLine two.\n</zerus-message>"));
+        let (sender, copied, body) = sender_message(&text).unwrap();
+        assert_eq!(Reference::parse(&copied).unwrap().name, reference.name);
+        assert_eq!((sender, copied, body), (reference.name.clone(), uri.clone(), "Line one.\n\nLine two.".into()));
+        assert_eq!(envelope(&reference.name, &reference.host, &uri, ""), envelope(&reference.name, "arch", &uri, ""));
+    }
+
+    #[test]
+    fn sender_xml_preserves_literal_text_without_expanding_it_twice() {
+        let uri = "zerus://session?machine=11111111-1111-4111-8111-111111111111&host=arch&name=claude%2Fp%2Freview&conversation=c&run=r";
+        let body = " \r\n雪 & <tag> \"quoted\" </zerus-message> &amp; &lt; &#65;\n ";
+        let frame = envelope("claude/p/review", "arch", uri, body);
+        assert!(frame.contains("&lt;/zerus-message&gt;"));
+        assert!(frame.contains("&amp;amp; &amp;lt; &amp;#65;"));
+        assert_eq!(sender_message(&frame), Some(("claude/p/review".into(), uri.into(), body.into())));
+        assert_eq!(sender_message(&envelope("claude/p/review", "arch", uri, "")),
+            Some(("claude/p/review".into(), uri.into(), "".into())));
+        assert_eq!(frame, envelope("claude/p/review", "arch", uri, body));
+    }
+
+    #[test]
+    fn sender_xml_refuses_malformed_framing_entities_or_declared_routes() {
+        let uri = "zerus://session?machine=11111111-1111-4111-8111-111111111111&host=arch&name=claude%2Fp%2Freview&conversation=c&run=r";
+        let frame = envelope("claude/p/review", "arch", uri, "BODY");
+        for body in ["raw & value", "<nested/>", "</zerus-message>", "<!DOCTYPE x>", "&#65;", "&#x41;", "&unknown;", "&apos;", "\u{0}", "\u{FFFF}"] {
+            assert!(sender_message(&frame.replace("BODY", body)).is_none(), "{body:?}");
+        }
+        for invalid in [
+            frame.replace(" from=", " extra=\"x\" from="),
+            frame.replace(" host=\"arch\"", " host=\"other\""),
+            frame.replace("from=\"claude/p/review\"", "from=\"claude/p/other\""),
+            frame.replace(" reference=", " reference=\"zerus://invalid\" ignored="),
+            frame.replace("&amp;host=", "&host="),
+            frame.replace("&amp;run=r", "&amp;run=r&amp;run=duplicate"),
+            frame.replace("\">\nBODY", "\">BODY"),
+            frame.replace("\n</zerus-message>", "</zerus-message>"),
+            frame.replace("\n</zerus-message>", "…"),
+            format!("{frame}\ntrailing"),
+            format!("{frame}{frame}"),
+            format!("<!DOCTYPE x>{frame}"),
+            envelope("claude/p/review", "arch", "https://example.invalid", "BODY"),
+            envelope("claude/p/review", "arch", "zerus://not-a-session", "BODY"),
+        ] {
+            assert!(sender_message(&invalid).is_none(), "{invalid}");
+        }
+        assert!(sender_message(&envelope("claude/p/review", "arch", uri, &"x".repeat(64 * 1024))).is_none());
     }
 }

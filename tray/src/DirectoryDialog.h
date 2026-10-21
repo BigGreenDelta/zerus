@@ -8,7 +8,6 @@ class QLineEdit;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
-class QToolButton;
 
 // Native folder selection locally; the CLI browser accesses a peer over SSH.
 class DirectoryDialog : public QDialog {
@@ -26,6 +25,7 @@ private:
     void navigate(const QString &path);
     void newFolder();
     void newFolderDialog();
+    void sizeInlineFolder();
     void cancelInlineFolder();
     void createFolder(const QString &path);
     void setCreating(bool creating);
@@ -36,11 +36,13 @@ private:
     bool m_creating = false;
     QString m_createdPath, m_creationError;
     QListWidgetItem *m_inlineItem = nullptr;
+    int m_inlineListMinimumHeight = 0;
+    QSize m_inlineDialogMinimumSize;
     QLineEdit *m_inlineName = nullptr;
     QLineEdit *m_path, *m_filter;
     QListWidget *m_list;
     QCheckBox *m_hidden;
     QLabel *m_status;
     QPushButton *m_choose, *m_newFolder, *m_up, *m_home, *m_go, *m_cancel;
-    QToolButton *m_newFolderOptions;
+    QPushButton *m_newFolderOptions;
 };

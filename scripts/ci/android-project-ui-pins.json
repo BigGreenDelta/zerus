@@ -1,0 +1,93 @@
+{
+  "hosted_images": [
+    {
+      "image": "ubuntu-24.04",
+      "java_home_variable": "JAVA_HOME_17_X64",
+      "jdk": "17.0.20.1+1",
+      "readme_git_blob": "e627f14a3702c8c01ea2cc3ed3a7eae6b1941da5",
+      "readme_sha256": "3911b4bc1aa423be7b7469a75f3093f51306c02f2638f2a8b4f5ed31f3ffe791",
+      "readme_url": "https://github.com/actions/runner-images/blob/ubuntu24/20261012.334/images/ubuntu/Ubuntu2404-Readme.md",
+      "release_target_commit": "7e7dc1bcc0ef464e5e315a2b4c33609590c6cffe",
+      "release_url": "https://github.com/actions/runner-images/releases/tag/ubuntu24/20261012.334",
+      "runner_summary_jdk": "17.0.20+1",
+      "scope": "Runner release metadata binds the selected base/build; actual bounded JDK release text is retained by admission. Vendor spelling is not inferred from the failed previous job.",
+      "sdk": {
+        "build_tools": "36.0.0",
+        "command_line_tools": "12.0",
+        "platform": "android-36",
+        "platform_tools": "37.0.1"
+      },
+      "version": "20261012.334.1"
+    },
+    {
+      "image": "ubuntu-24.04",
+      "java_home_variable": "JAVA_HOME_17_X64",
+      "jdk": "17.0.20.1+1",
+      "readme_git_blob": "52bec860302a71d5808c020cec996bf6e0491111",
+      "readme_sha256": "b34e8e11c5a3a4cd034d06823c10a6b47549e6e7995de13ff208a9ad9abc83a6",
+      "readme_url": "https://github.com/actions/runner-images/blob/ubuntu24/20261018.339/images/ubuntu/Ubuntu2404-Readme.md",
+      "release_target_commit": "b4067e48bd9bd803e958bfe1503ea0a06a3a127f",
+      "release_url": "https://github.com/actions/runner-images/releases/tag/ubuntu24/20261018.339",
+      "runner_summary_jdk": "17.0.20+1",
+      "scope": "Runner release metadata binds the selected base/build; actual bounded JDK release text is retained by admission. Vendor spelling is not inferred from the failed previous job.",
+      "sdk": {
+        "build_tools": "36.0.0",
+        "command_line_tools": "12.0",
+        "platform": "android-36",
+        "platform_tools": "37.0.1"
+      },
+      "version": "20261018.339.1"
+    }
+  ],
+  "jdk_release": {
+    "archive_sha256": "3808d1d15e3ec6bd5b84057fb5d84c33d8a1536a258146bcea2e603fc726e08e",
+    "build": 1,
+    "build_ref": "https://github.com/adoptium/temurin-build/commit/e6ba7dec3d07654074559310376a3ae89da5f4ac",
+    "hosted_release_sha256": "973f28729da43962dfba2e39b2a27ab736122f3a1bf829e06abfbde2a731c711",
+    "major": 17,
+    "metadata_sha256": "4f21ef9c32468160de6ac6dd6707d8637455bae067b11f322ffcd1b7a43f7280",
+    "metadata_url": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_linux_hotspot_17.0.20.1_1.tar.gz.json",
+    "minor": 0,
+    "patch": 1,
+    "release_url": "https://github.com/adoptium/temurin17-binaries/releases/tag/jdk-17.0.20.1%2B1",
+    "scm_ref": "jdk-17.0.20.1+1_adopt",
+    "scope": "Exact vendor release metadata and hosted release fields include patch1. Runner summary tables abbreviate it; no archive bytes were downloaded or installed-source closure claimed.",
+    "security": 20,
+    "version": "17.0.20.1+1"
+  },
+  "packages": {
+    "emulator": {
+      "archive": {
+        "bytes": 349654171,
+        "checksum": "cd7362ea55dfb86a418958138dc396e74165dd01",
+        "checksum_type": "sha1",
+        "url": "https://dl.google.com/android/repository/emulator-linux_x64-16428233.zip"
+      },
+      "channel": "channel-0",
+      "metadata": {
+        "bytes": 377036,
+        "sha256": "9c6014fd13f460b2eff2a241f1fa4f8881a8a2c4ed8c2a6a2886697c660b4af8",
+        "url": "https://dl.google.com/android/repository/repository2-1.xml"
+      },
+      "revision": "37.2.12"
+    },
+    "system-images;android-35;google_apis;x86_64": {
+      "archive": {
+        "bytes": 1738815903,
+        "checksum": "0103e6dab21290c4b9d16550a3ce99476f884eef",
+        "checksum_type": "sha1",
+        "url": "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-35_r09.zip"
+      },
+      "channel": "channel-0",
+      "metadata": {
+        "bytes": 200144,
+        "sha256": "d48bd8404b8d5ab42d84cc0907dfb9e55c8a50194bb07c8a864c331375dd8b3a",
+        "url": "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-1.xml"
+      },
+      "revision": "9.0.0"
+    }
+  },
+  "schema": 1,
+  "scope": "Official stable metadata selection; archive bytes are fetched by sdkmanager only on the disposable hosted job, not by source preparation. Installed package revisions and actual tool/image SHA-256 identities are checked separately. No mapping of old development-host platform-tools binaries is claimed.",
+  "selected_date": "2026-10-20"
+}

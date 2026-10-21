@@ -187,6 +187,12 @@ fn lookup(config: &Config, id: &str) -> Result<(Profile, PathBuf, bool)> {
         .clone();
     Ok((profile, profile_home(config, id), false))
 }
+/// Resolve a hook health target without inspecting credentials or running a provider.
+pub(crate) fn hook_profile(config: &Config, id: &str) -> Result<(String, PathBuf)> {
+    let (profile, path, _) = lookup(config, id)?;
+    Ok((profile.provider, path))
+}
+
 fn default_label(provider: &str) -> &'static str {
     if provider=="opencode" {return "Native OpenCode configuration";}
     if provider == "dsh" {
@@ -311,7 +317,7 @@ fn list(config: &Config) -> Result<Value> {
                 row["install_reason"] = json!(reason);
             }
             let models = crate::state::opencode::catalog(None);
-            for key in ["model_options", "settings_model", "catalog_state", "catalog_reason", "catalog_at"] {
+            for key in ["model_options", "model_options_truncated", "providers", "providers_truncated", "settings_model", "catalog_state", "catalog_reason", "catalog_at"] {
                 row[key] = models[key].clone();
             }
             row
@@ -323,6 +329,11 @@ fn list(config: &Config) -> Result<Value> {
         row["is_default"] = json!(row["id"].as_str() == Some(catalog.defaults.get(provider).map(String::as_str).unwrap_or(&format!("native-{provider}"))));
         let mode = catalog.permission_modes.get(row["id"].as_str().unwrap_or("")).map(String::as_str).unwrap_or("provider");
         permission_status::describe(config, row, mode);
+    }
+    // The connector forwards at most 128 KiB of accounts; this row keeps within 32 KiB.
+    #[cfg(unix)]
+    for row in rows.iter_mut().filter(|r| r["id"] == "native-opencode" && r["model_options"].is_array()) {
+        crate::state::opencode::fit_row(row, crate::state::opencode::ROW_BUDGET);
     }
     let (removed, visible): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| {
         catalog
@@ -491,6 +502,26 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             #[cfg(not(unix))]
             return Err(Error::new(2,platform::LOCAL_SESSIONS_UNSUPPORTED));
         },
+        "models"=>{
+            if id!="native-opencode" {return Err(Error::new(1,"Only the native OpenCode account lists OpenCode models"));}
+            // A dangling --location is an empty folder, refused like any other relative one.
+            #[cfg(unix)]
+            {let location=args.iter().position(|x|x=="--location").map(|i|PathBuf::from(args.get(i+1).map(String::as_str).unwrap_or("")));println!("{}",crate::state::opencode::models(location.as_deref()).map_err(|e|Error::new(1,e))?);}
+            #[cfg(not(unix))]
+            return Err(Error::new(2,platform::LOCAL_SESSIONS_UNSUPPORTED));
+        },
+        "favorite"=>{
+            if id!="native-opencode" {return Err(Error::new(1,"Only the native OpenCode account has favorite models"));}
+            let model=arg(args,"--model").ok_or_else(||Error::new(1,"Choose --model PROVIDER/MODEL"))?;
+            let favorite=match arg(args,"--favorite") {Some("on")=>true,Some("off")=>false,_=>return Err(Error::new(1,"Choose --favorite on or off"))};
+            let request=arg(args,"--request-id").ok_or_else(||Error::new(1,"A favorite change needs --request-id UUID"))?;
+            crate::state::opencode::validate_favorite(model,request).map_err(|e|Error::new(1,e))?;
+            if dry {println!("{}",json!({"dry_run":true,"model":model,"favorite":favorite}));return Ok(0);}
+            #[cfg(unix)]
+            {let _lock=locked(config)?;println!("{}",crate::state::opencode::set_favorite(&config.dir,model,favorite,request).map_err(|e|Error::new(1,e))?);}
+            #[cfg(not(unix))]
+            {return Err(Error::new(2,platform::LOCAL_SESSIONS_UNSUPPORTED));}
+        },
         "default"=>{
             if id.is_empty() {println!("{}",list(config)?);return Ok(0);}
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
@@ -587,7 +618,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             }
             return Ok(code);
         },
-        _=>return Err(Error::new(1,"usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME | rm ID | login ID")),
+        _=>return Err(Error::new(1,"usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME | rm ID | login ID | favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID | models native-opencode [--location DIR]")),
     }
     Ok(0)
 }

@@ -327,7 +327,7 @@ public enum ConversationDisplayCache {
     public static func decode(_ data: Data) -> Decoded? {
         guard let snapshot = try? JSONDecoder().decode(ConversationSnapshot.self, from: data), let raw = snapshot.raw.object,
               snapshot.events.count <= 500 else { return nil }
-        return Decoded(raw: raw, events: snapshot.events, truncated: snapshot.truncated || raw.bool("mobile_history_truncated"))
+        return Decoded(raw: raw, events: snapshot.events.map(ActivityNotices.cached), truncated: snapshot.truncated || raw.bool("mobile_history_truncated"))
     }
 }
 
@@ -384,15 +384,17 @@ public struct CachedHistoryPage: Codable, Hashable, Sendable {
     public var complete: Bool
     public var indexing: Bool
     public var truncated: Bool
+    // Optional decoding preserves old encrypted pages; absent coverage is zero.
+    public var projectionApplied: Int64?
 
     public init(_ page: HistoryPage) {
         self.init(target: page.target, epoch: page.epoch, events: page.events, before: page.before, after: page.after, hasBefore: page.hasBefore,
                   hasAfter: page.hasAfter, latestIncoming: page.latestIncoming, totalIncoming: page.totalIncoming, complete: page.complete,
-                  indexing: page.indexing, truncated: page.truncated)
+                  indexing: page.indexing, truncated: page.truncated, projectionApplied: page.projectionApplied)
     }
 
     public init(target: Target, epoch: String, events: [Event], before: String?, after: String?, hasBefore: Bool, hasAfter: Bool,
-                latestIncoming: Int64?, totalIncoming: Int64?, complete: Bool, indexing: Bool, truncated: Bool) {
+                latestIncoming: Int64?, totalIncoming: Int64?, complete: Bool, indexing: Bool, truncated: Bool, projectionApplied: Int64 = 0) {
         self.target = target
         self.epoch = epoch
         self.events = events
@@ -405,16 +407,18 @@ public struct CachedHistoryPage: Codable, Hashable, Sendable {
         self.complete = complete
         self.indexing = indexing
         self.truncated = truncated
+        self.projectionApplied = projectionApplied
     }
 
     /// Strict decoding: a foreign scope or a non-canonical row is a miss.
     public func page(for target: Target) throws -> HistoryPage {
         func require(_ condition: Bool) throws { if !condition { throw ZerusError.mismatch("Saved history page is invalid.") } }
+        try require((projectionApplied ?? 0) >= 0)
         try require(self.target == target && !epoch.isEmpty && epoch.count <= 512 && events.count <= 100)
         try require(events.allSatisfy { $0.historyEpoch == epoch && !$0.historyId.isEmpty && !$0.historyCursor.isEmpty })
         for cursor in [before, after].compactMap({ $0 }) { try require(!cursor.isEmpty && cursor.count <= 8192) }
-        return HistoryPage(target: target, epoch: epoch, events: events, before: before, after: after, hasBefore: hasBefore, hasAfter: hasAfter,
-                           latestIncoming: latestIncoming, totalIncoming: totalIncoming, complete: complete, indexing: indexing, truncated: truncated)
+        return HistoryPage(target: target, epoch: epoch, events: events.map(ActivityNotices.cached), before: before, after: after, hasBefore: hasBefore, hasAfter: hasAfter,
+                           latestIncoming: latestIncoming, totalIncoming: totalIncoming, complete: complete, indexing: indexing, truncated: truncated, projectionApplied: projectionApplied ?? 0)
     }
 
     static func slice(_ window: HistoryWindow, _ start: Int, _ end: Int) -> CachedHistoryPage? {
@@ -422,7 +426,7 @@ public struct CachedHistoryPage: Codable, Hashable, Sendable {
         guard let first = rows.first, let last = rows.last else { return nil }
         let page = CachedHistoryPage(target: window.target, epoch: window.epoch, events: rows, before: first.historyCursor, after: last.historyCursor,
                                      hasBefore: window.hasBefore || start > 0, hasAfter: window.hasAfter || end < window.events.count,
-                                     latestIncoming: nil, totalIncoming: nil, complete: false, indexing: false, truncated: true)
+                                     latestIncoming: nil, totalIncoming: nil, complete: false, indexing: false, truncated: true, projectionApplied: window.projectionApplied)
         return rows.reduce(0, { $0 + $1.approximateBytes }) < 900 * 1024 ? page : nil
     }
 

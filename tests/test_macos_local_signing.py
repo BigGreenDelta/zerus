@@ -71,6 +71,41 @@ class LocalSigning(unittest.TestCase):
         for selector in (DEVELOPER_ID[0].lower(), DEVELOPER_ID[1]):
             self.assertEqual(sign.select_identity([DEVELOPER_ID, OTHER_TEAM], None, selector), DEVELOPER_ID[0])
 
+    def test_local_identifier_is_promoted_only_with_the_verified_certificate(self):
+        with tempfile.TemporaryDirectory(prefix="zerus-local-identity-") as temporary:
+            root = Path(temporary)
+            app = root / "staged/hgs-tray.app"
+            executable = app / "Contents/MacOS/hgs-tray"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"\xcf\xfa\xed\xfe")
+            plist = app / "Contents/Info.plist"
+            original = plistlib.dumps({"CFBundleIdentifier": "com.hgdev.hgs-tray.local", "CFBundleExecutable": "hgs-tray"})
+            installed = root / "installed.app"
+            for failure in ("missing-key", "codesign", "continuity", None):
+                with self.subTest(failure=failure):
+                    plist.write_bytes(original)
+                    def execute(*args):
+                        self.assertEqual(plistlib.loads(plist.read_bytes())["CFBundleIdentifier"], sign.BUNDLE_ID)
+                        if failure == "codesign":
+                            raise subprocess.CalledProcessError(3, args, stderr="synthetic key failure")
+                    with mock.patch.object(sign, "installed_identity", return_value=INSTALLED), \
+                            mock.patch.object(sign, "identities", return_value=[] if failure == "missing-key" else [DEVELOPER_ID]), \
+                            mock.patch.object(sign, "run", side_effect=execute) as commands, \
+                            mock.patch.object(sign, "details", return_value=INSTALLED), \
+                            mock.patch.object(sign, "requirement", return_value='identifier "com.hgdev.hgs-tray"'), \
+                            mock.patch.object(sign, "verify_continuity", side_effect=ValueError("incompatible") if failure == "continuity" else None) as continuity:
+                        if failure:
+                            with self.assertRaises(ValueError):
+                                sign.sign(app, installed)
+                            self.assertEqual(plist.read_bytes(), original, "failed preparation keeps the local privacy identity")
+                            if failure == "missing-key":
+                                commands.assert_not_called()
+                        else:
+                            with contextlib.redirect_stdout(io.StringIO()):
+                                sign.sign(app, installed)
+                            self.assertEqual(plistlib.loads(plist.read_bytes())["CFBundleIdentifier"], sign.BUNDLE_ID)
+                            continuity.assert_called_once_with(app, installed)
+
     def test_continuity_requires_both_designated_requirements(self):
         for fail_at in (0, 1, None):
             calls = []
@@ -96,23 +131,35 @@ class LocalSigning(unittest.TestCase):
             installed = home / "Applications/hgs-tray.app/Contents/MacOS/hgs-tray"
             installed.parent.mkdir(parents=True)
             installed.write_bytes(b"previous installed application")
+            raw = tray / "build/hgs-tray.app/Contents/Info.plist"
+            raw.parent.mkdir(parents=True)
+            original = plistlib.dumps({"CFBundleIdentifier": sign.LOCAL_BUNDLE_ID})
+            raw.write_bytes(original)
+            stage_root = root / "temporary"
+            stage_root.mkdir()
             shutil.copy2(ROOT / "tray/install.sh", tray / "install.sh")
             # Exercise the installer boundary: failed signing must precede even
             # replacing the application or writing a LaunchAgent, with either restart policy.
-            (tray / "sign-local-macos.py").write_text("raise SystemExit(17)\n")
+            (tray / "sign-local-macos.py").write_text(
+                "import pathlib, sys\n"
+                "assert pathlib.Path(sys.argv[1]).resolve() != pathlib.Path(__file__).parent / 'build/hgs-tray.app'\n"
+                "raise SystemExit(17)\n")
             for name, body in {"uname": "echo Darwin", "brew": "echo /fixture/qt", "cmake": "exit 0",
+                               "ditto": 'cp -R "$1" "$2"',
                                "launchctl": "touch \"$HOME/launchctl-called\""}.items():
                 path = tools / name
                 path.write_text("#!/bin/sh\n" + body + "\n")
                 path.chmod(0o755)
             for restart in ("0", "1"):
                 env = dict(os.environ, HOME=str(home), PATH=str(tools) + os.pathsep + os.environ["PATH"],
-                           HGS_TRAY_RESTART=restart)
+                           HGS_TRAY_RESTART=restart, TMPDIR=str(stage_root))
                 result = subprocess.run(["bash", str(tray / "install.sh")], env=env, capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, 17, result.stderr)
                 self.assertEqual(installed.read_bytes(), b"previous installed application")
                 self.assertFalse((home / "Library/LaunchAgents").exists())
                 self.assertFalse((home / "launchctl-called").exists())
+                self.assertEqual(raw.read_bytes(), original)
+                self.assertEqual(list(stage_root.iterdir()), [], "the disposable signing copy is removed on failure")
 
 
 @unittest.skipUnless(sys.platform == "darwin" and os.environ.get("ZERUS_TEST_LOCAL_MACOS_SIGNING") == "1",

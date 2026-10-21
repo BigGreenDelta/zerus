@@ -67,7 +67,8 @@ not relicense its dependencies.
 The Windows portable zip is different: it bundles Qt 6 for MSVC, including Qt
 Multimedia with its audio runtime, next to the application. It contains no Qt
 WebEngine or Chromium. These are separate, replaceable DLLs. Qt is used under the GNU LGPL
-version 3; its third-party components retain their own licenses. The zip carries
+version 3; its third-party components retain their own licenses, and the zip's
+`README.txt` names the exact Qt source archive and Git tag. The zip carries
 the SPDX documents supplied
 with the exact Qt installation, which name the license and copyright of each Qt
 module and of the third-party code inside it (libjpeg-turbo, FreeType, HarfBuzz,
@@ -98,9 +99,14 @@ and Qt Multimedia) as unmodified, dynamically linked and replaceable Qt componen
 under LGPL-3.0-only. It contains no Qt WebEngine or Chromium. Third-party audio components retain their own license notices.
 `Zerus.app/Contents/Resources/licenses/qt` contains the LGPL-3.0 and GPL-3.0
 texts, Qt's official SPDX documents for every bundled module, including its
-third-party components, and the location of the exact Qt sources. The same folder also carries the Zerus, libvterm, md4c, Codex and
-Cargo dependency notices; `scripts/check-macos-bundle.py` rejects a bundle when
-any of them is missing.
+third-party components, and the location of the exact Qt sources. It also
+includes the standard license and exception texts those documents name;
+custom LicenseRef texts remain in the documents. This conservative coverage
+includes alternatives and optional components in the module metadata, without
+asserting that each component is compiled. The parent `licenses` folder carries
+the Zerus, libvterm, md4c, Codex and Cargo dependency notices.
+`scripts/check-macos-bundle.py` rejects missing notices and Qt identifiers without
+their texts.
 
 The CLI's `rusqlite` build includes SQLite through `libsqlite3-sys`. The collected
 notices also preserve its upstream public-domain dedication, separate from the
@@ -119,3 +125,26 @@ and contributors. Their exact upstream license texts are retained in
 application's third-party notices. Sources: [CommonMark Java](
 https://github.com/commonmark/commonmark-java/tree/commonmark-parent-0.30.0) and
 [autolink-java](https://github.com/robinst/autolink-java/tree/autolink-0.12.0).
+
+## Android libraries
+
+The Android application also contains AndroidX, Jetpack Compose, Kotlin,
+kotlinx, OkHttp, Okio, CameraX, ZXing, Guava and other libraries, almost all
+under Apache-2.0, and in the published build Firebase and Google Play services.
+`scripts/android-notices.py` generates the list of every library in the
+published release configuration with its license from Gradle's resolution of that
+configuration, the exact artifacts it resolved and the libraries' POM files:
+`mobile/android/app/src/main/assets/licenses/libraries.tsv`.
+Libraries under BSD or MIT licenses point to reviewed texts with their copyright
+notices in the same folder, including Checker Framework qualifiers (MIT) and the
+Protocol Buffers code that DataStore repackages (BSD-3-Clause, from the
+[protobuf `LICENSE`](https://github.com/protocolbuffers/protobuf/blob/v28.2/LICENSE),
+unchanged across releases). `library-notices.txt` keeps the NOTICE files the
+libraries ship, among them OkHttp's note that its public suffix data comes from
+the Public Suffix List under MPL-2.0. Google Play services and the Firebase
+analytics libraries are provided under the
+[Android Software Development Kit License](https://developer.android.com/studio/terms);
+`google-notices.txt` keeps, verbatim, the notices of the open source code they
+embed. The application shows all of these in Third-party notices. Apache-2.0
+text: `mobile/android/app/src/main/assets/licenses/Apache-2.0.txt`, from SPDX
+license-list-data `v3.29.0` like the Windows texts.

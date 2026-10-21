@@ -29,6 +29,8 @@ pub(super) struct Scope {
     conversation: String,
     archive: Option<String>,
     changed: Cell<bool>,
+    /// OpenCode service diagnostics are excluded from durable action errors.
+    opencode_error: Cell<bool>,
     target: RefCell<Option<Value>>,
 }
 impl Scope {
@@ -50,6 +52,9 @@ impl Scope {
     }
     pub(super) fn changing(&self) {
         self.changed.set(true);
+    }
+    pub(super) fn opencode_error(&self) {
+        self.opencode_error.set(true);
     }
     /// Only a supported native adapter may explicitly attest zero side effects.
     pub(super) fn unchanged(&self) {
@@ -81,12 +86,16 @@ impl Scope {
             conversation: conversation.into(),
             archive: None,
             changed: Cell::new(false),
+            opencode_error: Cell::new(false),
             target: RefCell::new(None),
         }
     }
     /// Whether a failure would be reported as uncertain rather than failed.
     pub(super) fn was_changing(&self) -> bool {
         self.changed.get()
+    }
+    pub(super) fn has_result(&self) -> bool {
+        self.target.borrow().is_some()
     }
 }
 
@@ -206,7 +215,7 @@ fn validate(request: &Request, name: &str) -> Result<()> {
     if request
         .message_id
         .as_deref()
-        .is_some_and(|id| !opencode::native_id(id, "msg_"))
+        .is_some_and(|id| !opencode::queued_message_id(id))
     {
         return Err("Invalid queued message identity".into());
     }
@@ -221,6 +230,7 @@ fn validate(request: &Request, name: &str) -> Result<()> {
 
 fn perform(request: &Request, name: &str, scope: &Scope) -> Result<()> {
     if opencode::exists(name) {
+        scope.opencode_error();
         return opencode::session_action(name, &request.action, request.new_name.as_deref(), request.message_id.as_deref(), scope);
     }
     if request.action == "remove_queued" {
@@ -320,6 +330,7 @@ where
         conversation: request.expected_conversation_id.clone(),
         archive: request.archive_id.clone(),
         changed: Cell::new(false),
+        opencode_error: Cell::new(false),
         target: RefCell::new(None),
     };
     let outcome = invoke(&scope);
@@ -332,7 +343,16 @@ where
     };
     let mut answer = receipt(request, name, hash, status);
     if let Err(ref error) = outcome {
-        answer["error"] = json!(error.chars().take(2048).collect::<String>());
+        if scope.opencode_error.get() {
+            answer["error_source"] = json!("opencode");
+            answer["error"] = json!(if status == "uncertain" {
+                "OpenCode action outcome is uncertain; inspect the session before creating a new request"
+            } else {
+                "OpenCode could not complete this action; inspect the session on its computer"
+            });
+        } else {
+            answer["error"] = json!(error.chars().take(2048).collect::<String>());
+        }
     }
     if outcome.is_ok() {
         if let Some(target) = scope.target.into_inner() {
@@ -409,6 +429,11 @@ mod tests {
         validate(&r, "opencode/p/t").unwrap();
         r.message_id = Some("../x".into());
         assert!(validate(&r, "opencode/p/t").is_err());
+        // `msg_` alone names no message; the relay and the connector refuse it too.
+        r.message_id = Some("msg_".into());
+        assert!(validate(&r, "opencode/p/t").is_err());
+        r.message_id = Some("msg_a-b_c".into());
+        validate(&r, "opencode/p/t").unwrap();
         r.action = "forget".into();
         r.message_id = Some("msg_A".into());
         assert!(validate(&r, "opencode/p/t").is_err());
@@ -454,5 +479,40 @@ mod tests {
         .unwrap();
         assert_eq!(answer["status"], "failed");
         assert!(answer["result_target"].is_null());
+    }
+    #[test]
+    fn opencode_diagnostics_never_enter_action_receipts_or_change_duplicate_results() {
+        let secret = "https://provider.example.invalid/v1?key=fixture-YO85-ACTION\u{1b}[31m";
+        for changed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("receipt");
+            let first = attempt(&path, &request(), "session", "hash", |scope| {
+                scope.opencode_error();
+                if changed { scope.changing(); }
+                Err(secret.into())
+            }).unwrap();
+            assert_eq!(first["status"], if changed { "uncertain" } else { "failed" });
+            assert_eq!(first["error_source"], "opencode");
+            let stored = std::fs::read_to_string(&path).unwrap();
+            assert!(!stored.contains("provider.example.invalid"));
+            assert!(!stored.contains("fixture-YO85-ACTION"));
+            assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), first);
+            assert_eq!(attempt(&path, &request(), "session", "hash", |_| panic!("replayed")).unwrap(), first);
+        }
+    }
+    #[test]
+    fn successful_opencode_actions_keep_their_original_receipt_and_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("receipt");
+        let first = attempt(&path, &request(), "session", "hash", |scope| {
+            scope.opencode_error();
+            scope.result("renamed", "run", "conversation", None);
+            Ok(())
+        }).unwrap();
+        assert_eq!(first["status"], "completed");
+        assert_eq!(first["result_target"], json!({"name":"renamed","run_id":"run","conversation_id":"conversation"}));
+        assert!(first.get("error").is_none());
+        assert!(first.get("error_source").is_none());
+        assert_eq!(attempt(&path, &request(), "session", "hash", |_| panic!("replayed")).unwrap(), first);
     }
 }

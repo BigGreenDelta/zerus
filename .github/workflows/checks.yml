@@ -74,12 +74,40 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.source.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
       - run: python3 scripts/ci/check-source.py
       - name: Release publication contract checks
         run: python3 -m unittest discover -s tests -p 'test_*publication.py'
       - name: Workflow trust boundary checks
         run: python3 -m unittest discover -s tests -p test_ci_security.py
+      - name: Scan the tree and all history for secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          scan_dir=$(mktemp -d)
+          cd "$scan_dir"
+          curl -fsSLO https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks_8.30.1_linux_x64.tar.gz' | sha256sum --check --strict
+          tar xzf gitleaks_8.30.1_linux_x64.tar.gz gitleaks
+          # Negative control: a token generated here, committed and then deleted,
+          # must fail the same history scan, so a silenced scanner cannot pass.
+          mkdir control
+          git -C control init -q
+          python3 -c 'import secrets, string; print("token = \"ghp_" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36)) + "\"  # gitleaks:allow")' > control/leak.py
+          git -C control add leak.py
+          git -C control -c user.name=ci -c user.email=ci@example.invalid commit -qm add
+          git -C control rm -q leak.py
+          git -C control -c user.name=ci -c user.email=ci@example.invalid commit -qm remove
+          status=0
+          "$scan_dir/gitleaks" git --no-banner --redact --ignore-gitleaks-allow --exit-code 3 control || status=$?
+          if [ "$status" != 3 ]; then
+            echo "::error::Gitleaks did not report the generated control token (exit $status)."
+            exit 1
+          fi
+          cd "$GITHUB_WORKSPACE"
+          "$scan_dir/gitleaks" git --no-banner --redact --ignore-gitleaks-allow --exit-code 1 .
+          "$scan_dir/gitleaks" dir --no-banner --redact --ignore-gitleaks-allow --exit-code 1 .
       - name: Validate GitHub Actions
         shell: bash
         run: |
@@ -480,6 +508,13 @@ jobs:
       - name: Unit tests and release lint
         working-directory: mobile/android
         run: ./gradlew --no-daemon testDebugUnitTest lintRelease checkReplicaPackaging -PzerusFirebase=true
+      # Third-party notices must list exactly what the published Firebase release
+      # build resolves, with the notices inside its resolved artifacts.
+      - name: Android library notices match the release classpath
+        working-directory: mobile/android
+        run: |
+          ./gradlew --no-daemon -q --init-script ../../scripts/android-resolved-artifacts.gradle -PzerusFirebase=true :app:zerusResolvedNotices
+          python3 -I ../../scripts/android-notices.py --check
       - name: Save Gradle cache
         if: inputs.save_caches && steps.gradle-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -614,7 +649,7 @@ jobs:
           persist-credentials: false
       - name: Arch dependencies and unprivileged builder
         run: |
-          pacman -Syu --noconfirm --needed base-devel git cmake ninja qt6-base qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache dbus
+          pacman -Syu --noconfirm --needed base-devel git cmake ninja qt6-base qt6-tools qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache dbus
           useradd -m user
           chown -R user:user "$GITHUB_WORKSPACE"
       - name: Restore ccache
@@ -687,7 +722,7 @@ jobs:
       # desktop build, so it has a cache family of its own.
       - name: Arch packaging dependencies and unprivileged builder
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache namcap desktop-file-utils
+          pacman -Syu --noconfirm --needed base-devel git rust cmake ninja qt6-base qt6-tools qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache namcap desktop-file-utils
           grep -qx 'BUILDENV=(!distcc color !ccache check !sign)' /etc/makepkg.conf ||
             { echo 'The default makepkg BUILDENV changed; review the ccache drop-in.' >&2; exit 1; }
           echo 'BUILDENV=(!distcc color ccache check !sign)' > /etc/makepkg.conf.d/ccache.conf
@@ -898,6 +933,16 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      - name: Windows mobile connector build and native filesystem contracts
+        run: |
+          cargo +1.99.1 clippy --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --lib windows_management::tests </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-locks.log
+          cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --target-dir target --test windows_gateway </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-config.log
+          cargo +1.99.1 test --locked --offline -j2 --manifest-path services/mobile/connector/Cargo.toml --target-dir target -p zerus-windows-private --lib -- --test-threads=2 </dev/null \
+            2>&1 | tee artifacts/test-results/windows-gateway-launch-builder.log
+          cargo +1.99.1 build --locked --release --manifest-path services/mobile/connector/Cargo.toml --target-dir target
       - name: Windows client integration tests
         run: |
           HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
@@ -930,6 +975,19 @@ jobs:
             --log ../artifacts/test-results/windows-host.log -- \
             python -m unittest -v test_windows_host test_windows_host_conpty test_windows_host_survival \
             test_windows_lifecycle test_windows_hooks test_backend_contract </dev/null
+      # A detached connector has fixture-owned handle custody. Keep this gate
+      # outside the legacy host harness's PID/tree and wildcard image cleanup.
+      - name: Windows mobile gateway isolated custody gate
+        timeout-minutes: 20
+        run: |
+          HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
+          HGS_TEST_FAKE_AGENT=$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")
+          HGS_TEST_CONPTY_DIR=$(cygpath -w "$RUNNER_TEMP/conpty")
+          HGS_TEST_CONNECTOR=$(cygpath -w "$PWD/target/release/zerus-mobile-connector.exe")
+          export HGS_TEST_BIN HGS_TEST_FAKE_AGENT HGS_TEST_CONPTY_DIR HGS_TEST_CONNECTOR
+          python scripts/ci/outside-job.py --custody-only --timeout 900 \
+            --log artifacts/test-results/windows-mobile-gateway.log -- \
+            python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
       # Only trusted main checks save it; PR, manual and candidate runs restore
       # it. The key covers the Qt pin and the installer.
       - name: Restore Qt 6.10.3 for MSVC
@@ -1009,9 +1067,30 @@ jobs:
       - name: Portable zip from the tested executables
         run: |
           python scripts/package-windows.py --cli target/release/hgs.exe --gui .ci-build/gui/hgs-tray.exe \
-            --conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log
+            --connector target/release/zerus-mobile-connector.exe --conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log
           python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest \
             </dev/null 2>&1 | tee artifacts/test-results/portable.log
+      # The per-user installer (packaging/windows/zerus.iss) from that zip, with
+      # the runner image's Inno Setup 6: its payload is the zip's files byte for
+      # byte. Release assembly takes only the zip at the top of this artifact.
+      - name: Per-user installer from the portable zip
+        run: |
+          python scripts/package-windows-installer.py artifacts/zerus-windows-x86_64.zip \
+            --output artifacts/installer/zerus-windows-x86_64-setup.exe </dev/null 2>&1 | tee artifacts/test-results/installer-package.log
+      # Install, upgrade over it and uninstall while a session host of the
+      # installed build runs from its staged image, outside the step's job as the
+      # host suites run.
+      - name: Installer upgrade keeps the session host
+        timeout-minutes: 15
+        run: |
+          HGS_TEST_BIN=$(cygpath -w "$PWD/target/release/hgs.exe")
+          HGS_TEST_INSTALLER=$(cygpath -w "$PWD/artifacts/installer/zerus-windows-x86_64-setup.exe")
+          HGS_TEST_PORTABLE_ZIP=$(cygpath -w "$PWD/artifacts/zerus-windows-x86_64.zip")
+          export HGS_TEST_BIN HGS_TEST_INSTALLER HGS_TEST_PORTABLE_ZIP
+          cd tests
+          python ../scripts/ci/outside-job.py --timeout 600 --end "$HGS_TEST_BIN" --end '*\hgs-host-*\hgs.exe' \
+            --log ../artifacts/test-results/installer.log -- \
+            python -m unittest -v test_windows_installer_survival </dev/null
       # Stable and nightly assembly download this artifact from the same run.
       - name: Retain Windows portable zip and test logs
         if: always()

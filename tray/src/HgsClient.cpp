@@ -5,6 +5,7 @@
 #include "ProcessRunner.h"
 #include "LocalFile.h"
 #include "MachinePlatform.h"
+#include "SessionNotifications.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -21,6 +22,8 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QDateTime>
+#include <QPointer>
+#include <QDataStream>
 #include <QCryptographicHash>
 #include <QUuid>
 
@@ -119,6 +122,10 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.backgroundObservedAt = work.value("sampled_at").toDouble();
     s.backgroundCommand = work.value("command").toString();
     s.runId = obj.value(QStringLiteral("run_id")).toString();
+    s.notificationPreferences = obj.value("notification_preferences").toObject();
+    s.sharedNotifications = SessionNotifications::valid(s.notificationPreferences, s.conversationId);
+    if (s.sharedNotifications) s.muted = s.notificationPreferences.value("muted").toBool();
+    else s.notificationPreferences = {};
     s.launchId = obj.value(QStringLiteral("launch_id")).toString();
     s.attentionId = obj.value(QStringLiteral("attention_id")).toString();
     s.sharedRead = obj.contains(QStringLiteral("attention_signature"));
@@ -169,6 +176,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.currentTool = obj.value(QStringLiteral("current_tool")).toString();
     s.toolDetail = obj.value(QStringLiteral("tool_detail")).toString();
     s.lastEventAt = obj.value(QStringLiteral("last_event_at")).toDouble();
+    s.attentionStarted = obj.value("attention_started").toDouble();
     s.turnStarted = obj.value(QStringLiteral("turn_started")).toDouble();
     s.compactionStarted = obj.value(QStringLiteral("compaction_started")).toDouble();
     s.subagentCount = obj.value(QStringLiteral("subagent_count")).toInt();
@@ -457,6 +465,49 @@ quint64 HgsClient::requestAccounts(const QString &host, const QStringList &argum
     return request;
 }
 
+quint64 HgsClient::requestOpenCodeModels(const QString &host, const QString &location)
+{
+    const quint64 request = ++m_accountRequest;
+    QStringList args;
+    if (!host.isEmpty()) args << QLatin1Char('@') + host;
+    args << QStringLiteral("account") << QStringLiteral("models") << QStringLiteral("native-opencode")
+         << QStringLiteral("--location") << location << QStringLiteral("--json");
+    runHgs(m_hgs, args, 30000, this,
+        [this, request, host, location](const QByteArray &bytes) {
+            // hgs keeps the catalog within 4 MiB; a larger answer is not one.
+            if (bytes.size() > 5 * 1024 * 1024) {
+                emit openCodeModelsFailed(request, host, location, tr("The OpenCode model catalog is too large"));
+                return;
+            }
+            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
+            if (error.error != QJsonParseError::NoError || !data.isObject()) emit openCodeModelsFailed(request, host, location, tr("Invalid OpenCode model catalog response"));
+            else emit openCodeModelsReady(request, host, location, data.object());
+        }, [this, request, host, location](const QString &, const QString &error) { emit openCodeModelsFailed(request, host, location, error); });
+    return request;
+}
+
+quint64 HgsClient::requestOpenCodeFavorite(const QString &host, const QString &value, bool favorite)
+{
+    const quint64 request = ++m_accountRequest;
+    // hgs answers a repeated identity from its receipt, so every change gets its own.
+    const auto identity = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QStringList args;
+    if (!host.isEmpty()) args << QLatin1Char('@') + host;
+    args << QStringLiteral("account") << QStringLiteral("favorite") << QStringLiteral("native-opencode")
+         << QStringLiteral("--model") << value << QStringLiteral("--favorite") << (favorite ? QStringLiteral("on") : QStringLiteral("off"))
+         << QStringLiteral("--request-id") << identity << QStringLiteral("--json");
+    runHgs(m_hgs, args, 25000, this,
+        [this, request, host, value, favorite, identity](const QByteArray &bytes) {
+            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error); const auto receipt = data.object();
+            // The receipt must name this exact change.
+            if (error.error != QJsonParseError::NoError || !data.isObject() || receipt["status"] != "applied"
+                || receipt["request_id"] != identity || receipt["model"] != value || receipt["favorite"] != favorite)
+                emit openCodeFavoriteFailed(request, host, tr("Invalid favorite response"));
+            else emit openCodeFavoriteReady(request, host, receipt);
+        }, [this, request, host](const QString &, const QString &error) { emit openCodeFavoriteFailed(request, host, error); });
+    return request;
+}
+
 quint64 HgsClient::requestMobile(const QString &host, const QStringList &arguments)
 {
     const quint64 request = ++m_mobileRequest;
@@ -735,16 +786,66 @@ quint64 HgsClient::downloadFile(const QString &host, const QString &path, const 
     return id;
 }
 
-quint64 HgsClient::downloadFileToCache(const QString &host, const QString &path)
+quint64 HgsClient::findCachedFile(const QString &host, const QString &path)
 {
     const auto id = ++m_fileDownloadRequest;
     const auto root = DownloadCache::directory();
-    DownloadCache::async<DownloadCache::Prepared>(this, [root] { return DownloadCache::prepare(root); },
-        [this, id, host, path](const DownloadCache::Prepared &prepared) {
-            if (!prepared.error.isEmpty()) { emit fileDownloadFailed(id, prepared.error); return; }
-            transferFile(id, host, path, prepared.pending->path, prepared.pending);
+    DownloadCache::async<DownloadCache::Result>(this, [root, host, path] { return DownloadCache::lookup(root, {host, path}); },
+        [this, id](const DownloadCache::Result &result) { emit fileCacheChecked(id, result.path, result.error); });
+    return id;
+}
+
+quint64 HgsClient::downloadFileToCache(const QString &host, const QString &path, bool force)
+{
+    const auto id = ++m_fileDownloadRequest;
+    const auto root = DownloadCache::directory();
+    QByteArray key;
+    QDataStream stream(&key, QIODevice::WriteOnly); stream.setVersion(QDataStream::Qt_6_0);
+    stream << root << host << path;
+    auto active = m_cachedDownloads.find(key);
+    if (active != m_cachedDownloads.end()) {
+        active->requests.append(id); active->force = active->force || force;
+        return id;
+    }
+    m_cachedDownloads.insert(key, CachedDownload{{id}, force});
+    if (force) prepareCachedDownload(key, root, host, path);
+    else DownloadCache::async<DownloadCache::Result>(this, [root, host, path] { return DownloadCache::lookup(root, {host, path}); },
+        [this, key, root, host, path](const DownloadCache::Result &result) {
+            const auto current = m_cachedDownloads.constFind(key);
+            if (current == m_cachedDownloads.cend()) return;
+            if (!result.error.isEmpty()) { finishCachedDownload(key, {}, result.error); return; }
+            if (!result.path.isEmpty() && !current->force) { finishCachedDownload(key, result.path, {}); return; }
+            prepareCachedDownload(key, root, host, path);
         });
     return id;
+}
+
+void HgsClient::prepareCachedDownload(const QByteArray &key, const QString &root, const QString &host, const QString &path)
+{
+    DownloadCache::async<DownloadCache::Prepared>(this, [root] { return DownloadCache::prepare(root); },
+        [this, key, host, path](const DownloadCache::Prepared &prepared) {
+            const auto active = m_cachedDownloads.constFind(key);
+            if (active == m_cachedDownloads.cend()) return;
+            if (!prepared.error.isEmpty()) { finishCachedDownload(key, {}, prepared.error); return; }
+            transferFile(active->requests.first(), host, path, prepared.pending->path, prepared.pending, key);
+        });
+}
+
+void HgsClient::finishCachedDownload(const QByteArray &key, const QString &path, const QString &error, const QString &warning)
+{
+    const auto active = m_cachedDownloads.take(key);
+    const QPointer<HgsClient> alive(this);
+    for (const auto id : active.requests) {
+        if (!error.isEmpty()) emit fileDownloadFailed(id, error);
+        else emit fileDownloaded(id, path);
+        // A direct result slot can close the window and destroy its client.
+        if (!alive) return;
+    }
+    if (!warning.isEmpty()) {
+        emit downloadCacheWarning(warning);
+        if (!alive) return;
+    }
+    if (error.isEmpty() && !active.requests.isEmpty()) scheduleDownloadCacheTrim();
 }
 
 quint64 HgsClient::requestApprovalLog(const QString &operation, const QJsonObject &data)
@@ -777,29 +878,30 @@ quint64 HgsClient::requestApprovalLog(const QString &operation, const QJsonObjec
 }
 
 void HgsClient::transferFile(quint64 id, const QString &host, const QString &path, const QString &destination,
-                             const std::shared_ptr<DownloadCache::Pending> &pending)
+                             const std::shared_ptr<DownloadCache::Pending> &pending, const QByteArray &cacheKey)
 {
+    const auto failed = [this, id, cacheKey](const QString &error) {
+        if (cacheKey.isEmpty()) emit fileDownloadFailed(id, error);
+        else finishCachedDownload(cacheKey, {}, error);
+    };
     runHgs(m_hgs, {'@' + host, "download", "--path", path, "--output", destination}, 135000, this,
-        [this, id, host, path, destination, pending](const QByteArray &out) {
-            if (out.size() > 65536) { emit fileDownloadFailed(id, tr("Invalid file transfer response.")); return; }
+        [this, id, host, path, destination, pending, cacheKey, failed](const QByteArray &out) {
+            if (out.size() > 65536) { failed(tr("Invalid file transfer response.")); return; }
             const auto object = QJsonDocument::fromJson(out).object();
             const QFileInfo saved(destination);
             if (object.value("host").toString() != host || object.value("path").toString() != path
                 || object.value("local_path").toString() != destination || !object.value("bytes").isDouble()
                 || !LocalFile::readable(saved) || object.value("bytes").toDouble() != LocalFile::size(saved)) {
-                emit fileDownloadFailed(id, tr("The file transfer did not confirm the saved local file.")); return;
+                failed(tr("The file transfer did not confirm the saved local file.")); return;
             }
             if (!pending) { emit fileDownloaded(id, destination); return; }
             DownloadCache::async<DownloadCache::Result>(this,
-                [pending, path] { return DownloadCache::publish(pending, path); },
-                [this, id](const DownloadCache::Result &result) {
-                    if (!result.error.isEmpty()) { emit fileDownloadFailed(id, result.error); return; }
-                    emit fileDownloaded(id, result.path);
-                    if (!result.warning.isEmpty()) emit downloadCacheWarning(result.warning);
-                    scheduleDownloadCacheTrim();
+                [pending, host, path] { return DownloadCache::publish(pending, path, -1, {host, path}); },
+                [this, cacheKey](const DownloadCache::Result &result) {
+                    finishCachedDownload(cacheKey, result.path, result.error, result.warning);
                 });
-        }, [this, id, pending](const QString &, const QString &error) {
-            emit fileDownloadFailed(id, error.startsWith("hgs: ") ? error.mid(5) : error);
+        }, [pending, failed](const QString &, const QString &error) {
+            failed(error.startsWith("hgs: ") ? error.mid(5) : error);
         });
 }
 
@@ -841,7 +943,7 @@ quint64 HgsClient::requestAttachment(const QString &host, const QString &name, c
         const auto decoded=QByteArray::fromBase64Encoding(encoded,QByteArray::AbortOnBase64DecodingErrors);
         if(out.size()>MaximumAttachmentBytes*4/3+8192 || object.value("request_id")!=file.value("request_id")
             || object.value("index")!=file.value("index") || !decoded || decoded.decoded.isEmpty() || decoded.decoded.size()>MaximumAttachmentBytes) {
-            emit attachmentFailed(id,tr("Invalid attachment response. Refresh Activity and try again."));return;
+            emit attachmentFailed(id,tr("Invalid attachment response. Try again."));return;
         }
         auto metadata=object;metadata.remove("data_base64");emit attachmentReady(id,metadata,decoded.decoded);
     },[this,id](const QString &,const QString &error){emit attachmentFailed(id,error);});
@@ -1770,8 +1872,11 @@ quint64 HgsClient::runSessionAction(const QString &host, const QString &name, co
     auto *process = new QProcess(this); configureProcess(process,m_hgs,args);
     auto *timer = new QTimer(process); timer->setSingleShot(true);
     auto reported = std::make_shared<bool>(false);
+    // QProcess can fail inside start(), before the caller holds the request ID:
+    // a failure is always reported afterwards.
     const auto fail = [this,request,reported](const QString &error) {
-        if (*reported) return; *reported = true; emit sessionActionFinished(request,false,{},error);
+        if (*reported) return; *reported = true;
+        QTimer::singleShot(0, this, [this,request,error] { emit sessionActionFinished(request,false,{},error); });
     };
     const auto payload = QJsonDocument(data).toJson(QJsonDocument::Compact);
     // OpenCode actions have no Terminal to check.
@@ -1948,6 +2053,66 @@ quint64 HgsClient::requestSettings(const QString &host, const QString &name, con
         process->deleteLater();
     });
     timer->start(host.isEmpty() ? 20000 : 35000); process->start(); return request;
+}
+
+quint64 HgsClient::requestNotifications(const QString &host, const QString &name, const QJsonObject &payload)
+{
+    const auto request = ++m_notificationsRequest;
+    const auto expected = SessionNotifications::revision(payload.value("expected_revision"));
+    if (name.isEmpty() || !SessionNotifications::keys(payload, {"run_id", "conversation_id", "muted", "expected_revision"})
+        || !SessionNotifications::identity(payload.value("run_id"), 128)
+        || !SessionNotifications::identity(payload.value("conversation_id"), 256) || !payload.value("muted").isBool() || expected < 0) {
+        QTimer::singleShot(0, this, [this, request] {
+            emit notificationsFinished(request, false, {}, tr("The session notification identity is unavailable. Refresh the session."));
+        });
+        return request;
+    }
+    // Probe the configured LOCAL CLI before giving it an unfamiliar command:
+    // an old CLI can pass a new peer's listing through, yet interpret an unknown
+    // command as an agent launch. The receiving CLI checks the remote marker.
+    const auto executable = m_hgs;
+    auto capability = processRequest(executable, {"--help"});
+    capability.input = QByteArray();
+    capability.timeoutMs = 5000;
+    capability.maximumOutputBytes = 256 * 1024;
+    ProcessRunner::run(std::move(capability), this, [this, request, executable, host, name, payload, expected](const ProcessRunner::Result &help) {
+        bool marker = false;
+        for (auto line : help.standardOutput.split('\n')) {
+            if (line.endsWith('\r')) line.chop(1); // Permit only the CRLF line ending.
+            if (line == "session-notifications-v1") marker = true;
+        }
+        if (help.outcome != ProcessRunner::Result::Finished || help.exitStatus != QProcess::NormalExit || help.exitCode != 0 || !marker) {
+            emit notificationsFinished(request, false, {}, tr("Update the configured local hgs to support shared notification preferences."));
+            return;
+        }
+        QStringList args{"notifications", name, "--json"}; if (!host.isEmpty()) args.prepend('@' + host);
+        auto job = processRequest(executable, args);
+        job.input = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+        job.timeoutMs = host.isEmpty() ? 15000 : 35000;
+        job.maximumOutputBytes = 512 * 1024; // Includes the bounded 256-child suppression baseline.
+        ProcessRunner::run(std::move(job), this, [this, request, payload, expected](const ProcessRunner::Result &reply) {
+            QJsonParseError parse;
+            const auto document = QJsonDocument::fromJson(reply.standardOutput, &parse);
+            const auto result = document.object(), preferences = result.value("preferences").toObject();
+            const auto revision = SessionNotifications::revision(preferences.value("revision"));
+            const bool applied = result.value("applied").toBool();
+            const bool confirmed = reply.outcome == ProcessRunner::Result::Finished && reply.exitStatus == QProcess::NormalExit
+                && reply.exitCode == 0 && parse.error == QJsonParseError::NoError && document.isObject()
+                && SessionNotifications::keys(result, {"ok", "applied", "run_id", "conversation_id", "preferences"})
+                && result.value("ok").isBool() && result.value("ok").toBool() && result.value("applied").isBool()
+                && result.value("run_id") == payload.value("run_id") && result.value("conversation_id") == payload.value("conversation_id")
+                && SessionNotifications::valid(preferences, payload.value("conversation_id").toString())
+                && preferences.value("muted") == payload.value("muted")
+                && (applied ? expected < std::numeric_limits<qint64>::max() && revision == expected + 1 : revision == expected);
+            QString error;
+            if (!confirmed) {
+                error = QString::fromUtf8(reply.standardError).trimmed().left(2000);
+                if (error.isEmpty()) error = tr("The shared notification change was not confirmed. Refresh the session before trying again.");
+            }
+            emit notificationsFinished(request, confirmed, confirmed ? result : QJsonObject(), error);
+        });
+    });
+    return request;
 }
 
 quint64 HgsClient::requestRead(const QString &host, const QString &name, const QJsonObject &payload)

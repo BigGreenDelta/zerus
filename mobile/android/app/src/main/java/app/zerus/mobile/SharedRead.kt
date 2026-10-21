@@ -13,6 +13,16 @@ object SharedReadPolicies {
         ?.takeIf { row.target.conversation.isNotBlank() && it.string("conversation_id")==row.target.conversation }
     /** Exactly the current reply was read on some device. */
     fun replyRead(row:Session):Boolean=row.raw.string("reply_id").let { it.isNotBlank() && mark(row)?.string("reply_id")==it }
+    /** Fleet hints alone cannot bind a nonselected reply mark to a canonical prefix. */
+    fun canAdoptReply(row:Session,selectedTarget:Target?,selectedRaw:JSONObject?,selectedVerified:Boolean):Boolean {
+        if(!replyRead(row)) return false
+        if(selectedTarget==null || ConversationReadPolicies.key(selectedTarget)!=ConversationReadPolicies.key(row.target)) return false
+        val target=row.target
+        return selectedTarget==target && selectedVerified && selectedRaw!=null &&
+            row.raw.string("run_id")==target.run && row.raw.string("conversation_id")==target.conversation &&
+            selectedRaw.string("run_id")==target.run && selectedRaw.string("conversation_id")==target.conversation &&
+            selectedRaw.string("reply_id")==row.raw.string("reply_id")
+    }
     /** Exactly the current request was acknowledged on some device. */
     fun attentionAcknowledged(row:Session):Boolean=
         row.raw.string("attention_signature").let { it.isNotBlank() && mark(row)?.string("attention_signature")==it }
@@ -32,6 +42,18 @@ object SharedReadPolicies {
         return JSONObject().put("run_id",t.run).put("conversation_id",t.conversation)
             .put("reply_id",reply ?: JSONObject.NULL).put("attention_signature",attention ?: JSONObject.NULL)
     }
+    /**
+     * Whether a `mark_read` receipt shows the computer applied every field this phone sent. A
+     * completed request can apply nothing: the value is no longer current, or the computer's
+     * question index is not ready. That needs a newer snapshot, so the same mark waits.
+     */
+    fun applied(receipt:JSONObject,payload:JSONObject):Boolean {
+        val result=receipt.optJSONObject("result")?.takeIf { receipt.string("state")=="completed" && it.opt("ok")==true } ?: return false
+        val applied=result.optJSONObject("applied") ?: return false
+        return listOf("reply_id","attention_signature").all { payload.isNull(it) || applied.opt(it)==true }
+    }
+    /** Delay before the same unapplied mark may be sent again: two minutes, doubling up to 16. */
+    fun retryDelayMs(unapplied:Int):Long=120_000L shl unapplied.coerceIn(0,3)
     /**
      * Read all shares its marks one request at a time. Each request is prepared only when its turn
      * comes, so a target that no longer qualifies (or was shared meanwhile) is skipped.

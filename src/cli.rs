@@ -50,6 +50,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
+       hgs [@host] analytics --json   private bounded computer analytics (JSON stdin)
        hgs [@host] mobile phones|invite|revoke-phone <id> [--workspace ID --server URL] --json   phones paired through this mobile connection
        Speech profile management v1
        hgs [@host] a <session>        attach by full name (see hgs ls)
@@ -58,6 +59,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs ls --json --local          this box as JSON (for the tray; no ssh)
        hgs [@host] status [--json] [--local]   version, sessions and background services here and on peers
        hgs [@host] version            this hgs version (also --version)
+       hgs [@host] hooks <session> --json   read scoped hook health (hooks-health-v1)
+       hgs [@host] hooks --account ID [--repair] --json   inspect or explicitly repair handlers
        hgs [@host] inspect <session> [--archive <id>] [--after <cursor>]   activity as JSON
        hgs [@host] reference <session> --json [--archive ID] [--agent ID]   copy a session reference
        hgs self [--json]              the calling agent's own session reference
@@ -68,6 +71,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
        hgs [@host] recovery action --scoped-json exact waiting-job control
        hgs [@host] history <session> --json bounded exact public history
+       hgs [@host] history-projection <session> --json retired and refreshed history rows
        hgs [@host] graph snapshot --json   bounded saved relationship metadata (partial coverage)
        hgs [@host] wait begin|ack|finish|cancel|list --json   explicit independent-agent waits (JSON stdin)
        hgs [@host] terminal <session> --json scoped terminal screen/input
@@ -81,6 +85,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a file through configured SSH
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
        hgs [@host] read <session> --json   mark the current reply/attention read (JSON stdin)
+       hgs [@host] notifications <session> --json   shared mute preference (session-notifications-v1)
        hgs [@host] fork <session> [-n name] [-d] [--archive ID]  branch into a new conversation
        hgs [@host] effort <session> --json   change this agent's effort from JSON stdin
        hgs [@host] settings <session> --json model and effort for this session (JSON stdin)
@@ -91,6 +96,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs machine resolve <alias>          effective SSH settings (no connection)
        hgs swarm get | preview PEER | join PEER | sync | worker   shared project catalog
        hgs swarm assign-launch --json   assign an exact launch to its selected project
+       hgs swarm session-project --json  read an exact session's logical project choices
+       hgs swarm assign-session --json   move only the exact session's project grouping
        hgs presence set --json        desktop idle/lock time from JSON stdin (written by the tray)
        hgs swarm preference get --json   shared phone notification timing
        hgs swarm preference set mobile_delivery VALUE --json   immediate|away|away_5|away_10|away_15|away_30
@@ -100,6 +107,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account default [ID]   show or select the default account for new sessions
        hgs [@host] account set-key native-dsh --json   save API key from private JSON stdin
        hgs [@host] account start native-opencode   start the shared OpenCode service if none runs; inspection never starts it
+       hgs [@host] account favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID   star an OpenCode model on that computer
+       hgs [@host] account models native-opencode [--location DIR]   every OpenCode model of that computer and folder as JSON; never starts OpenCode
        hgs [@host] account install codex|claude|kimi|dsh   install an agent in this terminal
        hgs [@host] account inspect --session SESSION [--refresh]
        hgs account copy ID --from MACHINE --to MACHINE --as NEW_ID [--label NAME]
@@ -110,6 +119,10 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] worktrees inspect --path WORKTREE --common-dir DIR [--file RELATIVE_PATH] [--json]   bounded read-only changes
        hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--discard-fingerprint HASH] [--delete-branch] [--json]
        Mobile worktree ABI: worktrees-v1 (catalog/create/verified project placement)
+       Mobile Git status ABI: git-status-v1
+       Mobile project assignment ABI: session-project-v1
+       Mobile clear-context ABI: dismiss-prompt-v1
+       session-notifications-v1
        hgs [@host] dirs [--hidden] [path]   directories as JSON (default: home)
        hgs [@host] dirs --create <path> [--request-id UUID]   create one folder (existing parent)
        hgs [@host] kill <session> [--archive <id>]
@@ -181,7 +194,7 @@ fn mobile_peers(config: &Config, args: &[String]) -> Result<i32> {
 fn mobile_peers(_: &Config, _: &[String]) -> Result<i32> {
     Err(Error::new(
         2,
-        "Mobile peers are not supported on Windows yet; use a Linux or macOS machine as the mobile gateway.",
+        "One-hop mobile peer routing is unavailable on a Windows gateway; local Windows sessions are supported.",
     ))
 }
 fn state_command(verb: &str, args: &[String]) -> Result<i32> {
@@ -450,7 +463,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             }
             print!("{}", usage_text(cfg!(unix)));
             #[cfg(windows)]
-            print!("{}", crate::host::admin::HELP);
+            print!("{}\nMobile gateway ABI: windows-local-v1\n", crate::host::admin::HELP);
             return Ok(0);
         }
         "--version" | "version" => return crate::status::version(&config, &target, args),
@@ -547,12 +560,14 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
     // Commands that only read or change this machine's configuration, or reach
     // remote machines, also run on a build without local sessions.
-    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "graph" | "wait" | "mobile") {
+    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks") {
         local_sessions()?;
     }
     // Only Unix has arms for these below; elsewhere they would reach the launch arm.
     unix_only(command, cfg!(unix))?;
     match command.as_str() {
+        "hooks" => state::hook_health::dispatch(&config, args, dry),
+        "analytics" => crate::analytics::dispatch(&config, args, dry),
         "speech" => crate::speech::dispatch(&config, args, dry),
         "mobile" => crate::phones::dispatch(&config, args, dry),
         "__dsh-ui-url" => {
@@ -563,11 +578,14 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         }
         "ls" => list(&config, args, dry),
         "archives" => {
+            let mobile = cfg!(windows) && args.last().map(String::as_str)==Some("--windows-mobile");
+            let args = if mobile { &args[..args.len()-1] } else { args };
             if (args != ["--json"] && args != ["lookup","--json"]) || dry { return Err(Error::new(1,"usage: hgs archives [lookup] --json (JSON query on stdin)")); }
             let query = state::archive_catalog::read_query().map_err(|e| Error::new(1,e))?;
             let result = if args.first().map(String::as_str) == Some("lookup") {
-                state::archive_catalog::lookup(&query)
-            } else { state::archive_catalog::page(&query) }.map_err(|e| Error::new(1,e))?;
+                if mobile { state::archive_catalog::lookup_scoped(&query,true) } else { state::archive_catalog::lookup(&query) }
+            } else if mobile { state::archive_catalog::page_scoped(&query,true) }
+            else { state::archive_catalog::page(&query) }.map_err(|e| Error::new(1,e))?;
             println!("{result}"); Ok(0)
         },
         "reference" => {
@@ -584,7 +602,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             }
             state_command(command, &args)
         }
-        "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read"
+        "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
         | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" => {
             if command == "wait" && dry { return Err(Error::new(1,"Wait operations do not support --dry-run")); }
             if command == "graph" && dry { return Err(Error::new(1,"Graph reads do not support --dry-run")); }
@@ -594,7 +612,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove") && dry {
                 return Err(Error::new(1, "worktree creation and removal do not support --dry-run"));
             }
-            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "voice" | "schedules") || (command=="attachment" && has(args,"--stage"))) && dry {
+            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "notifications" | "voice" | "schedules") || (command=="attachment" && has(args,"--stage"))) && dry {
                 return Err(Error::new(1, "message input does not support --dry-run"));
             }
             state_command(command, args)
@@ -909,7 +927,7 @@ fn remote(
             all
         }
         "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "speech" | "voice" | "--help" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -949,6 +967,12 @@ fn remote(
         // Old peers otherwise interpret an unknown command as an agent launch.
         // Probe the same installed executable without consuming JSON stdin.
         format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] wait'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to track waits' >&2; exit 1; fi",platform::join(&remote_args))
+    } else if command == "notifications" {
+        format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-notifications-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to change notification preferences' >&2; exit 1; fi",platform::join(&remote_args))
+    } else if command == "hooks" {
+        format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hooks-health-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to inspect hook health' >&2; exit 1; fi",platform::join(&remote_args))
+    } else if command == "analytics" {
+        format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] analytics --json'; then exec ~/.local/bin/hgs {} --read-only; else echo 'hgs: update the selected computer to read analytics' >&2; exit 1; fi",platform::join(&remote_args))
     } else if command == "guide" {
         format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args))
     } else { format!("~/.local/bin/hgs {}", platform::join(&remote_args)) };
@@ -2227,6 +2251,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_notifications_advertises_its_exact_standalone_marker_on_every_platform() {
+        for tmux in [false, true] {
+            let help = usage_text(tmux);
+            assert_eq!(
+                help.lines()
+                    .filter(|line| line.trim() == "session-notifications-v1")
+                    .count(),
+                1
+            );
+            assert!(help.contains("notifications <session> --json"));
+        }
+    }
+
+    #[test]
     fn session_names_take_the_on_disk_case_of_the_same_folder_only() {
         let name = |logical: &str, canonical: Option<&str>| {
             on_disk_name(logical.into(), canonical.map(str::to_owned))
@@ -2400,6 +2438,13 @@ mod tests {
         // The only explicit start of the shared service; inspection never starts it.
         assert!(usage.contains(
             "\n       hgs [@host] account start native-opencode   start the shared OpenCode service if none runs; inspection never starts it\n"
+        ), "{usage}");
+        // Clients look for these commands before offering stars and All models.
+        assert!(usage.contains(
+            "\n       hgs [@host] account favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID   star an OpenCode model on that computer\n"
+        ), "{usage}");
+        assert!(usage.contains(
+            "\n       hgs [@host] account models native-opencode [--location DIR]   every OpenCode model of that computer and folder as JSON; never starts OpenCode\n"
         ), "{usage}");
     }
 

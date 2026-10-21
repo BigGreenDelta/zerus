@@ -4,7 +4,7 @@ Production HTTP runs in services/mobile/relay. The supported zerus-mobile CLI
 executes that Rust binary; this module remains an independent protocol oracle.
 """
 from __future__ import annotations
-from . import file_reads
+from . import file_reads, hook_health, session_projects
 
 import asyncio
 from collections import OrderedDict, deque
@@ -18,9 +18,10 @@ import uuid
 from aiohttp import web
 
 from .attachments import LIMITS as ATTACHMENT_LIMITS, MAX_REQUEST_BYTES, MAX_QUEUE_BYTES, validate_read, validate_send
-from . import archives, speech, speech_config, voice
+from . import analytics, archives, speech, speech_config, voice, session_notifications
 from .recovery import validate_recovery
-from .history import validate_history
+from .history import validate_history, validate_history_projection
+from .context import CLEAR_CONTEXT_DISMISS_FEATURE, validate_clear_context
 from .context import COMPUTER_OPERATIONS, validate_mobile_delivery, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS, FEATURES, validate_context, validate_core, validate_inspect, validate_lifecycle, validate_mark_read
 from .launch import OPERATIONS as LAUNCH_OPERATIONS, validate as validate_launch
 from .routes import RouteError, MAX_PEERS
@@ -256,7 +257,7 @@ async def pair(request):
 async def capabilities(request):
     await auth(request, "devices")
     providers = ["fcm"] if request.app[PUSH_WORKER].fcm is not None else []
-    return web.json_response({"protocol_version": 1, "push_providers": providers, "attachment_limits": ATTACHMENT_LIMITS, "operations": sorted(OPERATIONS), "features": sorted(FEATURES | {voice.video.FEATURE})})
+    return web.json_response({"protocol_version": 1, "push_providers": providers, "attachment_limits": ATTACHMENT_LIMITS, "operations": sorted(OPERATIONS), "features": sorted(FEATURES | {voice.video.FEATURE, CLEAR_CONTEXT_DISMISS_FEATURE, session_projects.FEATURE})})
 
 
 def small_response(request):
@@ -281,10 +282,14 @@ def validate_request(value):
     if str(uuid.UUID(request_id)) != request_id:
         raise web.HTTPBadRequest()
     text(value["computer_id"], 36)
-    text(value["session"], 1024, empty=value["operation"] == "archive_list" or value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS or value["operation"] in speech.OPERATIONS or value["operation"] in speech_config.OPERATIONS)
+    text(value["session"], 1024, empty=value["operation"] in analytics.OPERATIONS or value["operation"] == "archive_list" or value["operation"] in LAUNCH_OPERATIONS or value["operation"] in COMPUTER_OPERATIONS or value["operation"] in speech.OPERATIONS or value["operation"] in speech_config.OPERATIONS)
     op, payload = value["operation"], value["payload"]
     if not isinstance(op, str) or op not in OPERATIONS or not isinstance(payload, dict):
         raise web.HTTPBadRequest()
+    if op in analytics.OPERATIONS:
+        if value["session"] != "": raise ValueError("analytics reads use no session target")
+        analytics.validate(payload)
+        return
     if op == "archive_list":
         if value["session"] != "": raise ValueError("archive browsing uses no session target")
         archives.validate(payload)
@@ -315,14 +320,26 @@ def validate_request(value):
             if str(uuid.UUID(archive_id)) != archive_id:
                 raise web.HTTPBadRequest()
         return
+    if op == "session_notifications":
+        session_notifications.validate(payload)
+        return
     if op == "mark_read":
         validate_mark_read(payload)
         return
     if op == "recovery_action":
         validate_recovery(payload,request_id)
         return
+    if op in session_projects.OPERATIONS:
+        session_projects.validate(op,payload,request_id)
+        return
+    if op == "hooks_status":
+        hook_health.validate(payload,request_id)
+        return
     if op == "history":
         validate_history(payload,request_id)
+        return
+    if op == "history_projection":
+        validate_history_projection(payload, request_id)
         return
     if op == "file_read":
         file_reads.validate(payload, request_id)
@@ -337,7 +354,7 @@ def validate_request(value):
         validate_lifecycle(op, payload, request_id)
         return
     if op in CONTEXT_COMMANDS:
-        validate_context(payload, request_id)
+        (validate_clear_context if op == "clear_context" else validate_context)(payload, request_id)
         return
     if op in {"send_now", "settings", "process_output", "process_stop"}:
         validate_core(op, payload, request_id)

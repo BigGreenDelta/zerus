@@ -26,10 +26,14 @@ struct Request {
     // closes it. Without a value stdin stays open, as with a plain QProcess.
     std::optional<QByteArray> input;
     int timeoutMs = 0;   // 0: no deadline
+    // Combined stdout/stderr retention bound. First excess reports an explicit
+    // failure and kills only this direct child; retained output stays bounded.
+    // Zero preserves the existing unrestricted callers.
+    qsizetype maximumOutputBytes = 0;
 };
 
 struct Result {
-    enum Outcome { Finished, FailedToStart, TimedOut };
+    enum Outcome { Finished, FailedToStart, TimedOut, OutputLimitExceeded };
     Outcome outcome = Finished;
     int exitCode = -1;
     QProcess::ExitStatus exitStatus = QProcess::NormalExit;
@@ -37,6 +41,7 @@ struct Result {
     QProcess::ProcessError error = QProcess::UnknownError;
     QString errorString;
     QByteArray standardOutput, standardError;
+    bool outputLimitExceeded = false;
 };
 
 // Reports exactly once on owner's thread, which must be the application thread.

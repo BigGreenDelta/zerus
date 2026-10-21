@@ -13,11 +13,16 @@ breakaway, as an sshd session does, runs the command there with stdin from NUL,
 and writes its output and exit status to files that this side follows. When the
 command ends, or this side times out and ends the copy, the job ends everything
 the command left, and session hosts that legitimately broke away from it are
-ended by executable path (--end, a PowerShell -like pattern). Usage:
+ended by executable path (--end, a PowerShell -like pattern). A detached-connector
+fixture instead uses --custody-only, which forbids --end and retains the wrapper,
+private fixture and unknown outcome on timeout, without PID/tree cleanup. Usage:
 
     python scripts/ci/outside-job.py --log FILE [--timeout SECONDS] [--end EXE]... -- COMMAND...
 
-It exits with the command's status, or 124 after the timeout.
+It exits with the command's status, or 124 after the timeout. Cleanup errors
+cannot turn a failed or unknown outcome into success. Cleanup subprocesses have
+a shared 120 s allowance and a 30 s per-action cap. These bounds do not preempt
+host filesystem or logging stalls.
 """
 import argparse
 import ctypes
@@ -32,6 +37,52 @@ import time
 
 # Step variables that grant access; the command never needs them.
 SECRET = re.compile(r"TOKEN|SECRET|PASSWORD|^ACTIONS_(RUNTIME|CACHE|RESULTS|ID_TOKEN)", re.IGNORECASE)
+CLEANUP_ALLOWANCE = 120
+CLEANUP_ACTION_LIMIT = 30
+
+
+class Cleanup:
+    """One finite allowance for independent cleanup attempts; never retry one.
+
+    Keep failures even when the next attempt succeeds. The caller retains its
+    status/work directory if cleanup or the command's outcome is unknown.
+    """
+    def __init__(self, report):
+        self.deadline = time.monotonic() + CLEANUP_ALLOWANCE
+        self.problems = []
+        self.report = report
+
+    def problem(self, message):
+        self.problems.append(message)
+        try:
+            self.report(f"outside-job: cleanup: {message}\n")
+        except (OSError, ValueError) as error:
+            self.problems.append(f"cannot report cleanup outcome: {type(error).__name__}")
+
+    def run(self, label, argv, **kwargs):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            self.problem(f"{label}: not attempted; cleanup allowance exhausted")
+            return None
+        limit = min(CLEANUP_ACTION_LIMIT, remaining)
+        try:
+            result = subprocess.run(argv, timeout=limit, **kwargs)
+        except (OSError, subprocess.SubprocessError) as error:
+            self.problem(f"{label}: outcome unknown ({type(error).__name__})")
+            return None
+        if type(result.returncode) is not int:
+            self.problem(f"{label}: exit status unknown")
+            return None
+        if result.returncode != 0:
+            self.problem(f"{label}: exit status {result.returncode}")
+            return None
+        return result
+
+    def exit_code(self, command_code):
+        if type(command_code) is not int:
+            self.problem("command exit status unknown")
+            return 1
+        return 1 if command_code == 0 and self.problems else command_code
 
 
 def in_job():
@@ -80,29 +131,49 @@ def join_kill_on_close_job():
     return job
 
 
-def end_executables(patterns):
+def end_executables(patterns, cleanup):
     """End every process whose executable path matches one of these -like patterns
     (left behind by a failed suite)."""
-    for pattern in patterns:
-        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+    for index, pattern in enumerate(patterns, 1):
+        cleanup.run(f"executable cleanup {index}", ["powershell", "-NoProfile", "-NonInteractive", "-Command",
                         "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like $env:OUTSIDE_JOB_EXE } "
                         "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "
                         "'outside-job: ended leftover ' + $_.ProcessId }"],
-                       env=dict(os.environ, OUTSIDE_JOB_EXE=pattern), stdin=subprocess.DEVNULL, timeout=120)
+                    env=dict(os.environ, OUTSIDE_JOB_EXE=pattern), stdin=subprocess.DEVNULL)
 
 
-def report_survivors(started, log):
+def report_survivors(started, log, cleanup):
     """Log processes created since `started` that still run: a suite should leave none,
     and anything left keeps loading the runner for the steps that follow."""
-    listing = subprocess.run(
+    listing = cleanup.run("survivor report",
         ["powershell", "-NoProfile", "-NonInteractive", "-Command",
          "$since = [datetime]::FromFileTimeUtc([long]$env:OUTSIDE_JOB_SINCE).ToLocalTime(); "
          "Get-CimInstance Win32_Process | Where-Object { $_.CreationDate -gt $since -and $_.ProcessId -ne $PID } "
          "| ForEach-Object { 'outside-job: still running: ' + $_.ProcessId + ' ' + $_.Name + ' ' + $_.CommandLine }"],
         env=dict(os.environ, OUTSIDE_JOB_SINCE=str(started)), stdin=subprocess.DEVNULL,
-        capture_output=True, text=True, timeout=120)
+        capture_output=True, text=True)
+    if listing is None:
+        return
     lines = [line for line in listing.stdout.splitlines() if line.startswith("outside-job:")]
     log.write(("\n".join(lines) + "\n" if lines else "outside-job: no process of the suites is left\n").encode())
+
+
+def stop_copy(pid, patterns, report):
+    """The existing timeout cleanup, bounded even when taskkill does not return."""
+    cleanup = Cleanup(report)
+    cleanup.run("taskkill", ["taskkill", "/T", "/F", "/PID", str(pid)],
+                stdin=subprocess.DEVNULL, capture_output=True)
+    end_executables(patterns, cleanup)
+    return cleanup
+
+
+def timeout_cleanup(pid, patterns, report, custody_only=False):
+    if custody_only:
+        # Detached connector custody belongs to its fixture. A wrapper timeout
+        # proves neither child identity nor exit and grants no PID/tree kill.
+        report("outside-job: custody-only timeout; wrapper/fixture retained, process outcome unknown\n")
+        return
+    stop_copy(pid, patterns, report)
 
 
 def file_time_now():
@@ -124,10 +195,12 @@ def child(spec_path):
         except OSError as error:
             log.write(f"outside-job: cannot run {spec['argv']}: {error}\n".encode())
             code = 127
-        log.flush()
-        end_executables(spec["end"])
+        cleanup = Cleanup(lambda message: log.write(message.encode()))
+        end_executables(spec["end"], cleanup)
         if started is not None:
-            report_survivors(started, log)
+            report_survivors(started, log, cleanup)
+        code = cleanup.exit_code(code)
+        log.flush()
     temporary = spec["status"] + ".tmp"
     Path(temporary).write_text(str(code), encoding="utf-8")
     os.replace(temporary, spec["status"])
@@ -140,8 +213,12 @@ def main():
     parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--end", action="append", default=[],
                         help="end processes whose executable path is -like this pattern afterwards")
+    parser.add_argument("--custody-only", action="store_true",
+                        help="retain unknown fixture on timeout; no PID/tree/image cleanup")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if getattr(args, "custody_only", False) and args.end:
+        parser.error("--custody-only forbids --end cleanup patterns")
     if args.child:
         child(args.child)
         return 0
@@ -177,6 +254,7 @@ def main():
     print(f"outside-job: started pid {pid} outside the step's job", flush=True)
     deadline = time.monotonic() + args.timeout
     gone = None
+    keep_work = False
     with open(log, "rb") as follow:
         while True:
             chunk = follow.read()
@@ -185,27 +263,39 @@ def main():
                 sys.stdout.flush()
             if status.exists():
                 sys.stdout.write(follow.read().decode("utf-8", "replace"))
-                code = int(status.read_text(encoding="utf-8"))
+                try:
+                    code = int(status.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    sys.stderr.write(f"outside-job: exit status unreadable; retained {work}\n")
+                    code = 1
+                keep_work = code != 0
                 break
-            # A copy that ended without a status never started its command.
+            # Without a status the command or cleanup outcome is unknown.
             if gone is None and exited(pid):
                 gone = time.monotonic()
             if gone is not None and time.monotonic() - gone > 5:
                 sys.stderr.write(f"outside-job: pid {pid} ended without a status\n")
                 code = 1
+                keep_work = True
                 break
             if time.monotonic() > deadline:
-                # Ending the copy closes its job, which ends the command's processes.
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], stdin=subprocess.DEVNULL,
-                               capture_output=True)
-                end_executables(args.end)
-                sys.stderr.write(f"outside-job: timed out after {args.timeout:.0f} s; ended pid {pid}\n")
+                # The custody-only gate leaves identity/exit to its fixture.
+                timeout_cleanup(pid, args.end, sys.stderr.write, getattr(args, "custody_only", False))
+                sys.stderr.write(f"outside-job: timed out after {args.timeout:.0f} s; outcome unknown for pid {pid}\n")
                 code = 124
+                keep_work = True
                 break
             time.sleep(1)
-    for path in (spec, status):
-        path.unlink(missing_ok=True)
-    work.rmdir()
+    if keep_work:
+        sys.stderr.write(f"outside-job: retained status/work directory {work}\n")
+    else:
+        try:
+            for path in (spec, status):
+                path.unlink(missing_ok=True)
+            work.rmdir()
+        except OSError as error:
+            sys.stderr.write(f"outside-job: cannot remove status/work directory {work}: {type(error).__name__}\n")
+            return 1
     return code
 
 

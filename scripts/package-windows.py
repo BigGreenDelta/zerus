@@ -108,6 +108,7 @@ def write_zip(stage, output, date_time):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cli", type=Path, required=True, help="tested hgs.exe")
+    parser.add_argument("--connector", type=Path, required=True, help="tested zerus-mobile-connector.exe")
     parser.add_argument("--gui", type=Path, required=True, help="tested hgs-tray.exe")
     parser.add_argument("--output", type=Path, required=True, help="zip to write")
     parser.add_argument("--qt-root", type=Path, default=os.environ.get("QT_ROOT_DIR"),
@@ -128,7 +129,7 @@ def main():
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     cli_version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
     manifest = {"product": "Zerus", "version": version, "cli_version": cli_version, "platform": "Windows",
-                "architecture": "x86_64", "qt_version": qt_version(qt_root), "native_agents_bundled": False,
+                "architecture": "x86_64", "qt_version": qt_version(qt_root), "native_agents_bundled": False, "mobile_connector_bundled": True,
                 "source_commit": source_commit()}
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -144,6 +145,7 @@ def main():
             pair = conpty_pair.fetch(Path(temporary) / "conpty")
         copy(args.cli, stage / "hgs.exe")
         copy(args.gui, stage / "hgs-tray.exe")
+        copy(args.connector, stage / "zerus-mobile-connector.exe")
         # Qt libraries, plugins and translations. The SVG image and icon plugins
         # are loaded at run time only, so windeployqt cannot infer them from
         # imports. QML debugging and TUIO touch plugins are not used; the NMEA
@@ -184,7 +186,9 @@ def main():
             require((args.rust_licenses / "inventory.json").is_file(), "Collect dependency license texts first.")
             shutil.copytree(args.rust_licenses, licenses / "rust")
         else:
-            subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust")],
+            subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust"),
+                            "--manifest-path", str(ROOT / "Cargo.toml"),
+                            "--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml")],
                            cwd=ROOT, check=True)
         for text in sorted((ROOT / "packaging/windows/licenses").glob("*.txt")):
             copy(text, licenses / "qt" / text.name)
@@ -204,6 +208,7 @@ def main():
         readme = (ROOT / "packaging/windows/README.txt").read_text(encoding="utf-8")
         for key in ("version", "cli_version", "qt_version", "source_commit"):
             readme = readme.replace(f"@{key.upper()}@", manifest[key])
+        readme = readme.replace("@QT_SERIES@", ".".join(manifest["qt_version"].split(".")[:2]))
         readme = readme.replace("@CONPTY_VERSION@", conpty_pair.PIN["version"])
         require(not re.search(r"@[A-Z_]+@", readme), "Unreplaced placeholder in the Windows README.")
         # Notepad and other Windows tools expect CRLF in a plain-text README.

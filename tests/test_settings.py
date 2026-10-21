@@ -319,6 +319,15 @@ class SessionSettings(test_effort.EffortTransport):
         self.assertEqual(self.received(),b'/model')
         self.assertEqual(self.inspect()['model'],'gpt-6-astra')
 
+    def test_unread_settings_keys_are_not_a_first_message(self):
+        self.fresh();(self.root/'freeze').touch();p=self.payload('low');p['model']='gpt-6-sol'
+        self.assertIn('not confirmed',self.settings(p,False))
+        record=json.loads(self.record_path.read_text())
+        self.assertFalse(record.get('input_pending_at'));self.assertIn('settings_unconfirmed_at',record)
+        info=self.inspect();self.assertFalse(info['first_message_can_send'])
+        self.assertIn('did not react',info['first_message_reason'])
+        self.assertEqual(self.received(),b'/model')
+
     def test_pending_settings_apply_before_ready_message(self):
         self.record.update(activity='busy',phase='working');self.write_record()
         self.settings(self.payload('low'))

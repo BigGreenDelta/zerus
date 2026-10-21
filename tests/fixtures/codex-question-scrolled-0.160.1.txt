@@ -1,0 +1,24 @@
+
+  Before I continue with the release preparation, which distribution channel
+  should this build target, considering that the stable channel requires the
+  full CI matrix, signed artifacts and the owner-triggered publication step,
+  while nightly and dev channels publish automatically after verification?
+  Before I continue with the release preparation, which distribution channel
+  should this build target, considering that the stable channel requires the
+  full CI matrix, signed artifacts and the owner-triggered publication step,
+  while nightly and dev channels publish automatically after verification?
+  Before I continue with the release preparation, which distribution channel
+  should this build target, considering that the stable channel requires the
+  full CI matrix, signed artifacts and the owner-triggered publication step,
+  while nightly and dev channels publish automatically after verification?
+
+  › 1. Option 1: publish to this channel after the complete matrix, package
+       checks and signed asset verification succeed on the exact candidate
+    2. Option 2: publish to this channel after the complete matrix, package
+       checks and signed asset verification succeed on the exact candidate
+    3. Option 3: publish to this channel after the complete matrix, package
+       checks and signed asset verification succeed on the exact candidate
+    4. Option 4: publish to this channel after the complete matrix, package
+
+  enter submit   ctrl+] skip   option 1/6   shift+→ main prompt
+

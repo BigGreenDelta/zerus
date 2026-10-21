@@ -267,6 +267,60 @@ pub fn process_alive(pid: u32) -> bool {
 pub fn file_identity(path: &Path) -> Option<FileIdentity> {
     FileIdentity::at(path).ok().map(|(identity, _)| identity)
 }
+/// The identity of the file this process runs, read from the running image:
+/// an upgrade may already have put another file at its path.
+#[cfg(target_os = "linux")]
+pub fn image_identity() -> Option<FileIdentity> {
+    file_identity(Path::new("/proc/self/exe"))
+}
+/// The identity of the file this process runs, read from the running image:
+/// an upgrade may already have put another file at its path.
+#[cfg(target_os = "macos")]
+pub fn image_identity() -> Option<FileIdentity> {
+    // struct proc_regionwithpathinfo in <sys/proc_info.h>: a proc_regioninfo, of
+    // which only pri_address and pri_size are read, then the file mapped there.
+    #[repr(C)]
+    struct Region {
+        info: [u64; 12],
+        vnode: libc::vnode_info_path,
+    }
+    const PROC_PIDREGIONPATHINFO: libc::c_int = 8;
+    const ADDRESS: usize = 10;
+    const SIZE: usize = 11;
+    // PROC_PIDREGIONPATHINFO_SIZE and the offsets of the fields read, as in the SDK.
+    const _: () = assert!(std::mem::size_of::<Region>() == 1272);
+    const _: () = assert!(std::mem::offset_of!(Region, vnode.vip_vi.vi_stat.vst_dev) == 96);
+    const _: () = assert!(std::mem::offset_of!(Region, vnode.vip_vi.vi_stat.vst_ino) == 104);
+    const _: () = assert!(std::mem::offset_of!(Region, vnode.vip_vi.vi_stat.vst_mtime) == 136);
+    const _: () = assert!(std::mem::offset_of!(Region, vnode.vip_vi.vi_stat.vst_mtimensec) == 144);
+    // This function's own code lies in the executable's __TEXT segment.
+    let address = image_identity as *const () as usize as u64;
+    let mut region: Region = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of_val(&region) as i32;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            PROC_PIDREGIONPATHINFO,
+            address,
+            &mut region as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    // The region found contains `address`, or else is the next one.
+    let start = region.info[ADDRESS];
+    let mapped = (start..start.saturating_add(region.info[SIZE])).contains(&address);
+    let stat = &region.vnode.vip_vi.vi_stat;
+    if read != size || !mapped || stat.vst_ino == 0 {
+        return None;
+    }
+    Some(FileIdentity {
+        // stat(2) reports the same device as a signed dev_t.
+        device: stat.vst_dev as i32 as u64,
+        inode: stat.vst_ino,
+        modified: stat.vst_mtime,
+        modified_nanos: stat.vst_mtimensec,
+    })
+}
 impl FileIdentity {
     /// The identity of a file this process has open. (Unix callers need its
     /// metadata as well and use `with_metadata`.)
@@ -1856,6 +1910,12 @@ mod tests {
             modified(&metadata),
             (metadata.mtime(), metadata.mtime_nsec())
         );
+    }
+
+    #[test]
+    fn the_running_image_is_the_file_this_test_started_from() {
+        let path = std::env::current_exe().unwrap();
+        assert_eq!(image_identity(), Some(file_identity(&path).unwrap()));
     }
 
     #[test]

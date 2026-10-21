@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 from macos_stapler import run_stapler
+from macos_notices import QT_NOTICES, notice_findings, ffmpeg_findings, ffmpeg_provenance
 
 BUNDLE_ID = "com.hgdev.hgs-tray"
 MINIMUM_SYSTEM = "14.0"
@@ -25,7 +26,6 @@ ALLOWED_RPATHS = ("@executable_path/", "@loader_path/")
 REFERENCES = {"LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LOAD_UPWARD_DYLIB", "LC_LAZY_LOAD_DYLIB"}
 MACH_O = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
           b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
-QT_NOTICES = ("qtbase", "qtsvg", "qtmultimedia")
 CONNECTOR = "Contents/MacOS/zerus-mobile-connector"
 EXECUTABLES = ["Contents/MacOS/hgs-tray", "Contents/MacOS/hgs", CONNECTOR, "Contents/Resources/bin/zerus-setup"]
 REQUIRED_FILES = [
@@ -49,6 +49,7 @@ REQUIRED_FILES = [
     "Contents/Resources/licenses/qt/LGPL-3.0.txt",
     "Contents/Resources/licenses/qt/GPL-3.0.txt",
     "Contents/Resources/licenses/qt/SOURCE.md",
+    "Contents/Resources/licenses/qt/FFMPEG-SOURCE.json",
     *[f"Contents/Resources/licenses/qt/{module}.spdx.json" for module in QT_NOTICES],
 ]
 NAME = re.compile(r"^\s*name (.*) \(offset \d+\)$")
@@ -145,6 +146,12 @@ def is_mach_o(path):
 def bundle_findings(bundle, version, release=None):
     findings = plist_findings(plistlib.loads((bundle / "Contents/Info.plist").read_bytes()), version, release)
     findings += [f"missing {name}" for name in REQUIRED_FILES if not (bundle / name).is_file()]
+    findings += notice_findings(bundle / "Contents/Resources/licenses/qt")
+    provenance = ffmpeg_provenance()
+    findings += ffmpeg_findings(bundle, provenance)
+    manifest = bundle / "Contents/Resources/licenses/qt/FFMPEG-SOURCE.json"
+    if manifest.is_file() and json.loads(manifest.read_text()) != provenance:
+        findings.append("FFMPEG-SOURCE.json differs from the reviewed source/configuration tuple")
     findings += [f"not executable: {name}" for name in EXECUTABLES
                  if (bundle / name).is_file() and not os.access(bundle / name, os.X_OK)]
     # The connector's black-box test seams exist only with the test-hooks feature.

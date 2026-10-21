@@ -32,7 +32,8 @@ object NativeEfforts {
         }.distinctBy { it.value }.take(MAX).toList()
     }
 }
-data class LaunchModel(val value:String,val label:String,val efforts:List<LaunchEffort> = emptyList())
+data class LaunchModel(val value:String,val label:String,val efforts:List<LaunchEffort> = emptyList(),
+    val provider:String="",val providerLabel:String="",val free:Boolean=false,val favorite:Boolean=false,val isDefault:Boolean=false)
 data class LaunchFolder(val path: String,val name: String)
 data class LaunchProjectFolder(val id:String,val path:String,val name:String)
 data class LaunchProject(val id:String,val name:String,val color:String,val folders:List<LaunchProjectFolder>)
@@ -96,17 +97,23 @@ object LaunchPresentation {
     fun validModel(value:String) = value.isNotBlank() && value.length<=120 && value.contains('/') && value.none(Char::isISOControl)
     fun validEffort(value:String) = NativeEfforts.valid(value)
     /** The model's own variants in native order; a missing label shows the ID. */
-    private fun modelEfforts(option:JSONObject):List<LaunchEffort> = NativeEfforts.parse(option).map { LaunchEffort(it.value,it.label ?: it.value) }
     /** Only exact models offered by this computer's selected native OpenCode account. */
     fun models(raw:JSONObject?,provider:String,accountId:String):List<LaunchModel> {
         if(provider!="opencode") return emptyList()
         val account=raw?.optJSONArray("accounts")?.objects().orEmpty().singleOrNull { it.string("provider")==provider && it.string("id")==accountId } ?: return emptyList()
-        return account.optJSONArray("model_options")?.objects().orEmpty().take(256).mapNotNull { option ->
-            val value=((option.opt("value") ?: option.opt("id")) as? String)?.takeIf(::validModel) ?: return@mapNotNull null
-            val label=(option.opt("label") as? String)?.takeIf { it.isNotBlank() && it.length<=160 && it.none(Char::isISOControl) } ?: value
-            LaunchModel(value,label,modelEfforts(option))
-        }.distinctBy { it.value }
+        return OpenCodeCatalog.models(account.optJSONArray("model_options")).map { model ->
+            LaunchModel(model.value,model.label,model.efforts.map { LaunchEffort(it.value,it.label ?: it.value) },
+                model.provider,model.providerLabel,model.free,model.favorite,model.isDefault)
+        }
     }
+    fun catalogNotice(raw:JSONObject?,provider:String,accountId:String):String {
+        if(provider!="opencode") return ""
+        val row=raw?.optJSONArray("accounts")?.objects().orEmpty().singleOrNull { it.string("provider")==provider && it.string("id")==accountId } ?: return ""
+        val catalog=OpenCodeCatalog.account(row) ?: return ""
+        return listOf(OpenCodeCatalog.stateMessage(catalog.state,catalog.reason),OpenCodeCatalog.truncationMessage(catalog.modelsTruncated,false))
+            .filter(String::isNotBlank).joinToString(" ")
+    }
+
     /**
      * Effort choices for New session: the chosen OpenCode model's variants, only when the relay and the
      * connector advertise [OPENCODE_LAUNCH_EFFORT] ([effortSupported]). Empty means no Effort row and no `effort` in the request.
@@ -212,7 +219,16 @@ object LaunchPresentation {
             JSONObject().put("id",account.id).put("provider",account.provider).put("label",account.label)
                 .put("native",account.native).put("is_default",account.isDefault).put("installed",account.installed).put("auth_status",account.authStatus)
                 .put("model_options",JSONArray(models(raw,account.provider,account.id).map { model -> JSONObject().put("value",model.value).put("label",model.label)
-                    .also { row -> if(model.efforts.isNotEmpty()) row.put("effort_options",JSONArray(model.efforts.map { it.value })).put("effort_labels",JSONArray(model.efforts.map { it.label })) } }))
+                    .put("provider",model.provider).put("provider_label",model.providerLabel).put("free",model.free)
+                    .also { row ->
+                        if(model.favorite) row.put("favorite",true)
+                        if(model.isDefault) row.put("default",true)
+                        if(model.efforts.isNotEmpty()) row.put("effort_options",JSONArray(model.efforts.map { it.value })).put("effort_labels",JSONArray(model.efforts.map { it.label }))
+                    } }))
+                .also { row -> if(account.provider=="opencode") {
+                    raw.optJSONArray("accounts")?.objects().orEmpty().singleOrNull { it.string("provider")==account.provider && it.string("id")==account.id }
+                        ?.let(OpenCodeCatalog::account)?.let { catalog -> row.put("catalog_state",catalog.state).put("catalog_reason",catalog.reason).put("model_options_truncated",catalog.modelsTruncated) }
+                } }
                 .also { row -> account.usage?.let { row.put("usage",AccountSnapshots.accountJson(it).getJSONObject("usage")) } }
         }))
         val supported=raw.opt("project_launch_supported")==true

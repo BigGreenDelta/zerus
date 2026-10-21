@@ -417,6 +417,19 @@ original editing form is restored only while its prepared request and revision
 remain owned; a concurrent edit is preserved. This refusal never opens a new
 confirmation or retries input automatically.
 
+Android context details offer a separate **Dismiss and clear…** confirmation
+only when both relay and exact computer advertise `clear_context_dismiss` and
+the selected fresh native inspection reports actual Boolean eligibility. The
+dialog captures its mode and target; it never upgrades an ordinary clear
+confirmation automatically. The explicit mode stores `dismiss_prompt:true` in
+the original durable context operation and rechecks identity, capabilities,
+eligibility and other pending work before transport. Only its own reservation
+is excluded from that final pending-work check. Ordinary clear omits the field;
+strict decoding preserves actual `false`/`true` metadata and rejects malformed
+new fields through the existing storage failure path without overwriting data.
+Receipt checking, recovery and review retain the original identity and never
+authorize replay. Cold-cache consent and draft/attachment handling are unchanged.
+
 Compact and clear are fixed native operations scoped to the exact computer,
 session, run, conversation and request UUID. The phone saves an operation before
 transport, and uncertain delivery is checked without replaying the mutation.
@@ -429,7 +442,9 @@ Compact and continue retains a cancellable send intent only in memory. It waits
 for the matching native compaction request to complete and the agent to be idle,
 then sends only the original unchanged draft with its native compaction UUID.
 An edit, attachment change, navigation, restart, cancellation, failed or unchanged
-compaction, or identity change cancels that continuation. Acceptance of the
+compaction, or identity change cancels that continuation. A later prompt,
+interruption, permission request or session end also ends it; a compaction that
+already completed keeps its Completed result. Acceptance of the
 compact command alone is never completion. Clear and compact never run merely
 because context is large or a cache has expired.
 
@@ -521,9 +536,14 @@ or failed reads cannot reopen it. Draft review and discard cannot bypass that
 submitted lock. Successful interrupts retain their separate cleanup behavior.
 Approval review accrues only in the visible, focused foreground disclosure.
 
-Ordinary agent messages and non-approval question disclosures render Markdown
-with the desktop's CommonMark and GFM feature set: headings, emphasis, lists,
+Ordinary agent messages and question disclosures from known agent-authored sources
+render Markdown with the desktop's CommonMark and GFM feature set: headings, emphasis, lists,
 quotes, links, tables, strikethrough, static task markers and code blocks.
+Approval and trust disclosures, terminal-read panels and unknown question sources
+stay literal, including prompt bodies, Other descriptions and option descriptions,
+so paths and terminal output keep their exact reported characters. The authored
+source allowlist matches desktop: `hook`, `codex_async`, `kimi_wire`,
+`kimi_plan_review`, `dsh_native`, `opencode_native` and `claude_native_question`.
 Android uses CommonMark Java 0.30.0 with native Compose presentation, not a WebView.
 Only explicitly tapped absolute HTTP(S) links open a browser. In an agent
 conversation, file links open the source computer's file dialog described below.
@@ -573,8 +593,21 @@ may add `provider_label`, `free`, and up to eight `effort_options` with
 `effort_labels` in the same order. An effort id keeps the native catalog's rule
 (non-empty, at most 40 UTF-8 bytes, no whitespace, control character or `/`); a
 malformed id drops only that entry. All fields are additive and appear only when
-the computer reports them; the whole projection stays within 128 KiB (over the bound, `effort_labels` and
-then `effort_options` are dropped before the projection is refused).
+the computer reports them. OpenCode rows may also carry `providers` (at most
+64 entries of `id`, `label`, `kind`, `credential_count`, `model_count` and
+`active_label`), `providers_truncated`, `model_options_truncated` and
+`catalog_at`; each model entry may carry `favorite` and `default` marks, sent
+only when `true`. Provider and model `settings`, `headers`, `body`, `options`,
+base URLs, connection status text and URLs, credential IDs and values and
+environment names never leave the connector. The launch catalog carries the
+marks and truncation flags but never providers. The whole projection stays
+within 128 KiB (over the bound, `effort_labels`, `effort_options` and then
+`providers` are dropped, setting `providers_truncated`, before the projection
+is refused). The connector keeps only OpenCode provider IDs that a phone
+launch accepts (an ASCII letter, digit or `_`, then letters, digits, `_`, `.`
+or `-`, at most 80 bytes): a provider outside that rule is dropped on phones
+together with its short-list models, without setting either truncation flag.
+The desktop and `hgs` still offer them.
 An unavailable catalog can indicate an older native CLI; it is not an empty
 list of verified accounts.
 
@@ -640,6 +673,14 @@ The relay allows each credential
 keeps its invitation limits; global and per-address limits belong to the reverse
 proxy (see [Mobile deployment](mobile-deployment.md)). Terminal remains capability-gated for
 unsupported native adapters, archived sessions and child activity views.
+Android opening or explicitly refreshing Terminal rechecks gateway capabilities,
+the computer catalog and the exact session before requesting a screen. An existing
+shared inspection settles first and cannot supply this fresh check. Missing,
+malformed or failed operation discovery remains unavailable metadata; an actual
+empty operation list is a reported lack of support. The explanation distinguishes
+gateway support, computer support and the native session's explicit refusal.
+Refreshing availability only reads metadata and session inspection; input still
+requires the separately verified fresh native Terminal binding.
 
 ### Conversation history and composition
 
@@ -655,6 +696,10 @@ The Android history cache is private and encrypted, with atomic files outside
 Android backup. It retains at most twenty conversations and twenty MiB for seven
 days, with a one-MiB limit per inspection. Disconnecting a workspace purges its
 history. Cache failures fall back to a network read and do not damage drafts.
+After a workspace is durably disconnected, Android clears only read errors owned
+by that exact connection. Catalog failures from an older connection set cannot
+restore its banner after disconnecting or pairing again. Errors from other
+workspaces and unowned mutation or storage failures remain visible.
 Native message IDs and journal sequence numbers identify rows. Legacy messages
 without either use scoped fingerprints; array positions are not message IDs.
 History parsing and reconciliation run away from the typing path.
@@ -753,9 +798,16 @@ to the source document do not change a pending message. A send uses the existing
 native `attachments: [{name, mime, data_base64, reference?}]` contract. No phone
 supplied path is opened on the computer. `hgs` creates its own private attachment
 files and retains them when input may have reached the native agent. Claude may
-record pasted input as `<pasted_content id="…">…</pasted_content id="…">`; `hgs`
-keeps only the inner text, so the native prompt still matches its delivery
-receipt and the message appears once.
+record pasted input as `<pasted_content id="…">…</pasted_content id="…">`, and
+frames a prompt that is only pasted text with blank lines; `hgs` keeps only the
+inner text, so the native prompt still matches its delivery receipt and the
+message appears once. As in desktop Activity, history leaves out Claude's
+compaction summaries and complete raw string envelopes for a local slash command
+or its output when the record has no human-origin evidence. A raw literal that
+exactly matches such an envelope without origin evidence is inherently ambiguous
+and is filtered too. Explicit human-origin records, structured user content,
+pasted-content wrappers and independently recorded hook user rows are retained;
+ordinary slash prompts and partial examples are not those complete envelopes.
 
 Limits match native input: eight files, ten MiB per file, twenty MiB total and
 64 KiB of message text. `/v1/requests` accepts a bounded 29 MiB JSON envelope;
@@ -936,6 +988,17 @@ as `desktop_presence`.
 Both relay capabilities and the computer snapshot's
 `mobile_capabilities` must advertise an extension before the phone uses it.
 
+The `clear_context_dismiss` extension permits the optional strict Boolean
+`dismiss_prompt` only on `clear_context`. Presence, even `false`, requires the
+distinct relay and computer feature after exact durable duplicate lookup.
+The connector offers it only for the exact trimmed HELP line
+`Mobile clear-context ABI: dismiss-prompt-v1`. For `true`, it verifies a fresh
+exact session/run/conversation and unarchived state, then requires the actual
+Boolean native `clear_context_dismiss: true`; phase/source hints grant no
+authority. It forwards the original payload. Omitted ordinary clear and compact
+validation, mutation identities and no-replay behavior remain unchanged. The
+native addition is a HELP marker only; this contract adds no native clear logic.
+
 The Rust connector adds the feature `opencode_launch_effort` (never advertised by
 the legacy Python connector). A phone sends the optional `effort` string in a
 `launch` payload only for OpenCode, with a `model` whose current account
@@ -953,12 +1016,30 @@ control character or `/`, as `hgs` projects it): in `launch` for agent
 layer tests against; membership in the model's `effort_options` stays
 authoritative. The relay advertises `opencode_launch_effort` too; phones offer
 such names only when both the relay and the computer advertise it.
-The connector also accepts a `remove_queued` session action carrying an exact
-`msg_` `message_id`, run and conversation identity and journals it like other
-session actions, and an in-flight one recovers as uncertain after a restart.
-It is currently unreachable from phones and relay clients: the relay operation
-set does not list it, so the relay rejects it and the connector does not
-advertise it. Phones do not offer it in phase 1.
+`remove_queued` removes one OpenCode message that was never delivered. It is a
+session mutation with a durable request identity, like `forget`: the payload
+holds exactly `request_id`, the exact `expected_run_id`, a nonempty
+`expected_conversation_id` and one `message_id`, `msg_` followed by 1–124 ASCII
+letters, digits, `_` or `-` (at most 128 characters). The relay, the Rust
+connector, the desktop and `hgs session-action` check the same shape, which
+`tests/fixtures/opencode-queued-message-ids.json` fixes; any other field is
+refused. The Rust connector advertises it exactly when its native hgs offers the
+scoped session-action ABI, as for the other session actions, journals it like
+them, and an in-flight one recovers as uncertain after a restart. That marker
+predates queue removal: an older hgs, for example on a one-hop peer, prints it
+too and then refuses the request, which leaves an uncertain receipt and removes
+nothing. The advertisement therefore does not prove that this hgs can remove a
+message; only `remove_queued` in the session's `allowed_actions` does, and an
+older hgs never lists it there. The legacy Python connector never advertises or
+accepts it, so the relay refuses it for a computer still running that connector.
+hgs removes the message only while it is still queued and the session is not
+running; it never resends it. A phone may offer Remove only when both the relay
+and the computer advertise `remove_queued`, the row's `delivery_state` is
+`not_delivered` and the session's `allowed_actions` contains `remove_queued`,
+always after an explicit confirmation for that exact run, conversation and
+message. It shows the message removed only after a completed receipt; a failed
+or uncertain receipt keeps the row with its reason and is never retried
+automatically.
 
 Legacy live `inspect` accepts an empty payload; an archive supplies its canonical
 `archive_id`. The `inspect_after` and `inspect_agent` features add a journal
@@ -968,7 +1049,12 @@ fresh control state. Inspect returns native `hgs inspect` JSON; bounded public
 history may be omitted as whole rows with explicit truncation metadata, while
 question disclosures and other control metadata remain intact.
 OpenCode events keep `delivery_state` (`queued` or `not_delivered`, with
-`message_id`) and `streaming`, and its question cards keep `input_kind`,
+`message_id`) and `streaming`. A recent prompt Zerus sent (among the newest
+100 user messages, queued ones first) carries the `request_id` of its send,
+while queued and after delivery: OpenCode dates a queued message by its
+delivery, so clients match their own message by this identity before falling
+back to text and time. Older prompts and rows from earlier versions have none.
+Its question cards keep `input_kind`,
 `min_length`, `max_length`, `min_items`, `max_items`, `default_option_ids`,
 `default_text` (prefilled for OpenCode text items unless a saved draft exists),
 `can_answer`, `answerable` and `unavailable_reason` unchanged.
@@ -1002,6 +1088,26 @@ transition is stored as an ordinary event, which refreshes phone state, and as
 an alert candidate. Push payloads contain only generic wake information, never
 conversation text, project names or credentials. Opening a notification
 refreshes the authenticated session state.
+
+The live parent conversation offers Mute notifications and Unmute notifications
+when both relay and computer advertise `session_notifications` and report valid
+`notification_preferences`. This host-owned setting follows the conversation
+across rename and resume and applies on every device. Its exact run/conversation
+and expected revision are checked by the durable request; no client changes the
+setting optimistically. Archives and child sessions cannot change it. Missing
+metadata leaves the control unavailable rather than creating a phone-only mute.
+
+Muted conversations retain their native state, unread replies, pending requests
+and Needs attention/Active membership. Attention and unread styling becomes
+neutral with a mute icon; Working and error signals remain visible. Notification
+cards, sounds and overflow totals exclude muted conversations. Unmute captures
+the host's complete current reply, main/child attention and optional-question
+identities, so an offline device cannot replay them. New identities can notify.
+The quiet `notification_preferences` event triggers refresh and withdrawal but
+never announces a transition. Clients retain the highest confirmed preference
+revision through late catalog/detail reads; receipt proofs share the existing
+bounded action history, deduplicate by computer/provider/conversation and use at most
+1 MiB of encoded proof storage. Evicting a proof keeps its request and outcome.
 
 ### Presence-aware delivery
 
@@ -1104,8 +1210,8 @@ optional Codex async question also carries `optional: true`, and blocking items
 never carry the key. The relay treats both alike, so the phone decides whether
 an optional item notifies: Android announces optional-only sessions only with its
 off-by-default Optional questions switch, once per question ID. As on the
-desktop, optional items never count as attention in Android's status, filters or
-counters. With many live Codex sessions, these alerts can lag
+desktop, optional items never count as attention in the status, filters or
+counters of Android and iOS. With many live Codex sessions, these alerts can lag
 by a complete scan cycle; ordinary native attention phases arrive with the next
 heartbeat.
 

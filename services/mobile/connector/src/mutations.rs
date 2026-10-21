@@ -183,7 +183,8 @@ pub fn validate_delivery(payload: Option<&Value>) -> Result<(), String> {
 pub fn validate(operation: &str, payload: &Value, request_id: &str) -> Result<(), String> {
     match operation {
         "recovery_action" => validate_recovery(payload, request_id),
-        "compact_context" | "clear_context" => validate_context(payload, request_id),
+        "compact_context" => validate_context(payload, request_id),
+        "clear_context" => validate_clear_context(payload, request_id),
         "send_now" | "settings" | "process_stop" => validate_core(operation, payload, request_id),
         "send" => validate_send(payload),
         "remove_queued" => validate_remove_queued(payload, request_id),
@@ -249,7 +250,9 @@ pub fn opencode_effort_offered(
     }
 }
 
-/// `remove_queued`: scoped identity plus one exact `msg_` message identity.
+/// `remove_queued`: scoped identity plus one exact `msg_` message identity,
+/// `msg_` and 1-124 ASCII letters, digits, `_` or `-` as hgs and the relay
+/// check it (`tests/fixtures/opencode-queued-message-ids.json`).
 pub fn validate_remove_queued(payload: &Value, request_id: &str) -> Result<(), String> {
     if !scoped(payload, request_id, &["message_id"], &["message_id"], true) {
         return Err(text("invalid scoped native operation fields"));
@@ -263,7 +266,9 @@ pub fn validate_remove_queued(payload: &Value, request_id: &str) -> Result<(), S
             id.len() <= 128
                 && id.len() > "msg_".len()
                 && id.starts_with("msg_")
-                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         });
     if valid {
         Ok(())
@@ -291,6 +296,23 @@ pub fn validate_recovery(payload: &Value, request_id: &str) -> Result<(), String
         return Err(text("invalid recovery job action"));
     }
     Ok(())
+}
+
+/// Only the optional clear field is new; the ordinary identity validator stays unchanged.
+pub fn validate_clear_context(payload: &Value, request_id: &str) -> Result<(), String> {
+    if let Some(value) = payload.get("dismiss_prompt") {
+        if !value.is_boolean() {
+            return Err(text("dismiss_prompt must be a boolean"));
+        }
+        let mut ordinary = payload.clone();
+        ordinary
+            .as_object_mut()
+            .expect("field exists")
+            .remove("dismiss_prompt");
+        validate_context(&ordinary, request_id)
+    } else {
+        validate_context(payload, request_id)
+    }
 }
 
 /// `context.validate_context(payload, request_id)`.
@@ -717,6 +739,11 @@ impl<N: Native + 'static> Connector<N> {
             return Err(Failure::text(CONTEXT_IDENTITY));
         }
         match operation {
+            "clear_context" if is_true(payload.get("dismiss_prompt")) => {
+                if !is_true(detail.get("clear_context_dismiss")) {
+                    return Err(Failure::text("native context operation is unavailable"));
+                }
+            }
             "compact_context" | "clear_context" => {
                 if !is_true(detail.get(&format!("{operation}_supported"))) {
                     return Err(Failure::text("native context operation is unavailable"));
@@ -955,6 +982,8 @@ impl<N: Native + 'static> Connector<N> {
             }
             result.insert("archive_id".into(), archive.clone());
         }
+        let opencode = self.state.borrow().opencode_sessions.contains(session);
+        crate::opencode_privacy::action(&mut result, opencode);
         let target = get(&result, "result_target");
         if !target.is_null() {
             let valid = target.as_object().is_some_and(|target| {
@@ -980,6 +1009,10 @@ impl<N: Native + 'static> Connector<N> {
                 let mut state = self.state.borrow_mut();
                 if operation == "rename" && name != session {
                     state.sessions.remove(session);
+                    state.opencode_sessions.remove(session);
+                }
+                if opencode {
+                    state.opencode_sessions.insert(name.clone());
                 }
                 state.sessions.insert(name);
             }
@@ -1230,6 +1263,7 @@ mod tests {
     fn remove_queued_needs_one_exact_message_identity() {
         let check = |extra: Value| validate("remove_queued", &scoped_payload(extra), "r");
         assert_eq!(check(json!({"message_id": "msg_abc123"})), Ok(()));
+        assert_eq!(check(json!({"message_id": "msg_a-b_c"})), Ok(()));
         assert!(check(json!({"message_id": "msg_".to_owned() + &"a".repeat(124)})).is_ok());
         for bad in [
             json!({}),

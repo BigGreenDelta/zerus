@@ -24,6 +24,7 @@ TRANSCRIPT = "BB-TRANSCRIPT-SENTINEL"
 VOICE = "BB-VOICE-SENTINEL"
 HISTORY = "BB-HISTORY-SENTINEL"
 INSPECTED = "BB-INSPECT-SENTINEL"
+CATALOG_REFRESHED = "BB-CATALOG-AFTER-RETENTION"
 MACHINE = "00000000-0000-4000-8000-000000000001"
 MESSAGE = "00000000-0000-4000-8000-0000000000aa"
 TERMINAL = ["terminal", SESSION, "--json"]
@@ -136,6 +137,11 @@ class ReadClassTests(OperationCase, BlackBoxCase):
             self.assertIn(sentinel.encode(), held, "the scan would not see this sentinel")
         first.stop()
 
+        # Change the live catalog after recording its empty result. A retained
+        # replay must still return that result, regardless of periodic reads.
+        self.hgs.prepend({"argv": ["account", "ls"], "stdout": {"profiles": [{
+            "id": "fixture-retained-catalog", "provider": "codex", "label": CATALOG_REFRESHED,
+            "native": False, "installed": False, "is_default": False}]}})
         self.age(121, *requests)
         second = await self.launch()
         kept = {row["operation"] for row in self.journal.rows()}
@@ -149,10 +155,10 @@ class ReadClassTests(OperationCase, BlackBoxCase):
                 self.assertEqual(await self.submit(request, second, redeliver=True,
                                                    expires_at=deadlines[request["request_id"]]),
                                  results[request["request_id"]])
-        # A catalog reads accounts and projects, which the heartbeat read only
-        # just now and next reads 15 s later; count them as work here.
-        self.assertEqual(self.work(mark, keep=[["account", "ls"], ["swarm", "get"]]), [],
-                         "a retained read executed again")
+        # The four other hour-class reads have distinct native commands. The
+        # catalog is proved by its unchanged result above: a new native read
+        # would return CATALOG_REFRESHED. Background reads are not request work.
+        self.assertEqual(self.work(mark), [], "a retained read executed again")
         await self.delivered(second, *[request for request in requests if request["operation"] in HOUR])
         second.stop()
 
@@ -171,6 +177,14 @@ class ReadClassTests(OperationCase, BlackBoxCase):
                                                    expires_at=deadlines[request["request_id"]]),
                                  results[request["request_id"]])
         self.assertEqual(self.work(mark), [], "a mutation executed again")
+        # Its old row is gone after the hour. This read identity may now run
+        # with a fresh claim deadline and must not return its old empty answer.
+        catalog = next(request for request in requests if request["operation"] == "catalog")
+        fresh = await self.submit(catalog, third, redeliver=True, expires_at=time.time() + DEADLINE)
+        self.assertEqual(fresh["state"], "completed")
+        self.assertEqual(fresh["result"]["request_id"], catalog["request_id"])
+        self.assertEqual([row["label"] for row in fresh["result"]["accounts"]], [CATALOG_REFRESHED])
+        self.assertNotEqual(fresh, results[catalog["request_id"]])
 
     def journal_bytes(self) -> bytes:
         return journal_bytes(self.state_dir)

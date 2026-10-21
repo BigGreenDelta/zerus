@@ -87,7 +87,8 @@ public enum SessionCardPresentation {
 
     public static func inactiveChild(_ child: JSONObject, countsComplete: Bool = false) -> Bool {
         let state = childState(child)
-        let inactive = ["finished", "idle", "ready"].contains(state)
+        // A failed turn has ended too; its error belongs to the parent's result.
+        let inactive = ["finished", "idle", "ready", "error"].contains(state)
         // Explicit display evidence wins over an older raw turn state or count.
         if !state.isEmpty && !inactive { return false }
         if flag(child, "group") { return countsComplete && child["active_count"]?.numberValue == 0 }
@@ -133,7 +134,7 @@ public enum SessionCardPresentation {
         }.map(\.target.agentId))
     }
 
-    /// The expanded rows. Finished, idle and ready turns are hidden unless completed children are included.
+    /// The expanded rows. Finished, idle, ready and failed turns are hidden unless completed children are included.
     public static func children(_ session: Session, _ online: Bool, includeCompleted: Bool = false, drafted: Set<String> = []) -> [SessionCardChild] {
         let current = SessionFilters.currentActivity(session, online)
         let complete = flag(session.raw, "subagent_counts_complete")
@@ -230,6 +231,15 @@ public enum QuestionPolicies {
         if let value = item["optional"] { return value == .bool(true) }
         if case .string(let id)? = item["question_id"] { return id.hasPrefix("codex-async:") }
         return false
+    }
+
+    /// Pending requests in one listing row that the agent cannot continue without: the connector's
+    /// `mobile_attention` items other than optional Codex questions or, without that list, the older
+    /// `pending_question_count`. As on the desktop and Android, optional questions are never attention;
+    /// a row whose only pending items are optional has none.
+    public static func blockingRequests(_ raw: JSONObject) -> Int {
+        guard let items = raw.array("mobile_attention") else { return raw.int("pending_question_count") }
+        return items.compactMap(\.object).filter { !optionalAttention($0) }.count
     }
 }
 

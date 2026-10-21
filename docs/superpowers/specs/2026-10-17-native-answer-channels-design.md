@@ -76,12 +76,12 @@ specific reason.
 | Panel (card `source`) | Agent | Channel C | Layer A |
 |---|---|---|---|
 | `hook` (AskUserQuestion) | Claude | PermissionRequest hook, verified by spike | fallback |
-| `claude_tool_approval` | Claude | PermissionRequest hook (allow or deny), to verify | in `zerus-6uhz` |
+| `claude_tool_approval` | Claude | PermissionRequest hook (allow or deny), main agent (P3) | in `zerus-6uhz` |
 | Claude's own questions (`refusal_fallback_preference`) | Claude | PermissionRequest without PreToolUse, to verify | fallback |
 | `claude_folder_trust`, `claude_permission_mode`, `claude_resume`, `claude_usage_limit`, terminal safety, auto-mode chooser | Claude | none known | only path |
-| `codex_async` | Codex | to investigate (hooks, app-server) | fallback |
+| `codex_async` | Codex | none on 0.160.1–0.162.1 (see Other agents) | only path, with A |
 | `codex_folder_trust`, `codex_hooks_trust`, `codex_update`, `codex_goal_resume` | Codex | none known | only path |
-| `kimi_wire` questions | Kimi | to investigate (wire protocol) | fallback |
+| `kimi_wire` questions | Kimi | none: the TUI resolves questions in process (`zerus-n88z`) | only path |
 | `kimi_folder_trust`, `kimi_cache_hint` | Kimi | none known | only path |
 | OpenCode, DeepSeek native requests | OpenCode, DeepSeek | already native APIs | not applicable |
 
@@ -263,6 +263,96 @@ owns this adapter (`zerus-pdmm`). Its spike verified the following on Claude
 Automatic approvals keep their durable private audit reservation before
 delivery. The channel is only another transport.
 
+### Implementation (P3, `zerus-pdmm`)
+
+- One channel worker serves both kinds. The registered group has no matcher,
+  and an AskUserQuestion-only group from an earlier hgs is widened in place.
+  Protocol files and `route`, `deliver`, `own`, `offer` and `claim` are
+  unchanged.
+- hgs records each active main-agent `PreToolUse` as the tool name and a
+  digest of its input, keyed by `tool_use_id`. Turn boundaries clear the
+  records, and more than 64 make every binding ambiguous. A request binds only
+  to the one record that began before it.
+- Each poll and the claim check the exact bound identity: process, run,
+  conversation, tool use, input and request time. A later identical request is
+  not the bound one and does not close it.
+- A Terminal answer sends the hook no signal. Inspection, `hgs answer` and the
+  worker's claim therefore also require Terminal to show a chooser. A complete
+  panel must match the request and no recorded child request; a clipped panel
+  counts only while no child request is recorded.
+- The worker takes an approval offer only while that proof holds, through the
+  same identity and capture as `hgs answer`. Until then the offer stays
+  unclaimed, and `hgs answer` retracts it with nothing sent.
+  - A retraction retires that channel, so the request continues on the screen.
+  - A refused agent identity never lets a decision go, before or after the
+    claim. This covers a pause, a provider error, another process and a
+    terminal of another run. After a claim the answer then stays uncertain and
+    locked.
+  - Only a capture that fails after the identity holds proves nothing and never
+    blocks the claim. Claude ignores a decision that arrives after a Terminal
+    answer.
+- A hook binds only to a request recorded in the last ten seconds. It binds
+  only to the one active tool call with the event's tool and input that began
+  before the hook started, as the first record it reads shows it. PreToolUse is
+  journaled before Claude asks. Without exactly one such call, the hook exits
+  and the screen remains. A later identical call is never adopted.
+- Before and after the claim, the screen is matched against the record that
+  was just checked.
+- The card always discloses the whole bound request (`request_body`): every
+  field of a Bash input, or the whole input of another tool. It never shows
+  another request's panel as the operation the hook grants.
+- The card's options:
+  - Claude's options are listed verbatim, and `panel_verified` is true, only
+    when a complete panel proves the exact operation (`proves`). That means the
+    main agent's "Bash command" title, the full command, the description if any,
+    and no other input field. The bound call must also be the only active main
+    Bash call (`channel::alone`), because the command match ignores how
+    whitespace wraps.
+  - The legacy file-name or host match is not proof. A Read of another file
+    with the same name can be queued in front, shown as "1 of 2" while the hook
+    waits for the second.
+  - Any other complete panel is left to the screen path, which acts on what it
+    shows.
+  - A clipped panel gives one-time Yes and No. An unreadable terminal gives no
+    hook card.
+  - Its free-text field, "Tell Claude what to do instead", maps to deny with
+    the message.
+  - Broader options, and the keys after an unclaimed offer, use only a proven
+    panel.
+- A visible safety warning is added, as its rows below the last fence, only
+  when it belongs to this request: the panel proves it, or, while the bound
+  call is the only active Bash call, the visible command rows of a clipped
+  panel end this command. Any diagnostic gutter below a visible chooser's last
+  fence that cannot be attributed and shown this way means no hook card,
+  whatever its text.
+- When the screen path answers a panel of another queued request, its
+  pre-existing bookkeeping settles the recorded request. That request then
+  waits in Terminal. This path is unchanged.
+- Automatic approvals accept `claude_hook` only with `panel_verified`, so only
+  for a proven Bash panel. This is the same one-time grant as on the screen
+  path.
+- Children are not answered through the channel. In Claude 2.1.296 they run in
+  the background, their requests appear only in the agents view, and switching
+  that view terminates the waiting hook. Claude then repeats `PreToolUse` and
+  `PermissionRequest` for the same tool use. No screen proof can show that a
+  child's request still waits.
+
+### Windows (`zerus-sser`)
+
+- Windows registers the same group, in Claude Code's exec form only
+  (`command` names the stable CLI, `args` `__state answer-channel`): Claude
+  starts hgs itself, so the hook process is the channel worker and its
+  recorded pid and start time identify it. Settings that keep the shell form
+  of an older Claude Code get no channel, since Git Bash would run between
+  Claude and hgs. hgs never wrote the AskUserQuestion-only group there.
+- No SIGTERM reaches the worker. A Terminal answer, decline or cancellation
+  ends it through the record, the transcript or Claude ending the hook
+  process; its own deadline stays below the hook timeout.
+- A rename is not exclusive on Windows, so claim and retract take
+  `handover.lock`. While holding it, a rename refused because a scanner or a
+  reader without delete sharing holds `answer.json` is tried again for up to
+  one second; a refused rename moved nothing. The outcome rules are unchanged.
+
 ## A, unviewed-terminal growth
 
 Implemented first for approvals in `zerus-6uhz` (agent-approval session) and
@@ -273,8 +363,11 @@ then reused here.
     window-local `window-size`. It runs `resize-window -y ROWS`, then
     `set -wu window-size`, so the next client sets the size again. Width never
     changes.
-  - The host and Windows backends return `false` (fail closed) until host
-    parity is implemented.
+  - The Windows session host answers a `grow_unviewed` request only while no
+    client is attached to the pane: it keeps the width, never shrinks, and the
+    next attaching client sets the size again (`zerus-5dox`). A host that
+    predates the request answers `unsupported`, which the backend reports as
+    `false` (fail closed).
   - tmux 3.8 behavior was verified on isolated sockets: after unsetting, the
     size persists while detached; an attach takes the client's size; a resize
     while attached reverts to the client's size.
@@ -319,9 +412,25 @@ version, like the Claude spike:
 - Codex: whether hooks or the app-server can answer `codex_async` questions,
   and approvals while the TUI runs.
 - Kimi: whether the wire protocol already observed for `kimi_wire` questions
-  can carry answers.
+  can carry answers. Kimi 2.1.1 answered no (`zerus-n88z`): its TUI runs the
+  agent engine in process and resolves questions and approvals only through its
+  own panels; hooks can only deny, `wire.jsonl` is output, and the local server
+  API belongs to a separate `kimi web` process. Kimi panels use screen delivery
+  with A.
 
 Until an adapter is qualified, these panels use screen delivery with A.
+
+Codex result (`zerus-zeb2`, 2026-10-18, pinned 0.160.1 and 0.162.0 plus
+0.162.1, isolated homes with `--no-daemon`): no channel. A synchronous
+`PermissionRequest` hook runs before Codex draws its approval panel, which
+shows only after the hook returns without a decision, so a waiting hook would
+hide the Terminal choice. With `async: true` the panel shows at once but the
+hook's decision is ignored. The decision carries only allow or deny with a
+message; `updatedInput`, `updatedPermissions` and `interrupt` fail closed, so
+hooks cannot answer questions either. hgs runs Codex without its app-server
+daemon, so no second client exists. `codex_async` questions keep screen
+delivery with A: an open panel taller than its pane scrolls its answers and
+names the visible row in its key hints, which marks it clipped.
 
 ## Testing and qualification
 
@@ -370,4 +479,7 @@ independent of the screen.
    start.
 3. Exact multi-choice and Other result formatting through `updatedInput`.
 4. Windows: hook process lifetime and parent-exit detection under the
-   Windows host.
+   Windows host. Answered for Claude Code 2.1.296 (`zerus-sser`, 2026-10-18):
+   in the native Windows suite a Terminal Yes or Esc ended the waiting
+   worker, a killed worker left the approval to the verified screen, and no
+   worker outlived its session or the suite's host.

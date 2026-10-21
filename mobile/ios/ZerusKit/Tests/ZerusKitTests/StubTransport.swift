@@ -15,15 +15,20 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     enum Reply: Sendable {
         case response(status: Int, body: Data, headers: [String: String] = [:])
         case failure(URLError.Code)
+        /// Never answers; only cancellation ends the request, which `stopped` counts.
+        case hang
     }
     typealias Responder = @Sendable (Recorded) -> Reply
 
     static let responder = Mutex<Responder?>(nil)
     static let recorded = Mutex<[Recorded]>([])
+    static let stoppedHanging = Mutex(0)
+    private let hanging = Mutex(false)
 
     static func reset(_ responder: @escaping Responder) {
         self.responder.withLock { $0 = responder }
         recorded.withLock { $0 = [] }
+        stoppedHanging.withLock { $0 = 0 }
     }
     static var requests: [Recorded] { recorded.withLock { $0 } }
 
@@ -48,6 +53,8 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         Self.recorded.withLock { $0.append(entry) }
         let reply = Self.responder.withLock { $0 }?(entry) ?? .failure(.cannotConnectToHost)
         switch reply {
+        case .hang:
+            hanging.withLock { $0 = true }
         case .failure(let code):
             client?.urlProtocol(self, didFailWithError: URLError(code))
         case .response(let status, let data, let headers):
@@ -58,7 +65,9 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        if hanging.withLock({ $0 }) { Self.stoppedHanging.withLock { $0 += 1 } }
+    }
 
     static func client() -> RelayClient {
         let configuration = RelayClient.configuration()

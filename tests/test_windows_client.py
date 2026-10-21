@@ -247,8 +247,8 @@ class WindowsClient(unittest.TestCase):
         for args, message in ((['native-ui', 'dsh/p'], 'native DeepSeek UI'), (['a', 'dsh/p'], 'native DeepSeek UI'),
                               (['account', 'login', 'native-dsh'], 'native DeepSeek UI'),
                               (['@peer', 'native-ui', 'dsh/p', '--json'], 'native DeepSeek UI'),
-                              (['mobile-peers', '--json'], 'Mobile peers'),
-                              (['swarm', 'mobile-peer', '--json'], 'Mobile peers')):
+                              (['mobile-peers', '--json'], 'One-hop mobile peer routing'),
+                              (['swarm', 'mobile-peer', '--json'], 'One-hop mobile peer routing')):
             with self.subTest(args=args):
                 result = self.hgs(*args, input='{}')
                 self.assertEqual(result.returncode, 2, result.stderr)

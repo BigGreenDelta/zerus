@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the pinned official tmux release for Linux input-contract tests.
+# Build the pinned official tmux release for hosted input-contract tests.
 set -euo pipefail
 prefix="$(realpath -m "${1:?pass a disposable installation prefix}")"
 tmux_version=3.7c
@@ -13,7 +13,13 @@ curl -fsSL "https://github.com/tmux/tmux/releases/download/$tmux_version/tmux-$t
     printf '%s  %s\n' "$tmux_sha256" "tmux-$tmux_version.tar.gz" | sha256sum --check -
     tar xzf "tmux-$tmux_version.tar.gz"
     cd "tmux-$tmux_version"
-    ./configure --prefix="$prefix"
+    # tmux requires explicit Unicode and allocator choices on macOS. The hosted
+    # job installs both libraries; Linux keeps its original defaults.
+    if [ "$(uname -s)" = Darwin ]; then
+        ./configure --prefix="$prefix" --enable-utf8proc --enable-jemalloc
+    else
+        ./configure --prefix="$prefix"
+    fi
     make --jobs=2
     make install
 )

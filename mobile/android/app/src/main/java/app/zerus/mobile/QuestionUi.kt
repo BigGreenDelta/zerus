@@ -114,15 +114,16 @@ import org.json.JSONObject
     fun answers() = QuestionPolicies.answers(question.prompts, options, texts)
     fun persist() { model.edit(target, texts.values.filter { it.isNotBlank() }.joinToString("\n"), question, answers().toString()) }
     val editing = draft.status == "editing" && native == null && model.pendingQuestionSend == null
-    val error = QuestionPolicies.answerError(question.prompts, options, texts)
-    val complete = QuestionPolicies.complete(question.prompts, options, texts)
+    val formReplyText = QuestionPolicies.formReplyText(question)
+    val error = QuestionPolicies.answerError(question.prompts, options, texts, formReplyText)
+    val complete = QuestionPolicies.complete(question.prompts, options, texts, formReplyText)
     val submitGate = remember(target.key,question.id,question.hash,draft.generation) { QuestionSubmitGate() }
     var submitPending by remember(submitGate) { mutableStateOf(false) }
     val submitScope = rememberCoroutineScope()
     val sendEnabled = question.canAnswer && editing && complete && available && !submitPending
     fun submitAnswer() {
         val allowed = question.canAnswer && editing && available && !submitPending &&
-            model.draft(target,question).status == "editing" && QuestionPolicies.complete(question.prompts,options,texts)
+            model.draft(target,question).status == "editing" && QuestionPolicies.complete(question.prompts,options,texts,formReplyText)
         if(!submitGate.claim(allowed)) return
         submitPending = true
         persist()
@@ -140,6 +141,10 @@ import org.json.JSONObject
         checkpoint(); focusManager.clearFocus(); keyboard?.hide(); onPage(next)
     }
     val approvalSupported = QuestionPolicies.approvalSupported(question)
+    val permission = QuestionPolicies.openCodePermission(question)
+    val choices = QuestionPolicies.nativeChoices(question)
+    var alwaysAllow by remember(target.key, question.id, question.hash) { mutableStateOf(AlwaysAllowConfirmation()) }
+    var broader by remember(target.key, question.id, question.hash) { mutableStateOf(BroaderChoiceConfirmation()) }
     val window = LocalWindowInfo.current
     val view = LocalView.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -150,7 +155,7 @@ import org.json.JSONObject
         onDispose { lifecycle.removeObserver(observer) }
     }
     var disclosureInWindow by remember(target.key, question.id, question.hash) { mutableStateOf(false) }
-    val reviewEligible = (inDialog || visible && LocalConversationObscuration.current?.obscured != true) && disclosureInWindow && foreground && window.isWindowFocused && available && editing && question.canAnswer && approvalSupported
+    val reviewEligible = (inDialog || visible && LocalConversationObscuration.current?.obscured != true) && disclosureInWindow && foreground && window.isWindowFocused && available && editing && question.canAnswer && (approvalSupported || permission || choices)
     var review by remember(target.key, question.id, question.hash) { mutableStateOf(ApprovalReview()) }
     var reviewNow by remember(target.key, question.id, question.hash) { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     LaunchedEffect(reviewEligible, question.approval) {
@@ -160,16 +165,23 @@ import org.json.JSONObject
         }
     }
     val remaining = review.secondsRemaining(reviewNow)
-    val step = QuestionSteps.current(question.prompts, page, options, texts)
+    // Every native choice, a rejection included, waits for the review, as on the desktop.
+    val reviewed = reviewEligible && remaining == 0
+    val step = QuestionSteps.current(question.prompts, page, options, texts, formReplyText)
     val pageIndex = step.page
     fun primaryAction() {
         if (step.nextPage != null) {
             if (editing && !submitPending && step.canAdvance) {
                 persist(); navigate(step.nextPage)
             }
-        } else submitAnswer()
+        } else if (!choices) submitAnswer()
+        else if (reviewed) {
+            // A broader option sends only from its own confirmation.
+            val confirmation = broader.request(question, options, true)
+            if (confirmation.open) broader = confirmation else submitAnswer()
+        }
     }
-    val primaryEnabled = if (step.nextPage != null) editing && !submitPending && step.canAdvance else sendEnabled
+    val primaryEnabled = if (step.nextPage != null) editing && !submitPending && step.canAdvance else sendEnabled && (!choices || reviewed)
     val currentPrompts = question.prompts.getOrNull(pageIndex)?.let(::listOf).orEmpty()
     val otherPrompts = currentPrompts.mapNotNull { prompt -> QuestionPolicies.textField(question, prompt)?.let { prompt to it } }
     val submitVisible = QuestionPolicies.submitVisible(question)
@@ -207,22 +219,24 @@ import org.json.JSONObject
                 currentPrompts.forEach { prompt ->
                     SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (prompt.header.isNotBlank()) Text(prompt.header, style = MaterialTheme.typography.labelLarge)
-                        if(question.approval) Text(prompt.text, fontWeight = FontWeight.SemiBold)
+                        if(!QuestionPolicies.authoredMarkdown(question)) Text(prompt.text, fontWeight = FontWeight.SemiBold)
                         else ProvideTextStyle(LocalTextStyle.current.copy(fontWeight=FontWeight.SemiBold)) { MarkdownText(prompt.text) }
                         if (prompt.body.isNotBlank()) {
-                            if(question.approval) Text(prompt.body, fontFamily=FontFamily.Monospace)
+                            if(!QuestionPolicies.authoredMarkdown(question)) Text(prompt.body, fontFamily=FontFamily.Monospace)
                             else MarkdownText(prompt.body)
                         }
                     } }
                     if (prompt.otherDescription.isNotBlank()) {
-                        if(question.approval) SelectionContainer { Text(prompt.otherDescription, style=MaterialTheme.typography.bodySmall) }
+                        if(!QuestionPolicies.authoredMarkdown(question)) SelectionContainer { Text(prompt.otherDescription, style=MaterialTheme.typography.bodySmall) }
                         else ProvideTextStyle(MaterialTheme.typography.bodySmall) { MarkdownText(prompt.otherDescription) }
                     }
                     prompt.choices.forEach { choice ->
-                        if (question.approval) {
+                        if (question.approval && !choices) {
                             SelectionContainer { Text(choice.label, style = MaterialTheme.typography.bodySmall) }
                             if (choice.description.isNotBlank()) SelectionContainer { Text(choice.description, style = MaterialTheme.typography.bodySmall) }
-                        } else QuestionOption(choice, prompt.multi, choice.id in options[prompt.id].orEmpty(), QuestionPolicies.inputEnabled(question, editing)) {
+                        } else QuestionOption(if (choice.scope != "broader") choice else choice.copy(description = listOf(choice.description,
+                            "Applies beyond this request. Asks for confirmation.").filter { it.isNotBlank() }.joinToString("\n")),
+                            prompt.multi, choice.id in options[prompt.id].orEmpty(), QuestionPolicies.inputEnabled(question, editing),markdown=QuestionPolicies.authoredMarkdown(question)) {
                             val selected = options[prompt.id].orEmpty()
                             options = options + (prompt.id to if (prompt.multi) {
                                 if (choice.id in selected) selected - choice.id else selected + choice.id
@@ -278,10 +292,22 @@ import org.json.JSONObject
             if (error.isNotBlank()) Text(error, color = Color(0xFFFFCB7D), style = MaterialTheme.typography.bodySmall)
             val sendNotice = model.questionSendNotice(target, question)
             if (sendNotice.isNotBlank()) Text(sendNotice, color = Color(0xFFFFCB7D), style = MaterialTheme.typography.bodySmall)
-            if (question.approval) {
+            fun submit(option: String) { model.send(target, question, QuestionPolicies.approvalAnswer(question, option)) }
+            // Outside the permission branch: a card that stops qualifying also drops an open confirmation.
+            AlwaysAllowDialog(alwaysAllow, question, question.canAnswer && editing && available && foreground, { alwaysAllow = it }) { model.send(target, question, it) }
+            BroaderChoiceDialog(broader, question, options, question.canAnswer && editing && available && foreground, { broader = it }) { submitAnswer() }
+            if (permission) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    QuestionPolicies.openCodePermissionActions(question).forEach { action ->
+                        val onClick = { if (action.confirmation) alwaysAllow = alwaysAllow.request(question, reviewed) else submit(action.option) }
+                        val enabled = action.enabled(question.canAnswer && editing && available, reviewed)
+                        if (action == OpenCodePermissionAction.AllowOnce) Button(onClick = onClick, enabled = enabled) { Text(action.label(remaining)) }
+                        else OutlinedButton(onClick = onClick, enabled = enabled) { Text(action.label(remaining)) }
+                    }
+                }
+                Text("Reject rejects every pending request in this session.", style = MaterialTheme.typography.bodySmall)
+            } else if (question.approval && !choices) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    fun submit(option: String) { model.send(target, question, JSONArray().put(JSONObject()
-                        .put("question_id", question.prompts.single().id).put("selected_option_ids", JSONArray().put(option)).put("text", ""))) }
                     OutlinedButton(onClick = { submit("deny") }, enabled = approvalSupported && question.canAnswer && editing && available) { Text("Deny") }
                     Button(onClick = { submit("allow") }, enabled = reviewEligible && remaining == 0) { Text(if (remaining > 0) "Approve once ($remaining)" else "Approve once") }
                 }
@@ -304,9 +330,11 @@ import org.json.JSONObject
                 if(otherPrompts.isEmpty() && submitVisible) QuestionActionButton(primaryEnabled,step,::primaryAction)
                 }
             }
+            if (choices && question.canAnswer && available) Text(if (remaining > 0) "Review the request, then choose one of the agent's options ($remaining)."
+                else "Choose one of the agent's options.", style = MaterialTheme.typography.bodySmall)
             if (!available) Text("Refresh to verify this request. Your answer is kept.", style = MaterialTheme.typography.bodySmall)
             else if (!question.canAnswer) SelectionContainer { Text(QuestionPolicies.unavailableNotice(question), style = MaterialTheme.typography.bodySmall) }
-            if (question.approval && !approvalSupported) Text("This approval cannot be answered here. Continue on your machine.", style = MaterialTheme.typography.bodySmall)
+            if (question.approval && !approvalSupported && !permission && !choices) Text("This approval cannot be answered here. Continue on your machine.", style = MaterialTheme.typography.bodySmall)
         }
     }
     }
@@ -333,7 +361,7 @@ import org.json.JSONObject
     }
 }
 
-@Composable private fun QuestionOption(choice: Choice, multi: Boolean, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+@Composable private fun QuestionOption(choice: Choice, multi: Boolean, selected: Boolean, enabled: Boolean, markdown:Boolean, onClick: () -> Unit) {
     val select = if (multi) Modifier.toggleable(selected, enabled, Role.Checkbox) { onClick() }
         else Modifier.selectable(selected, enabled, Role.RadioButton, onClick)
     Surface(color = MaterialTheme.colorScheme.surface, shape = MaterialTheme.shapes.small,
@@ -342,8 +370,54 @@ import org.json.JSONObject
             if (multi) Checkbox(selected, null) else RadioButton(selected, null)
             Column(Modifier.padding(start = 8.dp)) {
                 Text(choice.label)
-                if (choice.description.isNotBlank()) ProvideTextStyle(MaterialTheme.typography.bodySmall) { MarkdownText(choice.description) }
+                if (choice.description.isNotBlank()) {
+                    if(markdown) ProvideTextStyle(MaterialTheme.typography.bodySmall) { MarkdownText(choice.description) }
+                    else Text(choice.description,style=MaterialTheme.typography.bodySmall)
+                }
             }
         }
     }
+}
+
+/**
+ * A broader native option grants more than this request, so it asks first and shows the agent's own description
+ * of that grant. It closes without sending when the card changed, another option is chosen, the card can no longer
+ * be answered here, or the app left the foreground.
+ */
+@Composable private fun BroaderChoiceDialog(confirmation: BroaderChoiceConfirmation, question: Question,
+    options: Map<String, Set<String>>, eligible: Boolean, onChange: (BroaderChoiceConfirmation) -> Unit, send: () -> Unit) {
+    val choice = confirmation.showing(question, options, eligible)
+    LaunchedEffect(confirmation, choice) { if (confirmation.open && choice == null) onChange(confirmation.cancel()) }
+    if (choice == null) return
+    ObscureConversation()
+    ZerusAlertDialog(onDismissRequest = { onChange(confirmation.cancel()) },
+        title = { Text("Confirm this option?") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("\u201c${choice.label}\u201d changes the agent's permissions beyond this request.")
+            if (choice.description.isNotBlank()) SelectionContainer { Text(choice.description) }
+        } },
+        confirmButton = { TextButton(onClick = { onChange(confirmation.confirm(question, options, eligible, send)) }) { Text("Confirm") } },
+        dismissButton = { TextButton(onClick = { onChange(confirmation.cancel()) }) { Text("Cancel") } })
+}
+
+/**
+ * Always allow reaches beyond this request, so it asks first and names what it saves. The dialog closes without
+ * sending when the card changed, stopped offering Always allow, can no longer be answered here, or the app left
+ * the foreground.
+ */
+@Composable private fun AlwaysAllowDialog(confirmation: AlwaysAllowConfirmation, question: Question, eligible: Boolean,
+    onChange: (AlwaysAllowConfirmation) -> Unit, send: (JSONArray) -> Unit) {
+    val showing = confirmation.showing(question, eligible)
+    LaunchedEffect(confirmation, showing) { if (confirmation.open && !showing) onChange(confirmation.cancel()) }
+    if (!showing) return
+    ObscureConversation()
+    val saved = QuestionPolicies.alwaysAllowDescription(question)
+    ZerusAlertDialog(onDismissRequest = { onChange(confirmation.cancel()) },
+        title = { Text("Always allow?") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("OpenCode will allow matching requests without asking again.")
+            if (saved.isNotBlank()) Text(saved)
+        } },
+        confirmButton = { TextButton(onClick = { onChange(confirmation.confirm(question, eligible, send)) }) { Text("Always allow") } },
+        dismissButton = { TextButton(onClick = { onChange(confirmation.cancel()) }) { Text("Cancel") } })
 }
