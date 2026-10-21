@@ -185,6 +185,27 @@ def event(**changes):
 
 
 class OwnedWindowTouchObserverTests(unittest.TestCase):
+    def test_owned_window_id_uses_public_node_and_recycles_once_outside_dispatch(self):
+        source = HELPER.read_text()
+        self.assertNotIn('accessibilityWindowId', source)
+        public_read = source.split('    private fun ownedWindowId()', 1)[1].split('    fun begin(', 1)[0]
+        self.assertEqual(public_read, ''': Int? {
+        val node = window.decorView.createAccessibilityNodeInfo()
+        if (node == null) { uncertain("owned-window-unavailable"); return null }
+        return try {
+            val id = node.windowId
+            if (id < 0) { uncertain("owned-window-invalid"); null } else id
+        } finally { node.recycle() }
+    }
+''')
+        self.assertEqual(public_read.count('node.recycle()'), 1)
+        begin = source.split('    fun begin(', 1)[1].split('    fun end(', 1)[0]
+        self.assertIn('val ownedWindow = ownedWindowId() ?: return null', begin)
+        self.assertIn('catch (_: Throwable) { uncertain("begin-failed"); return null }', begin)
+        self.assertLess(source.index('    fun install()'), source.index('    private fun ownedWindowId()'))
+        for denied in ('getDeclared', 'javaClass', '@Suppress', 'getAccessibilityWindowId'):
+            self.assertNotIn(denied, source)
+
     def test_same_event_once_and_exact_true_false_return(self):
         for value in (True, False):
             with self.subTest(value=value):

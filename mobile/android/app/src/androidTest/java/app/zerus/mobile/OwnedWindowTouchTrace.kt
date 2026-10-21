@@ -72,6 +72,14 @@ internal class OwnedWindowTouchTrace(private val window: Window, private val sta
         window.callback = wrapper
         installed = true
     }
+    private fun ownedWindowId(): Int? {
+        val node = window.decorView.createAccessibilityNodeInfo()
+        if (node == null) { uncertain("owned-window-unavailable"); return null }
+        return try {
+            val id = node.windowId
+            if (id < 0) { uncertain("owned-window-invalid"); null } else id
+        } finally { node.recycle() }
+    }
     fun begin(label: String, expectedWindow: Int, down: Long, x: Float, y: Float): Int? {
         try {
             check(onMain())
@@ -80,7 +88,8 @@ internal class OwnedWindowTouchTrace(private val window: Window, private val sta
             if (taps.size >= 8) { tokenOverflow = true; uncertain("tap-overflow"); return null }
             if (!installed || window.callback !== wrapper) { uncertain("callback-changed"); return null }
             // This owned View/window observation happens outside dispatch, never in the callback.
-            val tap = Tap(taps.size + 1, expectedWindow, window.decorView.accessibilityWindowId, down, x, y)
+            val ownedWindow = ownedWindowId() ?: return null
+            val tap = Tap(taps.size + 1, expectedWindow, ownedWindow, down, x, y)
             if (tap.expectedWindow != tap.ownedWindow) uncertain("window-mismatch")
             taps.add(tap); pending = tap
             return tap.id
