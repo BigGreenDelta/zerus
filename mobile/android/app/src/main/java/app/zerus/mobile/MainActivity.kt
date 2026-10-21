@@ -811,8 +811,13 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val scrollMutex = remember { Mutex() }
     var viewportHeight by remember { mutableIntStateOf(0) }
     var viewportBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
-    // A pending question is what the reader acts on; leave a quarter for the history above it.
-    val cardMaxHeight = with(LocalDensity.current) { (viewportHeight.toDp() * .75f).coerceAtLeast(160.dp) }
+    // Keep history above the card unless the IME has already reduced its measured viewport.
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    val cardMaxHeight = with(density) {
+        if (imeVisible) viewportHeight.toDp().coerceAtLeast(0.dp)
+        else (viewportHeight.toDp() * .75f).coerceAtLeast(160.dp)
+    }
     val scope = rememberCoroutineScope()
     val currentHistoryTarget by rememberUpdatedState(target.key)
     val window = LocalWindowInfo.current
