@@ -39,7 +39,7 @@ pub(crate) enum EnvironmentError {
     /// The value of this variable holds NUL.
     Value(String),
     /// The name or value of this variable is not Unicode.
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     NotUnicode(String),
 }
 
@@ -49,7 +49,7 @@ impl fmt::Display for EnvironmentError {
             Self::Malformed(index) => write!(f, "environment entry {index} is not NAME=VALUE"),
             Self::Name(name) => write!(f, "invalid environment variable name {name:?}"),
             Self::Value(name) => write!(f, "the value of environment variable {name} contains NUL"),
-            #[cfg(windows)]
+            #[cfg(any(windows, test))]
             Self::NotUnicode(name) => write!(f, "environment variable {name:?} is not Unicode"),
         }
     }
@@ -102,8 +102,56 @@ impl Environment {
     /// This process's own environment, which the launcher hands to the host (D4).
     #[cfg(windows)]
     pub(crate) fn current() -> Result<Self, EnvironmentError> {
+        Self::from_os_entries(std::env::vars_os(), false)
+    }
+
+    /// A complete resolved hint snapshot will replace exactly these two
+    /// optional values. Drop their raw entries before Unicode validation so a
+    /// malformed optional value cannot reject the session's entire launch.
+    #[cfg(windows)]
+    pub(crate) fn current_for_hint_snapshot() -> Result<Self, EnvironmentError> {
+        Self::from_os_entries(std::env::vars_os(), true)
+    }
+
+    /// Starting the persistent host also captures its caller's environment.
+    /// Preserve valid raw controls, but normalize malformed optional controls
+    /// to off without relaxing validation of any unrelated environment entry.
+    #[cfg(windows)]
+    pub(crate) fn current_with_optional_hint_controls() -> Result<Self, EnvironmentError> {
+        let (environment, disabled) = Self::from_os_optional_hint_controls(std::env::vars_os())?;
+        if disabled {
+            eprintln!("{}", crate::config::HINT_POLICY_DIAGNOSTIC);
+        }
+        Ok(environment)
+    }
+
+    #[cfg(any(windows, test))]
+    fn from_os_optional_hint_controls(
+        raw: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    ) -> Result<(Self, bool), EnvironmentError> {
+        let raw = raw.into_iter().collect::<Vec<_>>();
+        let disabled = raw.iter().any(|(name, value)| {
+            name.to_str().is_some_and(hint_control)
+                && value.to_str().is_none_or(|value| value.contains('\0'))
+        });
+        let mut environment = Self::from_os_entries(raw, disabled)?;
+        if disabled {
+            environment.set("HGS_AGENT_HINT", "0")?;
+            environment.set("HGS_AGENT_HINT_OFF", "")?;
+        }
+        Ok((environment, disabled))
+    }
+
+    #[cfg(any(windows, test))]
+    fn from_os_entries(
+        raw: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+        replace_hint_controls: bool,
+    ) -> Result<Self, EnvironmentError> {
         let mut entries = Vec::new();
-        for (name, value) in std::env::vars_os() {
+        for (name, value) in raw {
+            if replace_hint_controls && name.to_str().is_some_and(hint_control) {
+                continue;
+            }
             match (name.into_string(), value.into_string()) {
                 (Ok(name), Ok(value)) => entries.push(format!("{name}={value}")),
                 (name, _) => {
@@ -114,7 +162,6 @@ impl Environment {
         }
         Self::parse(entries)
     }
-
     pub(crate) fn get(&self, name: &str) -> Option<&str> {
         self.position(name)
             .map(|index| self.variables[index].value.as_str())
@@ -183,6 +230,11 @@ impl Environment {
             .iter()
             .position(|variable| variable.key == key)
     }
+}
+
+#[cfg(any(windows, test))]
+fn hint_control(name: &str) -> bool {
+    name.eq_ignore_ascii_case("HGS_AGENT_HINT") || name.eq_ignore_ascii_case("HGS_AGENT_HINT_OFF")
 }
 
 /// `=X:`, where Windows keeps drive X's current directory for its programs.
@@ -808,6 +860,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn agent_hint_raw_environment_replaces_only_exact_controls_before_unicode_validation() {
+        use std::ffi::OsString;
+        #[cfg(unix)]
+        let malformed = {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(vec![0xff])
+        };
+        #[cfg(windows)]
+        let malformed = {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[0xd800])
+        };
+        let entries = |key: &str| {
+            vec![
+                (OsString::from("KEEP"), OsString::from("unchanged")),
+                (OsString::from(key), malformed.clone()),
+            ]
+        };
+        for key in ["HGS_AGENT_HINT", "hgs_agent_hint_off"] {
+            assert!(matches!(Environment::from_os_entries(entries(key), false),
+                Err(EnvironmentError::NotUnicode(name)) if name == key));
+            let normalized = Environment::from_os_entries(entries(key), true).unwrap();
+            assert_eq!(normalized.get("KEEP"), Some("unchanged"));
+            assert_eq!(normalized.get(key), None);
+            let (bootstrap, disabled) =
+                Environment::from_os_optional_hint_controls(entries(key)).unwrap();
+            assert!(disabled);
+            assert_eq!(bootstrap.get("HGS_AGENT_HINT"), Some("0"));
+            assert_eq!(bootstrap.get("HGS_AGENT_HINT_OFF"), Some(""));
+            assert_eq!(bootstrap.get("KEEP"), Some("unchanged"));
+        }
+        for key in ["UNRELATED", "HGS_AGENT_HINT_OTHER"] {
+            assert!(matches!(Environment::from_os_entries(entries(key), true),
+                Err(EnvironmentError::NotUnicode(name)) if name == key));
+            assert!(
+                matches!(Environment::from_os_optional_hint_controls(entries(key)),
+                Err(EnvironmentError::NotUnicode(name)) if name == key)
+            );
+        }
+        let (bootstrap, disabled) = Environment::from_os_optional_hint_controls([
+            (OsString::from("HGS_AGENT_HINT"), OsString::from("0")),
+            (OsString::from("HGS_AGENT_HINT_OFF"), OsString::from("work")),
+        ])
+        .unwrap();
+        assert!(!disabled);
+        assert_eq!(bootstrap.get("HGS_AGENT_HINT"), Some("0"));
+        assert_eq!(bootstrap.get("HGS_AGENT_HINT_OFF"), Some("work"));
+        assert!(matches!(
+            Environment::from_os_entries([(malformed, OsString::from("unchanged"))], true),
+            Err(EnvironmentError::NotUnicode(_))
+        ));
+        assert!(matches!(Environment::from_os_entries(
+            [(OsString::from("UNRELATED"), OsString::from("bad\0value"))], true),
+            Err(EnvironmentError::Value(name)) if name == "UNRELATED"));
+    }
     /// argv as the MSVC C runtime (2008 and later) reads a command line.
     fn split(line: &str) -> Vec<String> {
         let chars: Vec<char> = line.chars().collect();

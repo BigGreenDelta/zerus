@@ -254,7 +254,7 @@ pub fn config_dir(home: &str) -> PathBuf {
 }
 
 const HINT_KEYS: [&str; 2] = ["HGS_AGENT_HINT", "HGS_AGENT_HINT_OFF"];
-const HINT_POLICY_DIAGNOSTIC: &str =
+pub(crate) const HINT_POLICY_DIAGNOSTIC: &str =
     "hgs: optional agent hint disabled: invalid or unreadable hint policy";
 
 fn hint_key_without_assignment(line: &str) -> bool {

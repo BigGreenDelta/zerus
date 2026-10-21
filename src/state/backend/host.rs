@@ -151,6 +151,21 @@ const SESSION_CONTEXT: &[&str] = &[
     "HGS_CLIENT",
 ];
 
+/// Only a complete normalized pair permits dropping inherited raw controls
+/// before environment validation. Other values keep the existing refusal path.
+fn resolved_hint_snapshot(variables: &[String]) -> bool {
+    let value = |name: &str| {
+        variables
+            .iter()
+            .rev()
+            .filter_map(|entry| entry.split_once('='))
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value)
+    };
+    matches!(value("HGS_AGENT_HINT"), Some("0" | "1"))
+        && value("HGS_AGENT_HINT_OFF").is_some_and(|off| off.len() <= 8192 && !off.contains('\0'))
+}
+
 /// Why a request got no answer.
 #[derive(Debug)]
 pub(crate) enum Failure {
@@ -191,6 +206,11 @@ pub(crate) trait Connector: Sync {
     fn terminal(&self) -> Option<Box<dyn Terminal>>;
     /// This process's environment block, which a new session starts from (D8).
     fn environment(&self) -> Result<Environment>;
+    /// A session may replace optional hint controls before validating the raw
+    /// block. Existing connectors retain their normal strict capture by default.
+    fn environment_for_session(&self, _variables: &[String]) -> Result<Environment> {
+        self.environment()
+    }
     /// The stable CLI (D2, D8).
     fn stable_cli(&self) -> Result<String>;
     /// The verified parent of process `pid`, when known.
@@ -295,7 +315,7 @@ impl<C: Connector> HostBackend<C> {
     /// the launch ID.
     fn create(&self, spec: &LaunchSpec, size: Size) -> Result<(Created, String)> {
         let environment = session_environment(
-            self.connector.environment()?,
+            self.connector.environment_for_session(&spec.env)?,
             &spec.env,
             &self.connector.stable_cli()?,
         )?;
@@ -1036,6 +1056,14 @@ mod windows {
 
         fn environment(&self) -> Result<Environment> {
             Environment::current().map_err(|e| e.to_string())
+        }
+
+        fn environment_for_session(&self, variables: &[String]) -> Result<Environment> {
+            if resolved_hint_snapshot(variables) {
+                Environment::current_for_hint_snapshot().map_err(|e| e.to_string())
+            } else {
+                self.environment()
+            }
         }
 
         fn stable_cli(&self) -> Result<String> {
@@ -1917,6 +1945,37 @@ mod tests {
         assert!(!environment
             .iter()
             .any(|entry| entry.starts_with("HGS_FORK_AGENT_HINT_REVISION=")));
+    }
+
+    #[test]
+    fn agent_hint_raw_capture_exception_requires_a_complete_valid_replacement_pair() {
+        let pair = |entries: &[&str]| {
+            entries
+                .iter()
+                .map(|entry| (*entry).into())
+                .collect::<Vec<_>>()
+        };
+        assert!(resolved_hint_snapshot(&pair(&[
+            "HGS_AGENT_HINT=0",
+            "HGS_AGENT_HINT_OFF="
+        ])));
+        assert!(resolved_hint_snapshot(&pair(&[
+            "hgs_agent_hint=1",
+            "hgs_agent_hint_off=work"
+        ])));
+        for entries in [
+            vec!["HGS_AGENT_HINT=0"],
+            vec!["HGS_AGENT_HINT_OFF="],
+            vec!["HGS_AGENT_HINT=maybe", "HGS_AGENT_HINT_OFF="],
+            vec!["HGS_AGENT_HINT=1", "HGS_AGENT_HINT_OFF=bad\0value"],
+            vec![
+                "HGS_AGENT_HINT=0",
+                "HGS_AGENT_HINT_OFF=",
+                "HGS_AGENT_HINT=invalid",
+            ],
+        ] {
+            assert!(!resolved_hint_snapshot(&pair(&entries)));
+        }
     }
     #[test]
     fn creates_carry_the_launch_id_that_a_retry_repeats() {
