@@ -1,5 +1,6 @@
 #include <QtTest>
 #include <QFile>
+#include <QFileInfo>
 #include <QFileDevice>
 #include <QTemporaryDir>
 #include <QTextStream>
@@ -9,9 +10,15 @@
 #include <QSettings>
 #include <QThread>
 #include <QPointer>
+#include <QProcess>
+#include <QTimer>
 #include <QUuid>
 #include <atomic>
 #include <memory>
+#ifdef Q_OS_WIN
+#include <QScopeGuard>
+#include <qt_windows.h>
+#endif
 #ifndef Q_OS_WIN
 #include <fcntl.h>
 #include <unistd.h>
@@ -74,6 +81,10 @@ private slots:
     void rejectsGarbageProjects();
     void messagesUseStdinAndIdentityReceipts();
     void messageFailuresAreExplicitAndNeverRetried();
+#ifdef Q_OS_WIN
+    void writeStartupFailuresAreReportedAfterRequest_data();
+    void writeStartupFailuresAreReportedAfterRequest();
+#endif
     void questionAnswersUsePinnedIdentityAndStdin();
     void submittedQuestionReceiptsRequireOptionalCodexAndExactIdentity();
     void questionAnswerFailures_data();
@@ -1258,6 +1269,112 @@ print('{}')
     unexecutable.requestSendMessage({}, "codex/p", "hello", {}, "run");
     QTRY_COMPARE(blockedFailed.size(), 1); QVERIFY(!blockedFailed[0][4].toBool());
 }
+
+#ifdef Q_OS_WIN
+void TestHgsClient::writeStartupFailuresAreReportedAfterRequest_data()
+{
+    QTest::addColumn<QString>("operation");
+    for (const char *name : {"message", "queue", "settings"}) QTest::newRow(name) << QString(name);
+}
+
+void TestHgsClient::writeStartupFailuresAreReportedAfterRequest()
+{
+    QFETCH(QString, operation);
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QString program = directory.filePath("invalid-image.exe");
+    QFile executable(program); QVERIFY(executable.open(QIODevice::WriteOnly));
+    const QByteArray malformed("This is not a PE image.\n");
+    QCOMPARE(executable.write(malformed), qint64(malformed.size())); executable.close();
+    // An owned exclusive handle denies image/data access without denying the
+    // metadata checks below. Null security attributes make it noninheritable.
+    const auto *nativeProgram = reinterpret_cast<const wchar_t *>(program.utf16());
+    const HANDLE held = CreateFileW(nativeProgram, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const auto closeHeld = qScopeGuard([held] {
+        if (held != INVALID_HANDLE_VALUE) QVERIFY(CloseHandle(held));
+    });
+    QVERIFY(held != INVALID_HANDLE_VALUE);
+    DWORD handleFlags = 0; QVERIFY(GetHandleInformation(held, &handleFlags));
+    QVERIFY(!(handleFlags & HANDLE_FLAG_INHERIT));
+    const HANDLE probe = CreateFileW(nativeProgram, GENERIC_READ | GENERIC_EXECUTE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const DWORD probeError = probe == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    const auto closeProbe = qScopeGuard([probe] {
+        if (probe != INVALID_HANDLE_VALUE) QVERIFY(CloseHandle(probe));
+    });
+    QVERIFY(probe == INVALID_HANDLE_VALUE);
+    QCOMPARE(probeError, DWORD(ERROR_SHARING_VIOLATION));
+    QVERIFY(QFileInfo(program).isFile()); QVERIFY(QFileInfo(program).isExecutable());
+
+    QProcess::ProcessError errorAtFailure = QProcess::UnknownError;
+    QProcess::ProcessState stateAtFailure = QProcess::Starting;
+    qint64 pidAtFailure = -1;
+    bool failureObserved = false;
+    HgsClient client(program);
+    QSignalSpy failed(&client, &HgsClient::messageFailed), sent(&client, &HgsClient::messageSent);
+    QSignalSpy queued(&client, &HgsClient::queueSendFinished), settings(&client, &HgsClient::settingsFinished);
+    bool returned = false, beforeRegistration = false;
+    quint64 registered = 0;
+    connect(&client, &HgsClient::messageFailed, &client,
+        [&](quint64 request, const QString &, const QString &, const QString &, bool) {
+            beforeRegistration |= !returned || request != registered;
+        });
+    const auto finished = [&](quint64 request, bool, const QJsonObject &, const QString &) {
+        beforeRegistration |= !returned || request != registered;
+    };
+    connect(&client, &HgsClient::queueSendFinished, &client, finished);
+    connect(&client, &HgsClient::settingsFinished, &client, finished);
+    if (operation == "message")
+        registered = client.requestSendMessage({}, "codex/project", "Keep this message", {}, "run", "conversation");
+    else if (operation == "queue")
+        registered = client.requestQueueSendNow({}, "codex/project", "run", "conversation", "q-private");
+    else registered = client.requestSettings({}, "codex/project", "gpt-6.1-sol", "xhigh", "run", "conversation");
+    returned = true;
+    auto *process = client.findChild<QProcess *>(); QVERIFY(process);
+    // Starting inside the request call would already have failed here, before
+    // the caller registered the returned ID.
+    if (process->error() != QProcess::UnknownError) {
+        QCOMPARE(process->error(), QProcess::FailedToStart);
+        QCOMPARE(process->state(), QProcess::NotRunning);
+        QCOMPARE(process->processId(), qint64(0));
+    }
+    QVERIFY(process->error() == QProcess::UnknownError);
+    QCOMPARE(process->state(), QProcess::NotRunning);
+    QCOMPARE(process->processId(), qint64(0));
+    const auto *timer = process->findChild<QTimer *>(); QVERIFY(timer); QVERIFY(timer->isActive());
+    connect(process, &QProcess::errorOccurred, &client, [&, process](QProcess::ProcessError error) {
+        // Copy while the real QProcess is alive; deleteLater may run before
+        // the result wait ends. No numeric Win32 error is inferred from Qt.
+        errorAtFailure = error; stateAtFailure = process->state(); pidAtFailure = process->processId();
+        failureObserved = true;
+    });
+    QVERIFY(failed.isEmpty()); QVERIFY(queued.isEmpty()); QVERIFY(settings.isEmpty());
+    auto &result = operation == "message" ? failed : operation == "queue" ? queued : settings;
+    QTRY_COMPARE(result.size(), 1);
+    QVERIFY(failureObserved);
+    QCOMPARE(errorAtFailure, QProcess::FailedToStart);
+    QCOMPARE(stateAtFailure, QProcess::NotRunning);
+    QCOMPARE(pidAtFailure, qint64(0));
+    QVERIFY(!beforeRegistration); QCOMPARE(sent.size(), 0);
+    QCOMPARE(result[0][0].toULongLong(), registered);
+    if (operation == "message") {
+        QCOMPARE(result[0][1].toString(), QString());
+        QCOMPARE(result[0][2].toString(), QString("codex/project"));
+        QVERIFY(result[0][3].toString().startsWith("Cannot start hgs: "));
+        QVERIFY(!result[0][4].toBool());
+    } else {
+        QVERIFY(!result[0][1].toBool()); QVERIFY(result[0][2].toJsonObject().isEmpty());
+        QVERIFY(!result[0][3].toString().isEmpty());
+    }
+    bool nextTurn = false;
+    QTimer::singleShot(0, &client, [&] { nextTurn = true; });
+    QTRY_VERIFY(nextTurn); QCOMPARE(result.size(), 1);
+    QCOMPARE(failed.size(), operation == "message" ? 1 : 0);
+    QCOMPARE(queued.size(), operation == "queue" ? 1 : 0);
+    QCOMPARE(settings.size(), operation == "settings" ? 1 : 0);
+}
+#endif
 
 void TestHgsClient::forkCommandsPinSourceIdentity()
 {

@@ -487,6 +487,11 @@ private slots:
     void pushDropsAfterSessionIdentityChange_data();
     void pushDropsAfterSessionIdentityChange();
     void pushFollowsTheRunThatTakesTheMessage();
+#ifdef Q_OS_WIN
+    void messageStartupFailureRestoresThePendingDraft();
+    void queueStartupFailureReleasesThePendingAction();
+    void settingsStartupFailureReleasesThePendingChange();
+#endif
     void pushStaysWithItsSession();
     void pushTimesOut();
     void pushOutlastedBySlowSend();
@@ -12044,6 +12049,106 @@ void TestSessionsWindow::pushFollowsTheRunThatTakesTheMessage()
     notePhase(QStringLiteral("test queue inspection returned failed=%1").arg(flag(QTest::currentTestFailed())));
     QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-fresh"}, PushTimeout);
 }
+
+#ifdef Q_OS_WIN
+void TestSessionsWindow::messageStartupFailureRestoresThePendingDraft()
+{
+    PushFixture fixture; fixture.traceSend = true; QVERIFY(fixture.install(script()));
+    SessionsWindow window(FakeCli::program(fixture.script)); openPushSession(window, fleet(), fixture);
+    if (QTest::currentTestFailed()) return;
+    auto *client = window.findChild<HgsClient *>();
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    QVERIFY(client); QVERIFY(composer);
+    const QString key = composer->sessionKey(), text = "Keep the draft after a failed start";
+    setComposerText(composer, text);
+    ComposerDraftStore::flushWrites();
+    QVERIFY(!client->inspectionInFlight({}, "codex/hgs/dashboard"));
+    // Use the existing executable seam after the real fixture inspection. The
+    // separate private file passes prevalidation but fails at CreateProcess.
+    const QString program = fixture.dir.filePath("invalid-send-image.exe");
+    QFile executable(program); QVERIFY(executable.open(QIODevice::WriteOnly));
+    const QByteArray malformed("This is not a PE image.\n");
+    QCOMPARE(executable.write(malformed), qint64(malformed.size())); executable.close();
+    QVERIFY(QFileInfo(program).isFile()); QVERIFY(QFileInfo(program).isExecutable());
+    client->setExecutableForTests(program);
+    QSignalSpy failed(client, &HgsClient::messageFailed), sent(client, &HgsClient::messageSent);
+    auto *send = composer->findChild<QPushButton *>("sendMessage"); QVERIFY(send); QVERIFY(send->isEnabled());
+    send->click();
+    QTRY_COMPARE(failed.size(), 1);
+    QVERIFY(failed[0][3].toString().startsWith("Cannot start hgs: "));
+    QVERIFY(!failed[0][4].toBool());
+    // This uses the real SessionsWindow pending-request registration and its
+    // finishMessage path: a lost inline result leaves sending set indefinitely.
+    QTRY_VERIFY(!composer->isSending(key));
+    QCOMPARE(composer->editor()->toPlainText(), text); QVERIFY(composer->hasDraft(key));
+    QCOMPARE(sent.size(), 0); QVERIFY(!QFileInfo::exists(fixture.script + ".send-trace"));
+    QVERIFY(fixture.sentNow().isEmpty());
+}
+
+void TestSessionsWindow::queueStartupFailureReleasesThePendingAction()
+{
+    PushFixture fixture; fixture.queue("q-private", "❯ Exact queued message"); QVERIFY(fixture.install(script()));
+    const QString validProgram = FakeCli::program(fixture.script);
+    SessionsWindow window(validProgram); openPushSession(window, fleet(), fixture);
+    if (QTest::currentTestFailed()) return;
+    auto *client = window.findChild<HgsClient *>();
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *activity = window.findChild<ActivityView *>("mainActivity");
+    QVERIFY(client); QVERIFY(composer); QVERIFY(activity);
+    const QString text = "Keep the unrelated message draft"; setComposerText(composer, text);
+    const QString program = fixture.dir.filePath("invalid-queue-image.exe");
+    QFile executable(program); QVERIFY(executable.open(QIODevice::WriteOnly));
+    const QByteArray malformed("This is not a PE image.\n");
+    QCOMPARE(executable.write(malformed), qint64(malformed.size())); executable.close();
+    QVERIFY(QFileInfo(program).isFile()); QVERIFY(QFileInfo(program).isExecutable());
+    client->setExecutableForTests(program);
+    QSignalSpy finished(client, &HgsClient::queueSendFinished);
+    auto *send = activity->findChild<QPushButton *>("queueSendNow"); QVERIFY(send); QVERIFY(send->isEnabled());
+    send->click(); QTRY_COMPARE(finished.size(), 1); QVERIFY(!finished[0][1].toBool());
+    QVERIFY(!finished[0][3].toString().isEmpty());
+    client->setExecutableForTests(validProgram);
+    settleSelectedInspection(composer, client, {}, "codex/hgs/dashboard", fixture.details);
+    if (QTest::currentTestFailed()) return;
+    // An ordinary refresh must find this action free after the definite refusal.
+    // It never retries send-now or replaces the queued/native request identity.
+    QTRY_VERIFY(send->isEnabled()); QCOMPARE(send->text(), QString("Send now"));
+    QCOMPARE(finished.size(), 1); QVERIFY(fixture.sentNow().isEmpty());
+    QCOMPARE(composer->editor()->toPlainText(), text);
+}
+
+void TestSessionsWindow::settingsStartupFailureReleasesThePendingChange()
+{
+    PushFixture fixture;
+    fixture.details["model"] = "gpt-6.1-sol"; fixture.details["effort"] = "high";
+    fixture.details["settings_change_supported"] = true; fixture.details["settings_apply_when"] = "ready";
+    fixture.details["model_options"] = QJsonArray{QJsonObject{{"id", "gpt-6.1-sol"}, {"effort_options", QJsonArray{"high", "xhigh"}}}};
+    QVERIFY(fixture.install(script())); const QString validProgram = FakeCli::program(fixture.script);
+    SessionsWindow window(validProgram); openPushSession(window, fleet(), fixture);
+    if (QTest::currentTestFailed()) return;
+    auto *client = window.findChild<HgsClient *>();
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(client); QVERIFY(composer);
+    const QString text = "Keep this draft during the settings change"; setComposerText(composer, text);
+    auto *settings = composer->findChild<QPushButton *>("sessionModelSettings"); QVERIFY(settings); QVERIFY(settings->isEnabled());
+    settings->click();
+    auto *effort = composer->findChild<QComboBox *>("sessionEffortChoice"); QVERIFY(effort);
+    const int index = effort->findData("xhigh"); QVERIFY(index >= 0); effort->setCurrentIndex(index);
+    auto *apply = composer->findChild<QPushButton *>("applySessionSettings"); QVERIFY(apply); QVERIFY(apply->isEnabled());
+    const QString program = fixture.dir.filePath("invalid-settings-image.exe");
+    QFile executable(program); QVERIFY(executable.open(QIODevice::WriteOnly));
+    const QByteArray malformed("This is not a PE image.\n");
+    QCOMPARE(executable.write(malformed), qint64(malformed.size())); executable.close();
+    QVERIFY(QFileInfo(program).isFile()); QVERIFY(QFileInfo(program).isExecutable());
+    client->setExecutableForTests(program);
+    QSignalSpy finished(client, &HgsClient::settingsFinished);
+    apply->click(); QTRY_COMPARE(finished.size(), 1); QVERIFY(!finished[0][1].toBool());
+    QVERIFY(!finished[0][3].toString().isEmpty());
+    client->setExecutableForTests(validProgram);
+    settleSelectedInspection(composer, client, {}, "codex/hgs/dashboard", fixture.details);
+    if (QTest::currentTestFailed()) return;
+    QTRY_VERIFY(settings->isEnabled()); QVERIFY(!settings->toolTip().contains("Updating model settings"));
+    QCOMPARE(finished.size(), 1); QCOMPARE(composer->editor()->toPlainText(), text);
+}
+#endif
 
 void TestSessionsWindow::pushStaysWithItsSession()
 {
