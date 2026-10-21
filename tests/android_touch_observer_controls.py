@@ -516,7 +516,7 @@ class OwnedWindowTouchObserverTests(unittest.TestCase):
     def test_success_and_failure_retain_trace_without_changing_seven_case_parser(self):
         source = FIXTURE.read_text()
         outer = source.split('    override fun onStart()', 1)[1].split('    private fun <T> main(', 1)[0]
-        self.assertIn('synthetic receipts only. ${touchResultEvidence().replace("\\n", " | ")} | ${actionProbeEvidence().replace("\\n", " | ")}\\n', outer)
+        self.assertIn('synthetic receipts only. ${touchResultEvidence().replace("\\n", " | ")} | ${actionProbeEvidence().replace("\\n", " | ")} | $staleSendEvidence\\n', outer)
         self.assertIn('$failureEvidence\\n${touchResultEvidence()}\\n', outer)
         self.assertIn('catch (_: Throwable) { "owned-touch UNKNOWN result-capture-failed" }', outer)
         spec = importlib.util.spec_from_file_location('touch_trace_result_parser', ROOT / 'scripts/ci/android-project-ui.py')
@@ -524,7 +524,7 @@ class OwnedWindowTouchObserverTests(unittest.TestCase):
         parser.select_suite(['--approval-choices'])
         trace = 'owned-touch status=observed restored=true scope=window-consumption-only\nowned-touch token=1 kind=touch outcome=true'
         prefix = f'INSTRUMENTATION_RESULT: approval_cases=7\nINSTRUMENTATION_RESULT: approval_case_ids={parser.CASES}\n'
-        stream = f'Approval choices smoke passed: {parser.CASES}; synthetic receipts only. ' + trace.replace('\n', ' | ')
+        stream = f'Approval choices smoke passed: {parser.CASES}; synthetic receipts only. ' + trace.replace('\n', ' | ') + ' | stale-send status=observed disabled=true attempts=1 receipts=4'
         result = prefix + 'INSTRUMENTATION_RESULT: stream=' + stream + '\n\nINSTRUMENTATION_CODE: -1\n'
         self.assertEqual(parser.instrumentation_result(result)['stream'], stream)
         for invalid in (result.replace('approval_cases=7', 'approval_cases=6'), result.replace(' | ', '\n'),
