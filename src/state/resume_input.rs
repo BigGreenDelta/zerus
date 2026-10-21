@@ -605,6 +605,7 @@ mod tests {
             let cwd = temporary.path().join("workspace");
             fs::create_dir_all(&sessions).unwrap();
             fs::create_dir(&cwd).unwrap();
+            let sessions = crate::platform::canonical(sessions).unwrap();
             let rollout = sessions.join("rollout-child.jsonl");
             let value = Self {
                 temporary,
