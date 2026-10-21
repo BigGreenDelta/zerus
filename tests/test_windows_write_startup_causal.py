@@ -174,6 +174,12 @@ class Qualification(unittest.TestCase):
             self.assertEqual(gate.assertion_line(memory), 3)
             with self.assertRaises(RuntimeError):
                 gate.assertion_line(memory + b"changed")
+        # Passive region markers shift provenance, never the original assertion.
+        traced = memory.replace(b"    QVERIFY(failed.isEmpty());", b"    trace_fixed_region();\n    QVERIFY(failed.isEmpty());", 1)
+        with patch.dict(gate.PINS, {gate.TEST: gate.sha(traced)}):
+            self.assertEqual(gate.assertion_line(traced), 4)
+            with self.assertRaises(RuntimeError):
+                gate.assertion_line(memory)
 
     def test_private_environment_drops_session_and_secret_values(self):
         with tempfile.TemporaryDirectory() as folder:

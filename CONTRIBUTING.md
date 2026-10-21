@@ -91,6 +91,10 @@ wrappers reverted, and requires the three exact original assertion failures
 after real `FailedToStart` prerequisites. This source-bound opt-in is skipped on
 main and on unmarked, unlabeled PRs; it changes no tested candidate or package
 input. The marker selects a keyless test only and grants no deployment authority.
+The direct rows emit fixed, content-free stderr regions, including an outer
+row-unwound marker after their fixture/client locals are destroyed. At most 64
+markers are attempted. Logger IO is cooperative: a last marker identifies a
+region, not an individual blocked call, deadlock, native cause or successful cleanup.
 
 On macOS the Rust standard library marks a child's pipes close-on-exec only after
 creating them, so a child that another thread starts in between inherits them and

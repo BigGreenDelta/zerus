@@ -27,7 +27,7 @@ CLIENT = "tray/src/HgsClient.cpp"
 TEST = "tray/tests/test_hgsclient.cpp"
 PINS = {
     CLIENT: "f00be70cb7b0d40ca5fc4a0483c2f57cd40897ab92e729bedf85d075f1584d70",
-    TEST: "02abf3f1a095c09114496af382fa4863b840c29b4bc113f53921c7a1531f73f6",
+    TEST: "27f2c9ab0bce64951ae520adab31d13ef15f66ef830beec45b0ced5fc3816744",
     "tray/tests/test_sessionswindow.cpp": "03df316f82c02c9552710a670c4cb3232875149117e2fee4cb054551cbc895bd",
 }
 BASELINE_CLIENT = "99d2566b33980bf3dbb4236988418b3f67221607883a79c7b24ecb6d4fca812c"
