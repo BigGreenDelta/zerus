@@ -1910,6 +1910,9 @@ class ApprovalHarnessTests(unittest.TestCase):
 
     def test_android_stale_case_delivers_inspection_before_one_negative_physical_attempt(self):
         source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        role_seams = re.compile(r'^([ ]*)// BEGIN STALE_COMPOSE_ROLE ([a-z-]+)\n[\s\S]*?^\1// END STALE_COMPOSE_ROLE \2\n', re.M)
+        self.assertEqual([match[2] for match in role_seams.finditer(source)], ['definition', 'admission'])
+        source = role_seams.sub('', source)
         case = source.split('            boundary("begin", "readonly_stale_identity")', 1)[1].split('            boundary("complete", "readonly_stale_identity")', 1)[0]
         mutation = 'synchronized(raw) { raw.put("run_id", "replacement-run") }'
         refresh = 'main { model.refreshActivity() }'
@@ -1971,6 +1974,9 @@ class ApprovalHarnessTests(unittest.TestCase):
 
     def test_android_stale_negative_gesture_requires_fresh_owned_disabled_label_and_unchanged_bounds(self):
         source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        role_seams = re.compile(r'^([ ]*)// BEGIN STALE_COMPOSE_ROLE ([a-z-]+)\n[\s\S]*?^\1// END STALE_COMPOSE_ROLE \2\n', re.M)
+        self.assertEqual([match[2] for match in role_seams.finditer(source)], ['definition', 'admission'])
+        source = role_seams.sub('', source)
         case = source.split('            boundary("begin", "readonly_stale_identity")', 1)[1].split('            boundary("complete", "readonly_stale_identity")', 1)[0]
         before_touch = case.split('            val ownedWindow = main {', 1)[1].split('            val down = SystemClock.uptimeMillis()', 1)[0]
         for required in ('activity.window.decorView.createAccessibilityNodeInfo()', 'check(activity.hasWindowFocus())',
