@@ -623,18 +623,17 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         fun captureEarlySend(): EarlySend {
             val q = checkNotNull(pending)
             val id = q.string("question_id"); val hash = q.string("question_hash")
-            val current = {
-                main {
-                    val card = model.conversationQuestions.singleOrNull()
-                    model.selected?.target == target && model.activityVerified && card != null && card.id == id && card.hash == hash &&
-                        card.run == target.run && card.conversation == target.conversation
-                }
+            fun currentCard(): Boolean {
+                val card = model.conversationQuestions.singleOrNull()
+                return model.selected?.target == target && model.activityVerified && card != null && card.id == id && card.hash == hash &&
+                    card.run == target.run && card.conversation == target.conversation
             }
+            val current = { main { currentCard() } }
             check(earlySend == null && current())
             val send = node("Send answer")
             check(send.refresh() && exactVisible(send, "Send answer"))
             val observation = { afterGeneration: Int? -> main {
-                check(current())
+                check(currentCard())
                 QuestionUiProbe.contentSnapshot(checkNotNull(actionProbeSession), checkNotNull(model.conversationQuestions.singleOrNull()), afterGeneration)
             } }
             return EarlySend(send, send.windowId, current, observation)

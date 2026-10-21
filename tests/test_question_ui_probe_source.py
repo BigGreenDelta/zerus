@@ -12,7 +12,7 @@ MAIN = "mobile/android/app/src/main/java/app/zerus/mobile/"
 FIXTURE = "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
 ORIGINAL_UI = "3687bd4bb2f7243c06fc99865c08120795360b273aa8291b612794a9bfdf57bf"
 # Fixture baseline includes owned production-review clock binding and the same physical case oracles; probe seams reconstruct exactly.
-ORIGINAL_FIXTURE = "2859fcdc7dc6d835bc0a8f6af474042592861be23bbab8ea13ff3241ccd5de57"
+ORIGINAL_FIXTURE = "3bd3369cc49f7d7075f6cad34beb176bd8f0b187aef5a0581c39007c53a94281"
 
 
 def strip_probe(source, expected):
@@ -76,7 +76,7 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
     def test_failure_classifiers_and_post_observations_leave_all_original_client_and_ui_code_exact(self):
         source = (ROOT / FIXTURE).read_text()
         self.assertEqual(hashlib.sha256(strip_send_diagnostics(source).encode()).hexdigest(),
-            "9d18553767547ddd4bcc01f2179f290ebbff15c8c1946772c3a3c8e47ed1b49a")
+            "65d23e9e849f5abd3b9fd4e7e11ba8cdf3e05fd9f8777b6dd0e3a5a56b2e7402")
         model = source.split("    private fun modelEvidence(", 1)[1].split("    private fun set(", 1)[0]
         self.assertTrue(model.startswith('model: ZerusViewModel, target: Target, activity: MainActivity, offered: JSONObject?): String = main {'))
         self.assertIn('failureText(model.error)', model)

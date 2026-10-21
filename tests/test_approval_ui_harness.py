@@ -156,6 +156,31 @@ def review_clock_memory(source, observation, clock, current_card=lambda: True):
     return SimpleNamespace(begin=begin, bind=bind, current=current, state=state)
 
 
+def early_probe_main_depths(source):
+    """Bounded source call graph of the three fixed local callables; never Android/main-thread execution."""
+    capture = source.split('        fun captureEarlySend(): EarlySend {', 1)[1].split('        fun earlyReview(', 1)[0]
+    predicate = re.search(r'            fun currentCard\(\): Boolean \{([\s\S]*?)\n            }', capture)[1]
+    # The only callable in this scalar on-main predicate is the original bounded model-list observation.
+    assert re.findall(r'\b(\w+)\s*\(', predicate) == ['singleOrNull']
+    assert 'return model.selected?.target == target && model.activityVerified && card != null && card.id == id && card.hash == hash &&' in predicate
+    assert 'card.run == target.run && card.conversation == target.conversation' in predicate
+    current = capture.split('            val current = ', 1)[1].split('            check(earlySend == null', 1)[0].strip()
+    observation = capture.split('            val observation = ', 1)[1].split('            return EarlySend(', 1)[0].strip()
+    current = re.fullmatch(r'\{\s*main\s*\{([\s\S]*)}\s*}', current)[1]
+    observation = re.fullmatch(r'\{\s*afterGeneration: Int\?\s*->\s*main\s*\{([\s\S]*)}\s*}', observation)[1]
+    assert re.fullmatch(r'\s*currentCard\(\)\s*', current)
+    bodies = dict(currentCard=predicate, current=current, observation=observation)
+    roots = dict(currentCard=0, current=1, observation=1)
+    def depth(name, path=()):
+        assert name not in path and len(path) < 3
+        assert not re.search(r'\b(main|runOnMainSync)\s*(?:\(|\{)', bodies[name])
+        calls = re.findall(r'\b(currentCard|current|observation)\s*\(', bodies[name])
+        return roots[name] + max([depth(call, path + (name,)) for call in calls] or [0])
+    result = {name: depth(name) for name in bodies}
+    assert result == dict(currentCard=0, current=1, observation=1)
+    return result
+
+
 def kotlin_brace_scopes(source, offset):
     """Brace scopes for the fixed source layout guard; skip comments and quoted text, not a Kotlin compiler."""
     lexemes = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]')
@@ -823,11 +848,26 @@ class ApprovalHarnessTests(unittest.TestCase):
         unknown = review_clock_memory(source, observe, clock, current_card=lambda: False)
         with self.assertRaises(AssertionError): unknown.begin(1000)
         observation = source.split('            val observation = { afterGeneration: Int? -> main {', 1)[1].split('            return EarlySend(', 1)[0]
-        self.assertIn('check(current())', observation)
+        self.assertIn('check(currentCard())', observation)
         self.assertIn('QuestionUiProbe.contentSnapshot(checkNotNull(actionProbeSession), checkNotNull(model.conversationQuestions.singleOrNull()), afterGeneration)', observation)
         self.assertEqual(source.count('.bindReview()'), 2)
         self.assertNotIn('await(', source.split('        fun bindReview():', 1)[1].split('        fun current()', 1)[0])
         self.assertIn('await("same Activity regained focus for $name") { main { activity.hasWindowFocus() } && captured.bindReview() }', source)
+
+    def test_android_owned_probe_snapshot_never_reenters_the_main_thread_helper(self):
+        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        self.assertEqual(early_probe_main_depths(source), dict(currentCard=0, current=1, observation=1))
+        old_nested = source.replace('                check(currentCard())\n', '                check(current())\n', 1)
+        self.assertNotEqual(old_nested, source)
+        with self.assertRaises(AssertionError): early_probe_main_depths(old_nested)
+        predicate_nested = source.replace('            fun currentCard(): Boolean {\n                val card = model.conversationQuestions.singleOrNull()',
+                                          '            fun currentCard(): Boolean {\n                val card = main { model.conversationQuestions.singleOrNull() }', 1)
+        self.assertNotEqual(predicate_nested, source)
+        with self.assertRaises(AssertionError): early_probe_main_depths(predicate_nested)
+        observation = source.split('            val observation = ', 1)[1].split('            return EarlySend(', 1)[0]
+        self.assertLess(observation.index('check(currentCard())'), observation.index('QuestionUiProbe.contentSnapshot('))
+        for forbidden in ('await(', 'sleep(', 'startActivity(', 'injectInputEvent', 'performAction', 'current()'):
+            self.assertNotIn(forbidden, observation)
 
     def test_android_lifecycle_stop_requires_the_same_alive_created_activity_not_modal_focus_loss(self):
         source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
