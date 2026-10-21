@@ -81,8 +81,16 @@ predicate did not prove an `onStop` transition; the retained failed run does not
 Each scoped Send cache arms its deadline once from the first newer eligible committed `review.startedAt` in the same
 active owned DEBUG probe, for the exact current card/run/conversation, plus three seconds. That start must be at or after
 the pre-intent resume timestamp and no later than the observed clock. Missing, stale, foreign, closed or faulted evidence
-cannot bind the cache. An expired first start refuses; it cannot select a later reset or renew the bound window.
-A cached read refreshes the same exact visible owned label and current card with that same review start, then follows at
+cannot bind the cache. An expired first start refuses; initial binding cannot select a later reset or renew the bound window.
+A cached read requires the same first snapshot's card, question object and selection in that active healthy session.
+The latest eligible production start may equal the first start or move forward after a focus reset, only when it is no
+later than the current elapsed clock and that clock is still below the original first start plus three seconds. Missing,
+backward, future, overflowing or expired clocks refuse. The first snapshot, generation, start and end never change.
+This admits only passive negative-input evidence during a more restrictive production reset. Positive Send still waits
+for the ordinary current production review; no focus loss or reset is bypassed. Probe record `uptimeMs` values are
+ordinal observations and are never compared with the elapsed clock used for review. The three retained JVM suites
+contain 33 methods (8 publication, 18 binding and 7 review-observer controls); all 29 previous methods remain.
+The read refreshes the same exact visible owned label and current card, then follows at
 most sixteen ancestors in that window and package. Only an ancestor that fails `refresh()` permits another walk from that
 same validated label; the passive poll is clamped to the remaining original deadline. A stale label, changed
 card/window/package, missing action, read error, depth limit or late result refuses the read. There is no root search,

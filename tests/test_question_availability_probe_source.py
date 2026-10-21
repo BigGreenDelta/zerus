@@ -69,9 +69,9 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256((MAIN / "QuestionUi.kt").read_bytes()).hexdigest(),
                          "841c0d5b2df250497b0f54ef8854574ca386e83cb735dc1a0873096d719e22a2")
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
-        # The fixture baseline includes owned production-review clock binding and unchanged physical case oracles.
+        # The fixture baseline includes first-window forward-reset observation and unchanged physical case oracles.
         self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
-                         "5e4e419e0c9de67ef4c872f24975e33b65e46556bce98661358d74135e9d1157")
+                         "16fe8c0ea3f4b07414fbd4de243e3a05d559ceff89bace94f415ba179655aa95")
 
     def test_prepared_publication_uses_the_actual_bounded_owner_before_any_atomic_install(self):
         model = (MAIN / "ZerusViewModel.kt").read_text()
