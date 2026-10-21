@@ -516,7 +516,7 @@ class OwnedWindowTouchObserverTests(unittest.TestCase):
     def test_success_and_failure_retain_trace_without_changing_seven_case_parser(self):
         source = FIXTURE.read_text()
         outer = source.split('    override fun onStart()', 1)[1].split('    private fun <T> main(', 1)[0]
-        self.assertIn('synthetic receipts only. ${touchResultEvidence().replace("\\n", " | ")}\\n', outer)
+        self.assertIn('synthetic receipts only. ${touchResultEvidence().replace("\\n", " | ")} | ${actionProbeEvidence().replace("\\n", " | ")}\\n', outer)
         self.assertIn('$failureEvidence\\n${touchResultEvidence()}\\n', outer)
         self.assertIn('catch (_: Throwable) { "owned-touch UNKNOWN result-capture-failed" }', outer)
         spec = importlib.util.spec_from_file_location('touch_trace_result_parser', ROOT / 'scripts/ci/android-project-ui.py')

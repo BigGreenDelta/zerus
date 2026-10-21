@@ -84,7 +84,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             check(cases == CASES)
             result.putString("approval_cases", cases.size.toString())
             result.putString("approval_case_ids", cases.joinToString(","))
-            result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only. ${touchResultEvidence().replace("\n", " | ")}\n${actionProbeEvidence()}\n")
+            result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only. ${touchResultEvidence().replace("\n", " | ")} | ${actionProbeEvidence().replace("\n", " | ")}\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n${actionProbeEvidence()}\n")

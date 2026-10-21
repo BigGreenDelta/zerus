@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """SDK-free preservation checks, not Kotlin compilation or Compose/native evidence."""
 import hashlib
+import importlib.util
 from pathlib import Path
 import re
 import unittest
@@ -26,14 +27,52 @@ def original_ui(source):
 
 def original_fixture(source):
     source = strip_probe(source, ["fixture-report"])
-    if source.count("    private fun smokeBody(store: PrivateStore) {\n") != 1 or source.count("${actionProbeEvidence()}") != 2:
+    flat = r' | ${actionProbeEvidence().replace("\n", " | ")}'
+    raw = r'\n${actionProbeEvidence()}'
+    if source.count("    private fun smokeBody(store: PrivateStore) {\n") != 1 or source.count(flat) != 1 or source.count(raw) != 1:
         raise ValueError("unexpected fixture edits")
     source = source.replace("    private fun smokeBody(store: PrivateStore) {\n", "    private fun smoke(store: PrivateStore) {\n")
-    source = source.replace(r"\n${actionProbeEvidence()}", "")
+    source = source.replace(flat, "").replace(raw, "")
     return hashlib.sha256(source.encode()).hexdigest() == ORIGINAL_FIXTURE
 
 
 class QuestionUiProbeSourceTests(unittest.TestCase):
+    def test_pass_serializer_keeps_multiline_probe_inside_one_field_for_the_actual_parser(self):
+        source = (ROOT / FIXTURE).read_text()
+        lines = [line for line in source.splitlines() if 'result.putString("stream", "Approval choices smoke passed:' in line]
+        self.assertEqual(len(lines), 1)
+        flat = r' | ${actionProbeEvidence().replace("\n", " | ")}'
+        old = lines[0].replace(flat, r'\n${actionProbeEvidence()}')
+        self.assertNotEqual(old, lines[0])
+        spec = importlib.util.spec_from_file_location("probe_pass_parser", ROOT / "scripts/ci/android-project-ui.py")
+        parser = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(parser)
+        parser.select_suite(["--approval-choices"])
+        cases = parser.CASES.split(",")
+        self.assertEqual(len(cases), 7)
+        probe = "compose-action status=observed closed=true fault=NONE records=1 schema=1\ncompose-action Record(stage=ENTRY, synthetic)"
+        def serialized(line):
+            prefix, suffix = '            result.putString("stream", "', '")'
+            self.assertTrue(line.startswith(prefix) and line.endswith(suffix))
+            template = line[len(prefix):-len(suffix)]
+            replacements = {r'${cases.joinToString(",")}': ",".join(cases),
+                r'${touchResultEvidence().replace("\n", " | ")}': "owned-touch observed | restored=true",
+                r'${actionProbeEvidence().replace("\n", " | ")}': probe.replace("\n", " | "),
+                r'${actionProbeEvidence()}': probe}
+            for expression, value in replacements.items():
+                template = template.replace(expression, value)
+            self.assertNotIn("${", template)
+            stream = template.replace(r"\n", "\n")
+            return ("INSTRUMENTATION_RESULT: approval_cases=7\nINSTRUMENTATION_RESULT: approval_case_ids=" + ",".join(cases) +
+                "\nINSTRUMENTATION_RESULT: stream=" + stream + "\nINSTRUMENTATION_CODE: -1\n")
+        with self.assertRaises(AssertionError):
+            parser.instrumentation_result(serialized(old))
+        actual = parser.instrumentation_result(serialized(lines[0]))
+        self.assertEqual(actual["approval_cases"], "7")
+        self.assertEqual(actual["approval_case_ids"], parser.CASES)
+        self.assertIn(" | compose-action Record(", actual["stream"])
+        self.assertIn(r'\n${actionProbeEvidence()}\n")', source)  # Original FAIL stream remains raw.
+
     def test_original_actions_guards_bindings_and_seven_case_oracles_reconstruct_exactly(self):
         ui = (ROOT / MAIN / "QuestionUi.kt").read_text()
         fixture = (ROOT / FIXTURE).read_text()
