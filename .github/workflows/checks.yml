@@ -1025,6 +1025,16 @@ jobs:
           key: ${{ steps.qt-cache.outputs.cache-primary-key }}
       - name: Offscreen Qt suites
         run: bash scripts/ci/gui.sh test </dev/null
+      # One-time, source-bound old/fixed proof; ordinary main and unmarked PRs
+      # keep the six fixed regressions without an extra private rebuild. The
+      # initial PR body marker selects opened atomically; labels are optional.
+      - name: Opt-in desktop write-startup causal assertions
+        if: github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'windows-write-startup-causal') || contains(github.event.pull_request.body, '<!-- zerus-write-startup-causal-v1 -->'))
+        timeout-minutes: 8
+        run: |
+          write_startup_end=$(python -c 'import time; print(time.monotonic() + 480)')
+          python scripts/ci/msvc-env.py python scripts/ci/windows-write-startup-causal.py \
+            --source '${{ needs.source.outputs.commit }}' --end "$write_startup_end" </dev/null
       - name: Portable zip from the tested executables
         run: |
           python scripts/package-windows.py --cli target/release/hgs.exe --gui .ci-build/gui/hgs-tray.exe \

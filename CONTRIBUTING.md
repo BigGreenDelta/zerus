@@ -82,6 +82,16 @@ A change to tmux or `ps` call sites must keep Unix behaviour unchanged: compare 
 `scripts/ci/check-windows-target.sh` type-checks the Windows target from Linux or
 macOS.
 
+The six Windows desktop write-startup regressions run in the ordinary Qt suites.
+For their one-time causal qualification, include the hidden marker
+`<!-- zerus-write-startup-causal-v1 -->` in the initial PR body, or add the PR label
+`windows-write-startup-causal` before a source push. The existing Windows job then
+builds only `test_hgsclient` in a private source copy with the three failure
+wrappers reverted, and requires the three exact original assertion failures
+after real `FailedToStart` prerequisites. This source-bound opt-in is skipped on
+main and on unmarked, unlabeled PRs; it changes no tested candidate or package
+input. The marker selects a keyless test only and grants no deployment authority.
+
 On macOS the Rust standard library marks a child's pipes close-on-exec only after
 creating them, so a child that another thread starts in between inherits them and
 holds that exchange's input or output open until it exits. Where threads of one
