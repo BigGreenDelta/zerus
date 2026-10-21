@@ -137,7 +137,7 @@ Both disposable targets import the public Apple `<notify.h>` declarations throug
 header. Its bytes join the exact project source identities. The production application does not reference this header;
 no handwritten C ABI, SDK-header replacement, or new runtime dependency is introduced.
 
-The three fixture-only control modes use Darwin notifications through `notify_register_dispatch`, `notify_post`, and
+The four fixture-only control modes use Darwin notifications through `notify_register_dispatch`, `notify_post`, and
 `notify_cancel` ([Apple API header](https://raw.githubusercontent.com/apple-oss-distributions/Libnotify/main/notify.h),
 [notification semantics](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/notify.3.html)).
 The shared namespace does not authenticate a sender. This channel is confined to the disposable simulator fixture:
@@ -168,15 +168,28 @@ callbacks again, then runs the original final review/Return and exact payload as
 or assume [`typeText`](https://developer.apple.com/documentation/xcuiautomation/xcuielement/typetext(_:)) focuses a field.
 Replacement mode posts its one-time `replace` only after native Confirm is observed,
 then requires the same native retirement and no-submit assertions. The broad disclosure check expects the entire
-production message, including its description. These controls never set a review clock, foreground flag, native dialog,
+production message, including its description. Unavailable mode likewise observes the original native Confirm, full
+disclosure and zero callbacks after the real review and Send, then posts its one-time `become-unavailable` event. It sets
+only the fixture snapshot's availability false through the existing mode/generation/token guard. The original
+four-second Confirm-retirement, zero-callback and disabled-Send assertions remain mandatory, together with the exact
+action/serial/generation acknowledgement and checked closure. A physical timer trigger before Send allowed the first
+Confirm lookup to occur after its two-second window; that failure did not reach the retirement oracle. No timer,
+longer observation cap or retry substitutes for observing the original dialog before this event.
+These controls never set a review clock, foreground flag, native dialog,
 or provider permission. Monotonic phase records and exact ACKs are evidence only; all seven UI tests still have to pass.
 
 Broader cancellation first uses an actual native Cancel when present. If absent, the test requires exactly one actual
 native popover containing Confirm and the full production disclosure, a recognized actual horizontal size class, and
-a positively identified passive fixture header whose entire frame is outside that popover and inside the same unique
-owned app window. That window must contain the actual header and popover, and the app must be foreground. The derived
-header-centre [`XCUICoordinate`](https://developer.apple.com/documentation/xcuiautomation/xcuicoordinate) must have a finite
-screen point strictly inside the header, window and app canvas, and outside the popover, before one physical tap.
+a positively identified passive fixture header in the same unique owned app window. The popover, header, window and
+app canvas must have positive finite rectangles. Clip the actual header rectangle to that window and app canvas, then
+derive the first positive region above, below, left or right of the actual popover. Full occlusion or an empty clip
+fails. The centre of this unoccluded region supplies a strictly interior normalized offset relative to the actual
+header; its dynamic [`XCUICoordinate`](https://developer.apple.com/documentation/xcuiautomation/xcuicoordinate) must resolve
+to a finite screen point strictly inside that region, header, window and app canvas, and outside the popover, before
+one physical tap. All original rectangles and the actual size class are logged before geometry admission, and each
+geometry criterion records its result before an assertion can abort. A partially overlapping header rectangle alone
+does not reject a proven visible outside point. The prior combined positive-size/nonintersection failure printed no
+rectangles, so its exact failed conjunct remains unknown; this source change makes no native-success or cause claim.
 Background `isHittable` is deliberately not an admission predicate for this outside-dismissal gesture: Apple documents
 that [popover presentation](https://developer.apple.com/documentation/uikit/uipopoverpresentationcontroller/passthroughviews)
 normally disables underlying view interaction. [SwiftUI confirmation dialogs](https://developer.apple.com/documentation/swiftui/view/confirmationdialog(_:ispresented:titlevisibility:presenting:actions:)-9ibgk)

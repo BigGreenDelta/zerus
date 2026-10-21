@@ -4,6 +4,7 @@ import importlib.util
 import ast
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -242,7 +243,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn("@MainActor private func launchFixture(_ mode: Mode = .normal)", source)
         self.assertNotIn("override func setUp", source)
         self.assertNotIn("override func tearDown", source)
-        entries = re.findall(r"func (test\w+)\(\) \{\n        defer \{ closeFixture\(\) \}\n        launchFixture\((?:\.(?:countdown|feedback|replacement))?\)", source)
+        entries = re.findall(r"func (test\w+)\(\) \{\n        defer \{ closeFixture\(\) \}\n        launchFixture\((?:\.(?:countdown|feedback|replacement|unavailable))?\)", source)
         self.assertEqual(len(entries), 7)
         self.assertEqual(set(entries), set(ios.CASES))
         self.assertEqual(len(re.findall(r"^        launchFixture\(", source, re.M)), 7)
@@ -557,19 +558,21 @@ class ApprovalHarnessTests(unittest.TestCase):
         for required in ('if app.buttons["Cancel"].exists', 'XCTAssertEqual(app.popovers.count, 1',
                          'popover.buttons["Confirm"].exists && popover.staticTexts[disclosure].exists',
                          'XCTAssertTrue(anchor.exists)', 'XCTAssertEqual(anchor.identifier, "fixture-dismiss-anchor")',
-                         'XCTAssertEqual(anchor.label, "Synthetic UI only — no native delivery")', '["regular", "compact"].contains(',
-                         '$0.staticTexts["fixture-dismiss-anchor"].exists && $0.popovers.count == 1',
-                         'XCTAssertEqual(windows.count, 1', '.allSatisfy { $0.isFinite }', '!popup.intersects(frame)',
-                         'let coordinate = anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))',
+                         'XCTAssertEqual(anchor.label, "Synthetic UI only — no native delivery")', '["regular", "compact"].contains(trait)',
+                         'candidate.staticTexts["fixture-dismiss-anchor"].exists && candidate.popovers.count == 1',
+                         'geometryCheck(windows.count == 1', 'positiveFinite(actual) && actual.contains(popup)',
+                         'frame.intersection(window).intersection(canvas)', '!region.intersects(popup)',
+                         'let coordinate = anchor.coordinate(withNormalizedOffset: offset)',
                          'let point = coordinate.screenPoint', 'XCTAssertEqual(app.state, .runningForeground)',
-                         'XCTAssertTrue(pointInside,', 'coordinate.tap()',
+                         'geometryCheck(pointInside,', 'coordinate.tap()',
                          'XCTWaiter.wait(for: [retired], timeout: 2)'):
             self.assertIn(required, cancel)
         self.assertLess(cancel.index('XCTAssertEqual(app.popovers.count, 1'), cancel.index('anchor.coordinate('))
-        self.assertLess(cancel.index('let point = coordinate.screenPoint'), cancel.index('XCTAssertTrue(pointInside,'))
-        self.assertLess(cancel.index('XCTAssertTrue(pointInside,'), cancel.index('coordinate.tap()'))
+        self.assertLess(cancel.index('let point = coordinate.screenPoint'), cancel.index('geometryCheck(pointInside,'))
+        self.assertLess(cancel.index('geometryCheck(pointInside,'), cancel.index('coordinate.tap()'))
         self.assertEqual(cancel.count('coordinate.tap()'), 1)
-        for forbidden in ('notify_post(', 'while ', 'try?', 'coordinate(withOffset:', 'broader =', 'available =', '.isHittable'):
+        for forbidden in ('notify_post(', 'while ', 'try?', 'coordinate(withOffset:', 'broader =', 'available =', '.isHittable',
+                          '!popup.intersects(frame)', 'actual.contains(frame)'):
             self.assertNotIn(forbidden, cancel)
         host = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalUIFixtureApp.swift").read_text()
         anchor = host.split('Text("Synthetic UI only — no native delivery")', 1)[1].split('Text("Callbacks:', 1)[0]
@@ -579,24 +582,115 @@ class ApprovalHarnessTests(unittest.TestCase):
 
     def test_ios_outside_coordinate_source_point_refuses_edges_other_windows_and_popover(self):
         source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
-        condition = source.split('            let pointInside = ', 1)[1].split('\n            XCTAssertTrue(pointInside,', 1)[0]
+        condition = source.split('            let pointInside = ', 1)[1].split('\n            guard geometryCheck(pointInside,', 1)[0]
         condition = condition.replace('!popup.contains(point)', 'not popup_contains').replace('&&', ' and ')
         for value in ('point.x', 'point.y', 'frame.minX', 'frame.maxX', 'frame.minY', 'frame.maxY',
                       'window.minX', 'window.maxX', 'window.minY', 'window.maxY',
-                      'canvas.minX', 'canvas.maxX', 'canvas.minY', 'canvas.maxY'):
+                      'canvas.minX', 'canvas.maxX', 'canvas.minY', 'canvas.maxY',
+                      'region.minX', 'region.maxX', 'region.minY', 'region.maxY'):
             condition = condition.replace(value, value.replace('.', '_'))
         condition = '(' + condition + ')'
         good = dict(point_x=50, point_y=50, frame_minX=40, frame_maxX=60, frame_minY=40, frame_maxY=60,
                     window_minX=0, window_maxX=100, window_minY=0, window_maxY=100,
-                    canvas_minX=0, canvas_maxX=100, canvas_minY=0, canvas_maxY=100, popup_contains=False)
+                    canvas_minX=0, canvas_maxX=100, canvas_minY=0, canvas_maxY=100,
+                    region_minX=45, region_maxX=55, region_minY=45, region_maxY=55, popup_contains=False)
         self.assertTrue(finite_source_predicate(condition, good))
         departures = [dict(popup_contains=True), dict(point_x=float('nan')), dict(point_y=float('inf'))]
         for axis in ('X', 'Y'):
-            for owner in ('frame', 'window', 'canvas'):
+            for owner in ('frame', 'window', 'canvas', 'region'):
                 departures += [{owner + '_min' + axis: 50}, {owner + '_max' + axis: 50}]
         for change in departures:
             with self.subTest(change=change):
                 self.assertFalse(finite_source_predicate(condition, {**good, **change}))
+
+    def test_ios_outside_geometry_uses_finite_clipped_unoccluded_source_regions(self):
+        """Finite arithmetic controls for the source; no CGRect, Swift compiler or native gesture claim."""
+        source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
+        helper = source.split('    private func positiveFinite(', 1)[1].split('    private func cancelBroader', 1)[0]
+        fields = re.search(r'\[([^\n]+)\]\.allSatisfy \{ \$0.isFinite \}', helper)[1].split(', ')
+        self.assertEqual(fields, ['rect.minX', 'rect.minY', 'rect.maxX', 'rect.maxY', 'rect.width', 'rect.height'])
+        positive = helper.split(' && ', 1)[1].split('\n', 1)[0].replace('rect.', '').replace('&&', 'and')
+        def qualifies(rect):
+            return all(math.isfinite(rect[field.split('.')[1]]) for field in fields) and finite_source_predicate(positive, rect)
+        valid = dict(minX=0, minY=0, maxX=100, maxY=100, width=100, height=100)
+        self.assertTrue(qualifies(valid))
+        for field in valid:
+            for invalid in (float('nan'), float('inf'), -float('inf')):
+                with self.subTest(field=field, invalid=invalid):
+                    self.assertFalse(qualifies({**valid, field: invalid}))
+        for field in ('width', 'height'):
+            for invalid in (0, -1):
+                self.assertFalse(qualifies({**valid, field: invalid}))
+        bounds = source.split('let bounds: [(CGFloat, CGFloat, CGFloat, CGFloat)] = ', 1)[1].split('\n            guard let selected', 1)[0]
+        bounds = re.sub(r'(visible|popup)\.(minX|minY|maxX|maxY)', r'\1_\2', bounds)
+        tree = ast.parse(bounds, mode='eval')
+        allowed = (ast.Expression, ast.List, ast.Tuple, ast.Name, ast.Load, ast.Call)
+        self.assertTrue(all(isinstance(node, allowed) for node in ast.walk(tree)))
+        self.assertEqual({node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call)}, {'min', 'max'})
+        selector = re.search(r'bounds.first\(where: \{ ([^\n]+) \}\)', source)[1]
+        for index, name in enumerate(('minX', 'minY', 'maxX', 'maxY')):
+            selector = selector.replace('$0.' + str(index), name)
+        selector = selector.replace('&&', 'and')
+        def region(visible, popup):
+            values = {owner + '_' + field: value for owner, rect in (('visible', visible), ('popup', popup))
+                      for field, value in zip(('minX', 'minY', 'maxX', 'maxY'), rect)}
+            self.assertLessEqual({node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}, values.keys() | {'min', 'max'})
+            candidates = eval(compile(tree, '<finite-source-regions>', 'eval'), {'__builtins__': {}, 'min': min, 'max': max}, values)
+            self.assertEqual(len(candidates), 4)  # One geometric choice before the single gesture, never tap retries.
+            return next((row for row in candidates if finite_source_predicate(selector, dict(zip(('minX', 'minY', 'maxX', 'maxY'), row)))), None)
+        visible = (10, 10, 90, 90)
+        for popup in ((20, 20, 80, 80), (0, 0, 100, 50), (50, 0, 100, 100), (0, 0, 50, 100),
+                      (0, 90, 100, 100), (90, 0, 100, 100), (100, 100, 120, 120)):
+            with self.subTest(popup=popup):
+                selected = region(visible, popup)
+                self.assertIsNotNone(selected)
+                left, top, right, bottom = selected
+                x, y = (left + right) / 2, (top + bottom) / 2
+                self.assertTrue(visible[0] < x < visible[2] and visible[1] < y < visible[3])
+                self.assertFalse(popup[0] <= x <= popup[2] and popup[1] <= y <= popup[3])
+        for popup in (visible, (0, 0, 100, 100)):
+            self.assertIsNone(region(visible, popup))
+        cancel = source.split('    private func cancelBroaderConfirmation()', 1)[1].split('    func testRealCountdown', 1)[0]
+        self.assertLess(cancel.index('phase("cancel-geometry-popup-'), cancel.index('geometryCheck(positiveFinite(popup)'))
+        self.assertLess(cancel.index('phase("cancel-geometry-window-'), cancel.index('positiveFinite(actual)'))
+        self.assertLess(cancel.index('phase("cancel-geometry-visible-anchor-'), cancel.index('geometryCheck(positiveFinite(visible)'))
+        diagnostic = source.split('    private func geometryCheck(', 1)[1].split('    private func positiveFinite(', 1)[0]
+        self.assertLess(diagnostic.index('phase('), diagnostic.index('XCTAssertTrue(condition, criterion)'))
+
+    def test_ios_unavailable_event_follows_original_dialog_and_is_single_mode_bound(self):
+        host = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalUIFixtureApp.swift").read_text()
+        source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
+        controls = host.split('final class FixtureControls {', 1)[1].split('// This file belongs only', 1)[0]
+        self.assertIn('case becomeUnavailable = "become-unavailable"', controls)
+        self.assertIn('case .unavailable: [.becomeUnavailable]', controls)
+        self.assertIn('case .becomeUnavailable: available = false', controls)
+        self.assertNotIn('Unavailable in 2 seconds', host + source)
+        self.assertNotIn('Task.sleep', controls)
+        self.assertIn('case .replace, .becomeUnavailable: nil', controls)
+        actions = controls.split('    private var actions: [Action] {', 1)[1].split('    private func name(', 1)[0]
+        mode_actions = re.findall(r'case \.(\w+): \[([^\]]*)\]', actions)
+        self.assertEqual(len(mode_actions), 5)
+        self.assertEqual(dict(mode_actions), dict(normal='', feedback='.beginFeedbackReview', replacement='.replace',
+                                                  countdown='.beginCountdownReview', unavailable='.becomeUnavailable'))
+        raw = re.search(r'guard (!closed, failure.isEmpty, actions.contains\(action\), !consumed.contains\(action\), tokens\[action\] == token) else', controls)[1]
+        predicate = raw.replace('!closed', 'not closed').replace('failure.isEmpty', 'failure_empty').replace('actions.contains(action)', 'mode_admits').replace('!consumed.contains(action)', 'not consumed').replace('tokens[action]', 'owned_token').replace(',', ' and')
+        for mode in ('normal', 'feedback', 'replacement', 'countdown', 'unavailable'):
+            valid = dict(closed=False, failure_empty=True, mode_admits='.becomeUnavailable' in dict(mode_actions)[mode], consumed=False, owned_token=17, token=17)
+            self.assertEqual(finite_source_predicate(predicate, valid), mode == 'unavailable')
+        valid = dict(closed=False, failure_empty=True, mode_admits=True, consumed=False, owned_token=17, token=17)
+        for changed in (dict(closed=True), dict(failure_empty=False), dict(consumed=True), dict(owned_token=None), dict(token=18)):
+            self.assertFalse(finite_source_predicate(predicate, {**valid, **changed}))
+        case = source.split('    func testUnavailableRetiresAnOpenConfirmation()', 1)[1].split('    func testFeedback', 1)[0]
+        for earlier, later in [('launchFixture(.unavailable)', 'send.tap()'), ('send.tap()', 'waitForExistence(timeout: 1)'),
+                               ('waitForExistence(timeout: 1)', 'count(0)'), ('count(0)', 'app.staticTexts['),
+                               ('app.staticTexts[', 'post("become-unavailable")'), ('post("become-unavailable")', 'XCTWaiter.wait(for: [retired]'),
+                               ('XCTWaiter.wait(for: [retired]', 'ack("become-unavailable", serial: 0)'),
+                               ('ack("become-unavailable", serial: 0)', 'count(0); XCTAssertFalse(send.isEnabled)')]:
+            self.assertLess(case.index(earlier), case.index(later))
+        self.assertIn('changes the agent\'s permissions beyond this request.\\n\\nExact command for this session only', case)
+        self.assertIn('NSPredicate(format: "exists == false")', case)
+        self.assertIn('XCTWaiter.wait(for: [retired], timeout: 4)', case)
+        self.assertEqual(case.count('post("become-unavailable")'), 1)
 
     def test_ios_feedback_refocus_preserves_real_early_return_text_and_final_oracle(self):
         source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()

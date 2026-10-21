@@ -46,7 +46,7 @@ import Dispatch
 /// simulator-only memory host; callback assertions do not prove provider, relay or persistence delivery.
 @MainActor final class ApprovalChoicesUITests: XCTestCase {
     private var app: XCUIApplication!
-    private enum Mode: String { case normal, countdown, feedback, replacement }
+    private enum Mode: String { case normal, countdown, feedback, replacement, unavailable }
     private var fixtureLaunch = ""
     private var fixtureGeneration = ""
     private var acknowledgementNonce = ""
@@ -73,7 +73,7 @@ import Dispatch
         print("FIXTURE-UI \(name) uptime=\(ProcessInfo.processInfo.systemUptime) generation=\(fixtureGeneration)")
     }
     private func post(_ action: String) {
-        XCTAssertTrue(["begin-feedback-review", "replace", "begin-countdown-review"].contains(action))
+        XCTAssertTrue(["begin-feedback-review", "replace", "begin-countdown-review", "become-unavailable"].contains(action))
         XCTAssertTrue(posted.insert(action).inserted, "No control replays")
         XCTAssertEqual(app.staticTexts["fixture-generation"].label, fixtureGeneration)
         let name = "test.example.zerus.ui.\(fixtureLaunch).\(fixtureGeneration.lowercased()).\(action)"
@@ -142,6 +142,14 @@ import Dispatch
         XCTAssertTrue(app.staticTexts["“Approve for this session” changes the agent's permissions beyond this request.\n\nExact command for this session only"].exists)
         count(0)
     }
+    private func geometryCheck(_ condition: Bool, _ criterion: String) -> Bool {
+        phase("cancel-geometry-check-\(criterion)-\(condition)") // Record the exact refusal before XCTest aborts.
+        XCTAssertTrue(condition, criterion)
+        return condition
+    }
+    private func positiveFinite(_ rect: CGRect) -> Bool {
+        [rect.minX, rect.minY, rect.maxX, rect.maxY, rect.width, rect.height].allSatisfy { $0.isFinite } && rect.width > 0 && rect.height > 0
+    }
     private func cancelBroaderConfirmation() {
         let confirm = app.buttons["Confirm"]
         XCTAssertTrue(confirm.exists)
@@ -159,28 +167,52 @@ import Dispatch
             XCTAssertTrue(anchor.exists)
             XCTAssertEqual(anchor.identifier, "fixture-dismiss-anchor")
             XCTAssertEqual(anchor.label, "Synthetic UI only — no native delivery")
-            XCTAssertTrue(["regular", "compact"].contains(anchor.value as? String ?? ""), "Missing actual fixture size class")
-            let popup = popover.frame, frame = anchor.frame
-            let windows = app.windows.allElementsBoundByIndex.filter {
-                $0.exists && $0.staticTexts["fixture-dismiss-anchor"].exists && $0.popovers.count == 1 &&
-                $0.popovers.element(boundBy: 0).buttons["Confirm"].exists && $0.frame.contains(popup) && $0.frame.contains(frame)
+            let trait = anchor.value as? String ?? ""
+            let popup = popover.frame, frame = anchor.frame, canvas = app.frame
+            phase("cancel-geometry-popup-\(popup)-anchor-\(frame)-canvas-\(canvas)-trait-\(trait)")
+            let windowFrames = app.windows.allElementsBoundByIndex.map { (element: $0, frame: $0.frame) }
+            for captured in windowFrames { phase("cancel-geometry-window-\(captured.frame)") }
+            guard geometryCheck(["regular", "compact"].contains(trait), "recognized-size-class") else { return }
+            guard geometryCheck(positiveFinite(popup), "positive-finite-popover") else { return }
+            guard geometryCheck(positiveFinite(frame), "positive-finite-anchor") else { return }
+            guard geometryCheck(positiveFinite(canvas), "positive-finite-app-canvas") else { return }
+            let windows = windowFrames.compactMap { captured -> CGRect? in
+                let candidate = captured.element, actual = captured.frame
+                return candidate.exists && candidate.staticTexts["fixture-dismiss-anchor"].exists && candidate.popovers.count == 1 &&
+                    candidate.popovers.element(boundBy: 0).buttons["Confirm"].exists && positiveFinite(actual) && actual.contains(popup) ? actual : nil
             }
-            XCTAssertEqual(windows.count, 1, "Native dialog and passive anchor must share one owned app window")
-            XCTAssertTrue([popup.minX, popup.minY, popup.width, popup.height, frame.minX, frame.minY, frame.width, frame.height].allSatisfy { $0.isFinite })
-            XCTAssertTrue(popup.width > 0 && popup.height > 0 && frame.width > 0 && frame.height > 0 && !popup.intersects(frame))
-            let window = windows[0].frame, canvas = app.frame
+            guard geometryCheck(windows.count == 1, "unique-owned-window-with-popover-and-anchor") else { return }
+            let window = windows[0]
+            let visible = frame.intersection(window).intersection(canvas)
+            phase("cancel-geometry-visible-anchor-\(visible)")
+            guard geometryCheck(positiveFinite(visible), "positive-finite-clipped-anchor") else { return }
+            // Subtract the actual popover from the visible passive header. Its AX rectangle may overlap
+            // the popover; only a positive unoccluded part can supply the one physical outside tap.
+            let bounds: [(CGFloat, CGFloat, CGFloat, CGFloat)] = [
+                (visible.minX, visible.minY, visible.maxX, min(visible.maxY, popup.minY)),
+                (visible.minX, max(visible.minY, popup.maxY), visible.maxX, visible.maxY),
+                (visible.minX, visible.minY, min(visible.maxX, popup.minX), visible.maxY),
+                (max(visible.minX, popup.maxX), visible.minY, visible.maxX, visible.maxY)]
+            guard let selected = bounds.first(where: { $0.2 > $0.0 && $0.3 > $0.1 }) else {
+                _ = geometryCheck(false, "positive-unoccluded-anchor-region"); return
+            }
+            let region = CGRect(x: selected.0, y: selected.1, width: selected.2 - selected.0, height: selected.3 - selected.1)
+            phase("cancel-geometry-selected-region-\(region)")
+            guard geometryCheck(positiveFinite(region) && !region.intersects(popup), "positive-finite-region-outside-popover") else { return }
             XCTAssertEqual(app.state, .runningForeground)
             XCTAssertTrue(confirm.exists && anchor.exists)
             // Modal popovers disable background interaction: this is a physical outside tap, not a header action.
-            let coordinate = anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            let offset = CGVector(dx: (region.midX - frame.minX) / frame.width, dy: (region.midY - frame.minY) / frame.height)
+            guard geometryCheck([offset.dx, offset.dy].allSatisfy { $0.isFinite && $0 > 0 && $0 < 1 }, "strictly-interior-normalized-offset") else { return }
+            let coordinate = anchor.coordinate(withNormalizedOffset: offset)
             let point = coordinate.screenPoint
-            XCTAssertTrue([window.minX, window.minY, window.width, window.height, canvas.minX, canvas.minY,
-                           canvas.width, canvas.height, point.x, point.y].allSatisfy { $0.isFinite })
-            XCTAssertTrue(window.width > 0 && window.height > 0 && canvas.width > 0 && canvas.height > 0)
+            phase("cancel-geometry-derived-point-\(point)-offset-\(offset)")
+            guard geometryCheck([point.x, point.y].allSatisfy { $0.isFinite }, "finite-derived-point") else { return }
             let pointInside = point.x > frame.minX && point.x < frame.maxX && point.y > frame.minY && point.y < frame.maxY &&
+                point.x > region.minX && point.x < region.maxX && point.y > region.minY && point.y < region.maxY &&
                 point.x > window.minX && point.x < window.maxX && point.y > window.minY && point.y < window.maxY &&
                 point.x > canvas.minX && point.x < canvas.maxX && point.y > canvas.minY && point.y < canvas.maxY && !popup.contains(point)
-            XCTAssertTrue(pointInside, "Derived outside tap must be strictly inside the passive anchor and owned visible window")
+            guard geometryCheck(pointInside, "derived-point-inside-passive-region-and-owned-canvas-outside-popover") else { return }
             phase("cancel-popover-\(popup)-anchor-\(frame)-point-\(point)")
             coordinate.tap()
         }
@@ -230,12 +262,15 @@ import Dispatch
     }
     func testUnavailableRetiresAnOpenConfirmation() {
         defer { closeFixture() }
-        launchFixture()
-        choice("Approve for this session").tap(); reviewed()
-        app.buttons["Unavailable in 2 seconds"].tap(); send.tap()
+        launchFixture(.unavailable)
+        choice("Approve for this session").tap(); reviewed(); send.tap()
         XCTAssertTrue(app.buttons["Confirm"].waitForExistence(timeout: 1)); count(0)
+        XCTAssertTrue(app.staticTexts["“Approve for this session” changes the agent's permissions beyond this request.\n\nExact command for this session only"].exists)
+        // The original native Confirm and full disclosure must be observed before the one-time host event.
+        post("become-unavailable")
         let retired = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: app.buttons["Confirm"])
         XCTAssertEqual(XCTWaiter.wait(for: [retired], timeout: 4), .completed)
+        _ = ack("become-unavailable", serial: 0)
         count(0); XCTAssertFalse(send.isEnabled)
     }
     func testFeedbackKeyboardCannotBypassReview() {
