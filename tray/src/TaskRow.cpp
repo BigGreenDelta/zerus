@@ -153,7 +153,10 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
         for (const auto action : actions) {
             auto *button = new QToolButton(m_actions); button->setObjectName(QStringLiteral("taskAction:") + actionKey(action));
             button->setFixedSize(26, 26); button->setIconSize(QSize(15, 15)); button->setAutoRaise(true); button->setCursor(Qt::ArrowCursor);
-            connect(button, &QToolButton::clicked, this, [this, action] { emit actionRequested(action); });
+            connect(button, &QToolButton::clicked, this, [this, action, button] {
+                const QString why = button->property("blockedReason").toString();
+                if (why.isEmpty()) emit actionRequested(action); else emit actionBlocked(why);
+            });
             button->installEventFilter(this);
             m_actions->layout()->addWidget(button); m_buttons.insert(int(action), button);
         }
@@ -161,9 +164,12 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
     }
     for (auto it = m_buttons.begin(); it != m_buttons.end(); ++it) {
         const auto action = TaskAction(it.key()); const QString why = state.blocked.value(it.key());
-        it.value()->setIcon(workspaceIcon(TaskBoard::actionIcon(action), colors.muted));
-        it.value()->setEnabled(why.isEmpty()); it.value()->setToolTip(why.isEmpty() ? TaskBoard::actionLabel(action) : why);
+        // A blocked action stays clickable, dimmed, so a click can say why it does nothing.
+        QColor icon = colors.muted; if (!why.isEmpty()) icon.setAlphaF(0.45);
+        it.value()->setIcon(workspaceIcon(TaskBoard::actionIcon(action), icon));
+        it.value()->setProperty("blockedReason", why); it.value()->setToolTip(why.isEmpty() ? TaskBoard::actionLabel(action) : why);
         it.value()->setAccessibleName(TaskBoard::actionLabel(action));
+        it.value()->setAccessibleDescription(why);
         setWorkspaceStyle(it.value(), QStringLiteral("QToolButton{border:0;border-radius:6px;background:transparent;}QToolButton:hover{background:%1;}").arg(colors.hover.name()));
     }
     updateActions();

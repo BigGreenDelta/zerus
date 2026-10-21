@@ -286,6 +286,7 @@ void TasksView::render() {
         if (!row) {
             row = new TaskRow(m_listHost); m_rows.insert(task.uuid, row);
             connect(row, &TaskRow::actionRequested, this, [this, row](TaskAction action) { act(row->task(), action); });
+            connect(row, &TaskRow::actionBlocked, this, [this](const QString &reason) { emit notice(reason, true); });
             connect(row, &TaskRow::opened, this, [this, row] { openTask(row->task()); });
             connect(row, &TaskRow::dragStarted, this, [this, row](const QPoint &hotSpot) { startDrag(row, hotSpot); });
         }

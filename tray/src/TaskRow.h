@@ -36,6 +36,8 @@ public:
     void setDragging(bool dragging);
 signals:
     void actionRequested(TaskAction action);
+    // A blocked action was clicked: it does nothing, and the owner says why.
+    void actionBlocked(const QString &reason);
     void opened();
     // A To do or Backlog row was pressed and moved: the owner drags it from hotSpot.
     void dragStarted(const QPoint &hotSpot);

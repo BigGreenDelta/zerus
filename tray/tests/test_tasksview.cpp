@@ -142,17 +142,26 @@ void TestTasksView::sendNowNamesWhyASessionCannotTakeIt() {
     HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
     view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
     QTRY_VERIFY(row(view, 5)); tile(view, "todo")->click();
-    const auto blocked = [&](int n) { auto *b = action(row(view, n), "sendNow"); return b->isEnabled() ? QString() : b->toolTip(); };
+    const auto blocked = [&](int n) { return action(row(view, n), "sendNow")->property("blockedReason").toString(); };
     QCOMPARE(blocked(1), QString("codex/gone no longer exists — choose another session"));
     QCOMPARE(blocked(2), QString("The agent is not running. Resume it before sending."));
+    QCOMPARE(action(row(view, 2), "sendNow")->toolTip(), blocked(2));
     QCOMPARE(blocked(4), QString());
+    // A click on a blocked Send now says why and sends nothing, as a tap does on Android.
+    QSignalSpy notices(&view, &TasksView::notice);
+    action(row(view, 2), "sendNow")->click();
+    QTRY_COMPARE(notices.size(), 1);
+    QCOMPARE(notices[0][0].toString(), QString("The agent is not running. Resume it before sending."));
+    QTest::qWait(100);
+    const auto calls = FakeTasksCli::calls(dir.path());
+    QVERIFY(std::none_of(calls.cbegin(), calls.cend(), [](const QStringList &call) { return call.contains("uuid-2") && call.contains("send"); }));
     // A session on another computer takes it there; hgs runs the send on that computer.
     QCOMPARE(blocked(3), QString());
     action(row(view, 3), "sendNow")->click();
     QTRY_VERIFY(FakeTasksCli::calls(dir.path()).contains(QStringList({"task", "send", "uuid-3", "--project", "project-1"})));
     // An Any session task goes to the open session, there too.
     view.setContext("project-1", "orchard", "orchard-mac", "codex/ios", "orchard-mac\ncodex/ios", sessions());
-    QTRY_VERIFY(row(view, 5) && action(row(view, 5), "sendNow")->isEnabled());
+    QTRY_VERIFY(row(view, 5) && action(row(view, 5), "sendNow")->property("blockedReason").toString().isEmpty());
     action(row(view, 5), "sendNow")->click();
     QTRY_VERIFY(FakeTasksCli::calls(dir.path()).contains(
         QStringList({"task", "send", "uuid-5", "--session", "codex/ios", "--host", "orchard-mac", "--project", "project-1"})));
