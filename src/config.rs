@@ -50,44 +50,11 @@ impl Config {
             env::current_dir()?.join(raw_state)
         };
         env::set_var("HGS_STATE_DIR", &state);
-        let mut values = HashMap::new();
-        match fs::read_to_string(dir.join("config")) {
-            Ok(text) => {
-                for (index, line) in text.lines().enumerate() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
-                    let Some((key, raw)) = line.split_once('=') else {
-                        // The optional hint reader diagnoses its own keys;
-                        // malformed hint policy must not reject the launch.
-                        if hint_key_without_assignment(line) { continue; }
-                        return Err(Error::new(
-                            1,
-                            format!(
-                                "{}:{}: expected NAME=value",
-                                dir.join("config").display(),
-                                index + 1
-                            ),
-                        ));
-                    };
-                    let key = key.trim();
-                    if !matches!(key, "HGS_SELF" | "HGS_PEERS" | "HGS_TAB" | "HGS_TAB_COLORS") {
-                        continue;
-                    }
-                    let value = assignment_value(raw, &home, &values).map_err(|message| {
-                        Error::new(
-                            1,
-                            format!("{}:{}: {message}", dir.join("config").display(), index + 1),
-                        )
-                    })?;
-                    values.insert(key.to_owned(), value);
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        let values = match fs::read_to_string(dir.join("config")) {
+            Ok(text) => configuration_values(&text, &dir, &home)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
             Err(e) => return Err(e.into()),
-        }
+        };
         let get = |key: &str, default: &str| {
             env::var(key)
                 .ok()
@@ -229,6 +196,54 @@ impl Config {
     }
 }
 
+/// The same full-file line decoder used by Config::load, isolated from process
+/// environment mutation so optional policy controls can exercise that boundary.
+fn configuration_values(
+    text: &str,
+    directory: &Path,
+    home: &str,
+) -> Result<HashMap<String, String>> {
+    let mut values = HashMap::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((key, raw)) = line.split_once('=') else {
+            // The optional hint reader diagnoses its own keys; malformed
+            // hint policy must not reject the launch.
+            if hint_key_without_assignment(line) {
+                continue;
+            }
+            return Err(Error::new(
+                1,
+                format!(
+                    "{}:{}: expected NAME=value",
+                    directory.join("config").display(),
+                    index + 1
+                ),
+            ));
+        };
+        let key = key.trim();
+        if !matches!(key, "HGS_SELF" | "HGS_PEERS" | "HGS_TAB" | "HGS_TAB_COLORS") {
+            continue;
+        }
+        let value = assignment_value(raw, home, &values).map_err(|message| {
+            Error::new(
+                1,
+                format!(
+                    "{}:{}: {message}",
+                    directory.join("config").display(),
+                    index + 1
+                ),
+            )
+        })?;
+        values.insert(key.to_owned(), value);
+    }
+    Ok(values)
+}
+
 /// The configuration directory below `home`: `HGS_CONFIG_DIR` when set, else
 /// `~/.config/hgs`. Also used without a loaded `Config` (the Windows
 /// local-sessions marker), so both always name the same directory.
@@ -258,7 +273,17 @@ struct HintPolicy {
 }
 
 impl HintPolicy {
+    fn transport_valid(&self) -> bool {
+        self.off.len() <= 8192 && !self.off.contains('\0')
+    }
+
     fn environment(self) -> Vec<String> {
+        // Keep malformed optional data away from both Unix argv and the
+        // Windows environment block, even at this final transport boundary.
+        if !self.transport_valid() {
+            eprintln!("{HINT_POLICY_DIAGNOSTIC}");
+            return vec!["HGS_AGENT_HINT=0".into(), "HGS_AGENT_HINT_OFF=".into()];
+        }
         vec![
             format!("HGS_AGENT_HINT={}", if self.enabled { "1" } else { "0" }),
             format!("HGS_AGENT_HINT_OFF={}", self.off),
@@ -296,6 +321,9 @@ fn hint_policy(
         if let Some(value) = environment(key)? {
             values.insert(key.to_owned(), value);
         }
+    }
+    if values.values().any(|value| value.contains('\0')) {
+        return Err(());
     }
     let enabled = match values.get(HINT_KEYS[0]).map(String::as_str).unwrap_or("1") {
         "0" => false,
@@ -391,13 +419,14 @@ fn resolved_hint_policy(
         _ => return Err(()),
     };
     let off = off.unwrap_or("");
-    if off.len() > 8192 {
-        return Err(());
-    }
-    Ok(HintPolicy {
+    let policy = HintPolicy {
         enabled,
         off: off.into(),
-    })
+    };
+    if !policy.transport_valid() {
+        return Err(());
+    }
+    Ok(policy)
 }
 
 pub struct Project {
@@ -578,6 +607,7 @@ mod tests {
 
     #[test]
     fn agent_hint_malformed_assignment_is_optional_only_for_the_two_exact_keys() {
+        let directory = Path::new("/fixture/hgs");
         for line in [
             "HGS_AGENT_HINT",
             "HGS_AGENT_HINT 0",
@@ -587,6 +617,10 @@ mod tests {
             // hint reader; that reader refuses them and selects policy off.
             assert!(hint_key_without_assignment(line));
             assert!(policy(line, &[]).is_err());
+            let text = format!("HGS_SELF=fixture\n{line}\nHGS_TAB=0\n");
+            let full = configuration_values(&text, directory, "/home/fixture").unwrap();
+            assert_eq!(full["HGS_SELF"], "fixture");
+            assert_eq!(full["HGS_TAB"], "0");
         }
         for line in [
             "HGS_PEERS peer",
@@ -595,7 +629,61 @@ mod tests {
             "unrelated malformed line",
         ] {
             assert!(!hint_key_without_assignment(line));
+            let text = format!("HGS_SELF=fixture\n{line}\n");
+            let error = configuration_values(&text, directory, "/home/fixture").unwrap_err();
+            assert_eq!(
+                error.message,
+                format!(
+                    "{}:2: expected NAME=value",
+                    directory.join("config").display()
+                )
+            );
         }
+        let text = "HGS_SELF=fixture\nHGS_PEERS=$(must-not-execute)\n";
+        assert!(configuration_values(text, directory, "/home/fixture")
+            .unwrap_err()
+            .message
+            .contains("shell command substitution is not supported"));
+    }
+
+    #[test]
+    fn agent_hint_full_config_nul_falls_back_before_environment_transport() {
+        for key in HINT_KEYS {
+            let text = format!(
+                "HGS_SELF=fixture\n{key}='work\0tail'\nHGS_PEERS='peer-a peer-b'\nHGS_TAB=0\n"
+            );
+            assert!(text.as_bytes().contains(&0));
+            let full =
+                configuration_values(&text, Path::new("/fixture/hgs"), "/home/fixture").unwrap();
+            assert_eq!(full["HGS_SELF"], "fixture");
+            assert_eq!(full["HGS_PEERS"], "peer-a peer-b");
+            assert_eq!(full["HGS_TAB"], "0");
+            let forwarded = hint_policy_environment(policy(&text, &[]));
+            assert_eq!(forwarded, ["HGS_AGENT_HINT=0", "HGS_AGENT_HINT_OFF="]);
+            assert!(forwarded.iter().all(|entry| !entry.contains('\0')));
+            let block = crate::host::spawn::Environment::parse(&forwarded).unwrap();
+            assert_eq!(block.get("HGS_AGENT_HINT"), Some("0"));
+            assert_eq!(block.get("HGS_AGENT_HINT_OFF"), Some(""));
+            assert!(policy("", &[(key, "work\0tail")]).is_err());
+        }
+        assert!(resolved_hint_policy(Some("1\0"), None).is_err());
+        for enabled in ["0", "1"] {
+            assert!(resolved_hint_policy(Some(enabled), Some("work\0tail")).is_err());
+        }
+        let malformed = HintPolicy {
+            enabled: true,
+            off: "work\0tail".into(),
+        };
+        assert_eq!(
+            malformed.environment(),
+            ["HGS_AGENT_HINT=0", "HGS_AGENT_HINT_OFF="]
+        );
+        assert_eq!(
+            policy("HGS_AGENT_HINT_OFF='work\t native-codex'", &[])
+                .unwrap()
+                .off,
+            "work native-codex"
+        );
     }
 
     #[test]
