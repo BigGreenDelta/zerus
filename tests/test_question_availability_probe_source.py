@@ -6,6 +6,7 @@ import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+# Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
 # Product baseline includes prepared inspection publication before installation.
 MODEL_SHA = "36d8d64399e3ed9dc54bc0815165c2d7d61d6b70ba33ed432682d6750bd0fd83"
@@ -71,7 +72,7 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
         # The fixture baseline includes guarded preparation and passive lifecycle checkpoints; physical case oracles stay exact.
         self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
-                         "f25ae6ce985f886661a7285c76ad7000429084eff21b11e26358e690a537442d")
+                         "e61677c18f4ca75f8c78df130f0c6da8573af81524bc5770b273572465253f90")
 
     def test_prepared_publication_uses_the_actual_bounded_owner_before_any_atomic_install(self):
         model = (MAIN / "ZerusViewModel.kt").read_text()

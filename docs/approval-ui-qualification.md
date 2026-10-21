@@ -70,8 +70,14 @@ The original subtree traversal remains the fallback. Monotonic phase records cov
 first disabled/zero-answer assertion; they never override the three-second policy or establish UI acceptance alone.
 
 The three early-window assertions first use the same real Home/resume route as the lifecycle case, with the exact owned
-Activity required to lose and regain focus. Only these assertions use a scoped cached Send node captured for the verified
-card: refresh, exact visible label, window and card/run/conversation identity must still match, without a fallback search.
+Activity required to lose and regain focus. Their scoped Send cache retains the original verified card and owned window.
+After the first review snapshot binds and current identity passes, preparation acquires the exact visible Send label once
+from the resumed tree, then requires the same original window/package, a refreshed visible exact label, current identity
+and the unchanged original deadline. The lifecycle case performs this one acquisition only after its existing body
+restoration and confirmation-retirement checks. The private setter consumes its sole attempt before querying, including
+failed queries; missing, obsolete, foreign, invisible, late or faulted preparation refuses without another acquisition.
+No card, native question, selection, draft, review snapshot, generation, start or end is replaced. The later cached reader
+and its entire ancestor walk remain unchanged and perform no further label lookup or fallback search.
 The cache is cleared in `finally`. The monotonic timestamp before the sole resume intent is a lower bound, not the
 production review-clock start. The same existing ten-second focus wait also requires a newer eligible owned production
 observation; no additional wait slot is introduced. The early assertion or Enter must finish within the original three
@@ -103,7 +109,15 @@ most sixteen ancestors in that window and package. Only an ancestor that fails `
 same validated label; the passive poll is clamped to the remaining original deadline. A stale label, changed
 card/window/package, missing action, read error, depth limit or late result refuses the read. There is no root search,
 anchor rebinding, input retry or extra review time; the returned native node must still satisfy the original disabled
-assertion. The retained feedback failure identifies the ancestor-loop refresh check, but not which iteration or node
+assertion. This reader's no-search rule follows the single post-resume preparation above. Android's
+[`AccessibilityNodeInfo.refresh()`](https://developer.android.com/reference/android/view/accessibility/AccessibilityNodeInfo#refresh())
+can return false when its represented View has left the tree; logical card/window continuity does not guarantee that a
+pre-Home accessibility object remains live. The retained `95ef8f13` run failed in its first case's compound cached-label
+guard, before a negative Send touch or any receipt. Its exact false operand remains unknown; a later owned window/card
+snapshot does not identify it. Source-bound memory controls contrast an obsolete old reference with a current live label
+under the same immutable identity/deadline, and retain refusal controls and the original disabled oracle. They are finite
+stand-ins, not Kotlin compilation or demonstrated native recovery. The retained feedback failure identifies the
+ancestor-loop refresh check, but not which iteration or node
 failed. The `dd209de8` run entered its first assertion 3,214 ms after the resume intent while the last committed card still
 reported three review seconds remaining and Send disabled. That deadline failure produced no disabled-node oracle and
 did not reach the ancestor walk; it does not retrospectively qualify the ancestry repair.

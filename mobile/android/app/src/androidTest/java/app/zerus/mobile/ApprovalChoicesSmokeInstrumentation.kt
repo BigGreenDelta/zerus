@@ -83,9 +83,19 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         "k=$kind n=${value.length} p=${prefix.length} sha256Prefix=$digest"
     } catch (_: Throwable) { "k=UNKNOWN" }
     // END QUESTION_SEND_DIAGNOSTIC definition
-    private data class EarlySend(val node: AccessibilityNodeInfo, val window: Int, val currentCard: () -> Boolean,
+    private data class EarlySend(private val initialNode: AccessibilityNodeInfo, val window: Int, val currentCard: () -> Boolean,
         val observation: (Int?) -> QuestionUiProbe.ContentSnapshot?,
         val currentReview: (QuestionUiProbe.ContentSnapshot, Long, Long) -> Boolean) {
+        // BEGIN EARLY_SEND_LIVE_ANCHOR state
+        var node: AccessibilityNodeInfo = initialNode
+            private set
+        private var anchorPreparationAttempted = false
+        fun prepareAnchor(acquire: () -> AccessibilityNodeInfo) {
+            check(!anchorPreparationAttempted) { "Early-review Send anchor preparation repeated" }
+            anchorPreparationAttempted = true
+            node = acquire()
+        }
+        // END EARLY_SEND_LIVE_ANCHOR state
         private var resumeStart: Long? = null
         private var beforeGeneration: Int? = null
         private var reviewStart: Long? = null
@@ -275,6 +285,28 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             current = checkNotNull(current.parent)
         }
     }
+    // BEGIN EARLY_SEND_LIVE_ANCHOR preparation
+    private fun prepareEarlySendAnchor(cached: EarlySend) {
+        cached.prepareAnchor {
+            val end = checkNotNull(cached.resumeEnd)
+            check(cached.current()) { "Early-review card identity changed before label acquisition" }
+            check(SystemClock.elapsedRealtime() < end) { "Early-review Send deadline expired before label acquisition" }
+            val fresh = checkNotNull(visible("Send answer")) { "Early-review live Send label is unavailable" }
+            check(cached.current()) { "Early-review card identity changed after label acquisition" }
+            check(SystemClock.elapsedRealtime() < end) { "Early-review Send deadline expired after label acquisition" }
+            check(fresh.refresh()) { "Early-review live Send label is obsolete" }
+            check(cached.window >= 0 && fresh.windowId == cached.window) { "Early-review live Send window changed" }
+            check(fresh.packageName?.toString() == targetContext.packageName) { "Early-review live Send package changed" }
+            check(fresh.isVisibleToUser) { "Early-review live Send label is not visible" }
+            check(fresh.text?.toString() == "Send answer" || fresh.contentDescription?.toString() == "Send answer") {
+                "Early-review live Send label changed"
+            }
+            check(cached.current()) { "Early-review card identity changed after label validation" }
+            check(SystemClock.elapsedRealtime() < end) { "Early-review Send deadline expired after label validation" }
+            fresh
+        }
+    }
+    // END EARLY_SEND_LIVE_ANCHOR preparation
     private fun cachedSendButton(cached: EarlySend): AccessibilityNodeInfo {
         val end = checkNotNull(cached.resumeEnd)
         while (true) {
@@ -722,6 +754,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
                 await("same Activity regained focus for $name") { main { activity.hasWindowFocus() } && captured.bindReview() }
                 check(captured.current()) { "Early-review card identity changed after resume" }
+                // BEGIN EARLY_SEND_LIVE_ANCHOR early-review
+                prepareEarlySendAnchor(captured)
+                // END EARLY_SEND_LIVE_ANCHOR early-review
                 checkEarly()
                 val elapsed = captured.elapsed()
                 check(elapsed >= 0 && elapsed < 3_000) { "Fixture missed the real early-review window: $name elapsedMs=$elapsed" }
@@ -863,6 +898,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
                 lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_PASSED)
                 // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
+                // BEGIN EARLY_SEND_LIVE_ANCHOR lifecycle
+                prepareEarlySendAnchor(lifecycleSend)
+                // END EARLY_SEND_LIVE_ANCHOR lifecycle
                 // BEGIN LIFECYCLE_READ_DIAGNOSTIC disabled-send-begin
                 lifecycleCheckpoint(LifecycleCheckpoint.DISABLED_SEND_BEGIN)
                 // END LIFECYCLE_READ_DIAGNOSTIC disabled-send-begin

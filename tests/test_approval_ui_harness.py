@@ -16,6 +16,7 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
+# Fixture pins include the one-time post-resume live-label preparation; its four-seam reverse projection retains 95ef exactly.
 
 
 def android_approval_progress():
@@ -124,6 +125,71 @@ def cached_send_memory(source, anchor, window, package, end, clock, current_card
         assert remaining > 0
         clock.now += min(30, remaining)
         sleeps += 1
+
+
+def prepare_anchor_memory(source, cached, lookup, clock, package):
+    """Interpret the finite fixture preparation source over memory fakes; never Kotlin or Android evidence."""
+    state = source.split('// BEGIN EARLY_SEND_LIVE_ANCHOR state\n', 1)[1].split('// END EARLY_SEND_LIVE_ANCHOR state', 1)[0]
+    setter = re.fullmatch(r'\s*var node: AccessibilityNodeInfo = initialNode\s*private set\s*'
+        r'private var anchorPreparationAttempted = false\s*'
+        r'fun prepareAnchor\(acquire: \(\) -> AccessibilityNodeInfo\) \{\s*'
+        r'check\(!anchorPreparationAttempted\) \{ "([^"]+)" }\s*'
+        r'anchorPreparationAttempted = true\s*node = acquire\(\)\s*}\s*', state)
+    assert setter and 'private set' in state
+    body = source.split('    private fun prepareEarlySendAnchor(cached: EarlySend) {\n', 1)[1].split(
+        '    // END EARLY_SEND_LIVE_ANCHOR preparation', 1)[0]
+    assert body.startswith('        cached.prepareAnchor {\n') and body.endswith('        }\n    }\n')
+    body = body[len('        cached.prepareAnchor {\n'):-len('        }\n    }\n')]
+    token = re.compile(r'\s*(?:'
+        r'(?P<end>val end = checkNotNull\(cached.resumeEnd\))|'
+        r'val fresh = checkNotNull\(visible\("(?P<label>[^"]+)"\)\) \{ "(?P<missing>[^"]+)" }|'
+        r'check\((?P<guard>[\s\S]*?)\) \{\s*"(?P<failure>[^"]+)"\s*}|'
+        r'(?P<result>fresh)(?=\s*$))')
+    operations = []
+    while body.strip():
+        match = token.match(body)
+        assert match, 'unrecognized preparation source'
+        operations.append(match.groupdict())
+        body = body[match.end():]
+    assert [next(key for key in ('end', 'label', 'guard', 'result') if op[key]) for op in operations] == [
+        'end', 'guard', 'guard', 'label', 'guard', 'guard', 'guard', 'guard', 'guard', 'guard', 'guard',
+        'guard', 'guard', 'result']
+    assert [op['label'] for op in operations if op['label']] == ['Send answer']
+
+    def evaluate(expression, values):
+        for literal, replacement in (
+            ('SystemClock.elapsedRealtime()', 'clock.now'),
+            ('fresh.windowId', 'fresh.window'), ('fresh.packageName?.toString()', 'fresh.package'),
+            ('targetContext.packageName', 'package'), ('fresh.isVisibleToUser', 'fresh.visible'),
+            ('fresh.text?.toString()', 'fresh.text'), ('fresh.contentDescription?.toString()', 'fresh.description'),
+            ('&&', ' and '), ('||', ' or ')):
+            expression = expression.replace(literal, replacement)
+        tree = ast.parse(' '.join(expression.splitlines()), mode='eval')
+        allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.Compare, ast.Eq, ast.Lt, ast.GtE,
+                   ast.Name, ast.Load, ast.Constant, ast.Attribute, ast.Call)
+        assert all(isinstance(node, allowed) for node in ast.walk(tree))
+        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+            assert isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name)
+            assert (call.func.value.id, call.func.attr) in {('cached', 'current'), ('fresh', 'refresh')}
+            assert not call.args and not call.keywords
+        assert {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} <= values.keys()
+        return eval(compile(tree, '<live-anchor-source-predicate>', 'eval'), {'__builtins__': {}}, values)
+
+    assert not cached.attempted, setter[1]
+    cached.attempted = True  # The source consumes its sole attempt before the first read, including failed reads.
+    values = dict(cached=cached, clock=clock, package=package)
+    for operation in operations:
+        if operation['end']:
+            values['end'] = cached.end
+            assert values['end'] is not None
+        elif operation['label']:
+            values['fresh'] = lookup(operation['label'])
+            assert values['fresh'] is not None, operation['missing']
+        elif operation['guard']:
+            assert evaluate(operation['guard'], values), operation['failure']
+        else:
+            cached.node = values['fresh']
+    return cached.node
 
 
 def review_clock_memory(source, observation, clock, current_card=lambda: True):
@@ -526,7 +592,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
             'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
         # Baseline includes guarded preparation and passive lifecycle checkpoints; progress stripping stays exact.
-        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), '9941311ba2d5e1df78d3d8715335ca07284122929dd5d5b1e3311055d84434f6')
+        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), '22d50ceb2ca6b26b190a03b9986d3f448ec6cd0b3483c2b97a86850f134405d8')
         definition = source.split('// BEGIN APPROVAL_PROGRESS definition\n', 1)[1].split('// END APPROVAL_PROGRESS definition', 1)[0]
         self.assertIn('check(progressSequence in 0 until 32)', definition)
         self.assertIn('check(record.length <= 160)', definition)
@@ -552,7 +618,7 @@ class ApprovalHarnessTests(unittest.TestCase):
                  'primary-failure-capture-begin', 'finally-begin']
         self.assertEqual([match[2] for match in pattern.finditer(source)], names)
         self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(),
-                         '54ee3b3f1b6c3e31beaefeae42c6656469b58e4b40896f87cbeb74cc683461c3')
+                         '537f1b787c2eb212dd4a392517b54758fd43ef6bf296724bb1397e3ab2d7f945')
         stages = ['RESUMED_MAIN_RETURNED', 'BODY_RESTORE_BEGIN', 'BODY_RESTORE_PASSED',
                   'CONFIRM_RETIRE_BEGIN', 'CONFIRM_RETIRE_PASSED', 'DISABLED_SEND_BEGIN', 'DISABLED_SEND_PASSED',
                   'PRIMARY_FAILURE_CAPTURE_BEGIN', 'FINALLY_BEGIN']
@@ -920,6 +986,138 @@ class ApprovalHarnessTests(unittest.TestCase):
         resolver = source.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
         for forbidden in ('node(', 'visible(', 'uiAutomation', 'await(', 'injectInputEvent', 'performAction', 'catch (', 'phase('):
             self.assertNotIn(forbidden, resolver)
+
+    def test_android_live_anchor_preparation_preserves_the_original_fixture_and_reader(self):
+        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        pattern = re.compile(r'^([ ]*)// BEGIN EARLY_SEND_LIVE_ANCHOR ([a-z-]+)\n[\s\S]*?^\1// END EARLY_SEND_LIVE_ANCHOR \2\n', re.M)
+        self.assertEqual([match[2] for match in pattern.finditer(source)], ['state', 'preparation', 'early-review', 'lifecycle'])
+        projected = pattern.sub('', source)
+        constructor = 'private data class EarlySend(private val initialNode: AccessibilityNodeInfo,'
+        self.assertEqual(projected.count(constructor), 1)
+        projected = projected.replace(constructor, 'private data class EarlySend(val node: AccessibilityNodeInfo,')
+        self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(),
+                         'f25ae6ce985f886661a7285c76ad7000429084eff21b11e26358e690a537442d')
+        reader = lambda value: value.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
+        self.assertEqual(reader(source), reader(projected))
+        early = source.split('        fun earlyReview(', 1)[1].split('        var primaryFailure:', 1)[0]
+        self.assertEqual(early.count('prepareEarlySendAnchor(captured)'), 1)
+        self.assertLess(early.index('captured.bindReview()'), early.index('prepareEarlySendAnchor(captured)'))
+        self.assertLess(early.index('check(captured.current())'), early.index('prepareEarlySendAnchor(captured)'))
+        self.assertLess(early.index('prepareEarlySendAnchor(captured)'), early.index('checkEarly()'))
+        lifecycle = source.split('boundary("begin", "lifecycle_no_submit")', 1)[1].split('boundary("complete", "lifecycle_no_submit")', 1)[0]
+        self.assertEqual(lifecycle.count('prepareEarlySendAnchor(lifecycleSend)'), 1)
+        self.assertLess(lifecycle.index('disclosureScrollReady(lifecycleDisclosure)'), lifecycle.index('prepareEarlySendAnchor(lifecycleSend)'))
+        self.assertLess(lifecycle.index('await("background retires confirmation")'), lifecycle.index('prepareEarlySendAnchor(lifecycleSend)'))
+        self.assertLess(lifecycle.index('prepareEarlySendAnchor(lifecycleSend)'), lifecycle.index('check(count() == 4 && !button("Send answer").isEnabled)'))
+        helper = source.split('    private fun prepareEarlySendAnchor(', 1)[1].split('// END EARLY_SEND_LIVE_ANCHOR preparation', 1)[0]
+        self.assertEqual(helper.count('visible("Send answer")'), 1)
+        for read in ('fresh.refresh()', 'fresh.windowId', 'fresh.packageName', 'fresh.isVisibleToUser',
+                     'fresh.text', 'fresh.contentDescription'):
+            self.assertEqual(helper.count(read), 1)
+        for forbidden in ('await(', 'node(', 'catch (', 'sleep(', 'Thread(', 'performAction', 'injectInputEvent',
+                          '.begin(', '.bindReview(', 'resumeEnd =', 'reviewStart =', 'boundSnapshot =', 'boundGeneration ='):
+            self.assertNotIn(forbidden, helper)
+        self.assertEqual(source.count('prepareEarlySendAnchor('), 3)  # One definition and the two fixed call sites.
+
+    def test_android_live_anchor_has_a_source_bound_obsolete_node_counterexample(self):
+        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        clock = SimpleNamespace(now=1000)
+        def node(*, refresh=True, parent=None, clickable=False, enabled=True):
+            return SimpleNamespace(refresh=lambda: refresh, parent=parent, clickable=clickable, enabled=enabled,
+                                   window=7, package='app.zerus.mobile', visible=True, label='Send answer',
+                                   text='Send answer', description=None)
+        old = node(refresh=False)
+        bound = object()
+        cache = SimpleNamespace(node=old, window=7, end=4000, start=1000, generation=4,
+                                snapshot=bound, current=lambda: True, attempted=False)
+        # Controlled source stand-in: an obsolete pre-Home node refuses even though logical identity remains current.
+        with self.assertRaises(AssertionError):
+            cached_send_memory(source, old, cache.window, 'app.zerus.mobile', cache.end, clock)
+        fresh = node(parent=node(clickable=True, enabled=False))
+        queries = []
+        def acquire(label):
+            queries.append(label)
+            return fresh
+        self.assertIs(prepare_anchor_memory(source, cache, acquire, clock, 'app.zerus.mobile'), fresh)
+        action, walks, sleeps = cached_send_memory(source, cache.node, cache.window, 'app.zerus.mobile', cache.end, clock)
+        self.assertFalse(action.enabled)
+        self.assertEqual((walks, sleeps, queries), (1, 0, ['Send answer']))
+        self.assertEqual((cache.window, cache.start, cache.end, cache.generation), (7, 1000, 4000, 4))
+        self.assertIs(cache.snapshot, bound)
+        with self.assertRaisesRegex(AssertionError, 'preparation repeated'):
+            prepare_anchor_memory(source, cache, acquire, clock, 'app.zerus.mobile')
+        self.assertEqual(queries, ['Send answer'])
+        # A live enabled action still fails the original negative disabled oracle.
+        enabled = node(parent=node(clickable=True))
+        cache = SimpleNamespace(node=old, window=7, end=4000, current=lambda: True, attempted=False)
+        prepare_anchor_memory(source, cache, lambda _: enabled, clock, 'app.zerus.mobile')
+        with self.assertRaises(AssertionError):
+            assert not cached_send_memory(source, cache.node, 7, 'app.zerus.mobile', 4000, clock)[0].enabled
+
+    def test_android_live_anchor_refuses_missing_foreign_late_faulted_or_repeated_preparation(self):
+        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        clock = SimpleNamespace(now=1000)
+        def candidate(**changes):
+            value = SimpleNamespace(refresh=lambda: True, window=7, package='app.zerus.mobile', visible=True,
+                                    text='Send answer', description=None)
+            value.__dict__.update(changes)
+            return value
+        rows = [
+            ('missing', lambda: None, {}, 'label is unavailable'),
+            ('obsolete', lambda: candidate(refresh=lambda: False), {}, 'label is obsolete'),
+            ('window', lambda: candidate(window=8), {}, 'window changed'),
+            ('unknown-window', candidate, {'window': -1}, 'window changed'),
+            ('package', lambda: candidate(package='foreign'), {}, 'package changed'),
+            ('invisible', lambda: candidate(visible=False), {}, 'not visible'),
+            ('label', lambda: candidate(text='Other'), {}, 'label changed'),
+            ('unarmed', candidate, {'end': None}, ''),
+            ('current-before', candidate, {'current': lambda: False}, 'identity changed before'),
+            ('expired-before', candidate, {'end': 1000}, 'expired before'),
+        ]
+        for name, build, changes, reason in rows:
+            clock.now = 1000
+            old = object()
+            cache = SimpleNamespace(node=old, window=7, end=4000, current=lambda: True, attempted=False)
+            cache.__dict__.update(changes)
+            queries = []
+            def acquire(label):
+                queries.append(label)
+                return build()
+            with self.subTest(refusal=name), self.assertRaisesRegex(AssertionError, reason):
+                prepare_anchor_memory(source, cache, acquire, clock, 'app.zerus.mobile')
+            self.assertIs(cache.node, old)
+            self.assertEqual(len(queries), 0 if name in ('unarmed', 'current-before', 'expired-before') else 1)
+            with self.assertRaisesRegex(AssertionError, 'preparation repeated'):
+                prepare_anchor_memory(source, cache, acquire, clock, 'app.zerus.mobile')
+            self.assertLessEqual(len(queries), 1)
+        for stage in ('query-error', 'refresh-error', 'query-expired', 'refresh-expired', 'current-after-query', 'current-after-validation'):
+            clock.now = 1000
+            old = object()
+            cache = SimpleNamespace(node=old, window=7, end=4000, current=lambda: True, attempted=False)
+            if stage.startswith('current-after'):
+                answers = iter([True, False] if stage.endswith('query') else [True, True, False])
+                cache.current = lambda: next(answers)
+            queries = []
+            def fault(): raise RuntimeError('owned read failed')
+            def refresh():
+                if stage == 'refresh-error': fault()
+                if stage == 'refresh-expired': clock.now = 4000
+                return True
+            def acquire(label):
+                queries.append(label)
+                if stage == 'query-error': fault()
+                if stage == 'query-expired': clock.now = 4000
+                return candidate(refresh=refresh)
+            with self.subTest(refusal=stage), self.assertRaises((AssertionError, RuntimeError)):
+                prepare_anchor_memory(source, cache, acquire, clock, 'app.zerus.mobile')
+            self.assertEqual(queries, ['Send answer'])
+            self.assertIs(cache.node, old)
+            self.assertEqual(cache.end, 4000)
+        # Exact content-description identity remains an allowed label shape; text takes the original short-circuit path.
+        clock.now = 1000
+        cache = SimpleNamespace(node=object(), window=7, end=4000, current=lambda: True, attempted=False)
+        fresh = candidate(text='Other', description='Send answer')
+        self.assertIs(prepare_anchor_memory(source, cache, lambda _: fresh, clock, 'app.zerus.mobile'), fresh)
 
     def test_android_early_clock_binds_once_to_the_current_owned_production_start(self):
         source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
