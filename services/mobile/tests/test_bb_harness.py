@@ -1,20 +1,30 @@
 """Self-tests of the black-box harness; they run no connector."""
 import asyncio
+import fcntl
+import hashlib
 import io
 import json
 import os
+from pathlib import Path
 import random
+import selectors
+import shutil
+import signal
 import socket
+import sqlite3
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import uuid
+from unittest import mock
 
 from aiohttp import ClientSession
 
-from connector_harness import (BlackBoxCase, JSON_DEPTH, JSON_VALUES, MIB, canonical, foreign_connections,
-                               json_limits, remote_address)
+from connector_harness import (BlackBoxCase, JSON_DEPTH, JSON_VALUES, MIB, Journal, canonical,
+                               foreign_connections, json_limits, recover_stopped_journal, remote_address)
 
 
 def reference_limits(raw: bytes) -> tuple[int, int]:
@@ -331,6 +341,167 @@ class HarnessTests(BlackBoxCase):
             self.assertEqual(set(foreign_connections(os.getpid())) - baseline, {"udp 192.0.2.1:9"})
         with socket.create_server(("127.0.0.1", 0)) as server, socket.create_connection(server.getsockname()):
             self.assertEqual(set(foreign_connections(os.getpid())) - baseline, set())
+
+
+class StoppedJournalTests(unittest.TestCase):
+    """Real disposable SQLite pager recovery; no connector, relay or hgs."""
+
+    def test_hot_rollback_requires_guarded_recovery_before_readonly_tombstone_checks(self):
+        root = Path(tempfile.mkdtemp(prefix="zerus-bb-hot-"))
+        database, lock = root / "journal.sqlite3", root / "connector.lock"
+        database.touch(mode=0o600, exist_ok=False)
+        lock.touch(mode=0o600, exist_ok=False)
+        end = time.monotonic() + 20
+        child, reaped, complete = None, False, False
+
+        def remaining(maximum, reserve=3):
+            available = end - reserve - time.monotonic()
+            self.assertGreater(available, 0, f"original fixture end; retained {root}")
+            return min(maximum, available)
+
+        try:
+            db = sqlite3.connect(database, timeout=2)
+            try:
+                db.executescript("PRAGMA page_size=1024; PRAGMA journal_mode=DELETE;"
+                                 "CREATE TABLE requests(request_id TEXT PRIMARY KEY, state TEXT,"
+                                 " response_expired INTEGER, response TEXT, request_hash TEXT);"
+                                 "CREATE TABLE padding(body BLOB);")
+                with db:
+                    db.executemany("INSERT INTO requests VALUES(?,?,?,?,?)", [
+                        ("early", "completed", 1, "history_expired", "early-hash"),
+                        ("later", "completed", 1, "history_expired", "later-hash")])
+                    db.executemany("INSERT INTO padding VALUES(?)", [(b"A" * 8192,)] * 32)
+            finally:
+                db.close()
+            journal = Journal(root)
+            before_rows = [dict(row) for row in journal.query(
+                "SELECT * FROM requests ORDER BY request_id")]
+            before_schema = [tuple(row) for row in journal.query(
+                "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")]
+            before_bytes = database.read_bytes()
+            before_modes = [stat.S_IMODE(path.stat().st_mode) for path in (root, database, lock)]
+            writer = """import sqlite3,sys
+db=sqlite3.connect(sys.argv[1],isolation_level=None,timeout=2)
+db.execute('PRAGMA journal_mode=DELETE')
+db.execute('PRAGMA synchronous=FULL')
+db.execute('PRAGMA cache_size=1')
+db.execute('PRAGMA cache_spill=ON')
+db.execute('BEGIN IMMEDIATE')
+db.execute("UPDATE requests SET state='running',response_expired=0,response='BB-PRIVATE uncommitted'")
+db.execute('UPDATE padding SET body=randomblob(16384)')
+sys.stdout.buffer.write(b'uncommitted-spill-ready\\n');sys.stdout.buffer.flush()
+sys.stdin.buffer.read(1)
+"""
+            remaining(1)
+            child = subprocess.Popen([sys.executable, "-I", "-S", "-c", writer, str(database)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env={"PATH": "/usr/bin:/bin", "HOME": str(root), "TMPDIR": str(root)})
+            with selectors.DefaultSelector() as ready:
+                ready.register(child.stdout, selectors.EVENT_READ)
+                self.assertTrue(ready.select(remaining(10)), f"writer barrier; retained {root}")
+                self.assertEqual(os.read(child.stdout.fileno(), 128), b"uncommitted-spill-ready\n")
+            with (root / "journal.sqlite3-journal").open("rb") as rollback:
+                header = rollback.read(8)
+            self.assertEqual(header, b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7", "real hot rollback header")
+            # Only this unreaped direct child is killed; there is no PID lookup,
+            # other namespace, connector or native hgs in this regression.
+            child.kill()
+            stdout, stderr = child.communicate(timeout=remaining(3))
+            reaped = True
+            self.assertEqual((child.returncode, stdout, stderr), (-signal.SIGKILL, b"", b""))
+            with self.assertRaises(sqlite3.OperationalError) as old:
+                journal.row("early")
+            self.assertEqual(old.exception.sqlite_errorcode, sqlite3.SQLITE_READONLY_ROLLBACK)
+            self.assertEqual(old.exception.sqlite_errorname, "SQLITE_READONLY_ROLLBACK")
+            remaining(1)
+            recover_stopped_journal(root)
+            self.assertEqual([dict(row) for row in journal.query(
+                "SELECT * FROM requests ORDER BY request_id")], before_rows)
+            self.assertEqual([tuple(row) for row in journal.query(
+                "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")], before_schema)
+            self.assertEqual(database.read_bytes(), before_bytes)
+            self.assertNotIn(b"BB-PRIVATE", database.read_bytes())
+            self.assertEqual([stat.S_IMODE(path.stat().st_mode) for path in (root, database, lock)], before_modes)
+            self.assertFalse((root / "journal.sqlite3-journal").exists())
+            remaining(1)
+            print("ZERUS_STOPPED_JOURNAL_CONTROL=" + json.dumps({
+                "scope": "controlled hot-journal stand-in, not historical CI database evidence",
+                "readonly_error_code": old.exception.sqlite_errorcode,
+                "readonly_error_name": old.exception.sqlite_errorname,
+                "hot_header_hex": header.hex(), "committed_tombstones": 2,
+                "database_sha256_before": hashlib.sha256(before_bytes).hexdigest(),
+                "database_sha256_after": hashlib.sha256(database.read_bytes()).hexdigest(),
+                "schema_and_modes_equal": True, "private_uncommitted_bytes_absent": True,
+                "owned_child_reaped": reaped}), flush=True)
+            complete = True
+        finally:
+            unwinding, cleanup_error = sys.exc_info()[0] is not None, None
+            if child is not None:
+                try:
+                    if child.poll() is None:
+                        child.kill()
+                    if not reaped:
+                        child.communicate(timeout=max(.001, min(3, end - time.monotonic())))
+                        reaped = True
+                except BaseException as error:
+                    cleanup_error, complete = error, False
+                finally:
+                    for stream in (child.stdin, child.stdout, child.stderr):
+                        if stream is not None:
+                            stream.close()
+            if complete and (child is None or reaped):
+                shutil.rmtree(root)
+            else:
+                print(f"Retained stopped-journal fixture: {root}", flush=True)
+            if cleanup_error is not None:
+                if not unwinding:
+                    raise cleanup_error
+                print(f"Owned writer cleanup failed: {type(cleanup_error).__name__}", flush=True)
+
+    def test_recovery_refuses_a_held_connector_lock_before_opening_sqlite(self):
+        with tempfile.TemporaryDirectory(prefix="zerus-bb-locked-") as folder:
+            root = Path(folder)
+            (root / "journal.sqlite3").touch(mode=0o600, exist_ok=False)
+            descriptor = os.open(root / "connector.lock", os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with mock.patch("connector_harness.sqlite3.connect", side_effect=AssertionError("must not open")) as connect:
+                    with self.assertRaisesRegex(AssertionError, "only while its connector is stopped"):
+                        recover_stopped_journal(root)
+                    connect.assert_not_called()
+                self.assertEqual((root / "journal.sqlite3").read_bytes(), b"")
+            finally:
+                os.close(descriptor)
+
+    def test_recovery_never_creates_a_missing_database_or_follows_a_database_link(self):
+        with tempfile.TemporaryDirectory(prefix="zerus-bb-missing-") as folder:
+            root = Path(folder)
+            database = root / "journal.sqlite3"
+            with mock.patch("connector_harness.sqlite3.connect", side_effect=AssertionError("must not open")) as connect:
+                with self.assertRaises(FileNotFoundError):
+                    recover_stopped_journal(root)
+                self.assertFalse(database.exists())
+                target = root / "other.sqlite3"
+                target.write_bytes(b"untouched synthetic target")
+                database.symlink_to(target)
+                with self.assertRaisesRegex(AssertionError, "existing regular journal"):
+                    recover_stopped_journal(root)
+                connect.assert_not_called()
+                self.assertEqual(target.read_bytes(), b"untouched synthetic target")
+
+    def test_recovery_propagates_an_unrelated_database_error_without_changing_bytes_or_modes(self):
+        with tempfile.TemporaryDirectory(prefix="zerus-bb-corrupt-") as folder:
+            root = Path(folder)
+            database, lock = root / "journal.sqlite3", root / "connector.lock"
+            database.touch(mode=0o600, exist_ok=False)
+            lock.touch(mode=0o600, exist_ok=False)
+            database.write_bytes(b"not a sqlite database\n")
+            before, mode = database.read_bytes(), stat.S_IMODE(database.stat().st_mode)
+            with self.assertRaises(sqlite3.DatabaseError) as failure:
+                recover_stopped_journal(root)
+            self.assertEqual(failure.exception.sqlite_errorcode, sqlite3.SQLITE_NOTADB)
+            self.assertEqual(database.read_bytes(), before)
+            self.assertEqual(stat.S_IMODE(database.stat().st_mode), mode)
 
 
 if __name__ == "__main__":

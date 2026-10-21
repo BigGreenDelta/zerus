@@ -224,6 +224,16 @@ CI builds one venv per commit in `rollback-baselines.json`; a gateway's
 recorded pre-cutover commit belongs there before its cutover (design E0 and
 step 2 of the cutover runbook).
 
+The tombstone handoff retains its SIGKILLs. Before its final stopped byte and
+row checks, one bounded schema read through `stopped_journal` permits SQLite's
+normal hot rollback recovery under the exclusive connector lock. It invokes no
+connector migration or prune operation. Live journal observations remain
+`mode=ro`; a held connector lock or unrelated SQLite error still refuses.
+`StoppedJournalTests` uses one disposable, bounded SQLite writer to require the
+extended `SQLITE_READONLY_ROLLBACK` failure before recovery and unchanged committed
+tombstones, schema, database bytes and file modes afterward. This controlled
+stand-in does not identify a historical CI database's unretained error subtype.
+
 ## Soak
 
 `test_bb_soak` heartbeats every second while a phone polls one Terminal screen

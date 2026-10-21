@@ -36,6 +36,7 @@ import shlex
 import shutil
 import signal
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -767,6 +768,19 @@ def stopped_journal(state_dir: Path):
             db.close()
     finally:
         os.close(lock)
+
+
+def recover_stopped_journal(state_dir: Path) -> None:
+    """Allow normal hot-journal recovery only after the connector is stopped.
+
+    A SIGKILL may leave a rollback journal that a mode=ro observer cannot
+    recover. The existing exclusive connector lock guards this one writable
+    connection; its only SQL is a bounded read, with no migration or pruning.
+    """
+    if not stat.S_ISREG((state_dir / "journal.sqlite3").lstat().st_mode):
+        raise AssertionError("recover only an existing regular journal")
+    with stopped_journal(state_dir) as db:
+        db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
 
 
 class ConnectorProcess:
