@@ -95,7 +95,10 @@ pub fn spawn_ssh(
     stderr: bool,
 ) -> io::Result<super::SshChild> {
     for (piped, set) in [
-        (stdin, Command::stdin as fn(&mut Command, Stdio) -> &mut Command),
+        (
+            stdin,
+            Command::stdin as fn(&mut Command, Stdio) -> &mut Command,
+        ),
         (stdout, Command::stdout),
         (stderr, Command::stderr),
     ] {
@@ -809,7 +812,8 @@ pub fn request_exit(pid: u32) -> io::Result<()> {
     #[cfg(all(debug_assertions, target_os = "macos"))]
     {
         let errno = error.as_ref().and_then(io::Error::raw_os_error);
-        let _ = std::panic::catch_unwind(|| pause_signal_observer::after(observation, result, errno));
+        let _ =
+            std::panic::catch_unwind(|| pause_signal_observer::after(observation, result, errno));
     }
     match error {
         Some(error) => Err(error),
@@ -914,17 +918,13 @@ mod pause_signal_observer {
         let path = env::var_os(ROOT)
             .map(PathBuf::from)
             .ok_or(io::ErrorKind::NotFound)?;
-        if path.as_os_str().len() > 4096
-            || !path.is_absolute()
-            || fs::canonicalize(&path)? != path
+        if path.as_os_str().len() > 4096 || !path.is_absolute() || fs::canonicalize(&path)? != path
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         let directory = fs::OpenOptions::new()
             .read(true)
-            .custom_flags(
-                libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_DIRECTORY,
-            )
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_DIRECTORY)
             .open(path)?;
         let root = directory.metadata()?;
         if !private(&root, 0o700, false) {
@@ -936,7 +936,9 @@ mod pause_signal_observer {
             return Err(io::ErrorKind::InvalidData.into());
         }
         let mut bytes = Vec::new();
-        Read::by_ref(&mut input).take(1025).read_to_end(&mut bytes)?;
+        Read::by_ref(&mut input)
+            .take(1025)
+            .read_to_end(&mut bytes)?;
         let final_metadata = input.metadata()?;
         if bytes.len() > 1024
             || initial.len() != bytes.len() as u64
@@ -1269,11 +1271,23 @@ pub fn process_start_time(pid: u32) -> Option<String> {
 fn process_started_at(pid: u32) -> Option<Option<u64>> {
     // The kinfo_proc that ps reads, which also covers other users' processes.
     // Its extern_proc begins with p_starttime, a timeval whose seconds come first.
-    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid as libc::c_int];
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PID,
+        pid as libc::c_int,
+    ];
     let mut info = [0u64; 128]; // kinfo_proc is 648 bytes
     let mut size = std::mem::size_of_val(&info);
     let rc = unsafe {
-        libc::sysctl(mib.as_mut_ptr(), 4, info.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0)
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            info.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
     };
     match (rc, size) {
         (0, 0) => Some(None), // no such process
@@ -1293,14 +1307,22 @@ fn process_started_at(pid: u32) -> Option<Option<u64>> {
         Err(_) => return None,
     };
     // The command name may contain spaces and parentheses; fields follow its last ')'.
-    let ticks: u64 = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()?;
+    let ticks: u64 = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()?;
     let boot = (*BOOT.get_or_init(|| {
         fs::read_to_string("/proc/stat")
             .ok()?
             .lines()
             .find_map(|line| line.strip_prefix("btime ")?.trim().parse().ok())
     }))?;
-    let hertz = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).ok().filter(|&hz| hz > 0)?;
+    let hertz = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
+        .ok()
+        .filter(|&hz| hz > 0)?;
     Some(Some(boot + ticks / hertz))
 }
 
@@ -1312,17 +1334,24 @@ fn process_started_at(_pid: u32) -> Option<Option<u64>> {
 /// `%a %b %e %H:%M:%S %Y` in the C locale and UTC, the form ps and ctime print.
 fn lstart_text(seconds: u64) -> String {
     const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let (days, time) = (seconds / 86_400, seconds % 86_400);
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
     let shifted = days as i64 + 719_468;
     let era = shifted.div_euclid(146_097);
     let day_of_era = shifted - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_index = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     format!(
         "{} {} {:>2} {:02}:{:02}:{:02} {}",
@@ -1668,7 +1697,10 @@ mod tests {
         let folders: Vec<&str> = path.split(':').collect();
         assert_eq!(folders.last(), Some(&"/home/user/.opencode/bin"));
         assert_eq!(
-            folders.iter().filter(|f| f.ends_with("/.opencode/bin")).count(),
+            folders
+                .iter()
+                .filter(|f| f.ends_with("/.opencode/bin"))
+                .count(),
             1
         );
         assert!(
@@ -1700,7 +1732,9 @@ mod tests {
     fn process_start_time_matches_ps() {
         let parent = unsafe { libc::getppid() } as u32;
         for pid in [std::process::id(), parent, 1] {
-            let Some(expected) = ps_start(pid) else { return };
+            let Some(expected) = ps_start(pid) else {
+                return;
+            };
             let actual = process_start_time(pid).expect("readable start time");
             // A process that cannot be read must stay unknown rather than look absent.
             if expected.is_empty() {
@@ -1729,7 +1763,9 @@ mod tests {
         let (mut checked, mut differ) = (0, Vec::new());
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let line = line.trim_start();
-            let Some((pid, expected)) = line.split_once(' ') else { continue };
+            let Some((pid, expected)) = line.split_once(' ') else {
+                continue;
+            };
             let pid: u32 = pid.parse().unwrap();
             match process_start_time(pid) {
                 Some(actual) if actual == expected.trim() => checked += 1,
@@ -1910,7 +1946,10 @@ mod tests {
         assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
         // 0 would signal this process group and u32::MAX (-1) every process.
         for pid in [0, u32::MAX, 1 << 31] {
-            assert_eq!(request_exit(pid).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(
+                request_exit(pid).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
         }
     }
 
