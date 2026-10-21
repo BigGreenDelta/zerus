@@ -525,7 +525,18 @@ class OwnedWindowTouchObserverTests(unittest.TestCase):
         trace = 'owned-touch status=observed restored=true scope=window-consumption-only\nowned-touch token=1 kind=touch outcome=true'
         prefix = f'INSTRUMENTATION_RESULT: approval_cases=7\nINSTRUMENTATION_RESULT: approval_case_ids={parser.CASES}\n'
         stream = f'Approval choices smoke passed: {parser.CASES}; synthetic receipts only. ' + trace.replace('\n', ' | ') + ' | stale-send status=observed disabled=true attempts=1 receipts=4'
-        result = prefix + 'INSTRUMENTATION_RESULT: stream=' + stream + '\n\nINSTRUMENTATION_CODE: -1\n'
+        # Independent fixed status fixture; never derive expected progress from the production parser.
+        cases = ('countdown_once', 'broader_cancel', 'broader_confirm', 'card_replacement', 'feedback_keyboard',
+                 'lifecycle_no_submit', 'readonly_stale_identity')
+        setup = [(stage, '-', 0) for stage in ('ON_START', 'STORE_BEGIN', 'STORE_READY', 'BOOTSTRAP_BEGIN',
+                 'ACTIVITY_LAUNCH_BEGIN', 'ACTIVITY_LAUNCH_READY', 'BOOTSTRAP_READY')]
+        steps = setup + [(stage, case, index + (stage == 'CASE_COMPLETE')) for index, case in enumerate(cases)
+                         for stage in ('CASE_BEGIN', 'CASE_COMPLETE')]
+        self.assertEqual(','.join(cases), parser.CASES)
+        self.assertEqual(len(steps), 21)
+        progress = ''.join(f'INSTRUMENTATION_STATUS: zerus_approval_progress=1|{index}|{stage}|{case}|{complete}|{1000 + index}\n'
+                          'INSTRUMENTATION_STATUS_CODE: 1\n' for index, (stage, case, complete) in enumerate(steps, 1))
+        result = progress + prefix + 'INSTRUMENTATION_RESULT: stream=' + stream + '\n\nINSTRUMENTATION_CODE: -1\n'
         self.assertEqual(parser.instrumentation_result(result)['stream'], stream)
         for invalid in (result.replace('approval_cases=7', 'approval_cases=6'), result.replace(' | ', '\n'),
                         result.replace('INSTRUMENTATION_CODE: -1', 'INSTRUMENTATION_CODE: 0')):
