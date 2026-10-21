@@ -18,6 +18,7 @@ pub(crate) mod voice;
 mod interrupt;
 mod clear_context;
 mod compact_context;
+mod continuations;
 mod cache_hint;
 mod claude_approval;
 mod attempts;

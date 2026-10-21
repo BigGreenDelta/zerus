@@ -1205,10 +1205,12 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool) -> R
         .ok_or("hook did not supply a valid session_id")?;
     let kind = string(&event, "hook_event_name");
     let _guard = lock(None)?;
-    let Some(mut record) = read_run(&name, &token)? else {
+    let panes = live()?;
+    let continued = continuations::owner(&event, sid, &panes)?;
+    let Some(mut record) = continued.map_or_else(|| read_run(&name, &token), |record| Ok(Some(record)))? else {
         return Ok(0);
     };
-    if !matches(&record, live()?.get(string(&record, "name"))) {
+    if !matches(&record, panes.get(string(&record, "name"))) {
         return Ok(0);
     }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
