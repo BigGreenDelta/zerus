@@ -95,6 +95,12 @@ The direct rows emit fixed, content-free stderr regions, including an outer
 row-unwound marker after their fixture/client locals are destroyed. At most 64
 markers are attempted. Logger IO is cooperative: a last marker identifies a
 region, not an individual blocked call, deadlock, native cause or successful cleanup.
+The Windows HgsClient CTest also enables QtTest `-vs` signal logging for the full
+suite through the existing text/JUnit outputs. Other platforms and suites keep
+their commands. Signal logging formats argument values, uses cooperative output
+and can change timing; it is not a native stack or proof of a blocked call. A
+passing diagnostic does not establish the earlier timeout's cause or replace
+the paired old/fixed qualification.
 
 On macOS the Rust standard library marks a child's pipes close-on-exec only after
 creating them, so a child that another thread starts in between inherits them and
