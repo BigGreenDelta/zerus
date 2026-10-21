@@ -1682,6 +1682,9 @@ Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child
 history linked to the source conversation and its native composer is ready.
 The child ID is confirmed by the agent's own event; the source session stays intact.
+On Windows, verification searches only the selected account's history and requires
+the same supervised process to hold exactly one matching child history open.
+Incomplete, unreadable, ambiguous or exhausted verification keeps Send unavailable.
 
 <a id="projects"></a>
 

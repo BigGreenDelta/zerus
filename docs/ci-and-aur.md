@@ -1130,6 +1130,20 @@ verify input ownership, empty composers and native dialogs, including Codex's
 reset before its deferred SessionStart. Prefer a structured provider protocol
 when it can address the same exact live process/run/conversation. A separate
 app-server process must not be assumed to own an existing terminal session.
+Windows cannot enumerate a process's open files. Deferred Codex fork verification
+instead completes a bounded scan of only the selected account's `sessions`
+directory and uses the existing Restart Manager query for each eligible child
+file. It retains the exact supervised PID/birth, distinct child ID, parent,
+interactive source, launch directory and empty-composer requirements. Links and
+reparse points, missing or unreadable entries, uncertain ownership and multiple
+eligible held histories refuse input. The scan allows at most 16,384 entries,
+eight nested directory levels, 256 KiB per first-line header and 16 MiB of total
+returned header data, within a two-second verification window. Exhaustion is
+unknown; it never selects the newest file or accepts a partial inventory. This
+window does not interrupt an arbitrary filesystem or Restart Manager stall and
+does not extend the original startup, hook or cleanup budgets. Pure adapter
+controls cannot prove that a pinned native Windows fork creates and holds its
+child history before its first turn; that still requires native qualification.
 See [Codex App Server](https://developers.openai.com/codex/app-server) for its
 JSON-RPC protocol and version-specific schema generation. Migration of live
 terminal-backed sessions requires separate ownership/resume verification.
