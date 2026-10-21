@@ -434,7 +434,8 @@ class HintContract:
                                           env=dict(self.env, LC_ALL='C', TZ='UTC'), text=True,
                                           timeout=self.remaining(10)).strip().split(None, 5)
             self.assertEqual(' '.join(out[:5]), ' '.join(record['process_start'].split()))
-            image = out[5]
+            # Linux comm is only a basename; macOS comm retains the full image.
+            image = os.readlink('/proc/' + str(pid) + '/exe') if sys.platform.startswith('linux') else out[5]
         self.assertEqual(os.path.normcase(os.path.realpath(image)),
                          os.path.normcase(os.path.realpath(self.bin / (self.AGENT + ('.exe' if os.name == 'nt' else '')))))
         self.checkpoints.append(dict(native_pid=pid, process_start=record['process_start'], image=image,
