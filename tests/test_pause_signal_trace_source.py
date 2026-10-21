@@ -246,5 +246,287 @@ class SignalTraceSource(unittest.TestCase):
                 self.assertEqual(syncs, [('sync', 17), ('sync', 23), ('close', 23)])
 
 
+MAC_PROTECTED = {'direct_signal_agent': '0e0e76129449c8490a15cb5efadccb631f46aefe8d62b8081a8bf3364c2fd9bd', 'DirectSignalTrace': 'fb9bc39f72f835553e15c00b5744337a23fb3c6ba7d800143e87964c1a32c880', 'Lifecycle': 'fdb572edefe48309a288b014eedb6d026d72e1c7c0ffba5f9ecb6244b953f30c', 'Archive': 'd996ae7fdb6970a0d61f3213e6891c8bc2a88011a82eb00d5660d251221b4dae'}
+MAC_AGENT_SHA256 = 'dcdfeef3ab65f1ff5ae180941d01a828dacf72a3e118921d195b99fffb156959'
+
+# BEGIN private Mac pause observer controls. Authored separately from native gates.
+MAC_NODES = [node for node in TREE.body if isinstance(node, (ast.ClassDef, ast.Assign)) and
+             (getattr(node, "name", None) == "MacPauseProbe" or isinstance(node, ast.Assign) and
+              any(isinstance(target, ast.Name) and target.id in
+                  ("MAC_PAUSE_CASE", "MAC_PAUSE_PHASES", "MAC_PAUSE_RECEIVER") for target in node.targets))]
+
+
+def load_mac(**values):
+    namespace = dict(AGENT=AGENT, json=json, hashlib=hashlib, Path=PurePosixPath, re=re, **values)
+    exec(compile(ast.Module(body=copy.deepcopy(MAC_NODES), type_ignores=[]), "<mac-pause-source>", "exec"), namespace)
+    return namespace
+
+
+def mac_probe(namespace):
+    probe = namespace["MacPauseProbe"].__new__(namespace["MacPauseProbe"])
+    probe.root, probe.root_id, probe.nonce = PurePosixPath("/fixture/private"), (2, 3), "a" * 32
+    probe.context, probe.unknown, probe.created_at = None, None, 0
+    return probe
+
+
+class MacPauseObserverSource(unittest.TestCase):
+    def test_exact_darwin_case_only_and_original_agent_lifecycle_linux_bodies_are_preserved(self):
+        namespace = load_mac()
+        selected = namespace['MacPauseProbe'].selected
+        for platform in ('darwin', 'linux', 'win32'):
+            for case in (namespace['MAC_PAUSE_CASE'], 'test_pause.Archive.test_pause_and_agent_signal_remain_saved',
+                         '__main__.Lifecycle.test_claude_status_line_is_not_registered_where_claude_would_differ'):
+                for legacy in (None, '/fixture/legacy'):
+                    self.assertEqual(selected(platform, case, legacy), platform == 'darwin' and
+                                     case == namespace['MAC_PAUSE_CASE'] and not legacy)
+        for name, expected in MAC_PROTECTED.items():
+            node = next(node for node in TREE.body if getattr(node, 'name', None) == name)
+            text = ast.get_source_segment(SOURCE, node)
+            self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), expected, name)
+        self.assertEqual(hashlib.sha256(AGENT.encode()).hexdigest(), MAC_AGENT_SHA256)
+        probe = mac_probe(namespace)
+        wrapped = ast.parse(probe.agent())
+
+        class StripMac(ast.NodeTransformer):
+            def visit_FunctionDef(self, node):
+                return None if node.name == 'mac_pause_phase' else self.generic_visit(node)
+
+            def visit_Import(self, node):
+                return None if any(alias.asname in ('_mp_hashlib', '_mp_stat') for alias in node.names) else node
+
+            def visit_Assign(self, node):
+                names = [item.id for target in node.targets for item in ast.walk(target) if isinstance(item, ast.Name)]
+                return None if names and all(name.startswith('_mp_') for name in names) else node
+
+            def visit_Expr(self, node):
+                if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == 'mac_pause_phase':
+                    return None
+                return self.generic_visit(node)
+
+        self.assertEqual(ast.dump(StripMac().visit(wrapped)), ast.dump(ast.parse(AGENT)))
+        harness = next(node for node in TREE.body if isinstance(node, ast.ClassDef) and node.name == 'Harness')
+        hgs = next(node for node in harness.body if getattr(node, 'name', '') == 'hgs')
+        text = ast.get_source_segment(SOURCE, hgs)
+        self.assertEqual(text.count('subprocess.run('), 1)
+        self.assertIn('timeout=20', text)
+        self.assertIn('self.assertEqual(p.returncode, rc,', text)
+        self.assertIn('else self.env', text)
+
+    def test_one_original_kill_captures_errno_before_all_observer_io_and_keeps_result(self):
+        rust = (Path(__file__).resolve().parents[1] / 'src/platform/unix.rs').read_text()
+        request = rust.split('pub fn request_exit(pid: u32)', 1)[1].split('// BEGIN private Mac fixture observer.', 1)[0]
+        self.assertEqual(request.count('libc::kill(pid, libc::SIGTERM)'), 1)
+        self.assertLess(request.index('.filter(|pid| *pid > 0)'), request.index('libc::kill('))
+        self.assertLess(request.index('pause_signal_observer::before'), request.index('libc::kill('))
+        self.assertLess(request.index('libc::kill('), request.index('Some(io::Error::last_os_error())'))
+        self.assertLess(request.index('Some(io::Error::last_os_error())'), request.index('pause_signal_observer::after'))
+        self.assertIn('Some(error) => Err(error)', request)
+        self.assertIn('None => Ok(())', request)
+        self.assertEqual(request.count('std::panic::catch_unwind'), 2)
+        before = rust.split('pub(super) fn before(pid: u32)', 1)[1].split('fn private(', 1)[0]
+        self.assertIn('sender: std::process::id()', before)
+        self.assertIn('at: clock()', before)
+        for forbidden in ('open(', 'process_identity(', 'write(', 'read(', 'Command::', 'thread::', 'fsync', 'kill('):
+            self.assertNotIn(forbidden, before)
+        module = rust.split('// BEGIN private Mac fixture observer.', 1)[1].split('// END private Mac fixture observer.', 1)[0]
+        self.assertIn('#[cfg(all(debug_assertions, target_os = "macos"))]', module)
+        self.assertIn('#[serde(deny_unknown_fields)]', module)
+        for bound in ('metadata.uid() == unsafe { libc::geteuid() }', 'metadata.mode() & 0o7777 == mode',
+                      'metadata.nlink() == 1', 'libc::O_NOFOLLOW', 'libc::O_NONBLOCK', 'libc::O_EXCL',
+                      'initial.len() > 1024', '.take(1025)', 'row.len() > MAX_ROW',
+                      'context.target_pid != before.pid', 'context.root_ino != root.ino()',
+                      '!hex(&context.nonce, 32)', 'birth_before":"unknown"',
+                      'if result == 0 { None } else { errno }'):
+            self.assertIn(bound, module)
+        for forbidden in ('Command::', 'process_start_fallback(', 'thread::', 'sleep(', 'fsync', 'libc::kill('):
+            self.assertNotIn(forbidden, module)
+
+    @staticmethod
+    def context():
+        return dict(version=1, nonce='a' * 32, target_pid=41, root_dev=2, root_ino=3,
+                    run='b' * 64, conversation='c' * 64, pane='d' * 64, saved_start='e' * 64)
+
+    @classmethod
+    def rows(cls, role):
+        context = cls.context()
+        common = dict(v=1, role=role, seq=1, phase='handler_registered' if role == 'receiver' else 'kill_before',
+                      nonce=context['nonce'], pid=41 if role == 'receiver' else 17, clock='CLOCK_MONOTONIC',
+                      at=100, run=context['run'], conversation=context['conversation'])
+        if role == 'receiver':
+            return [dict(common, ppid=17, handler='stop_callback', term_blocked=False, term_pending=True,
+                         ignore_marker=False, delay_marker=False)]
+        first = dict(common, target=41, pane=context['pane'], saved_start=context['saved_start'],
+                     birth_before='unknown', sender_birth_after='100:2', target_birth_after=None, rc=None, errno=None)
+        return [first, dict(first, seq=2, phase='kill_return_or_errno', at=101, rc=0)]
+
+    @staticmethod
+    def encoded(rows):
+        return b''.join((json.dumps(row, separators=(',', ':')) + '\n').encode() for row in rows)
+
+    def test_decoder_retains_false_true_unknown_and_refuses_partial_stale_forged_or_future_rows(self):
+        decode = load_mac()['MacPauseProbe'].decode
+        context = self.context()
+        for role in ('sender', 'receiver'):
+            rows = self.rows(role)
+            self.assertEqual(decode(self.encoded(rows), role, context, 0, 1000), rows)
+            variants = [b'', self.encoded(rows)[:-1], b'x' * (768 * (2 if role == 'sender' else 7) + 1),
+                        self.encoded(rows).replace(b'{"v":1,', b'{"v":1,"v":1,', 1)]
+            for key, value in (('v', True), ('role', 'other'), ('seq', 2), ('nonce', 'f' * 32),
+                               ('pid', True), ('clock', 'actor_local'), ('at', -1), ('at', 1001),
+                               ('at', True), ('run', 'f' * 64), ('conversation', 'f' * 64), ('extra', 0)):
+                changed = copy.deepcopy(rows); changed[0][key] = value
+                variants.append(self.encoded(changed))
+            for raw in variants:
+                with self.subTest(role=role, raw_size=len(raw)), self.assertRaises((ValueError, TypeError)):
+                    decode(raw, role, context, 0, 1000)
+        row = self.rows('receiver')[0]
+        for value in (False, True, None):
+            changed = dict(row, term_blocked=value, term_pending=value, at=None)
+            self.assertEqual(decode(self.encoded([changed]), 'receiver', context, None, None), [changed])
+        for key, value in (('handler', 'address:0x1'), ('term_blocked', 1), ('term_pending', 'false'),
+                           ('ignore_marker', None), ('delay_marker', 0), ('phase', 'made_up'), ('pid', 99)):
+            with self.subTest(field=key), self.assertRaises(ValueError):
+                decode(self.encoded([dict(row, **{key: value})]), 'receiver', context, 0, 1000)
+        for key, value in (('birth_before', '100:2'), ('target', True), ('rc', 1), ('errno', 22), ('sender_birth_after', 'ps text')):
+            rows = self.rows('sender'); rows[1][key] = value
+            with self.subTest(field=key), self.assertRaises(ValueError):
+                decode(self.encoded(rows), 'sender', context, 0, 1000)
+        rows = self.rows('sender'); rows[1].update(rc=-1, errno=3)
+        self.assertEqual(decode(self.encoded(rows), 'sender', context, 0, 1000), rows)
+        with self.assertRaises(ValueError):
+            decode(self.encoded(self.rows('sender')[:1]), 'sender', context, 0, 1000)
+        with self.assertRaises(ValueError):
+            decode(self.encoded([row, dict(row, seq=2)]), 'receiver', context, 0, 1000)
+
+    def test_invalid_or_repeated_context_leaves_original_pause_environment_and_never_writes(self):
+        def forbidden(*args, **kwargs):
+            raise AssertionError('memory-only invalid context must not open anything')
+        namespace = load_mac(os=SimpleNamespace(open=forbidden))
+        valid = dict(name='claude/p/own', pid=41, run_id='run', conversation_id='conversation', pane='%1', process_start='start')
+        env = {'fixture': 'unchanged'}
+        for field, value in (('name', 'claude/p/other'), ('pid', False), ('pid', 0), ('run_id', None),
+                             ('conversation_id', ''), ('pane', 'x\n'), ('process_start', 'x' * 257)):
+            probe = mac_probe(namespace)
+            record = dict(valid, **{field: value})
+            self.assertIs(probe.environment(('pause', 'claude/p/own'), env, lambda name: record), env)
+            self.assertIsNotNone(probe.unknown)
+        probe = mac_probe(namespace); probe.context = self.context()
+        self.assertIs(probe.environment(('pause', 'claude/p/own'), env, lambda name: valid), env)
+        self.assertEqual(probe.unknown, 'ValueError')
+        for args in (('pause', 'claude/p/other'), ('resume', 'claude/p/own'), ('pause', 'claude/p/own', '--force')):
+            probe = mac_probe(namespace)
+            self.assertIs(probe.environment(args, env, forbidden), env)
+            self.assertIsNone(probe.unknown)
+
+    def test_receiver_faults_cannot_replace_original_stop_event_or_exit143(self):
+        import stat
+        namespace = load_mac()
+        probe = mac_probe(namespace)
+        tree = ast.parse(probe.agent())
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in ('mac_pause_phase', 'stop')]
+        original_stop = next(node for node in ast.parse(AGENT).body if isinstance(node, ast.FunctionDef) and node.name == 'stop')
+        self.assertEqual(len(functions), 2)
+
+        class MarkerPath(PurePosixPath):
+            def exists(self):
+                return False
+
+        for fault in (None, 'clock', 'getpid', 'open', 'fstat', 'wrong_owner', 'wrong_root', 'wrong_mode',
+                      'linked', 'wrong_type', 'full', 'short', 'write', 'close'):
+            calls, events, writes = [], [], []
+            def operation(name, result=None):
+                def invoke(*args, **kwargs):
+                    calls.append(name)
+                    if fault == name:
+                        raise OSError('in-memory observer fault')
+                    if name == 'write':
+                        writes.append(args[1]); return len(args[1]) - (fault == 'short')
+                    if name == 'open':
+                        return 19 if len(args) == 2 else 20
+                    if name == 'fstat':
+                        directory = args[0] == 19
+                        mode = (stat.S_IFDIR | 0o700) if directory else (stat.S_IFREG | 0o600)
+                        if fault == 'wrong_mode': mode |= 0o004
+                        if fault == 'wrong_type' and not directory: mode = stat.S_IFIFO | 0o600
+                        return SimpleNamespace(st_dev=2, st_ino=99 if fault == 'wrong_root' else 3 if directory else 4,
+                            st_uid=99 if fault == 'wrong_owner' else 7, st_mode=mode,
+                            st_nlink=2 if fault == 'linked' else 1, st_size=6000 if fault == 'full' else 0)
+                    return result
+                return invoke
+            memory_os = SimpleNamespace(environ={'HGS_SESSION': 'claude/p/own'}, getpid=operation('getpid', 41),
+                getppid=lambda: 17, geteuid=lambda: 7, open=operation('open'), fstat=operation('fstat'),
+                write=operation('write'), close=operation('close'), O_RDONLY=0, O_DIRECTORY=1, O_NOFOLLOW=2,
+                O_CLOEXEC=4, O_NONBLOCK=8, O_WRONLY=16, O_CREAT=32, O_EXCL=64, O_APPEND=128)
+            memory_signal = SimpleNamespace(SIGTERM=15, SIG_BLOCK=0, SIG_IGN=1, SIG_DFL=0,
+                getsignal=lambda signal: state['stop'], pthread_sigmask=lambda how, mask: [], sigpending=lambda: set())
+            state = dict(os=memory_os, signal=memory_signal, time=SimpleNamespace(CLOCK_MONOTONIC=6,
+                         clock_gettime_ns=operation('clock', 100)), json=json, _mp_stat=stat,
+                         _mp_root=MarkerPath('/fixture/private'), _mp_root_id=(2, 3), _mp_nonce='a' * 32,
+                         _mp_file_id=None, _mp_seq=0, _mp_busy=False, _mp_off=False,
+                         _mp_run='b' * 64, _mp_conversation='c' * 64, home=MarkerPath('/fixture'), sid='conversation',
+                         agent='claude', event=lambda *args, **kwargs: events.append((args, kwargs)),
+                         sys=SimpleNamespace(exit=lambda code: (_ for _ in ()).throw(SystemExit(code))))
+            exec(compile(ast.Module(body=copy.deepcopy(functions), type_ignores=[]), '<mac-phase-memory>', 'exec'), state)
+            with self.subTest(fault=fault), self.assertRaises(SystemExit) as exited:
+                state['stop']()
+            self.assertEqual(exited.exception.code, 143)
+            self.assertEqual(events, [(('SessionEnd',), {'reason': 'other'})])
+            self.assertNotIn('kill', calls)
+            self.assertLessEqual(len(writes), 4)
+            self.assertTrue(all(len(data) <= 768 for data in writes))
+            self.assertNotIn('fsync', calls)
+            self.assertNotIn('sleep', calls)
+            if fault is None:
+                rows = [json.loads(data) for data in writes]
+                self.assertEqual([row['phase'] for row in rows],
+                                 ['term_handler_enter', 'SessionEnd_begin', 'SessionEnd_returned', 'handler_exit143'])
+                self.assertEqual([row['seq'] for row in rows], [1, 2, 3, 4])
+            elif fault == 'short':
+                self.assertEqual(len(writes), 1)  # Never repair or retry a partial append.
+                self.assertTrue(state['_mp_off'])
+        # The removed observer calls leave exactly the old handler body.
+        wrapped_stop = next(node for node in functions if node.name == 'stop')
+        stripped = copy.deepcopy(wrapped_stop)
+        stripped.body = [node for node in stripped.body if not isinstance(node, ast.Expr) or
+                         not isinstance(node.value, ast.Call) or not isinstance(node.value.func, ast.Name) or
+                         node.value.func.id != 'mac_pause_phase']
+        self.assertEqual(ast.dump(stripped), ast.dump(original_stop))
+
+    def test_receiver_has_no_added_signal_poll_thread_fsync_or_mask_mutation(self):
+        namespace = load_mac()
+        function = next(node for node in ast.parse(mac_probe(namespace).agent()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'mac_pause_phase')
+        text = ast.unparse(function)
+        self.assertEqual(text.count('os.write('), 1)
+        self.assertIn('signal.pthread_sigmask(signal.SIG_BLOCK, [])', text)
+        for forbidden in ('SIG_SETMASK', 'SIG_UNBLOCK', 'signal.signal(', 'os.kill(', 'fsync(', 'Thread(', 'sleep(',
+                          'Popen(', 'subprocess.', 'while ', 'repr('):
+            self.assertNotIn(forbidden, text)
+        self.assertIn('_mp_seq >= 7', text)
+        self.assertIn('len(data) > 768', text)
+        self.assertIn('os.O_CREAT | os.O_EXCL', text)
+        self.assertIn('os.O_NOFOLLOW', text)
+
+    def test_failure_collector_error_stays_unknown_with_original_deadline_and_assertion(self):
+        probe = mac_probe(load_mac())
+        self.assertEqual(probe.failure(100), 'Mac pause diagnostic UNKNOWN: ValueError')
+        harness = next(node for node in TREE.body if isinstance(node, ast.ClassDef) and node.name == 'Harness')
+        report = next(node for node in harness.body if getattr(node, 'name', '') == 'stop_report')
+        text = ast.get_source_segment(SOURCE, report)
+        self.assertEqual(text.count('time.monotonic() + STOP_REPORT_SECONDS'), 1)
+        self.assertIn('probe.failure(deadline)', text)
+        self.assertIn('if len(report) > STOP_REPORT_CHARS:', text)
+        self.assertIn('step("Mac pause trace"', text)
+        failure = next(node for node in MAC_NODES if isinstance(node, ast.ClassDef))
+        failure = next(node for node in failure.body if getattr(node, 'name', '') == 'failure')
+        text = ast.get_source_segment(SOURCE, failure)
+        self.assertIn('limit + 1', text)
+        self.assertIn('len(encoded) > 8192', text)
+        self.assertIn('len(rows) > 9', text)
+        self.assertIn('during_stall_thread_state', text)
+        self.assertNotIn('subprocess.', text)
+# END private Mac pause observer controls.
+
+
 if __name__ == '__main__':
     unittest.main()
