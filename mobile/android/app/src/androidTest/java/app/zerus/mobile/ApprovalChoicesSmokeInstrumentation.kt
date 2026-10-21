@@ -161,6 +161,28 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         phases.addLast(record)
         Log.i("ZerusApprovalUI", record)
     }
+    // BEGIN LIFECYCLE_READ_DIAGNOSTIC definition
+    private enum class LifecycleCheckpoint { RESUMED_MAIN_RETURNED, BODY_RESTORE_BEGIN, BODY_RESTORE_PASSED,
+        CONFIRM_RETIRE_BEGIN, CONFIRM_RETIRE_PASSED, DISABLED_SEND_BEGIN, DISABLED_SEND_PASSED,
+        PRIMARY_FAILURE_CAPTURE_BEGIN, FINALLY_BEGIN }
+    private var lifecycleCheckpointCount = 0
+    private var lifecycleCheckpointUnknown = false
+    /** Fixed call-region observations only; logger IO is cooperative and never bounds the observed read. */
+    private fun lifecycleCheckpoint(stage: LifecycleCheckpoint) {
+        if (lifecycleCheckpointUnknown) return
+        if (lifecycleCheckpointCount >= 64) {
+            lifecycleCheckpointUnknown = true
+            try { phase("lifecycle-checkpoint:UNKNOWN_CAP") } catch (_: Throwable) { }
+            return
+        }
+        lifecycleCheckpointCount++
+        try { phase("lifecycle-checkpoint:${stage.name}") }
+        catch (_: Throwable) {
+            lifecycleCheckpointUnknown = true
+            try { phase("lifecycle-checkpoint:UNKNOWN_FAULT") } catch (_: Throwable) { }
+        }
+    }
+    // END LIFECYCLE_READ_DIAGNOSTIC definition
     override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
     override fun onStart() {
         val result = Bundle()
@@ -819,14 +841,35 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                     activity.lifecycle.currentState == androidx.lifecycle.Lifecycle.State.RESUMED && activity.hasWindowFocus()
                 } && lifecycleSend.bindReview() }
                 main { phase("lifecycle-resumed:id=${System.identityHashCode(activity)}:state=${activity.lifecycle.currentState.name}:focus=${activity.hasWindowFocus()}") }
+                // BEGIN LIFECYCLE_READ_DIAGNOSTIC resumed-main-returned
+                lifecycleCheckpoint(LifecycleCheckpoint.RESUMED_MAIN_RETURNED)
+                // END LIFECYCLE_READ_DIAGNOSTIC resumed-main-returned
                 // Preserve legitimate inner scrolling: bind the same native card, not a now-offscreen top label.
+                // BEGIN LIFECYCLE_READ_DIAGNOSTIC body-restore-begin
+                lifecycleCheckpoint(LifecycleCheckpoint.BODY_RESTORE_BEGIN)
+                // END LIFECYCLE_READ_DIAGNOSTIC body-restore-begin
                 await("same current card body restored") {
                     check(lifecycleSend.current()) { "Lifecycle card identity changed after resume" }
                     check(broaderDraftMatches(false)) { "Lifecycle broader draft changed after resume" }
                     disclosureScrollReady(lifecycleDisclosure)
                 }
+                // BEGIN LIFECYCLE_READ_DIAGNOSTIC body-restore-passed
+                lifecycleCheckpoint(LifecycleCheckpoint.BODY_RESTORE_PASSED)
+                // END LIFECYCLE_READ_DIAGNOSTIC body-restore-passed
+                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
+                lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_BEGIN)
+                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
                 await("background retires confirmation") { visible("Confirm this option?") == null }
+                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
+                lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_PASSED)
+                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
+                // BEGIN LIFECYCLE_READ_DIAGNOSTIC disabled-send-begin
+                lifecycleCheckpoint(LifecycleCheckpoint.DISABLED_SEND_BEGIN)
+                // END LIFECYCLE_READ_DIAGNOSTIC disabled-send-begin
                 check(count() == 4 && !button("Send answer").isEnabled)
+                // BEGIN LIFECYCLE_READ_DIAGNOSTIC disabled-send-passed
+                lifecycleCheckpoint(LifecycleCheckpoint.DISABLED_SEND_PASSED)
+                // END LIFECYCLE_READ_DIAGNOSTIC disabled-send-passed
                 val elapsed = lifecycleSend.elapsed()
                 check(elapsed >= 0 && elapsed < 3_000) { "Fixture missed the real early-review window: lifecycle elapsedMs=$elapsed" }
             } finally {
@@ -956,12 +999,18 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             screenshot("complete")
         } catch (error: Throwable) {
             primaryFailure = error
+            // BEGIN LIFECYCLE_READ_DIAGNOSTIC primary-failure-capture-begin
+            lifecycleCheckpoint(LifecycleCheckpoint.PRIMARY_FAILURE_CAPTURE_BEGIN)
+            // END LIFECYCLE_READ_DIAGNOSTIC primary-failure-capture-begin
             // Observe the still-owned Activity before the unchanged back/finish cleanup.
             try { failureEvidence = modelEvidence(model, target, activity, pending) } catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }
             try { failureEvidence += "\n" + windowEvidence() } catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }
             try { screenshot("failure") } catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }
             throw error
         } finally {
+            // BEGIN LIFECYCLE_READ_DIAGNOSTIC finally-begin
+            lifecycleCheckpoint(LifecycleCheckpoint.FINALLY_BEGIN)
+            // END LIFECYCLE_READ_DIAGNOSTIC finally-begin
             var observerCleanup: Throwable? = null
             try { main { touchTrace?.close() } }
             catch (cleanup: Throwable) {

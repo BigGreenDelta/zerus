@@ -525,8 +525,8 @@ class ApprovalHarnessTests(unittest.TestCase):
         pattern = re.compile(r'^([ ]*)// BEGIN APPROVAL_PROGRESS ([a-z-]+)\n[\s\S]*?^\1// END APPROVAL_PROGRESS \2\n', re.M)
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
             'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
-        # Baseline includes first-window observation and guarded stale disclosure reveal; progress stripping stays exact.
-        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), '47e1543e6a414cb34bc277968aa191c0d31a4e3160b1820a84f26dff18af747a')
+        # Baseline includes guarded preparation and passive lifecycle checkpoints; progress stripping stays exact.
+        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), '9941311ba2d5e1df78d3d8715335ca07284122929dd5d5b1e3311055d84434f6')
         definition = source.split('// BEGIN APPROVAL_PROGRESS definition\n', 1)[1].split('// END APPROVAL_PROGRESS definition', 1)[0]
         self.assertIn('check(progressSequence in 0 until 32)', definition)
         self.assertIn('check(record.length <= 160)', definition)
@@ -543,6 +543,46 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertNotIn('PIPE', run)
         self.assertNotIn('except', run)
         self.assertIn('[*device, "am", "instrument", "-w", "-r", "app.zerus.mobile.test/" + RUNNER], 90)', runner)
+
+    def test_lifecycle_read_checkpoints_are_bounded_passive_and_preserve_every_original_read(self):
+        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        pattern = re.compile(r'^([ ]*)// BEGIN LIFECYCLE_READ_DIAGNOSTIC ([a-z-]+)\n[\s\S]*?^\1// END LIFECYCLE_READ_DIAGNOSTIC \2\n', re.M)
+        names = ['definition', 'resumed-main-returned', 'body-restore-begin', 'body-restore-passed',
+                 'confirm-retire-begin', 'confirm-retire-passed', 'disabled-send-begin', 'disabled-send-passed',
+                 'primary-failure-capture-begin', 'finally-begin']
+        self.assertEqual([match[2] for match in pattern.finditer(source)], names)
+        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(),
+                         '54ee3b3f1b6c3e31beaefeae42c6656469b58e4b40896f87cbeb74cc683461c3')
+        stages = ['RESUMED_MAIN_RETURNED', 'BODY_RESTORE_BEGIN', 'BODY_RESTORE_PASSED',
+                  'CONFIRM_RETIRE_BEGIN', 'CONFIRM_RETIRE_PASSED', 'DISABLED_SEND_BEGIN', 'DISABLED_SEND_PASSED',
+                  'PRIMARY_FAILURE_CAPTURE_BEGIN', 'FINALLY_BEGIN']
+        self.assertEqual(re.findall(r'lifecycleCheckpoint\(LifecycleCheckpoint\.([A-Z_]+)\)', source), stages)
+        definition = pattern.search(source)[0]
+        self.assertIn('if (lifecycleCheckpointUnknown) return', definition)
+        self.assertIn('if (lifecycleCheckpointCount >= 64)', definition)
+        self.assertIn('lifecycleCheckpointCount++', definition)
+        self.assertEqual(definition.count('lifecycleCheckpointUnknown = true'), 2)
+        for outcome in ('UNKNOWN_CAP', 'UNKNOWN_FAULT'):
+            self.assertEqual(definition.count('phase("lifecycle-checkpoint:' + outcome + '")'), 1)
+        for forbidden in ('main {', 'runOnMainSync', 'performAction', 'injectInputEvent', 'startActivity',
+                          'model.', 'sendStatus', 'Thread(', 'delay(', 'sleep(', 'await(', 'synchronized('):
+            self.assertNotIn(forbidden, definition)
+        body = source.split('await("same current card body restored") {', 1)[1].split('\n                }', 1)[0]
+        self.assertNotIn('lifecycleCheckpoint(', body)
+        self.assertIn('await("background retires confirmation") { visible("Confirm this option?") == null }', source)
+        for literal, before, after in [
+            ('await("same current card body restored")', 'BODY_RESTORE_BEGIN', 'BODY_RESTORE_PASSED'),
+            ('await("background retires confirmation")', 'CONFIRM_RETIRE_BEGIN', 'CONFIRM_RETIRE_PASSED'),
+            ('check(count() == 4 && !button("Send answer").isEnabled)', 'DISABLED_SEND_BEGIN', 'DISABLED_SEND_PASSED')]:
+            position = source.index(literal, source.index('lifecycleCheckpoint(LifecycleCheckpoint.RESUMED_MAIN_RETURNED)'))
+            self.assertLess(source.index('lifecycleCheckpoint(LifecycleCheckpoint.' + before + ')'), position)
+            self.assertLess(position, source.index('lifecycleCheckpoint(LifecycleCheckpoint.' + after + ')'))
+        failure = source.split('            primaryFailure = error\n', 1)[1]
+        self.assertLess(failure.index('lifecycleCheckpoint(LifecycleCheckpoint.PRIMARY_FAILURE_CAPTURE_BEGIN)'),
+                        failure.index('failureEvidence = modelEvidence('))
+        cleanup = failure.split('        } finally {\n', 1)[1]
+        self.assertLess(cleanup.index('lifecycleCheckpoint(LifecycleCheckpoint.FINALLY_BEGIN)'),
+                        cleanup.index('main { touchTrace?.close() }'))
 
     def test_unknown_runner_and_extra_arguments_refuse_before_runtime(self):
         for arguments in (["other"], ["--approval-choices", "extra"], ["--approval-choices", "--approval-choices"]):

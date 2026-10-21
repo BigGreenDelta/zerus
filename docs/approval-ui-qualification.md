@@ -50,6 +50,11 @@ failure with bounded method/encoded-path metadata only, emits that named diagnos
 response without network forwarding. Every wait and final qualification refuses a retained interceptor failure.
 Missing, late or failed diagnostics remain unknown and cannot replace the primary failure, qualify a missing
 case, relax the strict result parser, or authorize a retry. The instrumentation cap remains 90 seconds.
+Fixed lifecycle checkpoints bracket the existing body-restoration wait, confirmation-retirement wait and disabled-Send
+check, outside their polling predicates. Separate markers identify return from the resumed main-thread observation,
+entry into primary-failure capture and entry into cleanup. They use the same phase log, at most 64 markers plus one
+UNKNOWN marker on capacity or logger failure. Logger IO is cooperative; a retained marker identifies a call region,
+not a deadlock or an individual main/accessibility subread. No original read, result, assertion, input or wait is changed.
 The approval instrumentation also streams at most 21 fixed scalar progress records through Android
 [`Instrumentation.sendStatus`](https://developer.android.com/reference/android/app/Instrumentation#sendStatus(int,android.os.Bundle)):
 entry, store/bootstrap and activity-launch boundaries, then each existing case begin/complete. Each versioned record has
