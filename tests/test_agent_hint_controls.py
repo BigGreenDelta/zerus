@@ -580,7 +580,7 @@ class HintFixtureControls(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             value, rows, events = self.unix_custody_double(Path(folder))
             rows.update({10: (1, 'S', 'server birth'), 20: (10, 'S', 'supervisor birth')})
-            with patch.object(fixture.test_pause, 'TMUX', '/fixture/tools/tmux'):
+            with patch.object(fixture, 'test_pause', SimpleNamespace(TMUX='/fixture/tools/tmux'), create=True):
                 _, server, panes = value.unix_live_snapshot()
                 self.assertEqual(server['pid'], 10)
                 self.assertEqual(panes, {20})
