@@ -359,7 +359,10 @@ impl Native for FreshLaunch {
     async fn call(&self, call: Call) -> NativeResult {
         self.calls.borrow_mut().push(call.clone());
         if call.argv.first().map(String::as_str) == Some("inspect") {
-            assert_eq!(call.argv, ["inspect", "codex/project/test", "--skip-processes"]);
+            assert_eq!(
+                call.argv,
+                ["inspect", "codex/project/test", "--skip-processes"]
+            );
             return Ok(Output::Json(self.detail.borrow().clone()));
         }
         self.writes.set(self.writes.get() + 1);
@@ -374,11 +377,16 @@ impl Native for FreshLaunch {
                 Ok(Output::Json(json!({"status":"submitted"})))
             }
             Some("session-action") => {
-                assert_eq!(call.argv, ["session-action", "codex/project/test", "--json"]);
+                assert_eq!(
+                    call.argv,
+                    ["session-action", "codex/project/test", "--json"]
+                );
                 let payload = call.payload.as_ref().unwrap();
                 assert_eq!(payload["action"], "terminate");
-                Ok(Output::Json(json!({"request_id":payload["request_id"],"name":"codex/project/test",
-                    "run_id":payload["expected_run_id"],"conversation_id":payload["expected_conversation_id"],"status":"completed"})))
+                Ok(Output::Json(
+                    json!({"request_id":payload["request_id"],"name":"codex/project/test",
+                    "run_id":payload["expected_run_id"],"conversation_id":payload["expected_conversation_id"],"status":"completed"}),
+                ))
             }
             other => panic!("unexpected native operation {other:?}"),
         }
@@ -461,11 +469,26 @@ async fn windows_fresh_conversation_requires_explicit_null_or_exact_string() {
         for (label, reported, expected, delivered) in [
             ("explicit-null", Some(Value::Null), "", true),
             ("empty", Some(json!("")), "", true),
-            ("confirmed", Some(json!("conversation")), "conversation", true),
+            (
+                "confirmed",
+                Some(json!("conversation")),
+                "conversation",
+                true,
+            ),
             ("missing", None, "", false),
-            ("null-vs-confirmed", Some(Value::Null), "conversation", false),
+            (
+                "null-vs-confirmed",
+                Some(Value::Null),
+                "conversation",
+                false,
+            ),
             ("confirmed-vs-empty", Some(json!("conversation")), "", false),
-            ("other-conversation", Some(json!("conversation")), "other", false),
+            (
+                "other-conversation",
+                Some(json!("conversation")),
+                "other",
+                false,
+            ),
             ("boolean", Some(json!(false)), "", false),
             ("number", Some(json!(0)), "", false),
             ("array", Some(json!([])), "", false),
@@ -492,7 +515,10 @@ async fn windows_fresh_conversation_requires_explicit_null_or_exact_string() {
             if delivered {
                 fresh_payload_unchanged(&connector, &request);
             } else {
-                assert_eq!(answer["error"], "fresh native target identity did not match");
+                assert_eq!(
+                    answer["error"],
+                    "fresh native target identity did not match"
+                );
             }
         }
     }
@@ -572,7 +598,8 @@ async fn fresh_null_cannot_bypass_native_refusal_or_replay_a_delivery() {
     for operation in ["send", "terminate"] {
         for refused in [false, true] {
             let scratch = Scratch::new("fresh-native-gate");
-            let connector = fresh_connector(&scratch, true, fresh_detail(Some(Value::Null)), refused);
+            let connector =
+                fresh_connector(&scratch, true, fresh_detail(Some(Value::Null)), refused);
             let request = fresh_request(operation, "");
             let answer = finished(connector.execute(request.clone()).await.unwrap());
             assert_eq!(
