@@ -86,11 +86,26 @@ The six Windows desktop write-startup regressions run in the ordinary Qt suites.
 For their one-time causal qualification, include the hidden marker
 `<!-- zerus-write-startup-causal-v1 -->` in the initial PR body, or add the PR label
 `windows-write-startup-causal` before a source push. The existing Windows job then
-builds only `test_hgsclient` in a private source copy with the three failure
-wrappers reverted, and requires the three exact original assertion failures
-after real `FailedToStart` prerequisites. This source-bound opt-in is skipped on
+builds only `test_hgsclient` in a private source copy with only the three queued
+starts restored to inline startup. It requires each row's exact pre-admission
+`UnknownError` assertion to fail after proving real `FailedToStart`, `NotRunning`
+and PID zero. The failure wrappers, timers and every other postimage stay fixed.
+This source-bound opt-in is skipped on
 main and on unmarked, unlabeled PRs; it changes no tested candidate or package
 input. The marker selects a keyless test only and grants no deployment authority.
+The direct fixture holds its own noninheritable, exclusive file handle, proves a
+second data/execute open fails with `ERROR_SHARING_VIOLATION`, then checks that
+the file still passes Qt's executable metadata admission. It creates no probe
+process. The fixed rows arm a real `errorOccurred` snapshot after the API returns,
+before event dispatch, and require `FailedToStart`, `NotRunning` and PID zero
+from that snapshot; a deleted QProcess is never inspected. Qt's numeric native
+error remains unknown. The three SessionsWindow consumer bodies are unchanged.
+Native startup is queued only after the original timer starts; an expired or
+already reported request cannot start or write payload. This preserves the
+original deadline without promising preemption of a blocked native startup.
+The earlier malformed-image 240-second timeouts remain unresolved evidence;
+passing the sharing-denial fixture would not establish their cause. The old
+failure-wrapper-only variant is superseded, not reclassified as causal evidence.
 The direct rows emit fixed, content-free stderr regions, including an outer
 row-unwound marker after their fixture/client locals are destroyed. At most 64
 markers are attempted. Logger IO is cooperative: a last marker identifies a

@@ -19,6 +19,7 @@
 #ifdef Q_OS_WIN
 #include <QScopeGuard>
 #include <cstdio>
+#include <qt_windows.h>
 #endif
 // END WRITE_STARTUP_ROW_TRACE includes
 #ifndef Q_OS_WIN
@@ -1326,11 +1327,35 @@ void TestHgsClient::writeStartupFailuresAreReportedAfterRequest()
     QFile executable(program); QVERIFY(executable.open(QIODevice::WriteOnly));
     const QByteArray malformed("This is not a PE image.\n");
     QCOMPARE(executable.write(malformed), qint64(malformed.size())); executable.close();
+    // An owned exclusive handle denies image/data access without denying the
+    // metadata checks below. Null security attributes make it noninheritable.
+    const auto *nativeProgram = reinterpret_cast<const wchar_t *>(program.utf16());
+    const HANDLE held = CreateFileW(nativeProgram, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const auto closeHeld = qScopeGuard([held] {
+        if (held != INVALID_HANDLE_VALUE) QVERIFY(CloseHandle(held));
+    });
+    QVERIFY(held != INVALID_HANDLE_VALUE);
+    DWORD handleFlags = 0; QVERIFY(GetHandleInformation(held, &handleFlags));
+    QVERIFY(!(handleFlags & HANDLE_FLAG_INHERIT));
+    const HANDLE probe = CreateFileW(nativeProgram, GENERIC_READ | GENERIC_EXECUTE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const DWORD probeError = probe == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    const auto closeProbe = qScopeGuard([probe] {
+        if (probe != INVALID_HANDLE_VALUE) QVERIFY(CloseHandle(probe));
+    });
+    QVERIFY(probe == INVALID_HANDLE_VALUE);
+    QCOMPARE(probeError, DWORD(ERROR_SHARING_VIOLATION));
     QVERIFY(QFileInfo(program).isFile()); QVERIFY(QFileInfo(program).isExecutable());
     // BEGIN WRITE_STARTUP_ROW_TRACE file-prepared
     writeStartupTrace(operation, WriteStartupPhase::FilePrepared);
     // END WRITE_STARTUP_ROW_TRACE file-prepared
 
+    QProcess::ProcessError errorAtFailure = QProcess::UnknownError;
+    QProcess::ProcessState stateAtFailure = QProcess::Starting;
+    qint64 pidAtFailure = -1;
+    bool failureObserved = false;
     HgsClient client(program);
     QSignalSpy failed(&client, &HgsClient::messageFailed), sent(&client, &HgsClient::messageSent);
     QSignalSpy queued(&client, &HgsClient::queueSendFinished), settings(&client, &HgsClient::settingsFinished);
@@ -1357,12 +1382,24 @@ void TestHgsClient::writeStartupFailuresAreReportedAfterRequest()
     // BEGIN WRITE_STARTUP_ROW_TRACE request-returned
     writeStartupTrace(operation, WriteStartupPhase::RequestReturned);
     // END WRITE_STARTUP_ROW_TRACE request-returned
-    // The file passed HgsClient's path/executable checks but Windows rejected
-    // its format. This exercises the real QProcess start failure, not reject().
-    const auto *process = client.findChild<QProcess *>(); QVERIFY(process);
-    QCOMPARE(process->error(), QProcess::FailedToStart);
+    auto *process = client.findChild<QProcess *>(); QVERIFY(process);
+    // The inline-start variant must first prove a real native start failure;
+    // only the following pre-admission assertion may qualify its causal RED.
+    if (process->error() != QProcess::UnknownError) {
+        QCOMPARE(process->error(), QProcess::FailedToStart);
+        QCOMPARE(process->state(), QProcess::NotRunning);
+        QCOMPARE(process->processId(), qint64(0));
+    }
+    QVERIFY(process->error() == QProcess::UnknownError);
     QCOMPARE(process->state(), QProcess::NotRunning);
     QCOMPARE(process->processId(), qint64(0));
+    const auto *timer = process->findChild<QTimer *>(); QVERIFY(timer); QVERIFY(timer->isActive());
+    connect(process, &QProcess::errorOccurred, &client, [&](QProcess::ProcessError error) {
+        // Copy while the real QProcess is alive; deleteLater may run before
+        // the result wait ends. No numeric Win32 error is inferred from Qt.
+        errorAtFailure = error; stateAtFailure = process->state(); pidAtFailure = process->processId();
+        failureObserved = true;
+    });
     // BEGIN WRITE_STARTUP_ROW_TRACE process-proof
     writeStartupTrace(operation, WriteStartupPhase::ProcessProof);
     // END WRITE_STARTUP_ROW_TRACE process-proof
@@ -1375,6 +1412,10 @@ void TestHgsClient::writeStartupFailuresAreReportedAfterRequest()
     // BEGIN WRITE_STARTUP_ROW_TRACE result-received
     writeStartupTrace(operation, WriteStartupPhase::ResultReceived);
     // END WRITE_STARTUP_ROW_TRACE result-received
+    QVERIFY(failureObserved);
+    QCOMPARE(errorAtFailure, QProcess::FailedToStart);
+    QCOMPARE(stateAtFailure, QProcess::NotRunning);
+    QCOMPARE(pidAtFailure, qint64(0));
     QVERIFY(!beforeRegistration); QCOMPARE(sent.size(), 0);
     QCOMPARE(result[0][0].toULongLong(), registered);
     if (operation == "message") {

@@ -2,7 +2,7 @@
 """One opt-in Windows source-bound RED for desktop request registration.
 
 The ordinary Qt suites must first pass all six new fixed regressions. This gate
-then changes only three failure wrappers in a private git-archive copy and builds
+then restores only three inline starts in a private git-archive copy and builds
 only test_hgsclient. It never changes the candidate, normal build or package
 inputs. The exact-source pins deliberately belong to the opt-in qualification,
 not to ordinary main/PR testing. No command, executable or address mode is exposed.
@@ -26,13 +26,13 @@ ROOT = Path(__file__).resolve().parents[2]
 CLIENT = "tray/src/HgsClient.cpp"
 TEST = "tray/tests/test_hgsclient.cpp"
 PINS = {
-    CLIENT: "f00be70cb7b0d40ca5fc4a0483c2f57cd40897ab92e729bedf85d075f1584d70",
-    TEST: "27f2c9ab0bce64951ae520adab31d13ef15f66ef830beec45b0ced5fc3816744",
+    CLIENT: "a75d609a45e6d865235e556cbf79e0c10231601997b9d2081f1d1383b5829477",
+    TEST: "a5ff0f5fffb17e498ed3995b81f3154c0de0ee609dbd1e23d07384ea7d38be8e",
     "tray/tests/test_sessionswindow.cpp": "03df316f82c02c9552710a670c4cb3232875149117e2fee4cb054551cbc895bd",
 }
-BASELINE_CLIENT = "99d2566b33980bf3dbb4236988418b3f67221607883a79c7b24ecb6d4fca812c"
+BASELINE_CLIENT = "d9fb7f0695048bfc98d90c21a3f00a0448404a9a4fba648f1bdb65d3b4ffc060"
 METHOD = "writeStartupFailuresAreReportedAfterRequest"
-CONDITIONS = {"message": "failed.isEmpty()", "queue": "queued.isEmpty()", "settings": "settings.isEmpty()"}
+CONDITIONS = {row: "process->error() == QProcess::UnknownError" for row in ("message", "queue", "settings")}
 FIXED = {
     ("TestHgsClient", f"{METHOD}({row})") for row in CONDITIONS
 } | {
@@ -103,46 +103,35 @@ def check_fixed(documents):
     return sorted(found)
 
 
-def reverse_wrappers(data):
+def reverse_start_admission(data):
     if sha(data) != PINS[CLIENT]:
         raise RuntimeError("This opt-in RED requires the reviewed fixed product postimage")
-    replacements = [(
-        b"        // A failed start can be reported inside start(), before the caller has\n"
-        b"        // registered this request. Keep the claim synchronous, the result queued.\n"
-        b"        QTimer::singleShot(0, this, [this, request, host, name, detail, uncertain] {\n"
-        b"            emit messageFailed(request, host, name, detail, uncertain);\n"
-        b"        });",
-        b"        emit messageFailed(request, host, name, detail, uncertain);",
-    )]
-    for signal_name in ("queueSendFinished", "settingsFinished"):
-        replacements.append((
-            ("        if (*reported) return; *reported = true;\n"
-             "        QTimer::singleShot(0, this, [this, request, error] { emit " + signal_name
-             + "(request, false, {}, error); });").encode(),
-            ("        if (*reported) return; *reported = true; emit " + signal_name
-             + "(request, false, {}, error);").encode(),
-        ))
-    for current, old in replacements:
-        if data.count(current) != 1:
-            raise RuntimeError("The exact three-wrapper transform is not unique")
-        data = data.replace(current, old, 1)
+    current = (b"    // Return the request ID before native startup can reenter the event loop.\n"
+               b"    QTimer::singleShot(0, process, [process, timer, reported, timeout] {\n"
+               b"        if (*reported) { process->deleteLater(); return; }\n"
+               b"        if (timer->remainingTime() <= 0) { timeout(); process->deleteLater(); return; }\n"
+               b"        process->start();\n"
+               b"    });")
+    if data.count(current) != 3:
+        raise RuntimeError("The exact three-start admission transform is not unique")
+    data = data.replace(current, b"    process->start();")
     if sha(data) != BASELINE_CLIENT:
-        raise RuntimeError("The old product file differs from the complete reviewed baseline")
+        raise RuntimeError("The inline-start product file differs from the complete reviewed baseline")
     return data
 
 
 def assertion_line(test_source):
     if sha(test_source) != PINS[TEST]:
-        raise RuntimeError("The original malformed-image regression source changed")
-    marker = b"    QVERIFY(failed.isEmpty()); QVERIFY(queued.isEmpty()); QVERIFY(settings.isEmpty());"
+        raise RuntimeError("The reviewed sharing-denial regression source changed")
+    marker = b"    QVERIFY(process->error() == QProcess::UnknownError);"
     lines = test_source.splitlines()
     if lines.count(marker) != 1:
-        raise RuntimeError("The original empty-spy assertion is not unique")
+        raise RuntimeError("The pre-admission assertion is not unique")
     return lines.index(marker) + 1
 
 
 def check_red(document, raw_log, row, code, expected_source, line):
-    """Only the original assertion after real QProcess prerequisites is a RED."""
+    """Only pre-admission failure after real QProcess prerequisites is a RED."""
     root = ET.fromstring(document)
     cases = list(root.iter("testcase"))
     wanted = ["initTestCase", f"{METHOD}({row})", "cleanupTestCase"]
@@ -164,11 +153,11 @@ def check_red(document, raw_log, row, code, expected_source, line):
     text = raw_log.decode("utf-8", "replace")
     expected = f"TestHgsClient::{METHOD}({row}) {message}"
     if text.count("FAIL!  : ") != 1 or expected not in text:
-        raise RuntimeError("Raw original assertion provenance is missing")
+        raise RuntimeError("Raw pre-admission assertion provenance is missing")
     locations = re.findall(r"Loc: \[(.+test_hgsclient\.cpp)\((\d+)\)\]", text)
     normalized = [(os.path.normcase(os.path.normpath(path)), int(number)) for path, number in locations]
     if normalized != [(os.path.normcase(os.path.normpath(str(expected_source))), line)]:
-        raise RuntimeError("Raw failure is not at the bound original post-prerequisite assertion")
+        raise RuntimeError("Raw failure is not at the bound pre-admission assertion")
     return {"row": row, "condition": CONDITIONS[row], "source_line": line,
             "actual_exit": code, "failures": 1, "errors": 0, "skips": 0}
 
@@ -461,6 +450,7 @@ def main(argv=None):
     evidence = ROOT / "artifacts/test-results/windows-write-startup-causal"
     evidence.mkdir(exist_ok=False)
     result = {"status": "STOP", "source": args.source, "original_end": args.end, "commands": [], "rows": [],
+              "variant": "three-inline-starts-only", "malformed_image_timeout_cause": "UNKNOWN",
               "historical_pvfa14_pvfa15_causes": "UNKNOWN", "resources_retained": True}
     kernel = None
     protected = None
@@ -546,11 +536,11 @@ def main(argv=None):
         source = private / "source"
         source.mkdir()
         extract_archive(archive, source, exported, args.end - CLEANUP)
-        (source / CLIENT).write_bytes(reverse_wrappers(read_bytes(source / CLIENT, args.end - CLEANUP)))
+        (source / CLIENT).write_bytes(reverse_start_admission(read_bytes(source / CLIENT, args.end - CLEANUP)))
         old_expected = dict(exported)
         old_expected[CLIENT] = {"bytes": (source / CLIENT).stat().st_size, "sha256": BASELINE_CLIENT}
         if file_map([(name, source / name) for name in exported], args.end - CLEANUP) != old_expected:
-            raise RuntimeError("Old variant differs outside the three product wrappers")
+            raise RuntimeError("Inline-start variant differs outside the three startup admission blocks")
         (evidence / "old-source.json").write_text(json.dumps(old_expected, indent=2) + "\n")
         build = private / "build"
         checked("configure", [tools["cmake"], "-S", str(source / "tray"), "-B", str(build), "-G", "Ninja",

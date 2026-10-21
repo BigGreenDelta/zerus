@@ -57,7 +57,7 @@ class Qualification(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     gate.check_fixed([ET.tostring(root)])
 
-    def test_three_exact_old_assertions_qualify(self):
+    def test_three_exact_pre_admission_assertions_qualify(self):
         for row in gate.CONDITIONS:
             with self.subTest(row=row):
                 root, message = red_document(row)
@@ -71,8 +71,8 @@ class Qualification(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     gate.check_red(ET.tostring(root), raw("message", message), "message", 1, Path("fixture/test_hgsclient.cpp"), 123)
 
-    def test_other_row_assertion_does_not_qualify(self):
-        root, message = red_document("message", gate.CONDITIONS["queue"])
+    def test_other_row_does_not_qualify(self):
+        root, message = red_document("queue")
         with self.assertRaises(RuntimeError):
             gate.check_red(ET.tostring(root), raw("message", message), "message", 1, Path("fixture/test_hgsclient.cpp"), 123)
 
@@ -140,42 +140,39 @@ class Qualification(unittest.TestCase):
                 self.assertFalse((root / "escape").exists())
 
     def test_variant_full_file_pin_and_exact_three_replacements(self):
-        message = (b"        // A failed start can be reported inside start(), before the caller has\n"
-                   b"        // registered this request. Keep the claim synchronous, the result queued.\n"
-                   b"        QTimer::singleShot(0, this, [this, request, host, name, detail, uncertain] {\n"
-                   b"            emit messageFailed(request, host, name, detail, uncertain);\n"
-                   b"        });")
-        current = b"// fixed context\n" + message
-        expected = b"// fixed context\n        emit messageFailed(request, host, name, detail, uncertain);"
-        for name in ("queueSendFinished", "settingsFinished"):
-            current += ("\n        if (*reported) return; *reported = true;\n"
-                        "        QTimer::singleShot(0, this, [this, request, error] { emit " + name + "(request, false, {}, error); });").encode()
-            expected += ("\n        if (*reported) return; *reported = true; emit " + name + "(request, false, {}, error);").encode()
+        admission = (b"    // Return the request ID before native startup can reenter the event loop.\n"
+                     b"    QTimer::singleShot(0, process, [process, timer, reported, timeout] {\n"
+                     b"        if (*reported) { process->deleteLater(); return; }\n"
+                     b"        if (timer->remainingTime() <= 0) { timeout(); process->deleteLater(); return; }\n"
+                     b"        process->start();\n"
+                     b"    });")
+        current = b"// fixed context\n" + b"\n".join([admission] * 3)
+        expected = b"// fixed context\n" + b"\n".join([b"    process->start();"] * 3)
         # Portable controls use an independent memory file. Unrelated future
         # product edits must not turn the one-time opt-in pin into a main gate.
         with patch.dict(gate.PINS, {gate.CLIENT: gate.sha(current)}), patch.object(gate, "BASELINE_CLIENT", gate.sha(expected)):
-            self.assertEqual(gate.reverse_wrappers(current), expected)
+            self.assertEqual(gate.reverse_start_admission(current), expected)
             with self.assertRaises(RuntimeError):
-                gate.reverse_wrappers(current + b"changed context")
+                gate.reverse_start_admission(current + b"changed context")
             with patch.object(gate, "BASELINE_CLIENT", "0" * 64), self.assertRaises(RuntimeError):
-                gate.reverse_wrappers(current)
-            duplicated = current + message
+                gate.reverse_start_admission(current)
+            duplicated = current + admission
             with patch.dict(gate.PINS, {gate.CLIENT: gate.sha(duplicated)}), self.assertRaises(RuntimeError):
-                gate.reverse_wrappers(duplicated)
+                gate.reverse_start_admission(duplicated)
 
     def test_complete_baseline_mismatch_refuses(self):
         with self.assertRaises(RuntimeError):
-            gate.reverse_wrappers(b"unreviewed product")
+            gate.reverse_start_admission(b"unreviewed product")
 
     def test_assertion_line_requires_bound_test_file(self):
         memory = (b"void actual() {\n    QCOMPARE(process->state(), QProcess::NotRunning);\n"
-                  b"    QVERIFY(failed.isEmpty()); QVERIFY(queued.isEmpty()); QVERIFY(settings.isEmpty());\n}\n")
+                  b"    QVERIFY(process->error() == QProcess::UnknownError);\n}\n")
         with patch.dict(gate.PINS, {gate.TEST: gate.sha(memory)}):
             self.assertEqual(gate.assertion_line(memory), 3)
             with self.assertRaises(RuntimeError):
                 gate.assertion_line(memory + b"changed")
-        # Passive region markers shift provenance, never the original assertion.
-        traced = memory.replace(b"    QVERIFY(failed.isEmpty());", b"    trace_fixed_region();\n    QVERIFY(failed.isEmpty());", 1)
+        # Passive region markers shift provenance, never the admission assertion.
+        traced = memory.replace(b"    QVERIFY(process->error()", b"    trace_fixed_region();\n    QVERIFY(process->error()", 1)
         with patch.dict(gate.PINS, {gate.TEST: gate.sha(traced)}):
             self.assertEqual(gate.assertion_line(traced), 4)
             with self.assertRaises(RuntimeError):
