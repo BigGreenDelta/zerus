@@ -190,23 +190,23 @@ class Qualification(unittest.TestCase):
 
     def test_workflow_opt_in_is_pr_only_and_budget_unchanged(self):
         workflow = (ROOT / ".github/workflows/checks.yml").read_text()
-        body = workflow.split("  windows-desktop:\n", 1)[1].split("\n  windows-", 1)[0]
-        step = body.split("      - name: Opt-in desktop write-startup causal assertions\n", 1)[1].split("\n      - name:", 1)[0]
+        job_body = workflow.split("  windows-desktop:\n", 1)[1].split("\n  windows-", 1)[0]
+        step = job_body.split("      - name: Opt-in desktop write-startup causal assertions\n", 1)[1].split("\n      - name:", 1)[0]
         expression = re.search(r"(?m)^        if: (.+)$", step)[1]
         expression = expression.replace("github.event_name", "event").replace("&&", "and").replace("||", "or")
         expression = expression.replace("contains(github.event.pull_request.labels.*.name, 'windows-write-startup-causal')", "'windows-write-startup-causal' in labels")
         marker = "<!-- zerus-write-startup-causal-v1 -->"
         expression = expression.replace("contains(github.event.pull_request.body, '" + marker + "')", "marker in (body or '')")
-        for event, labels, body, expected in (("pull_request", ["windows-write-startup-causal"], None, True),
+        for event, labels, pr_body, expected in (("pull_request", ["windows-write-startup-causal"], None, True),
                                               ("pull_request", [], marker, True), ("pull_request", [], "unmarked", False),
                                               ("pull_request", [], None, False), ("push", ["windows-write-startup-causal"], marker, False),
                                               ("workflow_dispatch", [], marker, False), ("pull_request_target", [], marker, False)):
             self.assertEqual(bool(eval(expression, {"__builtins__": {}}, {"event": event, "labels": labels,
-                                                                                "body": body, "marker": marker})), expected)
-        self.assertIn("    timeout-minutes: 90\n", body)
+                                                                                "body": pr_body, "marker": marker})), expected)
+        self.assertIn("    timeout-minutes: 90\n", job_body)
         self.assertIn("        timeout-minutes: 8\n", step)
-        self.assertLess(body.index("- name: Offscreen Qt suites"), body.index("- name: Opt-in desktop"))
-        self.assertLess(body.index("- name: Opt-in desktop"), body.index("- name: Portable zip"))
+        self.assertLess(job_body.index("- name: Offscreen Qt suites"), job_body.index("- name: Opt-in desktop"))
+        self.assertLess(job_body.index("- name: Opt-in desktop"), job_body.index("- name: Portable zip"))
         self.assertNotIn("secrets", step)
         self.assertNotIn("cache-mode", step)
         self.assertNotIn("permissions", step)
