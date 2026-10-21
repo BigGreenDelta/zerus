@@ -167,7 +167,7 @@ class PrivateCleanup(unittest.TestCase):
     def test_owned_cleanup_unlinks_links_without_following_or_touching_public_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'generation';root.mkdir(mode=0o700)
-            info = root.stat();data = dict(root_dev=info.st_dev, root_ino=info.st_ino, uid=info.st_uid, end=float('inf'))
+            info = root.stat();data = dict(root_dev=info.st_dev, root_ino=info.st_ino, uid=info.st_uid, end=float('inf'), admitted=1.0)
             private = root / 'private';private.mkdir(mode=0o700)
             outside = Path(tmp) / 'outside';outside.write_bytes(b'keep')
             (private / 'link').symlink_to(outside)
@@ -180,7 +180,7 @@ class PrivateCleanup(unittest.TestCase):
     def test_changed_identity_late_or_cleanup_error_refuses_and_preserves_unknown_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'generation';root.mkdir(mode=0o700)
-            info = root.stat();data = dict(root_dev=info.st_dev, root_ino=info.st_ino, uid=info.st_uid, end=float('inf'))
+            info = root.stat();data = dict(root_dev=info.st_dev, root_ino=info.st_ino, uid=info.st_uid, end=float('inf'), admitted=1.0)
             private = root / 'private';private.mkdir(mode=0o700);(private / 'key').write_bytes(b'synthetic')
             for changed in [{**data, 'root_ino': info.st_ino + 1}, {**data, 'end': 0}]:
                 with self.subTest(changed=changed), self.assertRaises(ValueError):
@@ -205,10 +205,44 @@ class PrivateCleanup(unittest.TestCase):
                 self.assertEqual(C.generation_survivors(Path('/owned/private'), float('inf'), proc), [first])
                 kill.assert_not_called()
 
+    def test_uninspectable_process_is_admitted_only_when_it_predates_the_generation(self):
+        tick = C.os.sysconf('SC_CLK_TCK')
+        original = Path.open
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp) / 'proc';proc.mkdir()
+            pid = str(C.os.getpid() + 1000000)
+            directory = proc / pid;directory.mkdir()
+            (directory / 'cmdline').write_bytes(b'manager\0');(directory / 'environ').write_bytes(b'HOME=/elsewhere\0')
+            (directory / 'cwd').symlink_to('/')
+            def denied(path, *args, **kwargs):
+                if path == directory / 'environ':
+                    raise PermissionError('capability-holding same-user process')
+                return original(path, *args, **kwargs)
+            def started(seconds):
+                fields = ['S'] + ['0'] * 18 + [str(int(seconds * tick))] + ['0'] * 10
+                (directory / 'stat').write_bytes(f'{pid} (user manager) '.encode() + ' '.join(fields).encode())
+            with patch.object(Path, 'open', denied), patch.object(C.os, 'killpg') as kill:
+                started(10)
+                self.assertEqual(C.generation_survivors(Path('/owned/private'), float('inf'), proc, admitted=50.0), [])
+                for admitted in (5.0, None):
+                    with self.subTest(admitted=admitted), self.assertRaisesRegex(ValueError, 'Uninspectable'):
+                        C.generation_survivors(Path('/owned/private'), float('inf'), proc, admitted=admitted)
+                kill.assert_not_called()
+
+    def test_cleanup_scans_with_the_recorded_admission_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'generation';root.mkdir(mode=0o700)
+            info = root.stat();data = dict(root_dev=info.st_dev, root_ino=info.st_ino, uid=info.st_uid, end=float('inf'), admitted=42.5)
+            (root / 'private').mkdir(mode=0o700)
+            with patch.object(C, 'generation_survivors', return_value=[]) as scan:
+                C.cleanup_private(root, data)
+            self.assertEqual(scan.call_args.kwargs, dict(admitted=42.5))
+            self.assertFalse((root / 'private').exists())
+
     def test_surviving_or_unknown_process_prevents_private_removal(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'generation';root.mkdir(mode=0o700)
-            info = root.stat();data = dict(root_dev=info.st_dev, root_ino=info.st_ino, uid=info.st_uid, end=float('inf'))
+            info = root.stat();data = dict(root_dev=info.st_dev, root_ino=info.st_ino, uid=info.st_uid, end=float('inf'), admitted=1.0)
             private = root / 'private';private.mkdir(mode=0o700);(private / 'key').write_bytes(b'synthetic')
             with patch.object(C, 'generation_survivors', return_value=[888881]), self.assertRaisesRegex(ValueError, 'survives'):
                 C.cleanup_private(root, data)
@@ -285,7 +319,7 @@ class CommandCustody(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / 'generation';self.root.mkdir(mode=0o700)
         info = self.root.stat()
-        self.data = dict(root_dev=info.st_dev, root_ino=info.st_ino, uid=info.st_uid, end=float('inf'))
+        self.data = dict(root_dev=info.st_dev, root_ino=info.st_ino, uid=info.st_uid, end=float('inf'), admitted=1.0)
         self.private = self.root / 'private';self.private.mkdir(mode=0o700)
         self.log = self.private / 'fake.log'
         self.child = Mock(pid=987654, returncode=0)

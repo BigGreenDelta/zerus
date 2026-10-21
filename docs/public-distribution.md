@@ -31,7 +31,9 @@ The candidate builds an exclusive clean source extraction with JDK 17, SDK 36
 and at most two Gradle workers, without Dev/version overrides or shared caches.
 Its original thirty-minute end includes admission, tooling, build, APK/R8
 validation and cleanup, reserving one minute for cleanup. Kernel stalls and
-unproven detached descendants do not establish successful cleanup. Unknown
+unproven detached descendants do not establish successful cleanup. A same-user
+process whose identity the job cannot read, such as a capability-holding user
+manager, is accepted only when it started before admission. Unknown
 process custody or cleanup refuses the artifact and retains the private root.
 
 The exact-build Crashlytics mapping upload must execute successfully, rather
