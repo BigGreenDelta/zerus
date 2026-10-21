@@ -308,12 +308,21 @@ def compose_option_memory(source, label, binding, current=lambda: True):
     assert (ancestor_limit, child_limit) == (16, 32)
     for exact in ('check(owner !in seen)', 'check(candidate == null)', 'check(owners.size <= 1)',
                   'check(witnesses.size <= 1)', 'check(owner.childCount == children)',
-                  'parent.refresh() && parent == owner', 'if (roleOnly(child) && childBounds == ownerBounds)',
+                  'parent.refresh() && parent == owner',
                   'composeOptionOwner == found.first && composeOptionWitness == found.second &&',
                   'composeOptionBounds == geometry', 'roleOnly(found.second)',
-                  'Rect().also(found.second::getBoundsInScreen) == found.third',
                   'Rect().also(label::getBoundsInScreen) == labelBounds'):
         assert exact in body
+    padded = 'if (roleOnly(child) && touchTarget(childBounds, ownerBounds)) witnesses += child to childBounds' in body
+    if padded:
+        for exact in TOUCH_TARGET_SOURCE:
+            assert exact in body
+    else:
+        for exact in ('if (roleOnly(child) && childBounds == ownerBounds)',
+                      'Rect().also(found.second::getBoundsInScreen) == found.third'):
+            assert exact in body
+    def witness_geometry(child, owner):
+        return touch_target(child, owner) if padded else child == owner
     owner_expression = body.split('if (owner.className?.toString() == "android.view.View"', 1)[1].split(') {', 1)[0]
     owner_expression = 'owner.className?.toString() == "android.view.View"' + owner_expression
     fresh_expression = body.split('check(found.first.refresh() &&', 1)[1].split(')\n', 1)[0]
@@ -362,23 +371,72 @@ def compose_option_memory(source, label, binding, current=lambda: True):
             for child in children:
                 owned(child); owned(child.parent)
                 assert child.parent is node
-                if child.role == 'android.widget.RadioButton' and evaluate(role_expression, child, 'child') and child.bounds == node.bounds:
+                if child.role == 'android.widget.RadioButton' and evaluate(role_expression, child, 'child') and \
+                        witness_geometry(child.bounds, node.bounds):
                     witnesses.append(child)
             assert tuple(node.children) == children and len(witnesses) <= 1
-            if witnesses: owners.append((node, witnesses[0], node.bounds))
+            if witnesses: owners.append((node, witnesses[0], node.bounds, witnesses[0].bounds))
         node = node.parent
     assert node is None and len(owners) <= 1 and current()
     if not owners: return None
-    owner, witness, bounds = owners[0]
+    owner, witness, bounds, witness_bounds = owners[0]
     owned(owner); owned(witness); owned(label)
     assert evaluate(fresh_expression, owner, 'found.first') and evaluate(role_expression, witness, 'child')
-    assert witness.parent is owner and owner.bounds == witness.bounds == bounds and label.bounds == label_bounds
+    assert witness.parent is owner and owner.bounds == bounds and witness.bounds == witness_bounds and label.bounds == label_bounds
     found = (owner, witness, bounds, label_bounds)
     if binding:
         assert binding['owner'] is owner and binding['witness'] is witness and binding['geometry'] == found[2:]
     else:
         binding.update(owner=owner, witness=witness, geometry=found[2:])
     return owner
+
+
+TOUCH_TARGET_SOURCE = (
+    'val minimum = 48f * targetContext.resources.displayMetrics.density',
+    'if (inner == outer) return innerStart == outerStart',
+    'return inner < outer && kotlin.math.abs(outer - minimum) <= 1f &&',
+    'kotlin.math.abs((innerStart - outerStart) - (outerEnd - innerEnd)) <= 1',
+    'return !child.isEmpty && owner.contains(child) &&',
+    'Rect().also(found.second::getBoundsInScreen) == witnessBounds[found.second]',
+)
+
+
+def touch_target(child, owner, density=2.625):
+    """Finite stand-in for touchTarget on the pinned 1080x2400 420 dpi emulator, not Compose execution."""
+    minimum = 48 * density
+    def axis(inner_start, inner_end, outer_start, outer_end):
+        inner, outer = inner_end - inner_start, outer_end - outer_start
+        if inner == outer: return inner_start == outer_start
+        return inner < outer and abs(outer - minimum) <= 1 and abs((inner_start - outer_start) - (outer_end - inner_end)) <= 1
+    empty = child[0] >= child[2] or child[1] >= child[3]
+    inside = owner[0] <= child[0] and owner[1] <= child[1] and child[2] <= owner[2] and child[3] <= owner[3]
+    return not empty and inside and axis(child[0], child[2], owner[0], owner[2]) and axis(child[1], child[3], owner[1], owner[3])
+
+
+def restore_touch_target_bounds(source):
+    """Reverse only the role-child touch-target admission to the exact 304b bytes; no Kotlin execution."""
+    helper = source.split('                // Compose reports the owner with its 48 dp minimum touch target; the role\n', 1)
+    assert len(helper) == 2
+    tail = helper[1].split('                fun roleOnly(child: AccessibilityNodeInfo): Boolean =\n', 1)
+    assert len(tail) == 2
+    source = helper[0] + '                fun roleOnly(child: AccessibilityNodeInfo): Boolean =\n' + tail[1]
+    terms = (
+        ('                    val witnessBounds = mutableMapOf<AccessibilityNodeInfo, Rect>()\n', ''),
+        ('val witnesses = mutableListOf<Pair<AccessibilityNodeInfo, Rect>>()', 'val witnesses = mutableListOf<AccessibilityNodeInfo>()'),
+        ('if (roleOnly(child) && touchTarget(childBounds, ownerBounds)) witnesses += child to childBounds',
+         'if (roleOnly(child) && childBounds == ownerBounds) witnesses += child'),
+        ('''                            if (witnesses.size == 1) {
+                                owners += Triple(owner, witnesses.single().first, Rect(ownerBounds))
+                                witnessBounds[witnesses.single().first] = witnesses.single().second
+                            }
+''', '                            if (witnesses.size == 1) owners += Triple(owner, witnesses.single(), Rect(ownerBounds))\n'),
+        ('Rect().also(found.second::getBoundsInScreen) == witnessBounds[found.second]',
+         'Rect().also(found.second::getBoundsInScreen) == found.third'),
+    )
+    for corrected, original in terms:
+        assert source.count(corrected) == 1
+        source = source.replace(corrected, original, 1)
+    return source
 
 
 def restore_stale_owner_checked(source):
@@ -759,7 +817,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
             'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
         # Baseline includes guarded preparation and passive lifecycle checkpoints; progress stripping stays exact.
-        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), '7c2010d0dda27284e44ba3bab0167446f4f0371da36ba4e17c21a0cba539f4da')
+        self.assertEqual(hashlib.sha256(restore_touch_target_bounds(pattern.sub('', source)).encode()).hexdigest(), '7c2010d0dda27284e44ba3bab0167446f4f0371da36ba4e17c21a0cba539f4da')
         definition = source.split('// BEGIN APPROVAL_PROGRESS definition\n', 1)[1].split('// END APPROVAL_PROGRESS definition', 1)[0]
         self.assertIn('check(progressSequence in 0 until 32)', definition)
         self.assertIn('check(record.length <= 160)', definition)
@@ -784,7 +842,7 @@ class ApprovalHarnessTests(unittest.TestCase):
                  'confirm-retire-begin', 'confirm-retire-passed', 'disabled-send-begin', 'disabled-send-passed',
                  'primary-failure-capture-begin', 'finally-begin']
         self.assertEqual([match[2] for match in pattern.finditer(source)], names)
-        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(),
+        self.assertEqual(hashlib.sha256(restore_touch_target_bounds(pattern.sub('', source)).encode()).hexdigest(),
                          '383010e1e8d816cc7e98d85df737d0e939074d84ddbbbbc67bb0302ceb83e2ff')
         stages = ['RESUMED_MAIN_RETURNED', 'BODY_RESTORE_BEGIN', 'BODY_RESTORE_PASSED',
                   'CONFIRM_RETIRE_BEGIN', 'CONFIRM_RETIRE_PASSED', 'DISABLED_SEND_BEGIN', 'DISABLED_SEND_PASSED',
@@ -1162,7 +1220,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         constructor = 'private data class EarlySend(private val initialNode: AccessibilityNodeInfo,'
         self.assertEqual(projected.count(constructor), 1)
         projected = projected.replace(constructor, 'private data class EarlySend(val node: AccessibilityNodeInfo,')
-        self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(),
+        self.assertEqual(hashlib.sha256(restore_touch_target_bounds(projected).encode()).hexdigest(),
                          'adb00c075f257a89a84aef23227de0342a0e4cd103894bda923487f00fd1d480')
         reader = lambda value: value.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
         self.assertEqual(reader(source), reader(projected))
@@ -2225,12 +2283,55 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
 
     def test_two_parent_checked_removals_reverse_to_every_96fc_fixture_byte(self):
         source = self.source()
-        original = restore_stale_owner_checked(source)
+        original = restore_stale_owner_checked(restore_touch_target_bounds(source))
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
                          '9b35c3ca5a5a3e9839a34ba53410ab45957f83ada14f7bad30f8d81c7c6b5d53')
         self.assertEqual(source.count('!child.isCheckable && !child.isChecked && !child.isSelected'), 1)
         self.assertEqual(source.split('            fun staleDisabledAction(', 1)[1],
                          original.split('            fun staleDisabledAction(', 1)[1])
+
+    def test_touch_target_reversal_restores_every_304b_byte(self):
+        source = self.source()
+        for exact in TOUCH_TARGET_SOURCE:
+            self.assertEqual(source.count(exact), 1)
+        self.assertEqual(hashlib.sha256(restore_touch_target_bounds(source).encode()).hexdigest(),
+                         '217e641a736eeb45ff1faa41462c8ae4316b3231859bd59455841a4c0eba71da')
+
+    def observed_touch_target_nodes(self):
+        # Hosted run 39638211299 retained these exact owner, role-child and label rectangles.
+        f = compose_option_nodes()
+        f.root.bounds = (0, 0, 1080, 2400)
+        f.owner.checked = False
+        f.owner.bounds = (74, 1192, 1006, 1318)
+        f.witness.bounds = (74, 1197, 1006, 1312)
+        f.label.bounds = (184, 1223, 455, 1286)
+        return f
+
+    def test_observed_compose_touch_target_is_admitted_and_was_refused_before(self):
+        source = self.source()
+        f = self.observed_touch_target_nodes()
+        self.assertIs(compose_option_memory(source, f.label, {}), f.owner)
+        f = self.observed_touch_target_nodes()
+        try: result = compose_option_memory(restore_touch_target_bounds(source), f.label, {})
+        except AssertionError: result = None
+        self.assertIsNone(result)
+
+    def test_touch_target_refuses_off_centre_unpadded_and_oversized_role_children(self):
+        source = self.source()
+        changes = {
+            'off-centre': lambda f: setattr(f.witness, 'bounds', (74, 1192, 1006, 1307)),
+            'owner-not-48dp': lambda f: (setattr(f.owner, 'bounds', (74, 1190, 1006, 1320)),
+                                         setattr(f.witness, 'bounds', (74, 1197, 1006, 1312))),
+            'narrower': lambda f: setattr(f.witness, 'bounds', (80, 1197, 1000, 1312)),
+            'oversized': lambda f: setattr(f.witness, 'bounds', (74, 1190, 1006, 1320)),
+            'empty': lambda f: setattr(f.witness, 'bounds', (74, 1255, 1006, 1255)),
+        }
+        for name, change in changes.items():
+            with self.subTest(case=name):
+                f = self.observed_touch_target_nodes(); change(f)
+                try: result = compose_option_memory(source, f.label, {})
+                except AssertionError: result = None
+                self.assertIsNone(result)
 
     def test_both_parent_selection_states_need_the_same_role_and_actual_fresh_predicate(self):
         # Source-bound finite stand-in, not compiled Kotlin or an observed child hierarchy.
@@ -2311,7 +2412,7 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
 
     def test_retained_diagnostic_seams_restore_all_9a4_bytes_and_original_throwable_path(self):
         source = self.source()
-        original = strip_stale_option_evidence(source)
+        original = restore_touch_target_bounds(strip_stale_option_evidence(source))
         # This diagnostic projection includes only the two corrected parent predicates; the full 96fc reverse is separate.
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
                          'ec824f50ae31c873d76d9c60b9f946366ceab85ccaa5cd040f67f0c0111a732d')
@@ -2375,11 +2476,11 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
 
     def test_stale_open_phase_seams_restore_every_f556_byte_and_all_earlier_observers(self):
         source = self.source()
-        original = strip_stale_open_phases(source)
+        original = restore_touch_target_bounds(strip_stale_open_phases(source))
         # This phase projection includes only the two corrected parent predicates; the full 96fc reverse is separate.
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
                          '71a90f9f9776fd2b485498f0d2e40ad616efcd749d9075e91775e0c74d4bd135')
-        self.assertEqual(source.split('            // BEGIN STALE_COMPOSE_ROLE definition', 1)[1],
+        self.assertEqual(restore_touch_target_bounds(source).split('            // BEGIN STALE_COMPOSE_ROLE definition', 1)[1],
                          original.split('            // BEGIN STALE_COMPOSE_ROLE definition', 1)[1])
         self.assertEqual(source.split('        fun open(', 1)[0], original.split('        fun open(', 1)[0])
 

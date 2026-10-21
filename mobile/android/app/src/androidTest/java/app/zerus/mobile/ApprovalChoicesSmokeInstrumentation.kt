@@ -1019,6 +1019,21 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                         facts += "stale-option-node kind=$kind index=$index class=$type ownedWindow=${node.windowId == ownedWindow} ownedPackage=${node.packageName?.toString() == targetContext.packageName} visible=${node.isVisibleToUser} enabled=${node.isEnabled} checkable=${node.isCheckable} checked=${node.isChecked} children=${node.childCount} bounds=$rect"
                     } catch (_: Throwable) { factsOverflow = true }
                 }
+                // Compose reports the owner with its 48 dp minimum touch target; the role
+                // child keeps its layout bounds, centred in that target on each short axis.
+                fun touchTarget(child: Rect, owner: Rect): Boolean {
+                    val minimum = 48f * targetContext.resources.displayMetrics.density
+                    fun axis(innerStart: Int, innerEnd: Int, outerStart: Int, outerEnd: Int): Boolean {
+                        val inner = innerEnd - innerStart
+                        val outer = outerEnd - outerStart
+                        if (inner == outer) return innerStart == outerStart
+                        return inner < outer && kotlin.math.abs(outer - minimum) <= 1f &&
+                            kotlin.math.abs((innerStart - outerStart) - (outerEnd - innerEnd)) <= 1
+                    }
+                    return !child.isEmpty && owner.contains(child) &&
+                        axis(child.left, child.right, owner.left, owner.right) &&
+                        axis(child.top, child.bottom, owner.top, owner.bottom)
+                }
                 fun roleOnly(child: AccessibilityNodeInfo): Boolean =
                     child.className?.toString() == "android.widget.RadioButton" && child.isVisibleToUser &&
                     child.text.isNullOrEmpty() && child.contentDescription.isNullOrEmpty() && child.childCount == 0 &&
@@ -1039,6 +1054,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                     check(!labelBounds.isEmpty)
                     val seen = mutableListOf<AccessibilityNodeInfo>()
                     val owners = mutableListOf<Triple<AccessibilityNodeInfo, AccessibilityNodeInfo, Rect>>()
+                    val witnessBounds = mutableMapOf<AccessibilityNodeInfo, Rect>()
                     var candidate: AccessibilityNodeInfo? = label
                     for (depth in 0 until 16) {
                         val owner = candidate ?: break
@@ -1065,7 +1081,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                                 ownerBounds.contains(labelBounds)) { "Known-stale option owner geometry is unproven" }
                             val children = owner.childCount
                             check(children in 1..32) { "Known-stale option child enumeration is unknown or exhausted" }
-                            val witnesses = mutableListOf<AccessibilityNodeInfo>()
+                            val witnesses = mutableListOf<Pair<AccessibilityNodeInfo, Rect>>()
                             for (index in 0 until children) {
                                 val child = checkNotNull(owner.getChild(index)) { "Known-stale option child is unknown" }
                                 check(child.refresh() && child.windowId == ownedWindow &&
@@ -1076,12 +1092,15 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                                 if (child.className?.toString() == "android.widget.RadioButton") {
                                     fact("role-child", index, child)
                                     val childBounds = Rect().also(child::getBoundsInScreen)
-                                    if (roleOnly(child) && childBounds == ownerBounds) witnesses += child
+                                    if (roleOnly(child) && touchTarget(childBounds, ownerBounds)) witnesses += child to childBounds
                                 }
                             }
                             check(owner.childCount == children) { "Known-stale option child enumeration changed" }
                             check(witnesses.size <= 1) { "Known-stale option role witness is ambiguous" }
-                            if (witnesses.size == 1) owners += Triple(owner, witnesses.single(), Rect(ownerBounds))
+                            if (witnesses.size == 1) {
+                                owners += Triple(owner, witnesses.single().first, Rect(ownerBounds))
+                                witnessBounds[witnesses.single().first] = witnesses.single().second
+                            }
                         }
                         candidate = owner.parent
                     }
@@ -1098,7 +1117,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                         check(label.refresh() && label.windowId == ownedWindow &&
                             label.packageName?.toString() == targetContext.packageName && exactVisible(label, "Approve once") &&
                             Rect().also(label::getBoundsInScreen) == labelBounds)
-                        check(Rect().also(found.second::getBoundsInScreen) == found.third &&
+                        check(Rect().also(found.second::getBoundsInScreen) == witnessBounds[found.second] &&
                             Rect().also(found.first::getBoundsInScreen) == found.third)
                         val geometry = Rect(found.third) to Rect(labelBounds)
                         if (composeOptionOwner == null) {

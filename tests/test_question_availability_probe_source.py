@@ -70,9 +70,10 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256((MAIN / "QuestionUi.kt").read_bytes()).hexdigest(),
                          "841c0d5b2df250497b0f54ef8854574ca386e83cb735dc1a0873096d719e22a2")
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
-        # The fixture baseline includes the two parent-selection corrections; physical case oracles stay exact.
+        # The fixture baseline includes the parent-selection and role-child touch-target corrections;
+        # physical case oracles stay exact.
         self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
-                         "217e641a736eeb45ff1faa41462c8ae4316b3231859bd59455841a4c0eba71da")
+                         "7c5b8101630dc1c68843c24c0b077f8107fcb7f66b49452db37121b0f9278621")
 
     def test_prepared_publication_uses_the_actual_bounded_owner_before_any_atomic_install(self):
         model = (MAIN / "ZerusViewModel.kt").read_text()
