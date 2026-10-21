@@ -28,6 +28,31 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     private val phases = ArrayDeque<String>()
     private var failureEvidence = "owned-window-evidence UNKNOWN not captured"
     private var touchTrace: OwnedWindowTouchTrace? = null
+    // BEGIN QUESTION_UI_PROBE fixture-report
+    private var actionProbeReport: QuestionUiProbe.Report? = null
+    private fun actionProbeEvidence(): String = try {
+        val report = checkNotNull(actionProbeReport)
+        check(report.records.size <= QuestionUiProbe.MAX_RECORDS)
+        val lines = report.records.map { "compose-action $it" }
+        check(lines.all { it.length <= 1024 })
+        val status = if (report.closed && report.fault == QuestionUiProbe.Fault.NONE) "observed" else "UNKNOWN"
+        ("compose-action status=$status closed=${report.closed} fault=${report.fault} records=${lines.size} schema=1\n" +
+            lines.joinToString("\n")).also { check(it.length <= 512 * 1024) }
+    } catch (_: Throwable) { "compose-action status=UNKNOWN reason=result-unavailable" }
+    private fun smoke(store: PrivateStore) {
+        val owned = QuestionUiProbe.install()
+        var primary: Throwable? = null
+        try { smokeBody(store) }
+        catch (error: Throwable) { primary = error; throw error }
+        finally {
+            try { actionProbeReport = main { QuestionUiProbe.close(owned) } }
+            catch (cleanup: Throwable) {
+                val original = primary
+                if (original == null) throw cleanup else if (cleanup !== original) original.addSuppressed(cleanup)
+            }
+        }
+    }
+    // END QUESTION_UI_PROBE fixture-report
     private data class EarlySend(val node: AccessibilityNodeInfo, val window: Int, val current: () -> Boolean)
     private var earlySend: EarlySend? = null
     private data class InterceptorFailure(val guard: String, val type: String, val method: String, val path: String)
@@ -59,10 +84,10 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             check(cases == CASES)
             result.putString("approval_cases", cases.size.toString())
             result.putString("approval_case_ids", cases.joinToString(","))
-            result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only. ${touchResultEvidence().replace("\n", " | ")}\n")
+            result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only. ${touchResultEvidence().replace("\n", " | ")}\n${actionProbeEvidence()}\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
-            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n")
+            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n${actionProbeEvidence()}\n")
             finish(Activity.RESULT_CANCELED, result)
         }
     }
@@ -305,7 +330,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             question.run == target.run && question.conversation == target.conversation
         return "id=$id sel=${model.selected?.target == target} own=$current edit=${draft?.status == "editing"} v=${model.activityVerified} busy=${model.detailBusy} consent=${model.pendingQuestionSend != null} focus=${activity.hasWindowFocus()} resumed=${activity.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)}"
     }
-    private fun smoke(store: PrivateStore) {
+    private fun smokeBody(store: PrivateStore) {
         val target = Target("fixture-computer", "kimi/fixture/approval", "fixture-run", "fixture-conversation", "fixture-workspace")
         store.saveMessageState(MessageState(drafts = listOf(Draft(target, "Keep unrelated composer"))))
         store.saveReadState(ConversationReadState().head(target, "fixture-epoch", 0, 0, true))

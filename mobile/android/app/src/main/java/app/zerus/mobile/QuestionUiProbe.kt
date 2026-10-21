@@ -1,0 +1,112 @@
+package app.zerus.mobile
+
+import android.os.SystemClock
+import java.security.MessageDigest
+
+/** Inactive unless the isolated DEBUG instrumentation owns a session. Never invokes a UI action. */
+internal object QuestionUiProbe {
+    const val MAX_RECORDS = 256
+    enum class Stage { ENTRY, REQUEST_RESULT, CONTENT_COMMIT, SHOWING_COMMIT }
+    enum class Fault { NONE, OBSERVATION, OVERFLOW }
+    sealed interface Detail
+    data class Captured(val next: Boolean, val advance: Boolean, val editing: Boolean, val pending: Boolean,
+        val choices: Boolean, val reviewed: Boolean, val open: Boolean) : Detail
+    data class Committed(val eligible: Boolean, val remaining: Int, val reviewed: Boolean, val enabled: Boolean,
+        val available: Boolean, val editing: Boolean, val pending: Boolean, val complete: Boolean,
+        val disclosure: Boolean, val foreground: Boolean, val focused: Boolean, val next: Boolean,
+        val advance: Boolean, val choices: Boolean, val open: Boolean, val dialog: Boolean,
+        val visible: Boolean, val obscured: Boolean, val answerable: Boolean, val supported: Boolean) : Detail
+    data class Requested(val open: Boolean, val sameCard: Boolean, val option: String) : Detail
+    data class Showing(val open: Boolean, val eligible: Boolean, val showing: Boolean,
+        val sameCard: Boolean, val option: String) : Detail
+    data class Record(val stage: Stage, val uptimeMs: Long, val card: String, val questionObject: Int,
+        val selection: String, val detail: Detail)
+    data class Report(val closed: Boolean, val fault: Fault, val records: List<Record>)
+
+    /** Contains only immutable scalar records; no model, question, option map or action reference is retained. */
+    class Session internal constructor() {
+        private val records = ArrayDeque<Record>(MAX_RECORDS)
+        private var content: Record? = null
+        private var showing: Record? = null
+        private var closed = false
+        private var fault = Fault.NONE
+        @Synchronized internal fun healthy() = !closed && fault == Fault.NONE
+        private fun same(left: Record?, right: Record) = left != null && left.stage == right.stage &&
+            left.card == right.card && left.questionObject == right.questionObject &&
+            left.selection == right.selection && left.detail == right.detail
+        @Synchronized internal fun append(record: Record) {
+            if (!healthy()) return
+            // A review's 100ms recomposition does not grow the log when none of the observed values changed.
+            if (record.stage == Stage.CONTENT_COMMIT && same(content, record) ||
+                record.stage == Stage.SHOWING_COMMIT && same(showing, record)) return
+            if (records.size == MAX_RECORDS) { fault = Fault.OVERFLOW; return }
+            records.addLast(record)
+            if (record.stage == Stage.CONTENT_COMMIT) content = record
+            if (record.stage == Stage.SHOWING_COMMIT) showing = record
+        }
+        @Synchronized internal fun failed() { fault = Fault.OBSERVATION }
+        @Synchronized internal fun close(): Report {
+            check(!closed)
+            closed = true
+            return Report(true, fault, records.toList())
+        }
+    }
+
+    @Volatile private var session: Session? = null
+    val enabled get() = BuildConfig.DEBUG && session?.healthy() == true
+    @Synchronized fun install(): Session {
+        check(BuildConfig.DEBUG && session == null)
+        return Session().also { session = it }
+    }
+    @Synchronized fun close(owned: Session): Report {
+        check(session === owned)
+        val report = owned.close()
+        session = null
+        return report
+    }
+
+    private fun fingerprint(parts: List<String>): String {
+        check(parts.size <= 40 && parts.all { it.length <= 256 })
+        val hash = MessageDigest.getInstance("SHA-256")
+        for (part in parts) {
+            val bytes = part.toByteArray(Charsets.UTF_8)
+            hash.update(byteArrayOf((bytes.size ushr 8).toByte(), bytes.size.toByte()))
+            hash.update(bytes)
+        }
+        return hash.digest().joinToString("") { "%02x".format(it) }
+    }
+    private fun selection(options: Map<String, Set<String>>): String {
+        check(options.size <= 4 && options.keys.all { it.length <= 256 } &&
+            options.values.all { it.size <= 8 && it.all { id -> id.length <= 256 } })
+        return fingerprint(options.toSortedMap().flatMap { (prompt, ids) -> listOf(prompt, ids.size.toString()) + ids.sorted() })
+    }
+    private inline fun observe(stage: Stage, question: Question, options: Map<String, Set<String>>, detail: () -> Detail) {
+        val owned = session ?: return
+        if (!BuildConfig.DEBUG || !owned.healthy()) return
+        // Catch only probe construction/storage failures. No original UI callback/request/send is inside this boundary.
+        try {
+            val now = SystemClock.uptimeMillis()
+            val card = fingerprint(listOf(question.id, question.hash, question.run, question.conversation))
+            val selected = selection(options)
+            owned.append(Record(stage, now, card, System.identityHashCode(question), selected, detail()))
+        } catch (_: Throwable) { owned.failed() }
+    }
+    fun entry(question: Question, options: Map<String, Set<String>>, next: Boolean, advance: Boolean,
+        editing: Boolean, pending: Boolean, choices: Boolean, reviewed: Boolean, open: Boolean) {
+        observe(Stage.ENTRY, question, options) { Captured(next, advance, editing, pending, choices, reviewed, open) }
+    }
+    fun requested(question: Question, options: Map<String, Set<String>>, confirmation: BroaderChoiceConfirmation) {
+        observe(Stage.REQUEST_RESULT, question, options) { Requested(confirmation.open,
+            confirmation.questionId == question.id && confirmation.questionHash == question.hash,
+            fingerprint(listOf(confirmation.optionId))) }
+    }
+    fun committed(question: Question, options: Map<String, Set<String>>, detail: Committed) {
+        observe(Stage.CONTENT_COMMIT, question, options) { detail }
+    }
+    fun showing(question: Question, options: Map<String, Set<String>>, confirmation: BroaderChoiceConfirmation,
+        eligible: Boolean, choice: Choice?) {
+        observe(Stage.SHOWING_COMMIT, question, options) { Showing(confirmation.open, eligible, choice != null,
+            confirmation.questionId == question.id && confirmation.questionHash == question.hash,
+            fingerprint(listOf(choice?.id.orEmpty()))) }
+    }
+}

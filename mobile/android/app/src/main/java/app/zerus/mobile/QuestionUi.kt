@@ -170,6 +170,9 @@ import org.json.JSONObject
     val step = QuestionSteps.current(question.prompts, page, options, texts, formReplyText)
     val pageIndex = step.page
     fun primaryAction() {
+        // BEGIN QUESTION_UI_PROBE entry
+        if (QuestionUiProbe.enabled) QuestionUiProbe.entry(question, options, step.nextPage != null, step.canAdvance, editing, submitPending, choices, reviewed, broader.open)
+        // END QUESTION_UI_PROBE entry
         if (step.nextPage != null) {
             if (editing && !submitPending && step.canAdvance) {
                 persist(); navigate(step.nextPage)
@@ -178,10 +181,23 @@ import org.json.JSONObject
         else if (reviewed) {
             // A broader option sends only from its own confirmation.
             val confirmation = broader.request(question, options, true)
+            // BEGIN QUESTION_UI_PROBE request
+            if (QuestionUiProbe.enabled) QuestionUiProbe.requested(question, options, confirmation)
+            // END QUESTION_UI_PROBE request
             if (confirmation.open) broader = confirmation else submitAnswer()
         }
     }
     val primaryEnabled = if (step.nextPage != null) editing && !submitPending && step.canAdvance else sendEnabled && (!choices || reviewed)
+    // BEGIN QUESTION_UI_PROBE committed
+    if (QuestionUiProbe.enabled) {
+        val committedOptions = options
+        val committed = QuestionUiProbe.Committed(reviewEligible, remaining, reviewed, primaryEnabled,
+            available, editing, submitPending, complete, disclosureInWindow, foreground, window.isWindowFocused,
+            step.nextPage != null, step.canAdvance, choices, broader.open, inDialog, visible,
+            LocalConversationObscuration.current?.obscured == true, question.canAnswer, approvalSupported || permission || choices)
+        SideEffect { QuestionUiProbe.committed(question, committedOptions, committed) }
+    }
+    // END QUESTION_UI_PROBE committed
     val currentPrompts = question.prompts.getOrNull(pageIndex)?.let(::listOf).orEmpty()
     val otherPrompts = currentPrompts.mapNotNull { prompt -> QuestionPolicies.textField(question, prompt)?.let { prompt to it } }
     val submitVisible = QuestionPolicies.submitVisible(question)
@@ -389,6 +405,9 @@ import org.json.JSONObject
     options: Map<String, Set<String>>, eligible: Boolean, onChange: (BroaderChoiceConfirmation) -> Unit, send: () -> Unit) {
     val choice = confirmation.showing(question, options, eligible)
     LaunchedEffect(confirmation, choice) { if (confirmation.open && choice == null) onChange(confirmation.cancel()) }
+    // BEGIN QUESTION_UI_PROBE showing
+    if (QuestionUiProbe.enabled) SideEffect { QuestionUiProbe.showing(question, options, confirmation, eligible, choice) }
+    // END QUESTION_UI_PROBE showing
     if (choice == null) return
     ObscureConversation()
     ZerusAlertDialog(onDismissRequest = { onChange(confirmation.cancel()) },
