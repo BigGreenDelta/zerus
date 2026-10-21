@@ -899,13 +899,16 @@ Child events preserve the parent's conversation, model and history; ephemeral
 children show their recorded request, tools and result. Unknown inherited
 SessionStart events cannot replace an established parent. `/new` and `/clear`
 still change the main native conversation.
-Claude's background service runs conversations in processes that inherited the
-run token of whichever session started the service. A hook names its Claude
-process and conversation (`CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID`); an event from
-a Claude process that is neither the session's agent nor runs under it never
-changes that session. A conversation sent to the background belongs to the live
-session whose transcript ends with Claude's `continued-in` mark for it, and that
-session follows it without a clear; other background events are not recorded.
+Claude's background service runs jobs in processes that inherited the run token
+of whichever session started the service. A hook names its Claude process and
+conversation (`CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID`); an event from a Claude
+process that is neither the session's agent nor runs under it never changes that
+session by its token. A background job belongs to the live session whose agent
+window moved it there, as Claude's session registry records (`jobId`,
+`parkedJobId` in `sessions/<pid>.json`). The session follows the job's
+conversation without a clear when its transcript ends with Claude's
+`continued-in` mark for it; a new conversation in the job clears it as `/clear`
+does. Events of jobs that no live session holds are not recorded.
 
 ### Sending and attachments
 

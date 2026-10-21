@@ -1,11 +1,16 @@
-//! Claude's background service runs conversations in processes that inherited
-//! the HGS run token of whichever session started the service. Their hooks never
-//! belong to that session: a conversation sent to the background belongs to the
-//! session whose transcript ends with Claude's `continued-in` mark for it.
+//! Claude's background service runs jobs in processes that inherited the HGS
+//! run token of whichever session started the service. A job's hooks never
+//! belong to that session by the token: the job belongs to the session whose
+//! agent window moved it to the background, as Claude's session registry
+//! records (`jobId` of the job's process, `parkedJobId` of the window's).
 use super::*;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
+use std::time::Duration;
+
+/// How long a job that no live session holds is not looked for again.
+const UNHELD: Duration = Duration::from_secs(60);
 
 /// The Claude process that runs this hook, when Claude named it for this event's
 /// own conversation rather than an outer Claude passing its variables on.
@@ -45,56 +50,103 @@ fn runs_under(agent: u32) -> bool {
     false
 }
 
+/// A Claude process's entry in Claude's session registry.
+fn registry(pid: u32) -> Option<Value> {
+    let dir = nonempty_env("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".claude"));
+    let path = dir.join("sessions").join(format!("{pid}.json"));
+    let entry: Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+    (entry["pid"] == pid).then_some(entry)
+}
+
+/// The background job the session's live agent window holds.
+fn parked(record: &Value) -> Option<String> {
+    if !process_alive(record) {
+        return None;
+    }
+    let entry = registry(u32::try_from(record["pid"].as_u64()?).ok()?)?;
+    Some(string(&entry, "parkedJobId").to_owned()).filter(|job| !job.is_empty())
+}
+
 fn links() -> PathBuf {
-    root().join("continued")
+    root().join("background_jobs")
 }
 
-fn link(sid: &str) -> PathBuf {
-    links().join(format!("{:x}.json", Sha256::digest(sid.as_bytes())))
+fn read_link(path: &Path) -> Value {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
 }
 
-/// The session the link names, while that conversation is still its own.
-fn linked(path: &Path) -> Option<Value> {
-    let link: Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
-    read_run(string(&link, "name"), string(&link, "run_id"))
+/// The session a link names, while its window still holds the job.
+fn held(link: &Value) -> Option<Value> {
+    read_run(string(link, "name"), string(link, "run_id"))
         .ok()?
-        .filter(|record| record["conversation_id"] == link["conversation_id"])
+        .filter(|record| parked(record).as_deref() == Some(string(link, "job")))
 }
 
-/// The live session whose conversation `sid` continues, bound to it. A main
-/// SessionStart finds it by the mark; later events by the link it leaves.
+/// A link that no live session held when it was written a moment ago.
+fn unheld(link: &Value, path: &Path) -> bool {
+    link.is_object()
+        && string(link, "run_id").is_empty()
+        && fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < UNHELD))
+}
+
+/// The live session whose agent window moved the background job that runs this
+/// hook. A job that continues the session's conversation takes it on unchanged.
 pub(super) fn owner(event: &Value, sid: &str, panes: &Snapshot) -> Result<Option<Value>> {
-    let path = link(sid);
-    if path.exists() {
-        if let Some(record) = linked(&path) {
-            return Ok(Some(record));
-        }
-        let _ = fs::remove_file(&path);
-    }
-    if string(event, "hook_event_name") != "SessionStart" || !string(event, "agent_id").is_empty() {
-        return Ok(None);
-    }
-    let mut found = records()?.into_iter().filter(|record| {
-        string(record, "agent") == "claude"
-            && matches(record, panes.get(string(record, "name")))
-            && continued_in(record).as_deref() == Some(sid)
-    });
-    let (Some(mut record), None) = (found.next(), found.next()) else {
+    let Some(job) = claude_process(sid)
+        .and_then(registry)
+        .filter(|entry| entry["kind"] == "bg")
+        .map(|entry| string(&entry, "jobId").to_owned())
+        .filter(|job| !job.is_empty())
+    else {
         return Ok(None);
     };
-    record["conversation_id"] = json!(sid);
-    if !string(event, "transcript_path").is_empty() {
-        record["transcript"] = event["transcript_path"].clone();
-    }
-    write(&mut record)?;
-    // A link outlives neither its session nor that session's conversation.
-    for entry in fs::read_dir(links()).into_iter().flatten().flatten() {
-        if linked(&entry.path()).is_none() {
-            let _ = fs::remove_file(entry.path());
+    let path = links().join(format!("{:x}.json", Sha256::digest(job.as_bytes())));
+    let link = read_link(&path);
+    let mut record = match held(&link) {
+        Some(record) => record,
+        None if unheld(&link, &path) => return Ok(None),
+        None => {
+            let mut holding = records()?.into_iter().filter(|record| {
+                string(record, "agent") == "claude"
+                    && matches(record, panes.get(string(record, "name")))
+                    && parked(record).as_deref() == Some(job.as_str())
+            });
+            let found = match (holding.next(), holding.next()) {
+                (Some(record), None) => Some(record),
+                _ => None,
+            };
+            // A link outlives neither its window's hold on the job nor, unheld, a minute.
+            for entry in fs::read_dir(links()).into_iter().flatten().flatten() {
+                let old = read_link(&entry.path());
+                if held(&old).is_none() && !unheld(&old, &entry.path()) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+            let link = found.as_ref().map_or_else(
+                || json!({"job": job}),
+                |record| json!({"job": job, "name": record["name"], "run_id": record["run_id"]}),
+            );
+            atomic(&path, &format!("{link}\n"))?;
+            let Some(record) = found else {
+                return Ok(None);
+            };
+            record
         }
+    };
+    if string(&record, "conversation_id") != sid && continued_in(&record).as_deref() == Some(sid) {
+        record["conversation_id"] = json!(sid);
+        if !string(event, "transcript_path").is_empty() {
+            record["transcript"] = event["transcript_path"].clone();
+        }
+        write(&mut record)?;
     }
-    let link = json!({"name": record["name"], "run_id": record["run_id"], "conversation_id": sid});
-    atomic(&path, &format!("{link}\n"))?;
     Ok(Some(record))
 }
 
