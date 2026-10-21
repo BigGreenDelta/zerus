@@ -47,6 +47,12 @@ only after constructing a bounded addition of at most 25,600 characters, includi
 The snapshot describes the helper's own observations, not a later walker or unvisited children. The retained 9a4b failure
 again completed six cases and four receipts, but preserved no class descriptors through its logcat-only route; its actual
 class shape and helper return route remain unknown.
+Six fixed BEFORE/RETURNED phase markers bracket only the existing refresh-main, visible-title and verified-model waits
+in `open("stale-identity")`. Other open cases emit no new markers. The original calls, predicates and order stay exact;
+marker faults cannot prevent those calls. These markers use the existing 64-row phase ring and logcat channel, whose
+cooperative logger and bounded tail can omit observations. A missing marker leaves the active call unknown. The retained
+f556 run reached six completed cases before its original 90-second instrumentation timeout; these markers do not establish
+a blocked call, reduce the production review or renew any budget.
 Before its one negative physical DOWN/UP attempt, it freshly resolves the exact visible Send
 label in the current owned window, requires that control to be disabled, and checks its current on-screen bounds. A
 missing label, changed identity/window/geometry or enabled control fails; there is no cached-node fallback, second

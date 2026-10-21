@@ -671,9 +671,28 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                         .put(JSONObject().put("id", "3").put("label", "Reject").put("scope", "once")))))
             pending = q
             synchronized(raw) { raw.put("pending_questions", JSONArray().put(q)) }
+            // BEGIN STALE_OPEN_PHASE refresh-main-before
+            val traceStaleOpen = name == "stale-identity"
+            if (traceStaleOpen) try { phase("stale-open:REFRESH_MAIN_BEFORE") } catch (_: Throwable) { }
+            // END STALE_OPEN_PHASE refresh-main-before
             main { model.refreshActivity() }
+            // BEGIN STALE_OPEN_PHASE refresh-main-returned
+            if (traceStaleOpen) try { phase("stale-open:REFRESH_MAIN_RETURNED") } catch (_: Throwable) { }
+            // END STALE_OPEN_PHASE refresh-main-returned
+            // BEGIN STALE_OPEN_PHASE title-before
+            if (traceStaleOpen) try { phase("stale-open:TITLE_BEFORE") } catch (_: Throwable) { }
+            // END STALE_OPEN_PHASE title-before
             node("Review synthetic $name")
+            // BEGIN STALE_OPEN_PHASE title-returned
+            if (traceStaleOpen) try { phase("stale-open:TITLE_RETURNED") } catch (_: Throwable) { }
+            // END STALE_OPEN_PHASE title-returned
+            // BEGIN STALE_OPEN_PHASE verified-before
+            if (traceStaleOpen) try { phase("stale-open:VERIFIED_BEFORE") } catch (_: Throwable) { }
+            // END STALE_OPEN_PHASE verified-before
             await("fresh approval $name") { main { model.activityVerified && model.conversationQuestions.singleOrNull()?.id == name } }
+            // BEGIN STALE_OPEN_PHASE verified-returned
+            if (traceStaleOpen) try { phase("stale-open:VERIFIED_RETURNED") } catch (_: Throwable) { }
+            // END STALE_OPEN_PHASE verified-returned
             phase("open-ready:$name")
         }
         fun reviewed() { await("three real visible review seconds") { button("Send answer").isEnabled } }

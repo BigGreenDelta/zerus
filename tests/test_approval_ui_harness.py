@@ -16,7 +16,7 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
-# Fixture pins include failure-only memory evidence; the diagnostic reverse projection retains the full 9a4b fixture.
+# Fixture pins include stale-open phase markers; their reverse projection retains the full f556 fixture.
 
 
 def android_approval_progress():
@@ -242,7 +242,15 @@ def review_clock_memory(source, observation, clock, current_card=lambda: True):
     return SimpleNamespace(begin=begin, bind=bind, current=current, state=state)
 
 
+def strip_stale_open_phases(source):
+    pattern = re.compile(r'^([ ]*)// BEGIN STALE_OPEN_PHASE ([a-z-]+)\n[\s\S]*?^\1// END STALE_OPEN_PHASE \2\n', re.M)
+    assert [match[2] for match in pattern.finditer(source)] == ['refresh-main-before', 'refresh-main-returned',
+        'title-before', 'title-returned', 'verified-before', 'verified-returned']
+    return pattern.sub('', source)
+
+
 def strip_stale_option_evidence(source):
+    source = strip_stale_open_phases(source)
     pattern = re.compile(r'^([ ]*)// BEGIN STALE_OPTION_EVIDENCE ([a-z-]+)\n[\s\S]*?^\1// END STALE_OPTION_EVIDENCE \2\n', re.M)
     assert [match[2] for match in pattern.finditer(source)] == [
         'state', 'failure-stream', 'completed-state', 'delegate-complete', 'return-complete', 'publish']
@@ -735,7 +743,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
             'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
         # Baseline includes guarded preparation and passive lifecycle checkpoints; progress stripping stays exact.
-        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), 'd4fdb656823e8840ef99e46d46ef211698aa203cbbbfb8a22032870336ed6e28')
+        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), 'a346cb7aed1f49bda999a2643a9114d6b4fb0b23f470955976c52b411dc476c8')
         definition = source.split('// BEGIN APPROVAL_PROGRESS definition\n', 1)[1].split('// END APPROVAL_PROGRESS definition', 1)[0]
         self.assertIn('check(progressSequence in 0 until 32)', definition)
         self.assertIn('check(record.length <= 160)', definition)
@@ -761,7 +769,7 @@ class ApprovalHarnessTests(unittest.TestCase):
                  'primary-failure-capture-begin', 'finally-begin']
         self.assertEqual([match[2] for match in pattern.finditer(source)], names)
         self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(),
-                         '9038830aa2ce426acf4cbedab84075606b4c356e14f14a35e5fa6b9ed95d8c3c')
+                         'b8d7f559c1b4b9f346ce13c4e8547f153f6c1f71119ee0298083042c60e27758')
         stages = ['RESUMED_MAIN_RETURNED', 'BODY_RESTORE_BEGIN', 'BODY_RESTORE_PASSED',
                   'CONFIRM_RETIRE_BEGIN', 'CONFIRM_RETIRE_PASSED', 'DISABLED_SEND_BEGIN', 'DISABLED_SEND_PASSED',
                   'PRIMARY_FAILURE_CAPTURE_BEGIN', 'FINALLY_BEGIN']
@@ -1139,7 +1147,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(projected.count(constructor), 1)
         projected = projected.replace(constructor, 'private data class EarlySend(val node: AccessibilityNodeInfo,')
         self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(),
-                         '30cbaf982eb4f1ac41cb19e8d404aafc293bd34dca6130f050b63d3024cfc320')
+                         'e79eaa6fe78a9fd1a8763fedcc2059191064e42cb3fd2b403e0c1eb2e6b463a8')
         reader = lambda value: value.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
         self.assertEqual(reader(source), reader(projected))
         early = source.split('        fun earlyReview(', 1)[1].split('        var primaryFailure:', 1)[0]
@@ -2314,6 +2322,45 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
         except RuntimeError as observed:
             self.assertIs(observed, original)
         self.assertEqual(captured, 'stale-option-evidence status=UNKNOWN outcome=CAPTURE_FAULT')
+
+    def test_stale_open_phase_seams_restore_every_f556_byte_and_all_earlier_observers(self):
+        source = self.source()
+        original = strip_stale_open_phases(source)
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+                         '11c782d130599196259e5cdac97d96f5eaad572788e7533d4b7f8991a3e01c05')
+        self.assertEqual(source.split('            // BEGIN STALE_COMPOSE_ROLE definition', 1)[1],
+                         original.split('            // BEGIN STALE_COMPOSE_ROLE definition', 1)[1])
+        self.assertEqual(source.split('        fun open(', 1)[0], original.split('        fun open(', 1)[0])
+
+    def test_stale_open_six_fixed_markers_bracket_original_calls_only_for_one_name(self):
+        source = self.source()
+        opening = source.split('        fun open(', 1)[1].split('        fun reviewed()', 1)[0]
+        pattern = re.compile(r'^([ ]*)// BEGIN STALE_OPEN_PHASE ([a-z-]+)\n([\s\S]*?)^\1// END STALE_OPEN_PHASE \2\n', re.M)
+        seams = list(pattern.finditer(opening))
+        selector = re.search(r'val traceStaleOpen = ([^\n]+)', opening)[1]
+        self.assertEqual(selector, 'name == "stale-identity"')
+        names = re.findall(r'open\("([^"\n]+)"', source)
+        self.assertEqual(names.count('stale-identity'), 1)
+        for name in names:
+            self.assertEqual(finite_source_predicate(selector, dict(name=name)), name == 'stale-identity')
+        markers = []
+        for seam in seams:
+            body = seam[3]
+            match = re.search(r'if \(traceStaleOpen\) try \{ phase\("(stale-open:[A-Z_]+)"\) } catch \(_: Throwable\) \{ }', body)
+            self.assertIsNotNone(match)
+            markers.append(match[1])
+            for forbidden in ('main {', 'node(', 'await(', 'refresh(', 'getChild(', 'performAction', 'injectInputEvent',
+                              'sendStatus(', 'sleep(', 'Thread(', 'model.'):
+                self.assertNotIn(forbidden, body)
+        self.assertEqual(markers, ['stale-open:REFRESH_MAIN_BEFORE', 'stale-open:REFRESH_MAIN_RETURNED',
+            'stale-open:TITLE_BEFORE', 'stale-open:TITLE_RETURNED', 'stale-open:VERIFIED_BEFORE', 'stale-open:VERIFIED_RETURNED'])
+        calls = ['main { model.refreshActivity() }', 'node("Review synthetic $name")',
+            'await("fresh approval $name") { main { model.activityVerified && model.conversationQuestions.singleOrNull()?.id == name } }']
+        for index, call in enumerate(calls):
+            self.assertEqual(opening.count(call), 1)
+            self.assertLess(seams[index * 2].end(), opening.index(call))
+            self.assertLess(opening.index(call) + len(call), seams[index * 2 + 1].start())
+        self.assertEqual(opening.count('phase("stale-open:'), 6)
 
 
 class QuestionLayoutSourceTests(unittest.TestCase):
