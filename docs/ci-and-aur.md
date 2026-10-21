@@ -1089,7 +1089,11 @@ and fail cleanup. No discovered numeric PID is signalled. Windows first waits
 at most five seconds for the selected host's sessions to drain after pane kills,
 clamped before the original row end's last five seconds, then keeps the same
 pinned-handle exit and executable-release requirements. The 60 seconds is a row
-cleanup reserve; cleanup uses the existing absolute row end even after an early
+cleanup reserve. If image lookup becomes unavailable, one passive wait of at
+most five seconds on the same pinned handle may prove exit; the original end is
+checked again afterward. Timeout, unknown status or late completion still fails,
+without a forced stop, image-query retry or process-ID reopen. Cleanup uses
+the existing absolute row end even after an early
 body failure, and these checks do not create a renewed cleanup allowance.
 
 An identity-bound, bounded read-only `startup_terminal_choice` may be observed

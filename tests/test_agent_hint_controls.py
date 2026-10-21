@@ -865,11 +865,31 @@ class HintFixtureControls(unittest.TestCase):
             else:
                 with self.assertRaisesRegex(AssertionError, 'image unavailable'):
                     fixture.stop_pinned_handle(123, lambda: None, '/fixture/owned', wait, stop, lambda n: n)
-        self.assertEqual(calls, [(123, 0)] * 6)
+        self.assertEqual(calls, [(123, 0), (123, 5000)] * 3)
         with self.assertRaisesRegex(AssertionError, 'absolute image unavailable'):
             fixture.stop_pinned_handle(123, lambda: 'hgs.exe', '/fixture/owned', lambda *args: 0x102,
                                        lambda *args: signals.append(args), lambda n: n)
         self.assertEqual(signals, [])
+
+    def test_missing_image_passive_wait_cannot_pass_before_or_after_the_original_end(self):
+        for expire_after_wait in (False, True):
+            calls, images, signals, checks = [], [], [], []
+            def image(): images.append(123); return None
+            def wait(handle, milliseconds):
+                calls.append((handle, milliseconds))
+                return 0x102 if milliseconds == 0 else 0
+            def remaining(maximum):
+                checks.append(maximum)
+                if not expire_after_wait or len(checks) == 2:
+                    raise AssertionError('original end')
+                return maximum
+            with self.subTest(expire_after_wait=expire_after_wait), self.assertRaisesRegex(AssertionError, 'original end'):
+                fixture.stop_pinned_handle(123, image, '/fixture/owned', wait,
+                                           lambda *args: signals.append(args), remaining)
+            self.assertEqual(images, [123])
+            self.assertEqual(calls, [(123, 0), (123, 5000)] if expire_after_wait else [(123, 0)])
+            self.assertEqual(checks, [5, 1] if expire_after_wait else [5])
+            self.assertEqual(signals, [])
 
     def test_image_query_uses_only_the_supplied_handle_and_never_opens_a_pid(self):
         import ctypes

@@ -1594,6 +1594,9 @@ mod process {
     }
     /// Windows cannot list another process's open files without a driver; it can
     /// only say who holds a given file (`holds_open`).
+    // Retain this explicit unsupported capability and its contract test even
+    // though Windows fork readiness no longer calls PID-to-file enumeration.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn open_files(_: u32) -> std::result::Result<Vec<PathBuf>, RunError> {
         Err(RunError::Unsupported)
     }

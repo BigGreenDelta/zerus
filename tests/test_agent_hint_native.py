@@ -321,7 +321,12 @@ def stop_pinned_handle(handle, image, root, wait, terminate, remaining):
     if state != 0x102: raise AssertionError('UNKNOWN pinned handle state')
     actual = image()
     if actual is None:
-        if wait(handle, 0) == 0: return
+        # A retiring process can lose image-query availability before its
+        # already-pinned handle signals exit. Observe that same handle once;
+        # missing image proof never authorizes a forced stop or a PID reopen.
+        state = wait(handle, int(remaining(5) * 1000))
+        remaining(1)
+        if state == 0: return
         raise AssertionError('UNKNOWN pinned handle image unavailable')
     if not isinstance(actual, (str, os.PathLike)) or not os.path.isabs(actual):
         raise AssertionError('UNKNOWN pinned handle absolute image unavailable')
