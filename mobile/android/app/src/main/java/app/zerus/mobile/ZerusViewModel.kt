@@ -236,6 +236,27 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun contextOperation(target: Target) = contextOperations.lastOrNull { ContextPolicies.sameSessionRun(it.target, target) && it.blocksSending }
         ?: contextOperations.lastOrNull { ContextPolicies.sameSessionRun(it.target, target) }
     fun contextBlocked(target: Target) = sessionActions.any { it.target == target && it.blocksSending } || clearExpectation?.let { ContextPolicies.sameSessionRun(it.target, target) } == true || contextOperations.any { ContextPolicies.sameSessionRun(it.target, target) && it.blocksSending }
+    // BEGIN QUESTION_AVAILABILITY_PROBE definitions
+    private fun questionVerificationProbe(writer: QuestionUiProbe.VerificationWriter) {
+        if (!QuestionUiProbe.enabled) return
+        val frame = activeFrame
+        QuestionUiProbe.verification(selected?.target, writer, activityVerified, activeFrameVerified,
+            frame != null, frame?.presentation != null, frame != null && frame.target == selected?.target)
+    }
+    internal fun questionAvailabilityProbe(target: Target, online: Boolean): QuestionUiProbe.Availability? {
+        if (!QuestionUiProbe.enabled) return null
+        return try {
+            val verified = activityVerified
+            val preview = demo
+            val blocked = contextBlocked(target)
+            val actionBlocked = sessionActions.any { it.target == target && it.blocksSending }
+            val clearBlocked = clearExpectation?.let { ContextPolicies.sameSessionRun(it.target, target) } == true
+            val operationBlocked = contextOperations.any { ContextPolicies.sameSessionRun(it.target, target) && it.blocksSending }
+            QuestionUiProbe.Availability(verified, preview, online, blocked, actionBlocked, clearBlocked,
+                operationBlocked, selected?.target == target, online && verified && !blocked)
+        } catch (_: Throwable) { QuestionUiProbe.observationFailed(); null }
+    }
+    // END QUESTION_AVAILABILITY_PROBE definitions
     private var messageState by mutableStateOf(MessageState())
     private val messageRepository = MessagePersistence.get(application)
     private var persistence: OrderedStatePersistence<MessageState>? = null
@@ -914,11 +935,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val frame=if(guarded!=null && (incoming.window!=guarded || incoming.events!=guarded.displayed)) incoming.copy(events=guarded.displayed,presentation=null,truncated=incoming.truncated || guarded.hasBefore || guarded.hasAfter,window=guarded,indexComplete=historyComplete && !changed,indexing=historyIndexing) else incoming
         if(guarded!=null) historyWindows[incoming.target.key]=guarded
         activeFrame = frame; activeFrameVerified = verified
-        if (frame.presentation == null) { activityVerified = false; historyCached = activity != null }
+        if (frame.presentation == null) { activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-install-wait-presentation */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.INSTALL_WAIT_PRESENTATION) /* END QUESTION_AVAILABILITY_PROBE writer-install-wait-presentation */; historyCached = activity != null }
         frame.presentation?.let { prepared ->
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 conversationEvents = prepared.events; conversationOutgoing = prepared.messages; conversationQuestions = prepared.questions
-                activity = frame.raw; activityVerified = verified; historyCached = !verified; conversationHistoryTruncated = frame.truncated
+                activity = frame.raw; activityVerified = verified /* BEGIN QUESTION_AVAILABILITY_PROBE writer-install-presentation */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.INSTALL_PRESENTATION) /* END QUESTION_AVAILABILITY_PROBE writer-install-presentation */; historyCached = !verified; conversationHistoryTruncated = frame.truncated
                 publishPagingMetadata(frame)
                 captureUnreadBoundary(frame.target,prepared.events)
             }
@@ -953,7 +974,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if (conversationQuestions != questions) conversationQuestions = questions
                 if (conversationEvents != merged.events) conversationEvents = merged.events
                 if (conversationOutgoing != messages) conversationOutgoing = messages
-                activity = frame.raw; activityVerified = activeFrameVerified; historyCached = !activeFrameVerified; conversationHistoryTruncated = frame.truncated
+                activity = frame.raw; activityVerified = activeFrameVerified /* BEGIN QUESTION_AVAILABILITY_PROBE writer-prepare-presentation */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.PREPARE_PRESENTATION) /* END QUESTION_AVAILABILITY_PROBE writer-prepare-presentation */; historyCached = !activeFrameVerified; conversationHistoryTruncated = frame.truncated
                 publishPagingMetadata(frame)
                 if(pendingHistoryPosition==frame.target.key) { pendingHistoryPosition="";readPositionReady=true }
                 captureUnreadBoundary(frame.target,merged.events)
@@ -1538,7 +1559,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun setTerminalVisible(target:Target,visible:Boolean) {
         if(selected?.target != target) return
         terminalVisible=visible
-        if(visible) terminalSnapshot(target) else { terminalJob?.cancel();terminalLoading=false;terminalVerified=false;activityVerified=false;activeFrameVerified=false;refreshActivity() }
+        if(visible) terminalSnapshot(target) else { terminalJob?.cancel();terminalLoading=false;terminalVerified=false;activityVerified=false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-terminal-closed */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.TERMINAL_CLOSED) /* END QUESTION_AVAILABILITY_PROBE writer-terminal-closed */;activeFrameVerified=false;refreshActivity() }
     }
     fun terminalSnapshot(target:Target) {
         val reason=terminalOpenReason(target);if(reason.isNotBlank()) { terminalError=reason;return }
@@ -1779,7 +1800,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 else if(completed != null) when(SessionActionFollowUp.kind(completed,selected?.target,navigationId==navigation)) {
                     SessionActionFollowUp.Kind.Sessions -> { back();returnToSessionsSequence++;refresh() }
                     SessionActionFollowUp.Kind.OpenResult -> {
-                        activityVerified=false;activeFrameVerified=false;historyCached=activity != null
+                        activityVerified=false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-action-result */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.ACTION_RESULT) /* END QUESTION_AVAILABILITY_PROBE writer-action-result */;activeFrameVerified=false;historyCached=activity != null
                         resolveActionResult(completed,navigation,target)
                     }
                     SessionActionFollowUp.Kind.Refresh -> {
@@ -2128,7 +2149,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             machines = machines.filterNot { it.connectionId == connection.id }
             selectedMachines = selectedMachines.filterNot { it.connectionId == connection.id }.toSet()
             relayOperations = relayOperations - connection.id; machineOperations = machineOperations.filterKeys { it.connectionId != connection.id }
-            if (selected?.target?.connectionId == connection.id) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false; conversationEvents = emptyList(); conversationQuestions = emptyList(); conversationOutgoing = emptyList(); cancelCompactContinuation(); clearExpectation = null }
+            if (selected?.target?.connectionId == connection.id) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-connection-forgotten */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.CONNECTION_FORGOTTEN) /* END QUESTION_AVAILABILITY_PROBE writer-connection-forgotten */; conversationEvents = emptyList(); conversationQuestions = emptyList(); conversationOutgoing = emptyList(); cancelCompactContinuation(); clearExpectation = null }
         } catch (e: Exception) { error = "Could not revoke this phone on the gateway. The connection is preserved. ${e.message}" }
         finally { busy = false }
     }
@@ -2237,7 +2258,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         flushDrafts()
         if (!preserveProject) selectedProject = null
         navigationId++; cancelDetail()
-        selected = session; activityVerified = false; historyCached = false
+        selected = session; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-open-session */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.OPEN_SESSION) /* END QUESTION_AVAILABILITY_PROBE writer-open-session */; historyCached = false
         activeFrame = null; activity = null; conversationEvents = emptyList(); conversationQuestions = emptyList(); conversationOutgoing = emptyList(); conversationHistoryTruncated = false
         val warm = frames[session.target.key]?.takeIf { if (it.observedAt == 0L) historyCache.getMemory(it.target) != null else System.currentTimeMillis() - it.observedAt in 0..7L * 24 * 60 * 60 * 1000 }
         if (warm == null) frames.remove(session.target.key)
@@ -2331,7 +2352,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(selected?.target?.agentId?.isNotBlank() == true && parentSelection != null) { val parent=parentSelection!!;parentSelection=null;open(parent,true);return }
         cancelCompactContinuation(); clearExpectation = null
         flushDrafts()
-        if (selected != null) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false }
+        if (selected != null) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-back */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.BACK) /* END QUESTION_AVAILABILITY_PROBE writer-back */ }
         else selectedProject = null
     }
     fun refreshActivity(explicit: Boolean = false) {
@@ -2362,7 +2383,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(detailReadErrorOwner==(original.target to navigation)) error=""
                 val clear = clearExpectation?.takeIf { it.navigation == navigation && ContextPolicies.sameSessionRun(it.target, frame.target) }
                 if (clear != null && frame.target.conversation != clear.target.conversation && !clear.confirmed) {
-                    activityVerified = false; activeFrameVerified = false; historyCached = activity != null
+                    activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-clear-unconfirmed */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.CLEAR_UNCONFIRMED) /* END QUESTION_AVAILABILITY_PROBE writer-clear-unconfirmed */; activeFrameVerified = false; historyCached = activity != null
                     return@launch
                 }
                 val clearOp = clear?.takeIf { it.confirmed && frame.target.conversation.isNotBlank() && frame.target.conversation != it.target.conversation }
@@ -2391,7 +2412,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         } catch (e: CancellationException) { throw e }
-        catch (e: Exception) { if (detailGate.owns(operation.id) && navigationId == navigation) { activeFrameVerified = false; activityVerified = false; historyCached = activity != null; error = ReadFailure.message(e, "conversation");detailReadErrorOwner=original.target to navigation;if(!olderLoading) { readPositionReady=true;captureUnreadBoundary(original.target,conversationEvents) } } }
+        catch (e: Exception) { if (detailGate.owns(operation.id) && navigationId == navigation) { activeFrameVerified = false; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-inspect-failed */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.INSPECT_FAILED) /* END QUESTION_AVAILABILITY_PROBE writer-inspect-failed */; historyCached = activity != null; error = ReadFailure.message(e, "conversation");detailReadErrorOwner=original.target to navigation;if(!olderLoading) { readPositionReady=true;captureUnreadBoundary(original.target,conversationEvents) } } }
         finally {
             if (detailGate.finish(operation.id)) {
                 detailTimer?.cancel(); detailBusy = false; detailProgress = false

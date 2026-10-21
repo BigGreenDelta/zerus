@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Authored SDK-free source contracts; not Kotlin or runtime qualification."""
+import hashlib
+from pathlib import Path
+import re
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
+MODEL_SHA = "9e1cba7a676c8df4c10c54186b5b97a4c2be33cfc3e127c77532091e5534a7ec"
+MAIN_SHA = "aeadbc12421065f20ce51957a9504e071d65f3f85321153706ebdaf6e900fdfa"
+WRITERS = ["INSTALL_WAIT_PRESENTATION", "INSTALL_PRESENTATION", "PREPARE_PRESENTATION", "TERMINAL_CLOSED",
+           "ACTION_RESULT", "CONNECTION_FORGOTTEN", "OPEN_SESSION", "BACK", "CLEAR_UNCONFIRMED", "INSPECT_FAILED"]
+
+
+def strip_availability(source):
+    source = re.sub(r"^    // BEGIN QUESTION_AVAILABILITY_PROBE ([a-z-]+)\n[\s\S]*?^    // END QUESTION_AVAILABILITY_PROBE \1\n", "", source, flags=re.M)
+    return re.sub(r" /\* BEGIN QUESTION_AVAILABILITY_PROBE (writer-[a-z-]+) \*/[\s\S]*?/\* END QUESTION_AVAILABILITY_PROBE \1 \*/", "", source)
+
+
+class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
+    def test_original_model_and_main_reconstruct_including_every_policy_and_assignment(self):
+        for name, digest in [("ZerusViewModel.kt", MODEL_SHA), ("MainActivity.kt", MAIN_SHA)]:
+            source = (MAIN / name).read_text()
+            self.assertEqual(hashlib.sha256(strip_availability(source).encode()).hexdigest(), digest)
+            changed = source.replace("activityVerified || model.demo", "true", 1) if name == "MainActivity.kt" else source.replace("it.blocksSending", "false", 1)
+            self.assertNotEqual(hashlib.sha256(strip_availability(changed).encode()).hexdigest(), digest)
+
+    def test_each_existing_write_is_followed_by_its_fixed_reason_without_changing_rhs(self):
+        source = (MAIN / "ZerusViewModel.kt").read_text()
+        writes = re.findall(r"\bactivityVerified\s*=(?!=)\s*(false|verified|activeFrameVerified) /\* BEGIN QUESTION_AVAILABILITY_PROBE (writer-[a-z-]+) \*/; questionVerificationProbe\(QuestionUiProbe.VerificationWriter\.([A-Z_]+)\) /\* END QUESTION_AVAILABILITY_PROBE \2 \*/", source)
+        self.assertEqual([w[2] for w in writes], WRITERS)
+        self.assertEqual([w[0] for w in writes], ["false", "verified", "activeFrameVerified"] + ["false"] * 7)
+        self.assertEqual(len(re.findall(r"\bactivityVerified\s*=(?!=)", strip_availability(source))), 10)
+
+    def test_availability_inputs_are_captured_before_side_effect_and_preserve_the_actual_expression(self):
+        model = (MAIN / "ZerusViewModel.kt").read_text().split("internal fun questionAvailabilityProbe(", 1)[1].split("// END QUESTION_AVAILABILITY_PROBE definitions", 1)[0]
+        self.assertLess(model.index("if (!QuestionUiProbe.enabled) return null"), model.index("val verified = activityVerified"))
+        self.assertIn("val blocked = contextBlocked(target)", model)
+        for term in ("sessionActions.any { it.target == target && it.blocksSending }", "clearExpectation?.let { ContextPolicies.sameSessionRun(it.target, target) } == true", "contextOperations.any { ContextPolicies.sameSessionRun(it.target, target) && it.blocksSending }"):
+            self.assertIn(term, model)
+        self.assertIn("online && verified && !blocked", model)
+        main = (MAIN / "MainActivity.kt").read_text().split("// BEGIN QUESTION_AVAILABILITY_PROBE committed", 1)[1].split("// END QUESTION_AVAILABILITY_PROBE committed", 1)[0]
+        self.assertLess(main.index("if (QuestionUiProbe.enabled)"), main.index("model.questionAvailabilityProbe(target, online)"))
+        self.assertIn("SideEffect { QuestionUiProbe.availability(target, observedAvailability) }", main)
+        self.assertNotIn("model.", main.split("SideEffect", 1)[1])
+
+    def test_model_observation_is_default_null_bounded_typed_and_catches_only_observer_work(self):
+        probe = (MAIN / "QuestionUiProbe.kt").read_text()
+        observer = probe.split("private inline fun observeTarget(", 1)[1].split("    fun verification(", 1)[0]
+        guard = "if (!BuildConfig.DEBUG || !owned.healthy()) return"
+        self.assertLess(observer.index("val owned = session ?: return"), observer.index(guard))
+        for work in ("SystemClock.uptimeMillis()", "target?.let", "fingerprint(identity)", "Record(", "detail()"):
+            self.assertLess(observer.index(guard), observer.index(work))
+        self.assertIn("catch (_: Throwable) { owned.failed() }", observer)
+        self.assertIn("const val MAX_RECORDS = 256", probe)
+        self.assertIn("if (records.size == MAX_RECORDS) { fault = Fault.OVERFLOW; return }", probe)
+        self.assertIn("record.stage == Stage.AVAILABILITY_COMMIT && same(availability, record)", probe)
+        self.assertIn("data class Verification(val writer: VerificationWriter", probe)
+        for forbidden in ("ZerusViewModel", "JSONObject", "question.prompts", "choice.label", "java.io", "okhttp", "Thread(", "launch(", "delay("):
+            self.assertNotIn(forbidden, probe)
+
+    def test_question_ui_and_entire_physical_fixture_are_unchanged(self):
+        self.assertEqual(hashlib.sha256((MAIN / "QuestionUi.kt").read_bytes()).hexdigest(),
+                         "0a1e6721a88511fe1ef385d11604481e5ad85d553b4f7b84a8574ddfb12efd93")
+        fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
+        self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
+                         "4fc8082c8da73e0c914b012afab02188229d0e79b23ab15e44c4edb8b246e09a")
+
+
+if __name__ == "__main__":
+    unittest.main()

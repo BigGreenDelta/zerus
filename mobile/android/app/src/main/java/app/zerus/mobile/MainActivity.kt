@@ -771,6 +771,12 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val ownSendId = model.ownSendId(target)
     // Exact inspection evidence supersedes the older computer catalog while reading.
     val online = model.activityVerified || model.demo
+    // BEGIN QUESTION_AVAILABILITY_PROBE committed
+    if (QuestionUiProbe.enabled) {
+        val observedAvailability = model.questionAvailabilityProbe(target, online)
+        if (observedAvailability != null) SideEffect { QuestionUiProbe.availability(target, observedAvailability) }
+    }
+    // END QUESTION_AVAILABILITY_PROBE committed
     val warning = if (model.demo) "" else raw?.string("pending_questions_error", "provider_messages_error").orEmpty()
     val queueVisible = target.agentId.isBlank() && !archived && raw?.optJSONObject("input_queue")?.string("id").orEmpty().isNotBlank()
     val unreadBoundary = model.firstUnreadEventId.takeIf { id -> events.any { it.id == id } }.orEmpty()

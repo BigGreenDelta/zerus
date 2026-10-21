@@ -6,7 +6,9 @@ import java.security.MessageDigest
 /** Inactive unless the isolated DEBUG instrumentation owns a session. Never invokes a UI action. */
 internal object QuestionUiProbe {
     const val MAX_RECORDS = 256
-    enum class Stage { ENTRY, REQUEST_RESULT, CONTENT_COMMIT, SHOWING_COMMIT }
+    enum class Stage { ENTRY, REQUEST_RESULT, CONTENT_COMMIT, SHOWING_COMMIT, VERIFICATION_WRITE, AVAILABILITY_COMMIT }
+    enum class VerificationWriter { INSTALL_WAIT_PRESENTATION, INSTALL_PRESENTATION, PREPARE_PRESENTATION,
+        TERMINAL_CLOSED, ACTION_RESULT, CONNECTION_FORGOTTEN, OPEN_SESSION, BACK, CLEAR_UNCONFIRMED, INSPECT_FAILED }
     enum class Fault { NONE, OBSERVATION, OVERFLOW }
     sealed interface Detail
     data class Captured(val next: Boolean, val advance: Boolean, val editing: Boolean, val pending: Boolean,
@@ -19,6 +21,11 @@ internal object QuestionUiProbe {
     data class Requested(val open: Boolean, val sameCard: Boolean, val option: String) : Detail
     data class Showing(val open: Boolean, val eligible: Boolean, val showing: Boolean,
         val sameCard: Boolean, val option: String) : Detail
+    data class Verification(val writer: VerificationWriter, val verified: Boolean, val frameVerified: Boolean,
+        val hasFrame: Boolean, val hasPresentation: Boolean, val frameMatchesSelected: Boolean) : Detail
+    data class Availability(val verified: Boolean, val demo: Boolean, val online: Boolean, val blocked: Boolean,
+        val actionBlocked: Boolean, val clearBlocked: Boolean, val operationBlocked: Boolean,
+        val selected: Boolean, val available: Boolean) : Detail
     data class Record(val stage: Stage, val uptimeMs: Long, val card: String, val questionObject: Int,
         val selection: String, val detail: Detail)
     data class Report(val closed: Boolean, val fault: Fault, val records: List<Record>)
@@ -28,6 +35,7 @@ internal object QuestionUiProbe {
         private val records = ArrayDeque<Record>(MAX_RECORDS)
         private var content: Record? = null
         private var showing: Record? = null
+        private var availability: Record? = null
         private var closed = false
         private var fault = Fault.NONE
         @Synchronized internal fun healthy() = !closed && fault == Fault.NONE
@@ -38,11 +46,13 @@ internal object QuestionUiProbe {
             if (!healthy()) return
             // A review's 100ms recomposition does not grow the log when none of the observed values changed.
             if (record.stage == Stage.CONTENT_COMMIT && same(content, record) ||
-                record.stage == Stage.SHOWING_COMMIT && same(showing, record)) return
+                record.stage == Stage.SHOWING_COMMIT && same(showing, record) ||
+                record.stage == Stage.AVAILABILITY_COMMIT && same(availability, record)) return
             if (records.size == MAX_RECORDS) { fault = Fault.OVERFLOW; return }
             records.addLast(record)
             if (record.stage == Stage.CONTENT_COMMIT) content = record
             if (record.stage == Stage.SHOWING_COMMIT) showing = record
+            if (record.stage == Stage.AVAILABILITY_COMMIT) availability = record
         }
         @Synchronized internal fun failed() { fault = Fault.OBSERVATION }
         @Synchronized internal fun close(): Report {
@@ -109,4 +119,26 @@ internal object QuestionUiProbe {
             confirmation.questionId == question.id && confirmation.questionHash == question.hash,
             fingerprint(listOf(choice?.id.orEmpty()))) }
     }
+
+    /** Model records use a target digest in card, zero questionObject and an empty selection digest. */
+    private inline fun observeTarget(stage: Stage, target: Target?, detail: () -> Detail) {
+        val owned = session ?: return
+        if (!BuildConfig.DEBUG || !owned.healthy()) return
+        try {
+            val now = SystemClock.uptimeMillis()
+            val identity = target?.let { listOf(it.computerId, it.session, it.run, it.conversation,
+                it.connectionId, it.archiveId, it.agentId, it.parentConversation) }.orEmpty()
+            owned.append(Record(stage, now, fingerprint(identity), 0, fingerprint(emptyList()), detail()))
+        } catch (_: Throwable) { owned.failed() }
+    }
+    fun verification(target: Target?, writer: VerificationWriter, verified: Boolean, frameVerified: Boolean,
+        hasFrame: Boolean, hasPresentation: Boolean, frameMatchesSelected: Boolean) {
+        observeTarget(Stage.VERIFICATION_WRITE, target) {
+            Verification(writer, verified, frameVerified, hasFrame, hasPresentation, frameMatchesSelected)
+        }
+    }
+    fun availability(target: Target, detail: Availability) {
+        observeTarget(Stage.AVAILABILITY_COMMIT, target) { detail }
+    }
+    fun observationFailed() { if (BuildConfig.DEBUG) session?.failed() }
 }
