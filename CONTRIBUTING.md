@@ -82,47 +82,6 @@ A change to tmux or `ps` call sites must keep Unix behaviour unchanged: compare 
 `scripts/ci/check-windows-target.sh` type-checks the Windows target from Linux or
 macOS.
 
-The six Windows desktop write-startup regressions run in the ordinary Qt suites.
-For their one-time causal qualification, include the hidden marker
-`<!-- zerus-write-startup-causal-v1 -->` in the initial PR body, or add the PR label
-`windows-write-startup-causal` before a source push. The existing Windows job then
-builds `test_hgsclient` and `test_sessionswindow` in one private source copy with
-only the three queued starts restored to inline startup (variant A). It requires each row's exact pre-admission
-`UnknownError` assertion to fail after proving real `FailedToStart`, `NotRunning`
-and PID zero. It then additionally restores the three inline failure emissions
-(variant B), incrementally rebuilds only `test_sessionswindow`, and requires the
-three exact original pending-state assertions to fail. Every source variant is
-separately pinned and mapped; all other postimages and timers stay fixed. Variant
-A alone is not expected to break the consumer rows. Both arms share the original
-480-second whole/60-second cleanup budget and max2 build parallelism; exhaustion
-stops without renewing a deadline or repeating an arm.
-This source-bound opt-in is skipped on
-main and on unmarked, unlabeled PRs; it changes no tested candidate or package
-input. The marker selects a keyless test only and grants no deployment authority.
-The direct fixture holds its own noninheritable, exclusive file handle, proves a
-second data/execute open fails with `ERROR_SHARING_VIOLATION`, then checks that
-the file still passes Qt's executable metadata admission. It creates no probe
-process. The fixed rows arm a real `errorOccurred` snapshot after the API returns,
-before event dispatch, and require `FailedToStart`, `NotRunning` and PID zero
-from that snapshot; a deleted QProcess is never inspected. Qt's numeric native
-error remains unknown. The three SessionsWindow consumer bodies are unchanged.
-Native startup is queued only after the original timer starts; an expired or
-already reported request cannot start or write payload. This preserves the
-original deadline without promising preemption of a blocked native startup.
-The earlier malformed-image 240-second timeouts remain unresolved evidence;
-passing the sharing-denial fixture would not establish their cause. The old
-failure-wrapper-only variant is superseded, not reclassified as causal evidence.
-The direct rows emit fixed, content-free stderr regions, including an outer
-row-unwound marker after their fixture/client locals are destroyed. At most 64
-markers are attempted. Logger IO is cooperative: a last marker identifies a
-region, not an individual blocked call, deadlock, native cause or successful cleanup.
-The Windows HgsClient CTest also enables QtTest `-vs` signal logging for the full
-suite through the existing text/JUnit outputs. Other platforms and suites keep
-their commands. Signal logging formats argument values, uses cooperative output
-and can change timing; it is not a native stack or proof of a blocked call. A
-passing diagnostic does not establish the earlier timeout's cause or replace
-the paired old/fixed qualification.
-
 On macOS the Rust standard library marks a child's pipes close-on-exec only after
 creating them, so a child that another thread starts in between inherits them and
 holds that exchange's input or output open until it exits. Where threads of one

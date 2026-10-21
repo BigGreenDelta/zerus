@@ -15,13 +15,10 @@
 #include <QUuid>
 #include <atomic>
 #include <memory>
-// BEGIN WRITE_STARTUP_ROW_TRACE includes
 #ifdef Q_OS_WIN
 #include <QScopeGuard>
-#include <cstdio>
 #include <qt_windows.h>
 #endif
-// END WRITE_STARTUP_ROW_TRACE includes
 #ifndef Q_OS_WIN
 #include <fcntl.h>
 #include <unistd.h>
@@ -1274,40 +1271,6 @@ print('{}')
 }
 
 #ifdef Q_OS_WIN
-// BEGIN WRITE_STARTUP_ROW_TRACE definition
-namespace {
-enum class WriteStartupPhase { RowEntry, FilePrepared, BeforeRequest, RequestReturned, ProcessProof,
-    ResultWait, ResultReceived, NextTurn, BodyDone, RowUnwound };
-
-// Fixed content-free regions only. Stderr IO is cooperative, not a timeout or a
-// proof of an individual blocked call. Logging failure never changes an oracle.
-void writeStartupTrace(const QString &operation, WriteStartupPhase phase) noexcept
-{
-    static unsigned remaining = 64;
-    if (!remaining) return;
-    const char *row = operation == "message" ? "message" : operation == "queue" ? "queue"
-        : operation == "settings" ? "settings" : nullptr;
-    if (!row) return;
-    const char *label = nullptr;
-    switch (phase) {
-    case WriteStartupPhase::RowEntry: label = "row-entry"; break;
-    case WriteStartupPhase::FilePrepared: label = "file-prepared"; break;
-    case WriteStartupPhase::BeforeRequest: label = "before-request"; break;
-    case WriteStartupPhase::RequestReturned: label = "request-returned"; break;
-    case WriteStartupPhase::ProcessProof: label = "process-proof"; break;
-    case WriteStartupPhase::ResultWait: label = "result-wait"; break;
-    case WriteStartupPhase::ResultReceived: label = "result-received"; break;
-    case WriteStartupPhase::NextTurn: label = "next-turn"; break;
-    case WriteStartupPhase::BodyDone: label = "body-done"; break;
-    case WriteStartupPhase::RowUnwound: label = "row-unwound"; break;
-    }
-    if (!label) return;
-    --remaining;
-    (void)std::fprintf(stderr, "ZERUS_WRITE_STARTUP v=1 row=%s phase=%s\n", row, label);
-    (void)std::fflush(stderr);
-}
-}
-// END WRITE_STARTUP_ROW_TRACE definition
 void TestHgsClient::writeStartupFailuresAreReportedAfterRequest_data()
 {
     QTest::addColumn<QString>("operation");
@@ -1317,11 +1280,6 @@ void TestHgsClient::writeStartupFailuresAreReportedAfterRequest_data()
 void TestHgsClient::writeStartupFailuresAreReportedAfterRequest()
 {
     QFETCH(QString, operation);
-    // BEGIN WRITE_STARTUP_ROW_TRACE row-entry
-    // Own the fixed row value; this guard runs after every later fixture/client/spying local.
-    const auto unwound = qScopeGuard([operation] { writeStartupTrace(operation, WriteStartupPhase::RowUnwound); });
-    writeStartupTrace(operation, WriteStartupPhase::RowEntry);
-    // END WRITE_STARTUP_ROW_TRACE row-entry
     QTemporaryDir directory; QVERIFY(directory.isValid());
     const QString program = directory.filePath("invalid-image.exe");
     QFile executable(program); QVERIFY(executable.open(QIODevice::WriteOnly));
@@ -1348,9 +1306,6 @@ void TestHgsClient::writeStartupFailuresAreReportedAfterRequest()
     QVERIFY(probe == INVALID_HANDLE_VALUE);
     QCOMPARE(probeError, DWORD(ERROR_SHARING_VIOLATION));
     QVERIFY(QFileInfo(program).isFile()); QVERIFY(QFileInfo(program).isExecutable());
-    // BEGIN WRITE_STARTUP_ROW_TRACE file-prepared
-    writeStartupTrace(operation, WriteStartupPhase::FilePrepared);
-    // END WRITE_STARTUP_ROW_TRACE file-prepared
 
     QProcess::ProcessError errorAtFailure = QProcess::UnknownError;
     QProcess::ProcessState stateAtFailure = QProcess::Starting;
@@ -1370,21 +1325,15 @@ void TestHgsClient::writeStartupFailuresAreReportedAfterRequest()
     };
     connect(&client, &HgsClient::queueSendFinished, &client, finished);
     connect(&client, &HgsClient::settingsFinished, &client, finished);
-    // BEGIN WRITE_STARTUP_ROW_TRACE before-request
-    writeStartupTrace(operation, WriteStartupPhase::BeforeRequest);
-    // END WRITE_STARTUP_ROW_TRACE before-request
     if (operation == "message")
         registered = client.requestSendMessage({}, "codex/project", "Keep this message", {}, "run", "conversation");
     else if (operation == "queue")
         registered = client.requestQueueSendNow({}, "codex/project", "run", "conversation", "q-private");
     else registered = client.requestSettings({}, "codex/project", "gpt-6.1-sol", "xhigh", "run", "conversation");
     returned = true;
-    // BEGIN WRITE_STARTUP_ROW_TRACE request-returned
-    writeStartupTrace(operation, WriteStartupPhase::RequestReturned);
-    // END WRITE_STARTUP_ROW_TRACE request-returned
     auto *process = client.findChild<QProcess *>(); QVERIFY(process);
-    // The inline-start variant must first prove a real native start failure;
-    // only the following pre-admission assertion may qualify its causal RED.
+    // Starting inside the request call would already have failed here, before
+    // the caller registered the returned ID.
     if (process->error() != QProcess::UnknownError) {
         QCOMPARE(process->error(), QProcess::FailedToStart);
         QCOMPARE(process->state(), QProcess::NotRunning);
@@ -1400,18 +1349,9 @@ void TestHgsClient::writeStartupFailuresAreReportedAfterRequest()
         errorAtFailure = error; stateAtFailure = process->state(); pidAtFailure = process->processId();
         failureObserved = true;
     });
-    // BEGIN WRITE_STARTUP_ROW_TRACE process-proof
-    writeStartupTrace(operation, WriteStartupPhase::ProcessProof);
-    // END WRITE_STARTUP_ROW_TRACE process-proof
     QVERIFY(failed.isEmpty()); QVERIFY(queued.isEmpty()); QVERIFY(settings.isEmpty());
     auto &result = operation == "message" ? failed : operation == "queue" ? queued : settings;
-    // BEGIN WRITE_STARTUP_ROW_TRACE result-wait
-    writeStartupTrace(operation, WriteStartupPhase::ResultWait);
-    // END WRITE_STARTUP_ROW_TRACE result-wait
     QTRY_COMPARE(result.size(), 1);
-    // BEGIN WRITE_STARTUP_ROW_TRACE result-received
-    writeStartupTrace(operation, WriteStartupPhase::ResultReceived);
-    // END WRITE_STARTUP_ROW_TRACE result-received
     QVERIFY(failureObserved);
     QCOMPARE(errorAtFailure, QProcess::FailedToStart);
     QCOMPARE(stateAtFailure, QProcess::NotRunning);
@@ -1429,16 +1369,10 @@ void TestHgsClient::writeStartupFailuresAreReportedAfterRequest()
     }
     bool nextTurn = false;
     QTimer::singleShot(0, &client, [&] { nextTurn = true; });
-    // BEGIN WRITE_STARTUP_ROW_TRACE next-turn
-    writeStartupTrace(operation, WriteStartupPhase::NextTurn);
-    // END WRITE_STARTUP_ROW_TRACE next-turn
     QTRY_VERIFY(nextTurn); QCOMPARE(result.size(), 1);
     QCOMPARE(failed.size(), operation == "message" ? 1 : 0);
     QCOMPARE(queued.size(), operation == "queue" ? 1 : 0);
     QCOMPARE(settings.size(), operation == "settings" ? 1 : 0);
-    // BEGIN WRITE_STARTUP_ROW_TRACE body-done
-    writeStartupTrace(operation, WriteStartupPhase::BodyDone);
-    // END WRITE_STARTUP_ROW_TRACE body-done
 }
 #endif
 

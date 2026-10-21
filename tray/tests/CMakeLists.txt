@@ -234,13 +234,7 @@ set_tests_properties(analytics PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen
 target_include_directories(test_hgsclient PRIVATE ../src)
 target_link_libraries(test_hgsclient PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
 target_compile_definitions(test_hgsclient PRIVATE ZERUS_OPENCODE_QUEUED_MESSAGE_IDS="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-queued-message-ids.json")
-if(WIN32)
-    # Diagnostic signal ordering for this suite only; rows, oracles and the
-    # existing CTest timeout remain unchanged.
-    zerus_add_test(hgsclient test_hgsclient -vs)
-else()
-    zerus_add_test(hgsclient test_hgsclient)
-endif()
+zerus_add_test(hgsclient test_hgsclient)
 
 add_executable(test_readmarksync test_readmarksync.cpp)
 target_include_directories(test_readmarksync PRIVATE ../src)
