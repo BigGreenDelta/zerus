@@ -3,9 +3,13 @@
 These are authored controls, not OS isolation or native compatibility evidence.
 """
 import copy
+import builtins
 import hashlib
 import json
 from pathlib import Path
+import sys
+import tempfile
+import types
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -41,6 +45,86 @@ def state(*cards, ready=False):
 
 
 class HintFixtureControls(unittest.TestCase):
+    def test_windows_loader_discovers_exact_four_actual_class_methods_without_unix_imports(self):
+        # Compile the real fixture module against frozen platform/fixture
+        # modules. No Windows API, inherited setup, transport or native runs.
+        windows_os = types.ModuleType('os')
+        windows_os.__dict__.update(vars(fixture.os))
+        windows_os.name, windows_os.environ = 'nt', {}
+        windows = types.ModuleType('test_windows_native_agents')
+        windows.NativeAgent, windows.CONPTY = type('NativeAgent', (), {}), None
+        host = types.ModuleType('test_windows_host')
+        host.HostCase = type('HostCase', (unittest.TestCase,), {})
+        frozen = {'os': windows_os, 'model_api_fixture': types.ModuleType('model_api_fixture'),
+                  'test_windows_native_agents': windows, 'test_windows_host': host}
+        imported = []
+        def imports(name, globals=None, locals=None, fromlist=(), level=0):
+            imported.append(name)
+            if name == 'test_pause': raise AssertionError('Windows must not import Unix pty fixtures')
+            return frozen.get(name) or builtins.__import__(name, globals, locals, fromlist, level)
+        module = types.ModuleType('test_agent_hint_native')
+        module.__dict__.update(__file__=fixture.__file__,
+                               __builtins__=dict(vars(builtins), __import__=imports))
+        exec(compile(Path(fixture.__file__).read_text(), fixture.__file__, 'exec'), module.__dict__)
+        loader = unittest.TestLoader()
+        with patch.dict(sys.modules, {'test_agent_hint_native': module}):
+            for provider in ('Claude', 'Codex'):
+                names = ['test_agent_hint_native.NativeWindows' + provider + 'Hint.' + method
+                         for method in fixture.CASE_METHODS]
+                suite = loader.loadTestsFromNames(names)
+                actual = [test.id() for group in suite for test in group]
+                self.assertEqual(actual, names)
+                self.assertEqual(loader.errors, [])
+        self.assertNotIn('test_pause', imported)
+
+    def registration_double(self, root, provider):
+        class Registration(fixture.HintContract, unittest.TestCase): pass
+        value = Registration()
+        value.root, value.AGENT, value.phase = root, provider, 'candidate'
+        value.observer_exe, value.real_hook = root / 'observer-hgs', root / 'real-hgs'
+        value.real_hook.write_bytes(b'synthetic real hgs')
+        value.inputs = {'candidate': dict(sha256=hashlib.sha256(value.real_hook.read_bytes()).hexdigest())}
+        value.settings_path = root / 'settings.json'
+        return value
+
+    def test_codex_never_fabricates_a_claude_answer_channel_on_either_platform(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value = self.registration_double(Path(folder), 'codex')
+            for platform in ('nt', 'posix'):
+                with self.subTest(platform=platform), patch.object(fixture, 'os', SimpleNamespace(name=platform)):
+                    value.install_observer_entry()
+                    self.assertIsNone(value.real_channel)
+                    self.assertNotIn('PermissionRequest', json.loads(value.settings_path.read_text())['hooks'])
+                    value.assert_registration()
+
+    def test_claude_requires_its_exact_real_answer_channel_on_either_platform(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value = self.registration_double(Path(folder), 'claude')
+            for platform in ('nt', 'posix'):
+                with self.subTest(platform=platform), patch.object(fixture, 'os', SimpleNamespace(name=platform)):
+                    value.install_observer_entry()
+                    self.assertIsNotNone(value.real_channel)
+                    value.assert_registration()
+                    settings = json.loads(value.settings_path.read_text())
+                    settings['hooks']['PermissionRequest'] = []
+                    value.settings_path.write_text(json.dumps(settings))
+                    with self.assertRaises(AssertionError): value.assert_registration()
+
+    def test_explicit_claude_config_dir_owns_unchanged_onboarding_payload_without_home_redirect(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            home, agent_home = root / 'owned', root / 'agent-config'
+            home.mkdir(); agent_home.mkdir()
+            value = SimpleNamespace(AGENT='claude', env=dict(HOME=str(home)), agent_home=agent_home)
+            fixture.HintContract.configure(value)
+            self.assertEqual(value.env['HOME'], str(home))
+            self.assertEqual(value.env['CLAUDE_CONFIG_DIR'], str(agent_home))
+            self.assertFalse((home / '.claude.json').exists())
+            self.assertEqual(json.loads((agent_home / '.claude.json').read_text()), dict(
+                hasCompletedOnboarding=True, theme='dark',
+                customApiKeyResponses=dict(approved=['fixture-key'], rejected=[])))
+            self.assertEqual(json.loads((agent_home / 'settings.json').read_text()), {})
+
     def test_exact_static_output_is_separate_from_empty_output(self):
         raw = json.dumps(dict(hookSpecificOutput=dict(hookEventName='SessionStart',
                                                     additionalContext=fixture.HINT))).encode() + b'\n'
@@ -157,6 +241,57 @@ class HintFixtureControls(unittest.TestCase):
             with self.assertRaises(AssertionError): value.gate('codex/p/test', 'run')
         self.assertEqual(value.startup_ends['run'], 120)
         self.assertEqual(calls, [])
+
+    def test_gate_expiry_between_reads_prevents_the_next_command_without_renewal(self):
+        for stage in ('inspection', 'binding'):
+            value, calls, now = self.gate_double([state()]), [], [0.]
+            def inspection(name):
+                calls.append('inspect')
+                if stage == 'inspection': now[0] = 120.
+                return state()
+            def binding(name):
+                calls.append('binding')
+                now[0] = 120.
+                return dict(run_id='run', agent='codex')
+            value.inspected, value.binding = inspection, binding
+            value.json_hgs = lambda *args: self.fail('expired gate must not start ls')
+            with self.subTest(stage=stage), patch.object(fixture.time, 'monotonic', side_effect=lambda: now[0]), \
+                    self.assertRaisesRegex(AssertionError, 'gate remained closed'):
+                value.gate('codex/p/test', 'run')
+            self.assertEqual(calls, ['inspect'] if stage == 'inspection' else ['inspect', 'binding'])
+            self.assertEqual(value.startup_ends['run'], 120.)
+            self.assertEqual(value.proven, [])
+
+    def test_startup_diagnostics_keep_unknown_private_pane_and_run_record_with_original_end(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value = self.gate_double([])
+            value.result_dir, value.row_end, value.socket = Path(folder), 10., '/fixture/private/socket'
+            value.last_gate = dict(name='codex/p/test', original_end=8.)
+            value.maybe_binding = lambda name: dict(run_id='run', exit_code=1)
+            calls = []
+            def capture(argv, **options):
+                calls.append((argv, options['timeout']))
+                return SimpleNamespace(returncode=1, stdout='', stderr='private socket missing')
+            value.execute = capture
+            with patch.object(fixture, 'os', SimpleNamespace(name='posix')), \
+                    patch.object(fixture, 'test_pause', SimpleNamespace(TMUX='/fixture/tmux'), create=True), \
+                    patch.object(fixture.time, 'monotonic', return_value=9.):
+                value.keep_startup_evidence()
+            evidence = json.loads((Path(folder) / 'startup-observations.json').read_text())
+            self.assertEqual(evidence['diagnostic_end'], 10.)
+            self.assertEqual(evidence['run_record'], dict(run_id='run', exit_code=1))
+            self.assertEqual(evidence['owned_pane']['returncode'], 1)
+            self.assertEqual(evidence['owned_pane']['status'], 'unknown')
+            self.assertEqual(calls[0][1], 1.)
+            self.assertEqual(calls[0][0][1:3], ['-S', '/fixture/private/socket'])
+            self.assertEqual(value.last_gate['original_end'], 8.)
+
+    def test_diagnostic_truncation_is_explicit_and_does_not_change_gate_values(self):
+        value = dict(error='x' * 40000)
+        observed = fixture.bounded_observation(value)
+        self.assertIs(observed['truncated'], True)
+        self.assertGreater(observed['bytes'], 32768)
+        self.assertEqual(len(value['error']), 40000)
 
     def test_uncertain_answer_cannot_rearm_same_card(self):
         value, calls = self.gate_double([state(card())]), []

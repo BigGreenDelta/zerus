@@ -160,6 +160,8 @@ try:
         return [item for child in node for item in ids(child)] if isinstance(node, unittest.TestSuite) else [node.id()]
     expected = json.loads(os.environ.get('ZERUS_NATIVE_EXPECTED_IDS', 'null'))
     if expected is not None and (ids(suite) != expected or len(expected) != 4):
+        diagnostic('discovery-mismatch', actual_ids=ids(suite), expected_ids=expected,
+                   loader_errors=[error[:8192] for error in unittest.defaultTestLoader.errors[:4]])
         raise ValueError('Named hint contract discovery differs from its fixed four-method inventory')
     result = unittest.TextTestRunner(verbosity=2, resultclass=DiagnosticResult,
                                    failfast=os.environ.get('ZERUS_NATIVE_FAILFAST') == '1').run(suite)

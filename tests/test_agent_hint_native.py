@@ -27,8 +27,10 @@ import unittest
 import uuid
 
 import model_api_fixture as api
-import test_pause
+if os.name != 'nt':
+    import test_pause
 
+REPO = Path(__file__).resolve().parents[1]
 PRE_FEATURE = 'ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce'
 HINT = ('This agent runs in a Zerus session: the hgs CLI reads, messages, launches and stops other agent '
         'sessions on this and other computers. Run hgs guide before using it.')
@@ -61,6 +63,13 @@ def read_json(path, maximum):
     if len(raw) > maximum:
         raise AssertionError('fixture record bound exceeded')
     return json.loads(raw)
+
+
+def bounded_observation(value, maximum=32768):
+    raw = json.dumps(value, ensure_ascii=False).encode()
+    if len(raw) <= maximum:
+        return value
+    return dict(truncated=True, bytes=len(raw), prefix=raw[:maximum].decode(errors='replace'))
 
 
 def sha256(path, end=None):
@@ -216,7 +225,7 @@ class HintContract:
         self.end, self.gate_end, self.cleaning = self.row_end - 60, None, False
         self.phase, self.attempted, self.checkpoints = 'candidate', set(), []
         self.startup_ends, self.completed_runs = {}, set()
-        self.cli_children, self.cleanup_intents = [], []
+        self.cli_children, self.cleanup_intents, self.cli_observations = [], [], []
         self.result_dir = Path(os.environ['ZERUS_HINT_RESULTS']) / self.id()
         self.result_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
         self.observations = self.result_dir / 'calls'
@@ -285,7 +294,40 @@ class HintContract:
 
     def tearDown(self):
         self.cleaning, self.gate_end = True, None
+        self.keep_startup_evidence()
         self.keep_evidence('before stop')
+
+    def keep_startup_evidence(self):
+        # Diagnostics never renew a gate or admit an answer/message. Admit one
+        # final two-second private-socket read within five seconds; its existing
+        # owned-child reap still shares the original row cleanup end.
+        end = min(self.row_end, time.monotonic() + 5)
+        document = dict(last_gate=getattr(self, 'last_gate', None),
+                        launch=getattr(self, 'last_launch', None),
+                        cli=list(getattr(self, 'cli_observations', [])),
+                        original_row_end=self.row_end, diagnostic_end=end)
+        name = (getattr(self, 'last_gate', None) or {}).get('name')
+        if name:
+            try:
+                self.assertLess(time.monotonic(), end)
+                document['run_record'] = bounded_observation(self.maybe_binding(name))
+            except Exception as error:
+                document['run_record_unknown'] = type(error).__name__ + ': ' + str(error)
+        if os.name != 'nt' and name and getattr(self, 'socket', None):
+            try:
+                remaining = min(2, end - time.monotonic())
+                self.assertGreater(remaining, 0)
+                result = self.execute([test_pause.TMUX, '-S', self.socket, 'capture-pane', '-p',
+                                       '-t', '=' + name + ':', '-S', '-80'], env=self.env,
+                                      timeout=remaining)
+                document['owned_pane'] = bounded_observation(dict(
+                    status='captured' if result.returncode == 0 else 'unknown',
+                    returncode=result.returncode, stdout=result.stdout, stderr=result.stderr))
+            except Exception as error:
+                document['owned_pane_unknown'] = type(error).__name__ + ': ' + str(error)
+        encoded = json.dumps(document, indent=2).encode()
+        self.assertLessEqual(len(encoded), MAX_RECORD, 'startup diagnostic evidence bound')
+        (self.result_dir / 'startup-observations.json').write_bytes(encoded)
 
     def start_api(self):
         self.model = api.Server(self.api_root, str(self.project), hint=HINT,
@@ -303,7 +345,7 @@ class HintContract:
         # NativeAgent's same private install; validate its existing ConPTY input
         # pair first, then seal the exact initial portable copies it produced.
         self.assertTrue(getattr(self, 'CONPTY', None), 'reviewed ConPTY input pair is required')
-        pin = read_json(test_pause.REPO / 'packaging/windows/conpty.json', 8192)
+        pin = read_json(REPO / 'packaging/windows/conpty.json', 8192)
         self.conpty_inputs = {name: dict(path=str(Path(self.CONPTY) / name), sha256=pin['files'][name]['sha256'])
                               for name in ('conpty.dll', 'OpenConsole.exe')}
         verify_image_seals([('conpty_input:' + name, Path(value['path']), value['sha256'])
@@ -344,7 +386,7 @@ class HintContract:
         """Dummy loopback account/onboarding only; no project or hook trust values."""
         self.env = private_environment(self.env)
         if self.AGENT == 'claude':
-            (Path(self.env['HOME']) / '.claude.json').write_text(json.dumps(dict(
+            (self.agent_home / '.claude.json').write_text(json.dumps(dict(
                 hasCompletedOnboarding=True, theme='dark',
                 customApiKeyResponses=dict(approved=['fixture-key'], rejected=[]))))
             self.env['CLAUDE_CONFIG_DIR'] = str(self.agent_home)
@@ -398,15 +440,25 @@ class HintContract:
         child = subprocess.Popen(argv, **options)
         self.cli_children = [known for known in self.cli_children if known.poll() is None]
         self.cli_children.append(child)
+        observation = dict(argv=list(argv), started_monotonic=time.monotonic(), status='unknown')
         try:
             stdout, stderr = child.communicate(input, timeout=timeout)
-        except BaseException:
+            observation.update(status='exited', returncode=child.returncode,
+                               stdout=stdout, stderr=stderr)
+        except BaseException as error:
+            observation.update(error=type(error).__name__ + ': ' + str(error))
             # An unreaped direct child retains its identity (a Windows process
             # handle, or this parent's unreaped POSIX child). No foreign lookup.
             if child.poll() is None:
                 child.kill()
             child.communicate(timeout=max(.001, min(5, self.row_end - time.monotonic())))
             raise
+        finally:
+            observation['finished_monotonic'] = time.monotonic()
+            if len(argv) > 1 and argv[1] in ('claude', 'codex', 'resume', 'fork', 'session-host'):
+                self.last_launch = bounded_observation(observation, 4096)
+            self.cli_observations = (getattr(self, 'cli_observations', []) +
+                                     [bounded_observation(observation, 4096)])[-16:]
         return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
 
     def run_hgs(self, *args, timeout=60):
@@ -478,7 +530,8 @@ class HintContract:
             channel = None
         else:
             hook = dict(type='command', command=shlex.join([program, '__state', 'hook']), timeout=5)
-            channel = dict(type='command', command=shlex.join([real, '__state', 'answer-channel']), timeout=86400)
+            channel = (dict(type='command', command=shlex.join([real, '__state', 'answer-channel']), timeout=86400)
+                       if self.AGENT == 'claude' else None)
         sentinel = self.root / 'personal-hook'
         code = 'from pathlib import Path; Path(' + repr(str(sentinel)) + ').touch()'
         if os.name == 'nt' and self.AGENT == 'claude':
@@ -586,8 +639,14 @@ class HintContract:
             self.gate_end = None
 
     def _gate(self, name, run, conversation, end):
+        self.last_gate = dict(name=name, run=run, phase=self.phase, original_end=end)
         while time.monotonic() < end:
-            state, record = self.inspected(name), self.binding(name)
+            state = self.inspected(name)
+            self.last_gate['inspection'] = bounded_observation(state)
+            if time.monotonic() >= end: break
+            record = self.binding(name)
+            self.last_gate['binding'] = bounded_observation(record)
+            if time.monotonic() >= end: break
             self.assertEqual(record['run_id'], run)
             self.assertEqual(record['agent'], self.AGENT)
             self.assertIs(state.get('tracked'), True)
@@ -614,7 +673,9 @@ class HintContract:
                 self.checkpoints.append(dict(consent=card['source'], run=run, receipt=receipt))
                 continue
             self.assertFalse(state.get('pending_questions_error'))
+            if time.monotonic() >= end: break
             live = next((r for r in self.json_hgs('ls', '--local', '--json')['sessions'] if r['name'] == name), {})
+            self.last_gate['live'] = bounded_observation(live)
             public = public_ready(state, record)
             if public and live.get('process_state') == 'running':
                 if conversation is not None:
@@ -990,14 +1051,14 @@ class HintContract:
                 {key: value for key, value in call.items() if key != 'output'} for call in calls], indent=2))
 
 
-@unittest.skipUnless(os.name != 'nt' and INPUTS in os.environ, 'select the reviewed agent-hint contract')
-class NativeClaudeHint(HintContract, test_pause.Harness):
-    AGENT = 'claude'
+if os.name != 'nt':
+    @unittest.skipUnless(INPUTS in os.environ, 'select the reviewed agent-hint contract')
+    class NativeClaudeHint(HintContract, test_pause.Harness):
+        AGENT = 'claude'
 
-
-@unittest.skipUnless(os.name != 'nt' and INPUTS in os.environ, 'select the reviewed agent-hint contract')
-class NativeCodexHint(HintContract, test_pause.Harness):
-    AGENT = 'codex'
+    @unittest.skipUnless(INPUTS in os.environ, 'select the reviewed agent-hint contract')
+    class NativeCodexHint(HintContract, test_pause.Harness):
+        AGENT = 'codex'
 
 
 if os.name == 'nt':
