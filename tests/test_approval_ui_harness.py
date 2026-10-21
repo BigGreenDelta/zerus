@@ -686,13 +686,44 @@ class ApprovalHarnessTests(unittest.TestCase):
 
     def test_android_broader_proof_and_failure_windows_do_not_rewrite_or_hide_primary_outcome(self):
         source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
-        proof = source.split("        fun proveBroaderDraft()", 1)[1].split("        fun expect(", 1)[0]
+        proof = source.split("        fun broaderDraftMatches(", 1)[1].split("        fun proveBroaderDraft()", 1)[0]
         for value in ('model.draft(target, question)', 'QuestionPolicies.broaderChoice(question, mapOf("approval" to ids))',
                       'ids == setOf("2")', 'answer.string("text").isEmpty()', 'draft.status == "editing"',
                       'question.run == target.run', 'question.conversation == target.conversation', 'scope?.id == "2"'):
             self.assertIn(value, proof)
         for forbidden in ("model.edit(", "set(model", "tap(", "expected.set("):
             self.assertNotIn(forbidden, proof)
+        self.assertIn("record: Boolean = false): Boolean = main {", proof)
+        self.assertLess(proof.index("if (!record) checkNotNull(QuestionPolicies.savedDraft(model.drafts, target, question))"),
+                        proof.index("val draft = model.draft(target, question)"))
+        self.assertIn("if (record) {", proof)
+        self.assertEqual(proof.count("phase("), 2)
+        self.assertNotIn("await(", proof)
+        wrapper = source.split("        fun proveBroaderDraft()", 1)[1].split("        fun proveRejectDraft()", 1)[0]
+        self.assertIn('check(broaderDraftMatches(true)) { "Broader Send must preserve its exact selected draft and card" }', wrapper)
+        self.assertNotIn("await(", wrapper)
+        lifecycle = source.split('            open("background")', 1)[1].split('            boundary("begin", "readonly_stale_identity")', 1)[0]
+        binding = 'val lifecycleDisclosure = bindDisclosureScroll("Approve for this session")'
+        self.assertLess(lifecycle.index(binding), lifecycle.index('tap("Approve for this session")'))
+        restored = lifecycle.split('await("same current card body restored") {', 1)[1].split('\n                }', 1)[0]
+        self.assertIn('check(lifecycleSend.current())', restored)
+        self.assertIn('check(broaderDraftMatches(false))', restored)
+        self.assertIn('disclosureScrollReady(lifecycleDisclosure)', restored)
+        for forbidden in ('await(', 'phase(', 'bindDisclosureScroll(', 'performAction(', 'tap('):
+            self.assertNotIn(forbidden, restored)
+        self.assertNotIn('node("Review synthetic background")', lifecycle)
+        self.assertEqual(lifecycle.count('await('), 4)  # Replaces the old node(header) await slot; adds no wait.
+        readiness = source.split('    private fun disclosureScrollReady(', 1)[1].split('    private fun screenshot(', 1)[0]
+        for required in ('check(scroll.refresh() && scroll.windowId == window && scroll.isScrollable &&',
+                         'scroll.packageName?.toString() == targetContext.packageName)',
+                         'val active = uiAutomation.rootInActiveWindow ?: return false',
+                         'if (!active.refresh() || active.windowId != window ||',
+                         'active.packageName?.toString() != targetContext.packageName) return false',
+                         'return scroll.isVisibleToUser && !bounds.isEmpty && bounds.left >= 0 && bounds.top >= 0 &&',
+                         'bounds.right <= targetContext.resources.displayMetrics.widthPixels && bounds.bottom <= targetContext.resources.displayMetrics.heightPixels'):
+            self.assertIn(required, readiness)
+        for forbidden in ('await(', 'phase(', 'performAction(', 'bindDisclosureScroll(', 'visible('):
+            self.assertNotIn(forbidden, readiness)
         diagnostics = source.split("    private fun evidenceLine(", 1)[1].split("    private fun set(", 1)[0]
         for required in ("windows.size <= 4", "depth <= 16", "++visited <= 128", "++matched <= 12", ".take(160)",
                          'root.packageName?.toString() == targetContext.packageName', 'owned-evidence UNKNOWN stage=$name'):

@@ -166,46 +166,49 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         }
     }
     private fun reveal(label: String, disclosureLabel: String) {
-        var disclosureScroll: AccessibilityNodeInfo? = null
-        var disclosureWindow: Int? = null
+        var disclosureScroll: DisclosureScroll? = null
         await("option $label") {
             if (visible(label) != null) true else {
-                if (disclosureScroll == null) {
-                    val anchor = checkNotNull(visible(disclosureLabel)) { "Current disclosure is not visible" }
-                    check(anchor.refresh() && exactVisible(anchor, disclosureLabel) &&
-                        anchor.packageName?.toString() == targetContext.packageName)
-                    val window = anchor.windowId
-                    check(window >= 0)
-                    var current = anchor
-                    var parents = 0
-                    while (true) {
-                        check(current.refresh() && current.windowId == window &&
-                            current.packageName?.toString() == targetContext.packageName)
-                        if (current.isScrollable) {
-                            check(current.isVisibleToUser)
-                            disclosureScroll = current
-                            disclosureWindow = window
-                            break
-                        }
-                        check(parents++ < 16) { "Disclosure scroll ancestor is unknown" }
-                        current = checkNotNull(current.parent) { "Disclosure has no scroll ancestor" }
-                    }
-                }
                 // Keep the bound inner node when its label scrolls offscreen; never rebind to the history.
-                val scroll = checkNotNull(disclosureScroll)
-                val window = checkNotNull(disclosureWindow)
-                val active = checkNotNull(uiAutomation.rootInActiveWindow)
-                check(active.refresh() && active.windowId == window &&
-                    active.packageName?.toString() == targetContext.packageName)
-                check(scroll.refresh() && scroll.windowId == window && scroll.isVisibleToUser && scroll.isScrollable &&
-                    scroll.packageName?.toString() == targetContext.packageName) { "Bound disclosure scroll is stale" }
-                val bounds = Rect().also(scroll::getBoundsInScreen)
-                check(!bounds.isEmpty && bounds.left >= 0 && bounds.top >= 0 &&
-                    bounds.right <= targetContext.resources.displayMetrics.widthPixels && bounds.bottom <= targetContext.resources.displayMetrics.heightPixels)
-                scroll.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                val disclosure = disclosureScroll ?: bindDisclosureScroll(disclosureLabel).also { disclosureScroll = it }
+                check(disclosureScrollReady(disclosure)) { "Bound disclosure is not in the active window" }
+                disclosure.node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
                 false
             }
         }
+    }
+    private data class DisclosureScroll(val node: AccessibilityNodeInfo, val window: Int)
+    private fun bindDisclosureScroll(label: String): DisclosureScroll {
+        val anchor = checkNotNull(visible(label)) { "Current disclosure anchor is not visible" }
+        check(anchor.refresh() && exactVisible(anchor, label) &&
+            anchor.packageName?.toString() == targetContext.packageName)
+        val window = anchor.windowId
+        check(window >= 0)
+        var current = anchor
+        var parents = 0
+        while (true) {
+            check(current.refresh() && current.windowId == window &&
+                current.packageName?.toString() == targetContext.packageName)
+            if (current.isScrollable) {
+                check(current.isVisibleToUser)
+                return DisclosureScroll(current, window)
+            }
+            check(parents++ < 16) { "Disclosure scroll ancestor is unknown" }
+            current = checkNotNull(current.parent) { "Disclosure has no scroll ancestor" }
+        }
+    }
+    private fun disclosureScrollReady(disclosure: DisclosureScroll): Boolean {
+        val scroll = disclosure.node
+        val window = disclosure.window
+        check(scroll.refresh() && scroll.windowId == window && scroll.isScrollable &&
+            scroll.packageName?.toString() == targetContext.packageName) { "Bound disclosure scroll is stale" }
+        // The same node may be temporarily hidden while the dialog/Activity accessibility window settles.
+        val active = uiAutomation.rootInActiveWindow ?: return false
+        if (!active.refresh() || active.windowId != window ||
+            active.packageName?.toString() != targetContext.packageName) return false
+        val bounds = Rect().also(scroll::getBoundsInScreen)
+        return scroll.isVisibleToUser && !bounds.isEmpty && bounds.left >= 0 && bounds.top >= 0 &&
+            bounds.right <= targetContext.resources.displayMetrics.widthPixels && bounds.bottom <= targetContext.resources.displayMetrics.heightPixels
     }
     private fun screenshot(name: String) {
         uiAutomation.takeScreenshot()?.let { bitmap ->
@@ -432,23 +435,27 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             phase("open-ready:$name")
         }
         fun reviewed() { await("three real visible review seconds") { button("Send answer").isEnabled } }
-        fun proveBroaderDraft() {
-            main {
+        fun broaderDraftMatches(record: Boolean = false): Boolean = main {
                 val question = checkNotNull(model.conversationQuestions.singleOrNull())
                 val offered = checkNotNull(pending)
+                if (!record) checkNotNull(QuestionPolicies.savedDraft(model.drafts, target, question))
                 val draft = model.draft(target, question)
                 val answer = JSONArray(draft.answers).objects().single()
                 val selected = answer.getJSONArray("selected_option_ids")
                 check(selected.length() == 1)
                 val ids = setOf(selected.getString(0))
                 val scope = QuestionPolicies.broaderChoice(question, mapOf("approval" to ids))
-                phase("broader-card:id=${question.id}:hash=${question.hash}:runMatches=${question.run == target.run}:conversationMatches=${question.conversation == target.conversation}")
-                phase("broader-draft:status=${draft.status}:ids=${ids.joinToString()}:emptyText=${answer.string("text").isEmpty()}:verified=${model.activityVerified}:answerable=${question.canAnswer}:scope=${scope?.id}")
-                check(model.selected?.target == target && question.id == offered.string("question_id") && question.hash == offered.string("question_hash") &&
+                if (record) {
+                    phase("broader-card:id=${question.id}:hash=${question.hash}:runMatches=${question.run == target.run}:conversationMatches=${question.conversation == target.conversation}")
+                    phase("broader-draft:status=${draft.status}:ids=${ids.joinToString()}:emptyText=${answer.string("text").isEmpty()}:verified=${model.activityVerified}:answerable=${question.canAnswer}:scope=${scope?.id}")
+                }
+                model.selected?.target == target && question.id == offered.string("question_id") && question.hash == offered.string("question_hash") &&
                     question.run == target.run && question.conversation == target.conversation && draft.target == target && draft.questionId == question.id && draft.questionHash == question.hash &&
                     draft.status == "editing" && answer.string("question_id") == "approval" && ids == setOf("2") && answer.string("text").isEmpty() &&
-                    model.activityVerified && question.canAnswer && scope?.id == "2") { "Broader Send must preserve its exact selected draft and card" }
-            }
+                    model.activityVerified && question.canAnswer && scope?.id == "2"
+        }
+        fun proveBroaderDraft() {
+            check(broaderDraftMatches(true)) { "Broader Send must preserve its exact selected draft and card" }
         }
         fun proveRejectDraft() {
             val offered = checkNotNull(pending)
@@ -588,7 +595,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
 
             boundary("begin", "lifecycle_no_submit")
             open("background")
-            reveal("Approve for this session", "Review synthetic background"); tap("Approve for this session"); reviewed()
+            reveal("Approve for this session", "Review synthetic background")
+            val lifecycleDisclosure = bindDisclosureScroll("Approve for this session")
+            tap("Approve for this session"); reviewed()
             proveBroaderDraft()
             val lifecycleSend = captureEarlySend() // Capture the underlying card before its native modal obscures it.
             tap("Send answer"); node("Confirm this option?")
@@ -605,7 +614,13 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 phase("early-resume-begin:lifecycle")
                 targetContext.startActivity(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
                 await("same Activity regained focus") { main { activity.hasWindowFocus() } }
-                node("Review synthetic background"); await("background retires confirmation") { visible("Confirm this option?") == null }
+                // Preserve legitimate inner scrolling: bind the same native card, not a now-offscreen top label.
+                await("same current card body restored") {
+                    check(lifecycleSend.current()) { "Lifecycle card identity changed after resume" }
+                    check(broaderDraftMatches(false)) { "Lifecycle broader draft changed after resume" }
+                    disclosureScrollReady(lifecycleDisclosure)
+                }
+                await("background retires confirmation") { visible("Confirm this option?") == null }
                 check(count() == 4 && !button("Send answer").isEnabled)
                 val elapsed = SystemClock.elapsedRealtime() - resumeStart
                 check(elapsed >= 0 && elapsed < 3_000) { "Fixture missed the real early-review window: lifecycle elapsedMs=$elapsed" }
