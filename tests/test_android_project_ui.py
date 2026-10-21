@@ -17,6 +17,11 @@ SPEC = importlib.util.spec_from_file_location("android_project_ui", ROOT / "scri
 UI = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(UI)
 
+TOUCH_SPEC = importlib.util.spec_from_file_location("android_touch_observer_controls", ROOT / "tests/android_touch_observer_controls.py")
+TOUCH_CONTROLS = importlib.util.module_from_spec(TOUCH_SPEC)
+TOUCH_SPEC.loader.exec_module(TOUCH_CONTROLS)
+OwnedWindowTouchObserverTests = TOUCH_CONTROLS.OwnedWindowTouchObserverTests
+
 
 def output(ids=UI.CASES, count="6", code="-1", stream="Session project smoke passed: synthetic fixture"):
     return (f"INSTRUMENTATION_RESULT: project_cases={count}\n"

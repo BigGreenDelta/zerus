@@ -248,3 +248,15 @@ Surface blocks touches behind its bounds, including its non-clickable form; the 
 The 1f0466cd attempt proved missing Reject selection near the hint text, but did not retain the old Surface background
 rectangle. Historical exact-pixel attribution remains an inference; unchanged physical fixture/native acceptance is
 still required. SDK-free brace-scope controls prove the sibling relationship, not Compose measurement or touch behavior.
+
+The Android fixture observes only its existing physical Send intervals through a delegated callback on its exact
+owned Activity window. Touch and focus callbacks forward their original arguments once, preserve the original return
+or exception, and keep bounded before/after memory records: at most eight Send tokens and four events per token.
+Screen-coordinate targets bind to received `rawX/rawY`; the received event object is distinct from the injector's
+object. Window identity is read outside dispatch; dispatch performs no window-tree/Binder query or additional action.
+The current Compose-local review guard remains unknown. A consumed window event does not prove the named button
+clicked. Mismatched identity/metadata, recording faults, changed callbacks or overflow make the observation unknown.
+Restoration checks the exact installed callback and is attempted independently of the original back/finish cleanup.
+These source-bound memory controls are not Kotlin, Android OS dispatch or a fix for the unproven f0c Send failure.
+Both native outcomes retain the final bounded memory trace. A positive result appends it on the original single
+stream line, preserving the unchanged seven-case parser; a failure retains the original error and diagnostic stream.

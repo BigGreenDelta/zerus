@@ -27,6 +27,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     private val cases = mutableListOf<String>()
     private val phases = ArrayDeque<String>()
     private var failureEvidence = "owned-window-evidence UNKNOWN not captured"
+    private var touchTrace: OwnedWindowTouchTrace? = null
     private data class EarlySend(val node: AccessibilityNodeInfo, val window: Int, val current: () -> Boolean)
     private var earlySend: EarlySend? = null
     private data class InterceptorFailure(val guard: String, val type: String, val method: String, val path: String)
@@ -58,13 +59,18 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             check(cases == CASES)
             result.putString("approval_cases", cases.size.toString())
             result.putString("approval_case_ids", cases.joinToString(","))
-            result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only.\n")
+            result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only. ${touchResultEvidence().replace("\n", " | ")}\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
-            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n")
+            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n")
             finish(Activity.RESULT_CANCELED, result)
         }
     }
+
+    /** Final memory snapshot works after teardown; never replace the original result with an observation failure. */
+    private fun touchResultEvidence(): String = try {
+        main { touchTrace?.evidence() ?: "owned-touch UNKNOWN not installed" }
+    } catch (_: Throwable) { "owned-touch UNKNOWN result-capture-failed" }
 
     private fun <T> main(action: () -> T): T {
         val result = AtomicReference<Result<T>>()
@@ -127,6 +133,10 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         phase("touch-node:$label:w=${action.windowId}:v=${action.isVisibleToUser}:s=${action.isSelected}:c=${action.isChecked}")
         phase("touch-geometry:$bounds:x=${bounds.exactCenterX()}:y=${bounds.exactCenterY()}")
         val down = SystemClock.uptimeMillis()
+        var traceToken: Int? = null
+        if (label == "Send answer") try { traceToken = main { touchTrace?.begin(label, action.windowId, down, bounds.exactCenterX(), bounds.exactCenterY()) } }
+        catch (_: Throwable) { touchTrace?.observationFailed() }
+        try {
         phase("touch-down:$label")
         for (type in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
             val event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), type, bounds.exactCenterX(), bounds.exactCenterY(), 0)
@@ -134,6 +144,10 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             try { check(uiAutomation.injectInputEvent(event, true)) } finally { event.recycle() }
         }
         phase("touch-up:$label")
+        } finally {
+            try { traceToken?.let { token -> main { touchTrace?.end(token) } } }
+            catch (_: Throwable) { touchTrace?.observationFailed() }
+        }
     }
     private fun reveal(label: String) {
         await("option $label") {
@@ -227,6 +241,16 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     }
     private fun set(model: ZerusViewModel, name: String, value: Any) {
         model.javaClass.declaredMethods.single { it.name == name }.apply { isAccessible = true }.invoke(model, value)
+    }
+    /** Called on main by the observer; fixed owned memory only, no accessibility/window-tree query. */
+    private fun touchModelState(model: ZerusViewModel, target: Target, activity: MainActivity, offered: JSONObject?): String {
+        val question = model.conversationQuestions.singleOrNull()
+        check(model.drafts.size <= 8)
+        val draft = question?.let { QuestionPolicies.savedDraft(model.drafts, target, it) }
+        val id = question?.id?.takeIf { it in setOf("countdown", "broader-cancel", "replacement", "replacement-new", "feedback", "background", "readonly", "stale-identity") } ?: "UNKNOWN"
+        val current = question != null && question.id == offered?.string("question_id") && question.hash == offered?.string("question_hash") &&
+            question.run == target.run && question.conversation == target.conversation
+        return "id=$id sel=${model.selected?.target == target} own=$current edit=${draft?.status == "editing"} v=${model.activityVerified} busy=${model.detailBusy} consent=${model.pendingQuestionSend != null} focus=${activity.hasWindowFocus()} resumed=${activity.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)}"
     }
     private fun smoke(store: PrivateStore) {
         val target = Target("fixture-computer", "kimi/fixture/approval", "fixture-run", "fixture-conversation", "fixture-workspace")
@@ -444,6 +468,10 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         }
         var primaryFailure: Throwable? = null
         try {
+            main {
+                touchTrace = OwnedWindowTouchTrace(activity.window) { touchModelState(model, target, activity, pending) }
+                touchTrace!!.install()
+            }
             await("private model storage") { main { model.storageReady } }
             main {
                 model.javaClass.getDeclaredField("api").apply { isAccessible = true }.set(model, RelayApi(client))
@@ -560,11 +588,19 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             try { screenshot("failure") } catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }
             throw error
         } finally {
+            var observerCleanup: Throwable? = null
+            try { main { touchTrace?.close() } }
+            catch (cleanup: Throwable) {
+                observerCleanup = cleanup
+                val original = primaryFailure
+                if (original != null && cleanup !== original) original.addSuppressed(cleanup)
+            }
             try { main { model.back(); activity.finish() } }
             catch (cleanup: Throwable) {
-                val original = primaryFailure
+                val original = primaryFailure ?: observerCleanup
                 if (original == null) throw cleanup else if (cleanup !== original) original.addSuppressed(cleanup)
             }
+            if (primaryFailure == null) observerCleanup?.let { throw it }
         }
     }
     companion object {
