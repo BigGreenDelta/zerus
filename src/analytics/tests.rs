@@ -739,13 +739,15 @@ fn usage_epoch_quota_preserves_current_baseline_and_bounded_expiry() {
 fn exact_question_adapter_uses_native_request_and_durable_answer_once() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let now = Utc::now().timestamp_millis();
+    let setup_at = Utc::now().timestamp_millis();
     let mut db = Store::open(&root.join("analytics"), true, true)
         .unwrap()
         .unwrap();
-    db.configure(NIL_EPOCH, true, 90, now - 5000).unwrap();
+    db.configure(NIL_EPOCH, true, 90, setup_at - 5000).unwrap();
     drop(db);
     let record = json!({"agent":"claude","conversation_id":"synthetic-conversation","run_id":"run","process_start":"process"});
+    // Disk setup must not age the live hook's two-second observation window.
+    let now = Utc::now().timestamp_millis();
     let timestamp = chrono::DateTime::from_timestamp_millis(now - 1000)
         .unwrap()
         .to_rfc3339();
