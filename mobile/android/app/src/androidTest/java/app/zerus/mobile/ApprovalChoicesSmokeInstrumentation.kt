@@ -877,6 +877,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             main { model.refreshActivity() }
             await("delivered replacement-run inspection") { staleInspectionCurrent() }
             check(earlySend == null && staleInspectionCurrent())
+            // The production refresh may reset this card's inner disclosure viewport.
+            reveal("Approve once", "Review synthetic stale-identity")
+            check(earlySend == null && staleInspectionCurrent()) { "Known-stale disclosure reveal changed the inspected run, draft or answer count" }
             val ownedWindow = main {
                 check(activity.hasWindowFocus())
                 val root = checkNotNull(activity.window.decorView.createAccessibilityNodeInfo())

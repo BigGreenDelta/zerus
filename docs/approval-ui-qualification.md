@@ -25,7 +25,10 @@ binding, four unique synthetic answer receipts, zero unexpected operations, and 
 Lifecycle uses the actual Activity and window, rather than an injected foreground Boolean. The stale-run case changes
 the intercepted inspection, calls the ordinary production refresh, and requires the verified model to observe the
 replacement run with the exact old card's run, ID and hash and both original saved drafts unchanged. A server-only
-mutation is insufficient. Before its one negative physical DOWN/UP attempt, it freshly resolves the exact visible Send
+mutation is insufficient. After that proof, the existing bounded inner-disclosure scroll reveals the original option
+when the refresh has reset its viewport. The same stale inspection, drafts and answer count must still be proved before
+binding the owned window and fresh action nodes; the scroll neither selects an answer nor retries the negative gesture.
+Before its one negative physical DOWN/UP attempt, it freshly resolves the exact visible Send
 label in the current owned window, requires that control to be disabled, and checks its current on-screen bounds. A
 missing label, changed identity/window/geometry or enabled control fails; there is no cached-node fallback, second
 gesture or further review wait. Normal enabled-action taps keep their original guard. The final evidence names this
