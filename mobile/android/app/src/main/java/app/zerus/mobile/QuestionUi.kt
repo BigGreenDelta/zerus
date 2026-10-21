@@ -97,9 +97,11 @@ import org.json.JSONObject
     }
 }
 
-@Composable private fun NativeQuestionCard(model: ZerusViewModel, target: Target, question: Question, available: Boolean,
+@Composable private fun NativeQuestionCard(model: ZerusViewModel, target: Target, question: Question, frameAvailable: Boolean,
     visible: Boolean, viewport: Rect?, maxHeight: Dp, page: Int, onPage: (Int) -> Unit, scrollOffset: Int, onScroll: (Int) -> Unit,
     expanded: Boolean, onExpand: () -> Unit, onCollapse: () -> Unit, onReview: (Draft) -> Unit) {
+    val bound = QuestionSendPolicies.bound(question, target)
+    val available = frameAvailable && bound
     val draft = model.draft(target, question)
     val native = QuestionPolicies.submitted(question, target)
     val saved = remember(draft.answers, native) {
@@ -113,7 +115,7 @@ import org.json.JSONObject
     }
     fun answers() = QuestionPolicies.answers(question.prompts, options, texts)
     fun persist() { model.edit(target, texts.values.filter { it.isNotBlank() }.joinToString("\n"), question, answers().toString()) }
-    val editing = draft.status == "editing" && native == null && model.pendingQuestionSend == null
+    val editing = bound && draft.status == "editing" && native == null && model.pendingQuestionSend == null
     val formReplyText = QuestionPolicies.formReplyText(question)
     val error = QuestionPolicies.answerError(question.prompts, options, texts, formReplyText)
     val complete = QuestionPolicies.complete(question.prompts, options, texts, formReplyText)

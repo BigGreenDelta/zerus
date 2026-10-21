@@ -1204,7 +1204,9 @@ class ApprovalHarnessTests(unittest.TestCase):
                   'question.hash': 'card_hash', 'question.run': 'card_run', 'question.conversation': 'card_conversation',
                   'target.run': 'old_run', 'target.conversation': 'old_conversation', 'draft == staleDraft': 'draft_unchanged',
                   'composer == staleComposer': 'composer_unchanged', 'model.answerInFlight(staleDraft)': 'in_flight',
-                  'model.pendingQuestionSend': 'pending_consent'}
+                  'model.pendingQuestionSend': 'pending_consent',
+                  'QuestionSendPolicies.bound(question, replacementTarget)': 'binding_matches',
+                  'QuestionSendPolicies.available(question, replacementTarget, staleDraft.answers)': 'complete_answer_allowed'}
         for old, new in sorted(fields.items(), key=lambda item: -len(item[0])):
             condition = condition.replace(old, new)
         condition = ' '.join(re.sub(r'!(?!=)', 'not ', condition).replace('&&', 'and').replace('null', 'None').split())
@@ -1212,12 +1214,13 @@ class ApprovalHarnessTests(unittest.TestCase):
                      inspected_run='replacement-run', replacement_run='replacement-run', inspected_conversation='conversation',
                      old_run='fixture-run', old_conversation='conversation', question_present=True, card_unchanged=True,
                      card_id='stale-identity', card_hash='hash-stale-identity', card_run='fixture-run', card_conversation='conversation',
-                     draft_unchanged=True, composer_unchanged=True, in_flight=False, pending_consent=None)
+                     draft_unchanged=True, composer_unchanged=True, in_flight=False, pending_consent=None,
+                     binding_matches=False, complete_answer_allowed=False)
         self.assertTrue(finite_source_predicate(condition, valid))
         departures = dict(focused=False, verified=False, busy=True, selected_target='old', inspected_run=None,
                           inspected_conversation=None, question_present=False, card_unchanged=False, card_id='old', card_hash='old',
                           card_run='replacement-run', card_conversation='other', draft_unchanged=False, composer_unchanged=False,
-                          in_flight=True, pending_consent='consent')
+                          in_flight=True, pending_consent='consent', binding_matches=True, complete_answer_allowed=True)
         for field, value in departures.items():
             with self.subTest(field=field):
                 self.assertFalse(finite_source_predicate(condition, {**valid, field: value}))
@@ -1236,6 +1239,9 @@ class ApprovalHarnessTests(unittest.TestCase):
                          'currentRoot.refresh() && currentRoot.windowId == ownedWindow', 'staleInspectionCurrent()'):
             self.assertIn(required, before_touch)
         self.assertIn('check(earlySend == null && staleInspectionCurrent())', case)
+        self.assertIn('QuestionPolicies.complete(question.prompts, mapOf("approval" to setOf("1")), emptyMap(), QuestionPolicies.formReplyText(question))', case)
+        self.assertIn('check(QuestionSendPolicies.bound(question, target) && QuestionSendPolicies.available(question, target, draft.answers))', case)
+        self.assertEqual(case.count('choice.refresh() && choice.windowId == ownedWindow && exactVisible(choice, "Approve once") && !choice.isEnabled'), 2)
         self.assertIn('touchTrace?.begin("Send answer", ownedWindow, down, bounds.exactCenterX(), bounds.exactCenterY())', case)
         self.assertIn('touchTrace?.end(token)', case)
         self.assertIn('finally { event.recycle() }', case)
@@ -1244,6 +1250,40 @@ class ApprovalHarnessTests(unittest.TestCase):
         normal = source.split('    private fun tap(label: String)', 1)[1].split('    private fun reveal(', 1)[0]
         self.assertIn('check(action.isEnabled && action.isClickable)', normal)
         self.assertEqual(normal.count('uiAutomation.injectInputEvent(event, true)'), 1)
+
+    def test_android_question_binding_is_shared_by_complete_answer_admission_and_all_native_card_actions(self):
+        policies = (ROOT / "mobile/android/app/src/main/java/app/zerus/mobile/QuestionSendConfirmation.kt").read_text()
+        condition = policies.split('    fun bound(question: Question, target: Target) =', 1)[1].split('\n    // Kimi', 1)[0]
+        fields = {'target.run.isNotBlank()': 'nonblank_run', 'question.run': 'card_run', 'target.run': 'target_run',
+                  'question.conversation': 'card_conversation', 'target.conversation': 'target_conversation'}
+        for old, new in sorted(fields.items(), key=lambda item: -len(item[0])):
+            condition = condition.replace(old, new)
+        condition = ' '.join(condition.replace('&&', 'and').split())
+        for conversation in ('fixture-conversation', ''):
+            valid = dict(nonblank_run=True, card_run='fixture-run', target_run='fixture-run',
+                         card_conversation=conversation, target_conversation=conversation)
+            self.assertTrue(finite_source_predicate(condition, valid))
+            for field, value in dict(nonblank_run=False, card_run='other-run', card_conversation='other-conversation').items():
+                with self.subTest(conversation=conversation, field=field):
+                    self.assertFalse(finite_source_predicate(condition, {**valid, field: value}))
+        available = policies.split('    fun available(', 1)[1].split('\n}\n', 1)[0]
+        self.assertLess(available.index('if (!bound(question, target)) return false'), available.index('QuestionPolicies.submitted('))
+        self.assertLess(available.index('if (!bound(question, target)) return false'), available.index('JSONArray(answers)'))
+        model = (ROOT / "mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt").read_text()
+        send = model.split('    private fun sendQuestion(', 1)[1].split('    fun sendingBlocked(', 1)[0]
+        self.assertLess(send.index('QuestionSendPolicies.available(native, target, frozenAnswers)'), send.index('QuestionSendPolicies.capture('))
+        self.assertLess(send.index('intent.permitsPrepared('), send.index('api.submit('))
+        ui = (ROOT / "mobile/android/app/src/main/java/app/zerus/mobile/QuestionUi.kt").read_text()
+        card = ui.split('@Composable private fun NativeQuestionCard(', 1)[1]
+        self.assertIn('frameAvailable: Boolean', card)
+        self.assertIn('val bound = QuestionSendPolicies.bound(question, target)', card)
+        self.assertIn('val available = frameAvailable && bound', card)
+        self.assertIn('val editing = bound && draft.status == "editing" && native == null && model.pendingQuestionSend == null', card)
+        for required in ('question.canAnswer && editing && complete && available', 'question.canAnswer && editing && available',
+                         'reviewEligible', 'enabled = editing && available', 'QuestionPolicies.inputEnabled(question, editing)',
+                         'readOnly = !QuestionPolicies.inputEnabled(question, editing)'):
+            self.assertIn(required, card)
+        self.assertIn('if (question != null) NativeQuestionCard(model, target, question, available', ui)
 
 
 class QuestionLayoutSourceTests(unittest.TestCase):

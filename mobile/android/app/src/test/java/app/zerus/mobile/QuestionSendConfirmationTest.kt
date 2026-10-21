@@ -25,6 +25,56 @@ class QuestionSendConfirmationTest {
         answers = answers, generation = "generation", revision = "revision")
     private fun intent(q: Question = question, payload: String = answers) = QuestionSendPolicies.capture(target, 1, q, draft, payload)
 
+    @Test fun completeAnswerAndSkipCannotCrossQuestionRunOrConversationBindings() {
+        val selected = mapOf("prompt" to setOf("allow"))
+        val complete = QuestionPolicies.answers(question.prompts, selected, emptyMap()).toString()
+        val skip = JSONArray().put(JSONObject().put("question_id", "prompt").put("skip", true)
+            .put("selected_option_ids", JSONArray()).put("text", "")).toString()
+        assertTrue(QuestionPolicies.complete(question.prompts, selected, emptyMap()))
+        assertTrue(QuestionSendPolicies.bound(question, target))
+        assertTrue(QuestionSendPolicies.available(question, target, complete))
+        assertTrue(QuestionSendPolicies.available(question, target, skip))
+        for ((changedTarget, changedQuestion) in listOf(
+            target.copy(run = "replacement-run") to question,
+            target.copy(conversation = "replacement-conversation") to question,
+            target to question.copy(run = "replacement-run"),
+            target to question.copy(conversation = "replacement-conversation"),
+            target to question.copy(run = ""),
+            target to question.copy(conversation = ""),
+            target.copy(run = "") to question.copy(run = ""),
+            target.copy(run = " \t") to question.copy(run = " \t"))) {
+            assertFalse(QuestionSendPolicies.bound(changedQuestion, changedTarget))
+            assertFalse(QuestionSendPolicies.available(changedQuestion, changedTarget, complete))
+            assertFalse(QuestionSendPolicies.available(changedQuestion, changedTarget, skip))
+            val changedDraft = draft.copy(target = changedTarget, answers = complete)
+            val pending = QuestionSendPolicies.capture(changedTarget, 1, changedQuestion, changedDraft, complete)
+            assertFalse(pending.matches(changedTarget, 1, changedQuestion, changedDraft))
+            val prepared = changedDraft.copy(status = "submitting", requestId = "request")
+            assertFalse(pending.permitsPrepared(changedTarget, 1, changedQuestion, prepared, "request", false, false))
+            assertFalse(pending.permitsPrepared(changedTarget, 1, changedQuestion, prepared, "request", true, true))
+        }
+    }
+
+    @Test fun exactOpaqueStartupRunAndMatchingEmptyConversationRetainExistingConsentRules() {
+        val startupTarget = target.copy(run = "fixture-run", conversation = "")
+        val startup = question.copy(id = "claude-trust:fixture-hash", source = "claude_folder_trust",
+            run = startupTarget.run, conversation = "", canSkip = false)
+        val complete = QuestionPolicies.answers(startup.prompts, mapOf("prompt" to setOf("allow")), emptyMap()).toString()
+        val original = draft.copy(target = startupTarget, questionId = startup.id, answers = complete)
+        assertTrue(QuestionSendPolicies.bound(startup, startupTarget))
+        assertTrue(QuestionSendPolicies.available(startup, startupTarget, complete))
+        val pending = QuestionSendPolicies.capture(startupTarget, 1, startup, original, complete)
+        assertTrue(pending.matches(startupTarget, 1, startup, original))
+        val prepared = original.copy(status = "submitting", requestId = "request")
+        assertTrue(pending.permitsPrepared(startupTarget, 1, startup, prepared, "request", false, false))
+        assertFalse(pending.permitsPrepared(startupTarget, 1, startup, prepared, "request", true, false))
+        assertTrue(pending.permitsPrepared(startupTarget, 1, startup, prepared, "request", true, true))
+        assertFalse(QuestionSendPolicies.available(startup.copy(canAnswer = false), startupTarget, complete))
+        assertFalse(QuestionSendPolicies.bound(startup.copy(conversation = "started"), startupTarget))
+        assertFalse(QuestionSendPolicies.bound(startup, startupTarget.copy(conversation = "started")))
+        assertFalse(QuestionSendPolicies.bound(startup.copy(run = ""), startupTarget.copy(run = "")))
+    }
+
     @Test fun nativeKimiCacheChoicesKeepExactAnswersWithoutSecondConsent() {
         val cachePrompt = prompt.copy(id = "cache", choices = (0..3).map { Choice("cache_$it", "Native choice $it", "") })
         val cache = question.copy(source = "kimi_cache_hint", toolCallId = "kimi_cache_hint", prompts = listOf(cachePrompt))

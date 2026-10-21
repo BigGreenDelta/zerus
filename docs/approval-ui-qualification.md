@@ -33,6 +33,12 @@ disabled physical attempt, and the case requires no increase in answer-entry cou
 drafts and a healthy interceptor afterward. This qualifies refusal of an already-observed stale inspection, rather
 than requiring a network inspection on every answer. No answer is admitted in that case. The fixture cannot contact its
 reserved relay: every permitted request is completed inside the interceptor, while unknown operations throw.
+Android uses one card/target predicate in send admission and the shared inline/expanded card: a nonblank target run
+and exact question run/conversation equality. Matching empty conversations remain valid for startup cards; no client
+prefix allowlist, identity filling or draft rebinding is added. A mismatched card's option/text controls and send, skip
+and approval actions become unavailable. The final case proves the same complete original answers are available on
+the old target and refused on the replacement target, and freshly observes the native option and Send disabled.
+An empty form after recomposition or disabled Send alone is not the binding-refusal oracle.
 Case entry/completion breadcrumbs go only to the disposable emulator's `ZerusApprovalUI` log. After a failed approval
 instrumentation attempt, the driver tries one five-second bounded read of the last 400 crash/main/system log records,
 only while the owned emulator and ADB server remain live. This uses the original 1200-second end and 20-second cleanup
