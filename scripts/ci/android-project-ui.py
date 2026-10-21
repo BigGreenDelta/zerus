@@ -112,6 +112,23 @@ def instrumentation_result(text):
     return fields
 
 
+def phone_service_ready(run, alive, device, boot_end):
+    """Require the already-used phone service within the original shared boot deadline."""
+    index = 0
+    while time.monotonic() < boot_end:
+        alive()
+        remaining = boot_end - time.monotonic()
+        assert remaining > 0, "phone service boot deadline"
+        result = run("phone-ready-" + str(index), [*device, "service", "check", "phone"], min(10, remaining))
+        assert time.monotonic() < boot_end, "phone service boot deadline"
+        if result.strip() == "Service phone: found":
+            return
+        assert result.strip() == "Service phone: not found", "unknown phone service readiness"
+        index += 1
+        time.sleep(min(1, max(0, boot_end - time.monotonic())))
+    raise AssertionError("phone service boot deadline")
+
+
 def failure_diagnostics(run, alive, device):
     """One bounded read on the still-owned emulator; never replace the primary failure."""
     try:
@@ -370,6 +387,7 @@ def main():
             time.sleep(min(1, max(0, boot_end - time.monotonic())))
         assert booted
         device = [*adb_args, "-s", SERIAL, "shell"]
+        phone_service_ready(run, alive, device, boot_end)
         for name, args in (("wifi-off", ["svc", "wifi", "disable"]), ("data-off", ["svc", "data", "disable"]),
                            ("airplane", ["cmd", "connectivity", "airplane-mode", "enable"])):
             alive()
