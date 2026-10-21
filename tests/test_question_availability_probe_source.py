@@ -7,7 +7,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
-MODEL_SHA = "9e1cba7a676c8df4c10c54186b5b97a4c2be33cfc3e127c77532091e5534a7ec"
+# Product baseline includes prepared inspection publication before installation.
+MODEL_SHA = "36d8d64399e3ed9dc54bc0815165c2d7d61d6b70ba33ed432682d6750bd0fd83"
 MAIN_SHA = "aeadbc12421065f20ce51957a9504e071d65f3f85321153706ebdaf6e900fdfa"
 WRITERS = ["INSTALL_WAIT_PRESENTATION", "INSTALL_PRESENTATION", "PREPARE_PRESENTATION", "TERMINAL_CLOSED",
            "ACTION_RESULT", "CONNECTION_FORGOTTEN", "OPEN_SESSION", "BACK", "CLEAR_UNCONFIRMED", "INSPECT_FAILED"]
@@ -70,6 +71,31 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
         self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
                          "4fc8082c8da73e0c914b012afab02188229d0e79b23ab15e44c4edb8b246e09a")
+
+    def test_prepared_publication_uses_the_actual_bounded_owner_before_any_atomic_install(self):
+        model = (MAIN / "ZerusViewModel.kt").read_text()
+        normalized = model.split("private fun frameInstall(", 1)[1].split("private fun installFrame(", 1)[0]
+        self.assertNotIn("currentHistoryHeads-=", normalized)
+        self.assertNotRegex(normalized, r"historyWindows\[[^\n]+\]\s*=")
+        body = model.split("val result = InspectionPublication.prepare(", 1)[1].split("if (result == InspectionPublication.Result.SUPERSEDED)", 1)[0]
+        for guard in ("activeFrame === preparationOwner", "clearExpectation == clearOwner", "messageState === captured.state",
+                      "presentationRevision == captured.revision", "historyWindows[frame.target.key] === captured.window",
+                      "outgoing.filter { it.belongsTo(frame.target) } == captured.messages",
+                      "selected === captured.selection", "catalogSessions === captured.catalog",
+                      "historyComplete == captured.complete", "historyIndexing == captured.indexing"):
+            self.assertIn(guard, body)
+        self.assertIn("withContext(Dispatchers.Default)", body)
+        self.assertIn("Snapshot.withMutableSnapshot", body)
+        self.assertLess(body.index("captured.install.frame.presentation = prepared"), body.index("installFrame(frame, true, captured.install)"))
+        self.assertIn("if (result == InspectionPublication.Result.SUPERSEDED) return@launch", model)
+        self.assertIn("check(result == InspectionPublication.Result.PUBLISHED)", model)
+        helper = (MAIN / "InspectionPublication.kt").read_text()
+        self.assertIn("const val MAX_ATTEMPTS = 3", helper)
+        self.assertIn("repeat(MAX_ATTEMPTS)", helper)
+        self.assertEqual(helper.count("currentCoroutineContext().ensureActive()"), 2)
+        self.assertLess(helper.index("if (!owns()) return Result.SUPERSEDED", helper.index("val prepared = build(snapshot)")), helper.index("publish(snapshot, prepared)"))
+        for forbidden in ("delay(", "launch(", "async(", "api.", "installFrame(", "while ("):
+            self.assertNotIn(forbidden, helper)
 
 
 if __name__ == "__main__":
