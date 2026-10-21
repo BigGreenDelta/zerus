@@ -65,12 +65,13 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for forbidden in ("ZerusViewModel", "JSONObject", "question.prompts", "choice.label", "java.io", "okhttp", "Thread(", "launch(", "delay("):
             self.assertNotIn(forbidden, probe)
 
-    def test_question_ui_and_entire_physical_fixture_are_unchanged(self):
+    def test_question_ui_and_entire_physical_fixture_match_the_reviewed_baselines(self):
         self.assertEqual(hashlib.sha256((MAIN / "QuestionUi.kt").read_bytes()).hexdigest(),
                          "fac5de42d733a6b2dbaf2fa66421c7265d3b1618d1839849c73b7d699b0835d1")
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
+        # The fixture baseline intentionally includes the same-instance onStop/resume barrier.
         self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
-                         "cc8ab4afab631d025a4e73a8923dc6fe26a7104a7018ed3c436e6519aa05b669")
+                         "9f89d6e02839d888d696e2f84de7bed450273013880ba622f28361bb889a90b5")
 
     def test_prepared_publication_uses_the_actual_bounded_owner_before_any_atomic_install(self):
         model = (MAIN / "ZerusViewModel.kt").read_text()

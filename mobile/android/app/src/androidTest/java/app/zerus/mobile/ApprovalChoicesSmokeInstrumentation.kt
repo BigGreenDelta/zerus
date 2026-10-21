@@ -677,14 +677,29 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             earlySend = lifecycleSend
             var lifecycleResumedAt: Long? = null
             try {
+                val lifecycleActivity = activity
+                main {
+                    check(lifecycleActivity === activity && !activity.isFinishing && !activity.isDestroyed)
+                    check(activity.lifecycle.currentState == androidx.lifecycle.Lifecycle.State.RESUMED)
+                    phase("lifecycle-before-home:id=${System.identityHashCode(activity)}:state=${activity.lifecycle.currentState.name}:focus=${activity.hasWindowFocus()}")
+                }
                 phase("early-home:lifecycle")
                 sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)
-                await("Activity stopped") { !main { activity.hasWindowFocus() } }
+                // The open Confirm dialog already removes Activity focus; only onStop proves Home completed.
+                await("Activity stopped") { main {
+                    check(lifecycleActivity === activity && !activity.isFinishing && !activity.isDestroyed)
+                    activity.lifecycle.currentState == androidx.lifecycle.Lifecycle.State.CREATED && !activity.hasWindowFocus()
+                } }
+                main { phase("lifecycle-stopped:id=${System.identityHashCode(activity)}:state=${activity.lifecycle.currentState.name}:focus=${activity.hasWindowFocus()}") }
                 val resumeStart = SystemClock.elapsedRealtime()
                 lifecycleResumedAt = resumeStart
                 phase("early-resume-begin:lifecycle")
                 targetContext.startActivity(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
-                await("same Activity regained focus") { main { activity.hasWindowFocus() } }
+                await("same Activity regained focus") { main {
+                    check(lifecycleActivity === activity && !activity.isFinishing && !activity.isDestroyed)
+                    activity.lifecycle.currentState == androidx.lifecycle.Lifecycle.State.RESUMED && activity.hasWindowFocus()
+                } }
+                main { phase("lifecycle-resumed:id=${System.identityHashCode(activity)}:state=${activity.lifecycle.currentState.name}:focus=${activity.hasWindowFocus()}") }
                 // Preserve legitimate inner scrolling: bind the same native card, not a now-offscreen top label.
                 await("same current card body restored") {
                     check(lifecycleSend.current()) { "Lifecycle card identity changed after resume" }

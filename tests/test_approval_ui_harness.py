@@ -606,6 +606,58 @@ class ApprovalHarnessTests(unittest.TestCase):
         for forbidden in ('setActivityVerified', 'setDeclaredField("activeFrameVerified"', 'setReviewDelayForTests', 'CountDownLatch'):
             self.assertNotIn(forbidden, source)
 
+    def test_android_lifecycle_stop_requires_the_same_alive_created_activity_not_modal_focus_loss(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        body = source.split('boundary("begin", "lifecycle_no_submit")', 1)[1].split('boundary("complete", "lifecycle_no_submit")', 1)[0]
+        stop = body.split('await("Activity stopped") { main {\n', 1)[1].split('                } }', 1)[0]
+        resume = body.split('await("same Activity regained focus") { main {\n', 1)[1].split('                } }', 1)[0]
+        def admitted(fragment, values):
+            lines = [line.strip() for line in fragment.splitlines() if line.strip()]
+            self.assertEqual(len(lines), 2)
+            self.assertTrue(lines[0].startswith('check(') and lines[0].endswith(')'))
+            expressions = [lines[0][6:-1], lines[1]]
+            for expression in expressions:
+                for literal, replacement in (
+                    ('lifecycleActivity === activity', 'same'), ('activity.isFinishing', 'finishing'),
+                    ('activity.isDestroyed', 'destroyed'), ('activity.lifecycle.currentState', 'state'),
+                    ('androidx.lifecycle.Lifecycle.State.CREATED', repr('CREATED')),
+                    ('androidx.lifecycle.Lifecycle.State.RESUMED', repr('RESUMED')),
+                    ('activity.hasWindowFocus()', 'focus'), ('&&', ' and '), ('!', 'not ')):
+                    expression = expression.replace(literal, replacement)
+                if not finite_source_predicate(expression, values): return False
+            return True
+        modal = dict(same=True, finishing=False, destroyed=False, state='RESUMED', focus=False)
+        self.assertTrue(finite_source_predicate('not focus', modal))  # The retained old focus-only predicate admitted this.
+        self.assertFalse(admitted(stop, modal))
+        stopped = {**modal, 'state': 'CREATED'}
+        self.assertTrue(admitted(stop, stopped))
+        for changed in ({'same': False}, {'finishing': True}, {'destroyed': True}, {'state': 'STARTED'},
+                        {'state': 'RESUMED'}, {'state': 'DESTROYED'}, {'focus': True}):
+            with self.subTest(stopped=changed): self.assertFalse(admitted(stop, {**stopped, **changed}))
+        resumed = {**modal, 'focus': True}
+        self.assertTrue(admitted(resume, resumed))
+        for changed in ({'same': False}, {'finishing': True}, {'destroyed': True}, {'state': 'CREATED'}, {'focus': False}):
+            with self.subTest(resumed=changed): self.assertFalse(admitted(resume, {**resumed, **changed}))
+        self.assertIn('val lifecycleActivity = activity', body)
+        for phase in ('lifecycle-before-home:', 'lifecycle-stopped:', 'lifecycle-resumed:'):
+            line = next(line for line in body.splitlines() if 'phase("' + phase in line)
+            self.assertIn('System.identityHashCode(activity)', line)
+            self.assertIn('activity.lifecycle.currentState.name', line)
+            self.assertIn('activity.hasWindowFocus()', line)
+        sequence = ('phase("lifecycle-before-home:', 'sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)',
+                    'await("Activity stopped")', 'phase("lifecycle-stopped:', 'val resumeStart = ',
+                    'targetContext.startActivity(', 'await("same Activity regained focus")', 'phase("lifecycle-resumed:',
+                    'await("same current card body restored")', 'await("background retires confirmation")',
+                    'check(count() == 4 && !button("Send answer").isEnabled)', 'val elapsed = ',
+                    'elapsed >= 0 && elapsed < 3_000')
+        self.assertEqual([body.index(item) for item in sequence], sorted(body.index(item) for item in sequence))
+        self.assertEqual(body.count('sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)'), 1)
+        self.assertEqual(body.count('targetContext.startActivity('), 1)
+        wait = source.split('    private fun await(', 1)[1].split('    private fun find(', 1)[0]
+        self.assertIn('SystemClock.elapsedRealtime() + 10_000', wait)
+        self.assertIn('SystemClock.sleep(30)', wait)
+        self.assertNotIn('sleep(', body)
+
     def test_ios_controls_bind_modes_generation_first_consumption_and_checked_cleanup(self):
         host = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalUIFixtureApp.swift").read_text()
         tests = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()

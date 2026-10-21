@@ -61,6 +61,13 @@ its original Home/resume boundary exactly once, with the same cache and elapsed 
 focus/question/confirmation-retired/count/disabled assertions; it never performs an additional reset. No production
 visibility, foreground or review clock is set.
 
+The lifecycle case starts with an open native Confirm dialog, which can remove the Activity's window focus while the
+Activity is still resumed. Its single Home transition therefore waits for the same live Activity to reach lifecycle
+`CREATED` with no focus before sending the existing single resume intent. It then requires that original instance to be
+`RESUMED` with focus. Bounded before/stopped/resumed observations retain instance identity, lifecycle and focus. The
+original ten-second wait slots and three-second early-review requirement remain unchanged. The former focus-only stop
+predicate did not prove an `onStop` transition; the retained failed run does not establish the exact OS event ordering.
+
 Ordinary Home/resume can also initiate the production catalog refresh. The interceptor admits only GET
 `/v1/capabilities` and `/v1/computers` at the exact reserved HTTPS origin, default port, empty userinfo/query/fragment/body,
 and exact existing fixture authorization. Capabilities advertise only protocol1, `inspect`, `answer`, and no features.
