@@ -220,3 +220,14 @@ diagnostics, not proof that a touch activated a control. Failure window evidence
 before the Activity's back/finish cleanup; diagnostic or cleanup errors cannot replace the original throwable. The driver
 does not retrieve a PNG or add any host operation. These fixture admission/diagnostic corrections do not establish the
 cause of the earlier missing-modal failure or a product defect; all seven cases, original actions and budgets remain.
+
+The later replacement fixture also proves the existing exact option3/empty/editing/current draft after its one Reject
+touch, before Home, and rechecks it only after the unchanged early timing assertion has completed. It never creates a
+draft or repeats the touch. Failure-only observations record real Activity focus/lifecycle, existing draft completeness,
+and exact fixed synthetic command/title/review labels with owned root, scroll and window bounds. The active owned root
+is observed before a separately caught window-list query; a failed query/traversal retains earlier lines and its stage.
+The evidence is capped at64 lines of160 characters, with128 visited nodes/depth16,12 fixed-label matches and4 scroll
+nodes per root, and at most4 listed windows. These records cannot qualify a case or select an answer. They distinguish
+missing selection from unavailable review evidence without overriding the production timer or inferring a cause from a
+disabled Send alone. Current-window/focus admission, additional disclosure scrolling and every host operation remain
+unchanged; the observed replacement failure remains unproven until actual bounded evidence identifies its cause.

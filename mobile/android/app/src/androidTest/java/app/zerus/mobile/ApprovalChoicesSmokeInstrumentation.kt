@@ -152,33 +152,79 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             bitmap.recycle()
         }
     }
-    private fun windowEvidence(): String = try {
-        val lines = mutableListOf<String>()
-        val windows = uiAutomation.windows
-        check(windows.size in 1..4) { "window-count" }
-        val labels = setOf("Approve once", "Approve for this session", "Reject", "Send answer", "Confirm this option?", "Confirm", "Cancel", "Exact command for this session only")
-        for (window in windows) {
-            val root = window.root ?: error("window-root")
-            if (root.packageName?.toString() != targetContext.packageName) continue // Never log another application's tree.
-            val bounds = Rect(); window.getBoundsInScreen(bounds)
-            lines += "owned-window id=${window.id} type=${window.type} active=${window.isActive} focused=${window.isFocused} bounds=$bounds".take(160)
-            var visited = 0; var matched = 0
-            fun visit(node: AccessibilityNodeInfo?, depth: Int) {
-                check(node != null && depth <= 16 && ++visited <= 128 && node.refresh()) { "window-traversal" }
-                check(node.packageName?.toString() == targetContext.packageName) { "window-package" }
-                val label = sequenceOf(node.text?.toString(), node.contentDescription?.toString()).firstOrNull { it in labels }
-                if (label != null) {
-                    check(++matched <= 8) { "window-label-count" }
-                    val rectangle = Rect(); node.getBoundsInScreen(rectangle)
-                    lines += "owned-node window=${window.id} label=$label visible=${node.isVisibleToUser} enabled=${node.isEnabled} clickable=${node.isClickable} selected=${node.isSelected} bounds=$rectangle".take(160)
-                }
-                for (index in 0 until node.childCount) visit(node.getChild(index), depth + 1)
-            }
-            visit(root, 0)
+    private fun evidenceLine(lines: MutableList<String>, text: String) {
+        if (lines.size < 63) lines.add(text.take(160))
+        else if (lines.size == 63) lines.add("owned-evidence UNKNOWN line-limit")
+    }
+    private fun diagnosticStage(lines: MutableList<String>, name: String, inspect: () -> Unit) {
+        try { inspect() } catch (error: Throwable) {
+            evidenceLine(lines, "owned-evidence UNKNOWN stage=$name type=${error.javaClass.simpleName.take(80)}")
         }
-        check(lines.isNotEmpty()) { "owned-window-missing" }
+    }
+    private fun ownedTreeEvidence(lines: MutableList<String>, root: AccessibilityNodeInfo, kind: String) {
+        check(root.refresh() && root.packageName?.toString() == targetContext.packageName) { "owned-root" }
+        val rootBounds = Rect(); root.getBoundsInScreen(rootBounds)
+        evidenceLine(lines, "owned-root kind=$kind window=${root.windowId} focused=${root.isFocused} bounds=$rootBounds")
+        val labels = setOf("Approve once", "Approve for this session", "Reject", "Send answer", "Confirm this option?", "Confirm", "Cancel",
+            "Exact command for this session only", "printf fixture # *literal* [not a link](https://example.test)", "Scroll for options ↓",
+            "Choose one of the agent's options.") + (1..3).map { "Review the request, then choose one of the agent's options ($it)." } +
+            listOf("countdown", "broader-cancel", "replacement", "replacement-new", "feedback", "background", "readonly", "stale-identity").map { "Review synthetic $it" }
+        var visited = 0; var matched = 0; var scrolls = 0
+        fun visit(node: AccessibilityNodeInfo?, depth: Int) {
+            check(node != null && depth <= 16 && ++visited <= 128 && node.refresh()) { "window-traversal" }
+            check(node.packageName?.toString() == targetContext.packageName) { "window-package" }
+            val rectangle = Rect(); node.getBoundsInScreen(rectangle)
+            if (node.isScrollable) {
+                check(++scrolls <= 4) { "window-scroll-count" }
+                evidenceLine(lines, "owned-scroll kind=$kind window=${node.windowId} visible=${node.isVisibleToUser} bounds=$rectangle")
+            }
+            val label = sequenceOf(node.text?.toString(), node.contentDescription?.toString()).firstOrNull { it in labels }
+            if (label != null) {
+                check(++matched <= 12) { "window-label-count" }
+                evidenceLine(lines, "owned-label kind=$kind index=$matched literal=$label")
+                evidenceLine(lines, "owned-node kind=$kind index=$matched window=${node.windowId} visible=${node.isVisibleToUser} enabled=${node.isEnabled} selected=${node.isSelected} checked=${node.isChecked}")
+                evidenceLine(lines, "owned-bounds kind=$kind index=$matched bounds=$rectangle")
+            }
+            for (index in 0 until node.childCount) visit(node.getChild(index), depth + 1)
+        }
+        visit(root, 0)
+    }
+    private fun windowEvidence(): String {
+        val lines = mutableListOf<String>()
+        diagnosticStage(lines, "active-root") {
+            ownedTreeEvidence(lines, checkNotNull(uiAutomation.rootInActiveWindow), "active")
+        }
+        diagnosticStage(lines, "window-list") {
+            val windows = uiAutomation.windows
+            check(windows.size <= 4) { "window-count" }
+            evidenceLine(lines, "owned-window-list count=${windows.size}")
+            for (window in windows) diagnosticStage(lines, "listed-root") {
+                val root = checkNotNull(window.root)
+                if (root.packageName?.toString() == targetContext.packageName) {
+                    val bounds = Rect(); window.getBoundsInScreen(bounds)
+                    evidenceLine(lines, "owned-window id=${window.id} type=${window.type} active=${window.isActive} focused=${window.isFocused} bounds=$bounds")
+                    ownedTreeEvidence(lines, root, "listed")
+                }
+            }
+        }
+        return lines.joinToString("\n")
+    }
+    private fun modelEvidence(model: ZerusViewModel, target: Target, activity: MainActivity, offered: JSONObject?): String = main {
+        val question = model.conversationQuestions.singleOrNull()
+        val draft = question?.let { QuestionPolicies.savedDraft(model.drafts, target, it) }
+        val saved = QuestionPolicies.savedAnswers(draft?.answers.orEmpty())
+        val options = saved.mapValues { it.value.optionIds.toSet() }
+        val texts = saved.mapValues { it.value.text }
+        val selected = saved["approval"]?.optionIds?.singleOrNull()?.takeIf { it in setOf("1", "2", "3") } ?: "missing-or-multiple"
+        val complete = question?.let { QuestionPolicies.complete(it.prompts, options, texts, QuestionPolicies.formReplyText(it)) } ?: false
+        val lines = mutableListOf<String>()
+        evidenceLine(lines, "owned-model focused=${activity.hasWindowFocus()} lifecycle=${activity.lifecycle.currentState.name} selected=${model.selected?.target == target}")
+        evidenceLine(lines, "owned-model verified=${model.activityVerified} detailBusy=${model.detailBusy} pendingConsent=${model.pendingQuestionSend != null}")
+        evidenceLine(lines, "owned-card id=${question?.id?.take(48)} current=${question?.id == offered?.string("question_id") && question?.hash == offered?.string("question_hash")} run=${question?.run == target.run} conversation=${question?.conversation == target.conversation}")
+        evidenceLine(lines, "owned-draft present=${draft != null} status=${draft?.status?.take(16)} inFlight=${draft?.let(model::answerInFlight)} answerable=${question?.canAnswer}")
+        evidenceLine(lines, "owned-answer rows=${saved.size} option=$selected emptyText=${saved["approval"]?.text?.isEmpty()} complete=$complete nativeChoices=${question?.let(QuestionPolicies::nativeChoices)}")
         lines.joinToString("\n")
-    } catch (error: Throwable) { "owned-window-evidence UNKNOWN ${error.javaClass.simpleName.take(80)}" }
+    }
     private fun set(model: ZerusViewModel, name: String, value: Any) {
         model.javaClass.declaredMethods.single { it.name == name }.apply { isAccessible = true }.invoke(model, value)
     }
@@ -331,6 +377,26 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                     model.activityVerified && question.canAnswer && scope?.id == "2") { "Broader Send must preserve its exact selected draft and card" }
             }
         }
+        fun proveRejectDraft() {
+            val offered = checkNotNull(pending)
+            await("exact selected Reject draft") {
+                main {
+                    val question = model.conversationQuestions.singleOrNull()
+                    val draft = question?.let { QuestionPolicies.savedDraft(model.drafts, target, it) }
+                    val answer = runCatching { JSONArray(draft?.answers.orEmpty()).objects().single() }.getOrNull()
+                    val selected = answer?.optJSONArray("selected_option_ids")
+                    val proven = question != null && question.id == offered.string("question_id") && question.hash == offered.string("question_hash") &&
+                        question.run == target.run && question.conversation == target.conversation && model.selected?.target == target &&
+                        draft != null && draft.target == target && draft.questionId == question.id && draft.questionHash == question.hash &&
+                        draft.status == "editing" && draft.requestId.isEmpty() && !model.answerInFlight(draft) &&
+                        answer != null && answer.opt("question_id") == "approval" && selected != null && selected.length() == 1 &&
+                        selected.opt(0) == "3" && answer.opt("text") == "" && model.pendingQuestionSend == null &&
+                        model.activityVerified && question.canAnswer && QuestionPolicies.nativeChoices(question)
+                    proven
+                }
+            }
+            phase("reject-draft:${offered.string("question_id")}:option=3:empty:editing:current")
+        }
         fun expect(option: String? = null, text: String = "") {
             val q = checkNotNull(pending)
             check(expected.compareAndSet(null, JSONObject().put("id", q.string("question_id")).put("hash", q.string("question_hash"))
@@ -420,7 +486,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             open("replacement-new")
             await("replacement drops old confirmation") { visible("Confirm this option?") == null }
             reveal("Reject"); tap("Reject")
+            proveRejectDraft()
             earlyReview("replacement") { check(!button("Send answer").isEnabled && count() == 2) }
+            proveRejectDraft()
             reviewed(); expect("3"); tap("Send answer"); await("new card reject receipt") { count() == 3 }
             receiptApplied(3)
             cases += "card_replacement"
@@ -487,7 +555,8 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         } catch (error: Throwable) {
             primaryFailure = error
             // Observe the still-owned Activity before the unchanged back/finish cleanup.
-            try { failureEvidence = windowEvidence() } catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }
+            try { failureEvidence = modelEvidence(model, target, activity, pending) } catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }
+            try { failureEvidence += "\n" + windowEvidence() } catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }
             try { screenshot("failure") } catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }
             throw error
         } finally {

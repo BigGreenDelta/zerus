@@ -34,6 +34,34 @@ def finite_source_predicate(expression, values):
     return eval(compile(tree, "<finite-source-predicate>", "eval"), {"__builtins__": {}}, values)
 
 
+def android_diagnostic_memory(source):
+    """Source-bound finite callback/line stand-in; no Android, JVM or real window operation."""
+    line = source.split('    private fun evidenceLine(', 1)[1].split('    private fun diagnosticStage(', 1)[0]
+    limits = re.fullmatch(r'[^\n]+\{\s*if \(lines.size < (\d+)\) lines.add\(text.take\((\d+)\)\)\s*'
+                         r'else if \(lines.size == (\d+)\) lines.add\("([^"]+)"\)\s*}\s*', line)
+    assert limits and limits[1] == limits[3]
+    count, width, overflow = int(limits[1]), int(limits[2]), limits[4]
+    assert (count, width, overflow) == (63, 160, "owned-evidence UNKNOWN line-limit")
+    stage = source.split('    private fun diagnosticStage(', 1)[1].split('    private fun ownedTreeEvidence(', 1)[0]
+    body = stage.split(' {\n', 1)[1].rsplit('    }', 1)[0]
+    assert re.fullmatch(r'\s*try \{ inspect\(\) } catch \(error: Throwable\) \{\s*'
+                        r'evidenceLine\(lines, "owned-evidence UNKNOWN stage=\$name type=\$\{error.javaClass.simpleName.take\(80\)}"\)\s*}\s*', body)
+    # Only the exact source stage's call/catch/append is translated; callbacks replace OS observations.
+    translated = 'def stage(lines, name, inspect):\n    try:\n        inspect()\n    except BaseException as error:\n' \
+                 '        evidenceLine(lines, "owned-evidence UNKNOWN stage=" + name + " type=" + type(error).__name__[:80])\n'
+    def evidence_line(lines, text):
+        if len(lines) < count:
+            lines.append(text[:width])
+        elif len(lines) == count:
+            lines.append(overflow)
+    namespace = dict(evidenceLine=evidence_line, BaseException=BaseException, type=type, __builtins__={})
+    exec(compile(translated, '<android-diagnostic-stage-source-standin>', 'exec'), namespace)
+    window = source.split('    private fun windowEvidence()', 1)[1].split('    private fun modelEvidence(', 1)[0]
+    stages = re.findall(r'^        diagnosticStage\(lines, "([^"]+)"\)', window, re.M)
+    assert stages == ["active-root", "window-list"]
+    return evidence_line, namespace["stage"], stages
+
+
 class ApprovalHarnessTests(unittest.TestCase):
     def setUp(self):
         self.ui = module("android_approval_ui", "scripts/ci/android-project-ui.py")
@@ -420,9 +448,9 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertIn(value, proof)
         for forbidden in ("model.edit(", "set(model", "tap(", "expected.set("):
             self.assertNotIn(forbidden, proof)
-        diagnostics = source.split("    private fun windowEvidence()", 1)[1].split("    private fun set(", 1)[0]
-        for required in ("windows.size in 1..4", "depth <= 16", "++visited <= 128", "++matched <= 8", ".take(160)",
-                         'root.packageName?.toString() != targetContext.packageName', 'owned-window-evidence UNKNOWN'):
+        diagnostics = source.split("    private fun evidenceLine(", 1)[1].split("    private fun set(", 1)[0]
+        for required in ("windows.size <= 4", "depth <= 16", "++visited <= 128", "++matched <= 12", ".take(160)",
+                         'root.packageName?.toString() == targetContext.packageName', 'owned-evidence UNKNOWN stage=$name'):
             self.assertIn(required, diagnostics)
         for forbidden in ("performAction(", "injectInputEvent(", "request.body", "Authorization"):
             self.assertNotIn(forbidden, diagnostics)
@@ -494,10 +522,11 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertNotIn('screenshot("failure")', outer)
         tail = source.split('        var primaryFailure: Throwable? = null', 1)[1]
         failure, cleanup = tail.rsplit('        } catch (error: Throwable) {', 1)[1].split('        } finally {', 1)
-        for earlier, later in [('primaryFailure = error', 'failureEvidence = windowEvidence()'),
-                               ('failureEvidence = windowEvidence()', 'screenshot("failure")'), ('screenshot("failure")', 'throw error')]:
+        for earlier, later in [('primaryFailure = error', 'failureEvidence = modelEvidence('),
+                               ('failureEvidence = modelEvidence(', 'failureEvidence += "\\n" + windowEvidence()'),
+                               ('failureEvidence += "\\n" + windowEvidence()', 'screenshot("failure")'), ('screenshot("failure")', 'throw error')]:
             self.assertLess(failure.index(earlier), failure.index(later))
-        self.assertEqual(failure.count('catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }'), 2)
+        self.assertEqual(failure.count('catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }'), 3)
         self.assertNotIn('model.back()', failure)
         self.assertNotIn('activity.finish()', failure)
         self.assertIn('try { main { model.back(); activity.finish() } }', cleanup)
@@ -518,6 +547,155 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('bounds.exactCenterX(), bounds.exactCenterY(), 0)', tap)
         for forbidden in ('performAction(', 'ACTION_CLICK', 'tap(', 'while ', 'Thread.sleep('):
             self.assertNotIn(forbidden, tap)
+
+    def test_android_reject_proof_source_predicate_requires_existing_current_option_three_without_fabrication(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        helper = source.split('        fun proveRejectDraft()', 1)[1].split('        fun expect(', 1)[0]
+        self.assertIn('QuestionPolicies.savedDraft(model.drafts, target, it)', helper)
+        for forbidden in ('model.draft(', 'model.edit(', 'set(model', 'model.send(', 'tap(', 'expected.set(', 'refreshActivity('):
+            self.assertNotIn(forbidden, helper)
+        condition = helper.split('                    val proven =', 1)[1].split('\n                    proven', 1)[0]
+        fields = {'question != null': 'question_present', 'draft != null': 'draft_present', 'answer != null': 'answer_present',
+                  'selected != null': 'selection_present', 'offered.string("question_id")': 'offered_id',
+                  'offered.string("question_hash")': 'offered_hash', 'question.id': 'current_id', 'question.hash': 'current_hash',
+                  'question.run': 'current_run', 'question.conversation': 'current_conversation', 'model.selected?.target': 'selected_target',
+                  'draft.target': 'draft_target', 'draft.questionId': 'draft_id', 'draft.questionHash': 'draft_hash',
+                  'draft.status': 'status', 'draft.requestId.isEmpty()': 'unsubmitted', '!model.answerInFlight(draft)': 'not in_flight',
+                  'answer.opt("question_id")': 'answer_id', 'selected.length()': 'option_count', 'selected.opt(0)': 'option',
+                  'answer.opt("text")': 'actual_text', 'model.pendingQuestionSend': 'pending_consent',
+                  'model.activityVerified': 'verified', 'question.canAnswer': 'answerable', 'QuestionPolicies.nativeChoices(question)': 'native_choices',
+                  'target.run': 'target_run', 'target.conversation': 'target_conversation'}
+        for old, new in fields.items():
+            condition = condition.replace(old, new)
+        condition = ' '.join(condition.replace('&&', 'and').replace('null', 'None').split())
+        valid = dict(question_present=True, draft_present=True, answer_present=True, selection_present=True,
+                     offered_id='replacement-new', current_id='replacement-new', offered_hash='new-hash', current_hash='new-hash',
+                     current_run='run', target_run='run', current_conversation='conversation', target_conversation='conversation',
+                     target='target', selected_target='target', draft_target='target', draft_id='replacement-new', draft_hash='new-hash',
+                     status='editing', unsubmitted=True, in_flight=False, answer_id='approval', option_count=1, option='3', actual_text='',
+                     pending_consent=None, verified=True, answerable=True, native_choices=True)
+        self.assertTrue(finite_source_predicate(condition, valid))
+        departures = dict(question_present=False, draft_present=False, answer_present=False, selection_present=False,
+                          current_id='old', current_hash='old', current_run='old', current_conversation='old', selected_target='other',
+                          draft_target='other', draft_id='old', draft_hash='old', status='submitted', unsubmitted=False, in_flight=True,
+                          answer_id='other', option_count=2, option='2', actual_text='other', pending_consent='pending', verified=False,
+                          answerable=False, native_choices=False)
+        for field, value in departures.items():
+            with self.subTest(field=field):
+                self.assertFalse(finite_source_predicate(condition, {**valid, field: value}))
+        for field, value in (('option', 3), ('option', None), ('actual_text', None), ('actual_text', False), ('answer_id', None)):
+            with self.subTest(field=field, type=type(value).__name__):
+                self.assertFalse(finite_source_predicate(condition, {**valid, field: value}))
+        replacement = source.split('            open("replacement-new")', 1)[1].split('            cases += "card_replacement"', 1)[0]
+        self.assertEqual(replacement.count('proveRejectDraft()'), 2)
+        self.assertLess(replacement.index('tap("Reject")'), replacement.index('proveRejectDraft()'))
+        self.assertLess(replacement.index('proveRejectDraft()'), replacement.index('earlyReview("replacement")'))
+        self.assertLess(replacement.index('earlyReview("replacement")'), replacement.rindex('proveRejectDraft()'))
+        self.assertLess(replacement.rindex('proveRejectDraft()'), replacement.index('reviewed(); expect("3")'))
+        self.assertIn('elapsed >= 0 && elapsed < 3_000', source)
+
+    def test_android_staged_diagnostic_fault_retains_active_partial_when_window_query_throws(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        record, stage, order = android_diagnostic_memory(source)
+        lines, calls = [], []
+        def active():
+            calls.append('active')
+            record(lines, 'owned-root active bounds=fixture')
+            record(lines, 'owned-label literal=Review synthetic replacement-new')
+        def window_query():
+            calls.append('windows')
+            raise LookupError('memory-only windows query fault')
+        for name, callback in zip(order, (active, window_query), strict=True):
+            stage(lines, name, callback)
+        self.assertEqual(calls, ['active', 'windows'])
+        self.assertEqual(lines, ['owned-root active bounds=fixture', 'owned-label literal=Review synthetic replacement-new',
+                                 'owned-evidence UNKNOWN stage=window-list type=LookupError'])
+        def partial_root():
+            record(lines, 'owned-label literal=Reject')
+            raise ValueError('memory-only traversal fault')
+        stage(lines, 'active-root', partial_root)
+        self.assertEqual(lines[-2:], ['owned-label literal=Reject', 'owned-evidence UNKNOWN stage=active-root type=ValueError'])
+        bounded = []
+        for _ in range(100):
+            record(bounded, 'x' * 1000)
+        self.assertEqual(len(bounded), 64)
+        self.assertTrue(all(len(line) <= 160 for line in bounded))
+        self.assertEqual(bounded[-1], 'owned-evidence UNKNOWN line-limit')
+
+    def test_android_staged_diagnostics_and_cleanup_preserve_the_identical_primary_in_memory(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        record, stage, order = android_diagnostic_memory(source)
+        failure = source.split('        var primaryFailure: Throwable? = null', 1)[1].rsplit('        } catch (error: Throwable) {', 1)[1]
+        capture, cleanup = failure.split('        } finally {', 1)
+        callbacks = re.findall(r'^            try \{ (?:failureEvidence [+=]+ (?:"\\n" \+ )?)?(modelEvidence|windowEvidence|screenshot)\(', capture, re.M)
+        self.assertEqual(callbacks, ['modelEvidence', 'windowEvidence', 'screenshot'])
+        self.assertLess(capture.index('primaryFailure = error'), capture.index('modelEvidence('))
+        self.assertIn('throw error', capture)
+        self.assertIn('if (diagnostic !== error) error.addSuppressed(diagnostic)', capture)
+        self.assertIn('if (original == null) throw cleanup else if (cleanup !== original) original.addSuppressed(cleanup)', cleanup)
+        primary, window_error, cleanup_error = RuntimeError('primary'), LookupError('windows'), OSError('cleanup')
+        lines, suppressed, events = [], [], []
+        def model():
+            events.append('model')
+            record(lines, 'owned-model option=3 complete=true')
+        def windows():
+            events.append('window')
+            stage(lines, order[0], lambda: record(lines, 'owned-root active'))
+            def query():
+                raise window_error
+            stage(lines, order[1], query)
+        def screenshot():
+            events.append('screenshot')
+            raise primary  # Same-object diagnostic must not self-suppress or replace it.
+        actions = dict(modelEvidence=model, windowEvidence=windows, screenshot=screenshot)
+        caught = None
+        try:
+            try:
+                raise primary
+            except BaseException as error:
+                original = error
+                for callback in callbacks:  # Exact source callback order, memory-only replacements.
+                    try:
+                        actions[callback]()
+                    except BaseException as diagnostic:
+                        if diagnostic is not error:
+                            suppressed.append(diagnostic)
+                raise
+            finally:
+                events.append('cleanup')
+                try:
+                    raise cleanup_error
+                except BaseException as error:
+                    if original is None:
+                        raise
+                    if error is not original:
+                        suppressed.append(error)
+        except BaseException as error:
+            caught = error
+        self.assertIs(caught, primary)
+        self.assertEqual(suppressed, [cleanup_error])
+        self.assertEqual(events, ['model', 'window', 'screenshot', 'cleanup'])
+        self.assertEqual(lines, ['owned-model option=3 complete=true', 'owned-root active',
+                                 'owned-evidence UNKNOWN stage=window-list type=LookupError'])
+
+    def test_android_failure_labels_model_and_tree_diagnostics_are_fixed_owned_and_readonly(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        diagnostics = source.split('    private fun evidenceLine(', 1)[1].split('    private fun set(', 1)[0]
+        for required in ('root.refresh() && root.packageName?.toString() == targetContext.packageName',
+                         'node.packageName?.toString() == targetContext.packageName', 'depth <= 16', '++visited <= 128', '++matched <= 12',
+                         '++scrolls <= 4', 'windows.size <= 4', 'kind=$kind', 'root.getBoundsInScreen(rootBounds)',
+                         'printf fixture # *literal* [not a link](https://example.test)', 'Scroll for options ↓',
+                         'Choose one of the agent\'s options.', 'Review the request, then choose one of the agent\'s options ($it).',
+                         '(1..3).map', '"Review synthetic $it"', 'QuestionPolicies.savedDraft(model.drafts, target, it)',
+                         'activity.hasWindowFocus()', 'activity.lifecycle.currentState.name', 'model.activityVerified', 'model.detailBusy',
+                         'model.pendingQuestionSend != null', 'QuestionPolicies.complete(', 'QuestionPolicies.nativeChoices'):
+            if required == 'QuestionPolicies.nativeChoices':
+                self.assertIn('QuestionPolicies::nativeChoices', diagnostics)
+            else:
+                self.assertIn(required, diagnostics)
+        for forbidden in ('performAction(', 'injectInputEvent(', 'model.draft(', 'model.edit(', 'model.send(', 'set(model', 'expected.set(',
+                          'refreshActivity(', 'setServiceInfo(', 'FLAG_RETRIEVE_INTERACTIVE_WINDOWS', 'Thread.sleep(', 'SystemClock.sleep('):
+            self.assertNotIn(forbidden, diagnostics)
 
     def test_ios_reverse_ack_source_token_guard_nonce_order_and_teardown_refuse_unknown(self):
         source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
