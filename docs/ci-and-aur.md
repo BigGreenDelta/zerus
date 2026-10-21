@@ -900,6 +900,73 @@ python3 scripts/ci/agent-compatibility.py --agent opencode
 python3 scripts/ci/agent-compatibility.py --latest
 ```
 
+The unshipped static coordination hint has a separately selected source candidate:
+`--contract agent-hint`. Its fixture is authored for the same reviewed Claude and
+Codex pins and targets above. It has not yet been built or executed. It selects
+exactly four methods per pin: actual hgs lifecycle (launch, compact, clear, two
+resumes, rename, fork), lost-mark output, real pre-feature first resume, and
+global/account exclusions with instruction and personal-hook preservation. The
+Unix launcher sentinel covers supported project shell launchers; Windows starts
+the real executable directly and makes no shell-launcher claim. Existing default
+UI matrices, geometry/animation coverage and pin values are unchanged.
+
+The source inputs are the candidate hgs, a real CLI built from pre-feature main
+`ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce`, the `session_start_observer` Rust example,
+and cached public official package tarballs whose exact filenames and SHA-512
+pins are already in `agent-compatibility.json`. The hint selection never downloads
+or retries missing packages. Build receipts must bind each declared Git source to
+its binary hash; a version string cannot establish that association. A future
+separately authorized run has this shape (all paths are examples, not inputs):
+
+```sh
+python3 scripts/ci/agent-compatibility.py --contract agent-hint --agent claude \
+  --hgs /fixture/candidate/hgs --hgs-source <reviewed-40-digit-source> \
+  --pre-feature-hgs /fixture/pre-feature/hgs \
+  --hook-observer /fixture/observer/session_start_observer \
+  --observer-source <reviewed-40-digit-observer-source> \
+  --native-package-cache /fixture/public-package-cache --results /fixture/fresh-results
+```
+
+Each selected pin has one original 1200-second row end including preparation and
+a 60-second cleanup reserve, with four fixed methods and first failure stopping
+the selected campaign. Startup and deferred-resume gates keep their original
+120-second ends, including late native consent answered only through `hgs answer`.
+The native five-second hook timeout is unchanged. No prompt or count precedes the
+actual public gate and native-process proof. Pre-feature migration launches and
+pauses through the old CLI, then resumes through the candidate; Windows records a
+resident old host separately from the newly installed candidate stable CLI.
+
+The fixture intentionally seeds an observed retained owned hook entry at a
+separate private executable named `hgs` or `hgs.exe`. It leaves the real stable
+CLI, staged images, supervisor/native argv and real answer channel intact. The
+normal installer must retain that entry; this does not qualify fresh registration
+as having generated the observer path. Each observed call starts one standalone
+phase-sealed real hgs. Bounded capture never truncates forwarded streams; stdin,
+stdout and stderr preserve their own byte order, without a cross-stream ordering
+claim. Missing identity, incomplete capture/forwarding, overflow or unknown output
+fails the case. Pipes add interposition and can change fault-path behavior.
+Recorded output and completed forwarding do not prove customer receipt or
+crash-atomic exactly-once delivery. The lost-mark control requires a second
+distinct actual SessionStart output, then empty output on the next marked resume;
+marks, model counts and transcripts alone cannot prove that, particularly with
+Claude's identical-context deduplication. This is no OS/network-isolation claim,
+native execution grant, shipped feature or release-dependency waiver.
+
+The finite allocation is six pin/OS rows: Claude 2.1.296 on Linux x86_64,
+macOS arm64 and Windows x86_64; retained Codex 0.160.1 on Linux x86_64, and
+Codex 0.162.0 on Linux x86_64 and Windows x86_64. A disposable Linux job needs
+Python, tmux and private short TMPDIR; macOS needs Python, tmux and its native
+arm64 build; Windows needs Python and the reviewed ConPTY pair supplied through
+`HGS_TEST_CONPTY_DIR`. Candidate and pre-feature hgs and the observer must be built
+for that job's OS/architecture, with separate source/command/toolchain/hash
+receipts. Linux Codex selection runs its two manifest pins sequentially; all
+other provider/OS selections run one row. Each selection uses the command above
+with `--agent claude` or `--agent codex` and fresh results, its OS-native binary
+paths and official public cache. Existing version/help/schema probes remain part
+of the runner. These focused disposable hosted or local jobs can be allocated
+after review; ordinary CI defaults and workflows are unchanged. No native row or
+helper/runner control has run on this source candidate.
+
 On Windows it takes the release build and the ConPTY pair as
 [testing the session host](windows-host-testing.md#real-agents) shows. The
 generated `artifacts/test-results/agent-compatibility/summary.md` and

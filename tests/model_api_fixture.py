@@ -252,9 +252,14 @@ class Handler(BaseHTTPRequestHandler):
         body = body if isinstance(body, dict) else {}
         number = next(self.server.numbers)
         answer = plan(body, self.server.project)
-        self.server.record({"method": "POST", "route": route, "n": number, "model": body.get("model"),
+        entry = {"method": "POST", "route": route, "n": number, "model": body.get("model"),
                             "tools": tool_names(body), "prompt": typed(body), "results": results(body),
-                            "answer": list(answer[:2])})
+                            "answer": list(answer[:2])}
+        if self.server.hint is not None:
+            entry["hint_count"] = json.dumps(body, ensure_ascii=False).count(self.server.hint)
+            entry["fixture_sentinels"] = {text: json.dumps(body, ensure_ascii=False).count(text)
+                                          for text in self.server.sentinels}
+        self.server.record(entry)
         try:
             if route.endswith("/count_tokens"):
                 return self.reply(200, {"input_tokens": 100})
@@ -271,12 +276,14 @@ class Handler(BaseHTTPRequestHandler):
 class Server(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, root, project):
+    def __init__(self, root, project, hint=None, sentinels=()):
         super().__init__(("127.0.0.1", 0), Handler)
         self.project = project
         self.numbers = itertools.count(1)
         self.lock = threading.Lock()
         self.log = Path(root) / "requests.jsonl"
+        self.hint = hint
+        self.sentinels = sentinels
 
     def server_bind(self):
         # HTTPServer would name itself with socket.getfqdn, a reverse lookup that can
