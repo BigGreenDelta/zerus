@@ -18,6 +18,18 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def android_approval_progress():
+    """Independent fixed diagnostic wire fixture; never an Android status or final result."""
+    setup = [(stage, "-", 0) for stage in ("ON_START", "STORE_BEGIN", "STORE_READY", "BOOTSTRAP_BEGIN",
+             "ACTIVITY_LAUNCH_BEGIN", "ACTIVITY_LAUNCH_READY", "BOOTSTRAP_READY")]
+    cases = ("countdown_once", "broader_cancel", "broader_confirm", "card_replacement", "feedback_keyboard",
+             "lifecycle_no_submit", "readonly_stale_identity")
+    steps = setup + [(stage, case, index + (stage == "CASE_COMPLETE")) for index, case in enumerate(cases)
+                     for stage in ("CASE_BEGIN", "CASE_COMPLETE")]
+    return ''.join(f'INSTRUMENTATION_STATUS: zerus_approval_progress=1|{index}|{stage}|{case}|{complete}|{1000 + index}\n'
+                   'INSTRUMENTATION_STATUS_CODE: 1\n' for index, (stage, case, complete) in enumerate(steps, 1))
+
+
 def module(name, path):
     spec = importlib.util.spec_from_file_location(name, ROOT / path)
     value = importlib.util.module_from_spec(spec)
@@ -430,7 +442,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.ui = module("android_approval_ui", "scripts/ci/android-project-ui.py")
 
     def output(self, ids=None, count="7", code="-1"):
-        return (f"INSTRUMENTATION_RESULT: approval_cases={count}\n"
+        return (android_approval_progress() + f"INSTRUMENTATION_RESULT: approval_cases={count}\n"
                 f"INSTRUMENTATION_RESULT: approval_case_ids={ids or self.ui.CASES}\n"
                 "INSTRUMENTATION_RESULT: stream=Approval choices smoke passed: synthetic only\n\n"
                 f"INSTRUMENTATION_CODE: {code}\n")
@@ -455,6 +467,71 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.ui.instrumentation_result(self.output().replace("approval_cases", "project_cases"))
         self.assertEqual(self.ui.RUNNER, "app.zerus.mobile.ApprovalChoicesSmokeInstrumentation")
         self.assertIn("Lapp/zerus/mobile/QuestionUiKt;", self.ui.APP_CLASSES)
+
+    def test_android_progress_never_qualifies_without_every_original_final_oracle(self):
+        self.ui.select_suite(["--approval-choices"])
+        progress = android_approval_progress()
+        final = self.output().removeprefix(progress)
+        self.assertEqual(self.ui.instrumentation_result(progress + final)["approval_cases"], "7")
+        for prefix in ('', progress, progress + final.split('INSTRUMENTATION_CODE:')[0]):
+            with self.subTest(prefix_length=len(prefix)), self.assertRaises(AssertionError):
+                self.ui.instrumentation_result(prefix)
+        lines = progress.splitlines(keepends=True)
+        self.assertEqual(len(lines), 42)
+        for index in range(len(lines)):
+            with self.subTest(truncated_at=index), self.assertRaises(AssertionError):
+                self.ui.instrumentation_result(''.join(lines[:index]) + final)
+        for malformed in (final, self.output(count='6'), self.output(code='0'),
+                          self.output().replace('passed:', 'failed:')):
+            with self.subTest(final=malformed[-180:]), self.assertRaises(AssertionError):
+                self.ui.instrumentation_result(malformed)
+
+    def test_android_progress_refuses_unknown_duplicate_reordered_oversize_or_forged_frames(self):
+        self.ui.select_suite(["--approval-choices"])
+        text = self.output()
+        changes = [
+            text.replace('zerus_approval_progress=', 'stream=', 1),
+            text.replace('|ON_START|', '|UNKNOWN|', 1),
+            text.replace('|ON_START|-|0|', '|ON_START|countdown_once|0|', 1),
+            text.replace('|STORE_BEGIN|-|0|', '|STORE_BEGIN|-|1|', 1),
+            text.replace('=1|1|', '=1|01|', 1),
+            text.replace('=1|2|', '=1|3|', 1),
+            text.replace('|1002\n', '|0\n', 1),
+            text.replace('|1001\n', '|9223372036854775808\n', 1),
+            text.replace('INSTRUMENTATION_STATUS_CODE: 1', 'INSTRUMENTATION_STATUS_CODE: -1', 1),
+            text.replace('INSTRUMENTATION_STATUS_CODE: 1\n', '', 1),
+            text.replace('=1|1|', '=1|1|' + 'x' * 161, 1),
+            text.replace('|1001\n', '|1001\nINSTRUMENTATION_RESULT: approval_cases=7\n', 1),
+        ]
+        first = '\n'.join(text.splitlines()[:2]) + '\n'
+        changes.extend((first + text, text + first, text.replace(first, first + 'INSTRUMENTATION_STATUS_CODE: 1\n', 1)))
+        for value in changes:
+            self.assertNotEqual(value, text)
+            with self.subTest(prefix=value[:180]), self.assertRaises(AssertionError):
+                self.ui.instrumentation_result(value)
+
+    def test_android_streaming_progress_is_bounded_passive_and_preserves_all_original_fixture_bytes(self):
+        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        pattern = re.compile(r'^([ ]*)// BEGIN APPROVAL_PROGRESS ([a-z-]+)\n[\s\S]*?^\1// END APPROVAL_PROGRESS \2\n', re.M)
+        self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
+            'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
+        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), '35155cce8a3b63447b28efad8c8c5bff555e6aa6780d8c0f89a285c92daebbca')
+        definition = source.split('// BEGIN APPROVAL_PROGRESS definition\n', 1)[1].split('// END APPROVAL_PROGRESS definition', 1)[0]
+        self.assertIn('check(progressSequence in 0 until 32)', definition)
+        self.assertIn('check(record.length <= 160)', definition)
+        self.assertIn('sendStatus(1, Bundle().apply { putString("zerus_approval_progress", record) })', definition)
+        self.assertEqual(source.count('sendStatus('), 1)
+        for forbidden in ('main {', 'runOnMainSync', 'performAction', 'injectInputEvent', 'startActivity', 'model.', 'pending', 'postStage', 'Thread(', 'delay(', 'sleep('):
+            self.assertNotIn(forbidden, definition)
+        self.assertEqual(re.findall(r'progress\(ProgressStage\.([A-Z_]+)\)', source),
+            ['ON_START', 'STORE_BEGIN', 'STORE_READY', 'BOOTSTRAP_BEGIN', 'ACTIVITY_LAUNCH_BEGIN', 'ACTIVITY_LAUNCH_READY', 'BOOTSTRAP_READY'])
+        runner = (ROOT / 'scripts/ci/android-project-ui.py').read_text()
+        run = runner.split('    def run(name, argv, cap=60, stdin=None):', 1)[1].split('    def spawn(', 1)[0]
+        self.assertIn('with out.open("xb") as stdout, err.open("xb") as stderr:', run)
+        self.assertIn('stdout=stdout, stderr=stderr,', run)
+        self.assertNotIn('PIPE', run)
+        self.assertNotIn('except', run)
+        self.assertIn('[*device, "am", "instrument", "-w", "-r", "app.zerus.mobile.test/" + RUNNER], 90)', runner)
 
     def test_unknown_runner_and_extra_arguments_refuse_before_runtime(self):
         for arguments in (["other"], ["--approval-choices", "extra"], ["--approval-choices", "--approval-choices"]):

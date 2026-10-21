@@ -52,6 +52,12 @@ class InstrumentationOutcomeTests(unittest.TestCase):
     def test_complete_exact_ordered_result_is_accepted(self):
         self.assertEqual(UI.instrumentation_result(output())["project_cases"], "6")
 
+    def test_approval_diagnostic_statuses_cannot_qualify_the_project_runner(self):
+        for status in ('INSTRUMENTATION_STATUS: zerus_approval_progress=1|1|ON_START|-|0|1001\nINSTRUMENTATION_STATUS_CODE: 1\n',
+                       'INSTRUMENTATION_STATUS_CODE: 1\n'):
+            with self.subTest(status=status), self.assertRaises(AssertionError):
+                UI.instrumentation_result(status + output())
+
     def test_failed_or_unknown_finish_code_is_rejected(self):
         for code in ("0", "1", "-2", "-1 extra"):
             with self.subTest(code=code), self.assertRaises(AssertionError):

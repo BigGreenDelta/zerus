@@ -12,7 +12,7 @@ MAIN = "mobile/android/app/src/main/java/app/zerus/mobile/"
 FIXTURE = "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
 ORIGINAL_UI = "3687bd4bb2f7243c06fc99865c08120795360b273aa8291b612794a9bfdf57bf"
 # Fixture baseline includes owned production-review clock binding and the same physical case oracles; probe seams reconstruct exactly.
-ORIGINAL_FIXTURE = "3bd3369cc49f7d7075f6cad34beb176bd8f0b187aef5a0581c39007c53a94281"
+ORIGINAL_FIXTURE = "7ca8038a652eb06b7951c45a09f2b2e13cd151d56d7e1c4edb2a29fcb8db5611"
 
 
 def strip_probe(source, expected):
@@ -76,7 +76,7 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
     def test_failure_classifiers_and_post_observations_leave_all_original_client_and_ui_code_exact(self):
         source = (ROOT / FIXTURE).read_text()
         self.assertEqual(hashlib.sha256(strip_send_diagnostics(source).encode()).hexdigest(),
-            "65d23e9e849f5abd3b9fd4e7e11ba8cdf3e05fd9f8777b6dd0e3a5a56b2e7402")
+            "0b2e0ff81763a5c1b688042dfe792c45d11e75d63a183206c35d857173e6b7a1")
         model = source.split("    private fun modelEvidence(", 1)[1].split("    private fun set(", 1)[0]
         self.assertTrue(model.startswith('model: ZerusViewModel, target: Target, activity: MainActivity, offered: JSONObject?): String = main {'))
         self.assertIn('failureText(model.error)', model)
@@ -152,7 +152,13 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
                 template = template.replace(expression, value)
             self.assertNotIn("${", template)
             stream = template.replace(r"\n", "\n")
-            return ("INSTRUMENTATION_RESULT: approval_cases=7\nINSTRUMENTATION_RESULT: approval_case_ids=" + ",".join(cases) +
+            setup = [(stage, "-", 0) for stage in ("ON_START", "STORE_BEGIN", "STORE_READY", "BOOTSTRAP_BEGIN",
+                "ACTIVITY_LAUNCH_BEGIN", "ACTIVITY_LAUNCH_READY", "BOOTSTRAP_READY")]
+            steps = setup + [(stage, case, index + (stage == "CASE_COMPLETE")) for index, case in enumerate(cases)
+                for stage in ("CASE_BEGIN", "CASE_COMPLETE")]
+            progress = ''.join(f'INSTRUMENTATION_STATUS: zerus_approval_progress=1|{index}|{stage}|{case}|{complete}|{1000 + index}\n'
+                'INSTRUMENTATION_STATUS_CODE: 1\n' for index, (stage, case, complete) in enumerate(steps, 1))
+            return (progress + "INSTRUMENTATION_RESULT: approval_cases=7\nINSTRUMENTATION_RESULT: approval_case_ids=" + ",".join(cases) +
                 "\nINSTRUMENTATION_RESULT: stream=" + stream + "\nINSTRUMENTATION_CODE: -1\n")
         with self.assertRaises(AssertionError):
             parser.instrumentation_result(serialized(old))

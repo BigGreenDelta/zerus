@@ -130,9 +130,28 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             error("Fixture interceptor ${failure.type} at ${failure.guard}: ${failure.method} ${failure.path}")
         }
     }
+    // BEGIN APPROVAL_PROGRESS definition
+    private enum class ProgressStage { ON_START, STORE_BEGIN, STORE_READY, BOOTSTRAP_BEGIN,
+        ACTIVITY_LAUNCH_BEGIN, ACTIVITY_LAUNCH_READY, BOOTSTRAP_READY, CASE_BEGIN, CASE_COMPLETE }
+    private var progressSequence = 0
+    /** Only fixed instrumentation-thread boundaries; never a UI callback, input authority or success result. */
+    private fun progress(stage: ProgressStage, caseId: String = "-") {
+        check(progressSequence in 0 until 32)
+        check(if (stage in setOf(ProgressStage.CASE_BEGIN, ProgressStage.CASE_COMPLETE)) caseId in CASES else caseId == "-")
+        val now = SystemClock.elapsedRealtime()
+        check(now >= 0 && cases.size in 0..CASES.size)
+        val sequence = ++progressSequence
+        val record = "1|$sequence|${stage.name}|$caseId|${cases.size}|$now"
+        check(record.length <= 160)
+        sendStatus(1, Bundle().apply { putString("zerus_approval_progress", record) })
+    }
+    // END APPROVAL_PROGRESS definition
     private fun boundary(event: String, name: String) {
         check(event in setOf("begin", "complete") && name in CASES)
         Log.i("ZerusApprovalUI", "$event $name completed=${cases.size} elapsedMs=${SystemClock.elapsedRealtime()}")
+        // BEGIN APPROVAL_PROGRESS case-boundary
+        progress(if (event == "begin") ProgressStage.CASE_BEGIN else ProgressStage.CASE_COMPLETE, name)
+        // END APPROVAL_PROGRESS case-boundary
     }
     private fun phase(name: String) {
         val record = "phase ${name.take(100)} elapsedMs=${SystemClock.elapsedRealtime()}".take(160)
@@ -144,9 +163,18 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     override fun onStart() {
         val result = Bundle()
         try {
+            // BEGIN APPROVAL_PROGRESS on-start
+            progress(ProgressStage.ON_START)
+            // END APPROVAL_PROGRESS on-start
             check(BuildConfig.DEBUG && Build.HARDWARE in setOf("ranchu", "goldfish"))
+            // BEGIN APPROVAL_PROGRESS store-begin
+            progress(ProgressStage.STORE_BEGIN)
+            // END APPROVAL_PROGRESS store-begin
             val store = PrivateStore(targetContext)
             require(store.connections().isEmpty() && store.messageState() == MessageState() && store.readState() == ConversationReadState())
+            // BEGIN APPROVAL_PROGRESS store-ready
+            progress(ProgressStage.STORE_READY)
+            // END APPROVAL_PROGRESS store-ready
             smoke(store)
             requireHealthyFixture()
             check(cases == CASES)
@@ -431,6 +459,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         return "id=$id sel=${model.selected?.target == target} own=$current edit=${draft?.status == "editing"} v=${model.activityVerified} busy=${model.detailBusy} consent=${model.pendingQuestionSend != null} focus=${activity.hasWindowFocus()} resumed=${activity.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)}"
     }
     private fun smokeBody(store: PrivateStore) {
+        // BEGIN APPROVAL_PROGRESS bootstrap-begin
+        progress(ProgressStage.BOOTSTRAP_BEGIN)
+        // END APPROVAL_PROGRESS bootstrap-begin
         val target = Target("fixture-computer", "kimi/fixture/approval", "fixture-run", "fixture-conversation", "fixture-workspace")
         store.saveMessageState(MessageState(drafts = listOf(Draft(target, "Keep unrelated composer"))))
         store.saveReadState(ConversationReadState().head(target, "fixture-epoch", 0, 0, true))
@@ -526,7 +557,13 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                     .body("{\"error\":{\"message\":\"Synthetic fixture interceptor refused the request.\"}}".toResponseBody("application/json".toMediaType())).build()
             }
         }.build()
+        // BEGIN APPROVAL_PROGRESS activity-launch-begin
+        progress(ProgressStage.ACTIVITY_LAUNCH_BEGIN)
+        // END APPROVAL_PROGRESS activity-launch-begin
         val activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
+        // BEGIN APPROVAL_PROGRESS activity-launch-ready
+        progress(ProgressStage.ACTIVITY_LAUNCH_READY)
+        // END APPROVAL_PROGRESS activity-launch-ready
         val model = main { activity.javaClass.getDeclaredMethod("getModel").apply { isAccessible = true }.invoke(activity) as ZerusViewModel }
         fun count() = synchronized(calls) { calls.size }
         fun receiptApplied(number: Int) {
@@ -678,6 +715,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 val session = Session(target, "Approval fixture", "kimi", "idle", "", "", 0, raw)
                 set(model, "setSessions", listOf(session)); set(model, "setSelected", session)
             }
+            // BEGIN APPROVAL_PROGRESS bootstrap-ready
+            progress(ProgressStage.BOOTSTRAP_READY)
+            // END APPROVAL_PROGRESS bootstrap-ready
             boundary("begin", "countdown_once")
             open("countdown")
             reveal("Approve once", "Review synthetic countdown"); tap("Approve once")

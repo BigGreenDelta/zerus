@@ -93,12 +93,42 @@ def validate_inputs(environment, pins):
         assert re.fullmatch(r"https://dl\.google\.com/android/repository/(?:sys-img/google_apis/)?[A-Za-z0-9_.-]+\.zip", archive["url"])
 
 
+def approval_progress_order():
+    """Diagnostic order only; no status record can replace the final result oracle."""
+    assert RESULT_NAMESPACE == "approval" and len(CASES.split(",")) == 7
+    setup = [(stage, "-", 0) for stage in ("ON_START", "STORE_BEGIN", "STORE_READY", "BOOTSTRAP_BEGIN",
+             "ACTIVITY_LAUNCH_BEGIN", "ACTIVITY_LAUNCH_READY", "BOOTSTRAP_READY")]
+    return setup + [(stage, case, index + (stage == "CASE_COMPLETE")) for index, case in enumerate(CASES.split(","))
+                    for stage in ("CASE_BEGIN", "CASE_COMPLETE")]
+
+
 def instrumentation_result(text):
     """Require the one complete custom-runner result, including every case ID."""
     fields, codes = {}, []
+    progress, pending = [], None
     for line in text.splitlines():
         if not line:
             continue
+        if line.startswith("INSTRUMENTATION_STATUS: "):
+            assert RESULT_NAMESPACE == "approval" and not fields and not codes and pending is None and len(progress) < 32
+            key, separator, value = line.removeprefix("INSTRUMENTATION_STATUS: ").partition("=")
+            assert key == "zerus_approval_progress" and separator and len(value) <= 160
+            match = re.fullmatch(r"1\|([1-9][0-9]?)\|([A-Z_]+)\|(-|[a-z_]+)\|([0-7])\|(0|[1-9][0-9]{0,18})", value)
+            assert match is not None
+            sequence, stage, case, completed, elapsed = match.groups()
+            sequence, completed, elapsed = int(sequence), int(completed), int(elapsed)
+            order = approval_progress_order()
+            assert sequence == len(progress) + 1 and sequence <= len(order)
+            assert (stage, case, completed) == order[sequence - 1]
+            assert elapsed <= 2 ** 63 - 1 and (not progress or elapsed >= progress[-1])
+            pending = elapsed
+            continue
+        if line.startswith("INSTRUMENTATION_STATUS_CODE: "):
+            assert pending is not None and line == "INSTRUMENTATION_STATUS_CODE: 1"
+            progress.append(pending)
+            pending = None
+            continue
+        assert pending is None, "truncated approval progress frame"
         if line.startswith("INSTRUMENTATION_CODE: "):
             codes.append(line.removeprefix("INSTRUMENTATION_CODE: "))
             continue
@@ -109,6 +139,9 @@ def instrumentation_result(text):
     assert codes == ["-1"] and set(fields) == {RESULT_NAMESPACE + "_cases", RESULT_NAMESPACE + "_case_ids", "stream"}
     assert fields[RESULT_NAMESPACE + "_cases"] == str(len(CASES.split(","))) and fields[RESULT_NAMESPACE + "_case_ids"].split(",") == CASES.split(",")
     assert fields["stream"].startswith(RESULT_PREFIX)
+    assert pending is None
+    if RESULT_NAMESPACE == "approval":
+        assert len(progress) == len(approval_progress_order())
     return fields
 
 

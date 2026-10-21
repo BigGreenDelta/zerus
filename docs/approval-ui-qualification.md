@@ -47,6 +47,15 @@ failure with bounded method/encoded-path metadata only, emits that named diagnos
 response without network forwarding. Every wait and final qualification refuses a retained interceptor failure.
 Missing, late or failed diagnostics remain unknown and cannot replace the primary failure, qualify a missing
 case, relax the strict result parser, or authorize a retry. The instrumentation cap remains 90 seconds.
+The approval instrumentation also streams at most 21 fixed scalar progress records through Android
+[`Instrumentation.sendStatus`](https://developer.android.com/reference/android/app/Instrumentation#sendStatus(int,android.os.Bundle)):
+entry, store/bootstrap and activity-launch boundaries, then each existing case begin/complete. Each versioned record has
+only sequence, literal stage/case, completed-case count and monotonic elapsed time, is at most 160 characters, and is paired
+with the exact status code. It emits nothing during a physical gesture or from a UI/input callback. The parser refuses
+unknown, duplicated, reordered, oversized or truncated status framing; progress never substitutes for the unchanged
+complete seven-case final result. The existing direct stdout/stderr files preserve any partial records on a timeout;
+no new ADB operation, child, retry or time budget is added. The retained `b0141fce` 90-second timeout had empty output and
+did not establish any reached case, review-clock or product-action failure. This streaming boundary is diagnostic only.
 The fixture's [native text search](https://developer.android.com/reference/android/view/accessibility/AccessibilityNodeInfo#findAccessibilityNodeInfosByText(java.lang.String))
 returns approximate matches, so candidates must refresh and retain the exact visible text/content-description check.
 The original subtree traversal remains the fallback. Monotonic phase records cover card opening, physical touch and the
