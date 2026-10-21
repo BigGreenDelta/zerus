@@ -239,9 +239,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     // BEGIN QUESTION_AVAILABILITY_PROBE definitions
     private fun questionVerificationProbe(writer: QuestionUiProbe.VerificationWriter) {
         if (!QuestionUiProbe.enabled) return
-        val frame = activeFrame
-        QuestionUiProbe.verification(selected?.target, writer, activityVerified, activeFrameVerified,
-            frame != null, frame?.presentation != null, frame != null && frame.target == selected?.target)
+        try {
+            val frame = activeFrame
+            QuestionUiProbe.verification(selected?.target, writer, activityVerified, activeFrameVerified,
+                frame != null, frame?.presentation != null, frame != null && frame.target == selected?.target)
+        } catch (_: Throwable) { QuestionUiProbe.observationFailed() }
     }
     internal fun questionAvailabilityProbe(target: Target, online: Boolean): QuestionUiProbe.Availability? {
         if (!QuestionUiProbe.enabled) return null

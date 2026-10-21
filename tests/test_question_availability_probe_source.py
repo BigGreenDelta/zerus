@@ -46,6 +46,10 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         self.assertNotIn("model.", main.split("SideEffect", 1)[1])
 
     def test_model_observation_is_default_null_bounded_typed_and_catches_only_observer_work(self):
+        model = (MAIN / "ZerusViewModel.kt").read_text().split("private fun questionVerificationProbe(", 1)[1].split("internal fun questionAvailabilityProbe(", 1)[0]
+        self.assertLess(model.index("if (!QuestionUiProbe.enabled) return"), model.index("try {"))
+        self.assertLess(model.index("try {"), model.index("val frame = activeFrame"))
+        self.assertIn("catch (_: Throwable) { QuestionUiProbe.observationFailed() }", model)
         probe = (MAIN / "QuestionUiProbe.kt").read_text()
         observer = probe.split("private inline fun observeTarget(", 1)[1].split("    fun verification(", 1)[0]
         guard = "if (!BuildConfig.DEBUG || !owned.healthy()) return"
