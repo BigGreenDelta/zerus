@@ -28,6 +28,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     private val phases = ArrayDeque<String>()
     private var failureEvidence = "owned-window-evidence UNKNOWN not captured"
     private var touchTrace: OwnedWindowTouchTrace? = null
+    private var staleSendEvidence = "stale-send status=UNKNOWN reason=not-completed"
     // BEGIN QUESTION_UI_PROBE fixture-report
     private var actionProbeReport: QuestionUiProbe.Report? = null
     private fun actionProbeEvidence(): String = try {
@@ -111,10 +112,10 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             check(cases == CASES)
             result.putString("approval_cases", cases.size.toString())
             result.putString("approval_case_ids", cases.joinToString(","))
-            result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only. ${touchResultEvidence().replace("\n", " | ")} | ${actionProbeEvidence().replace("\n", " | ")}\n")
+            result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only. ${touchResultEvidence().replace("\n", " | ")} | ${actionProbeEvidence().replace("\n", " | ")} | $staleSendEvidence\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
-            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n${actionProbeEvidence()}\n")
+            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n${actionProbeEvidence()}\n$staleSendEvidence\n")
             finish(Activity.RESULT_CANCELED, result)
         }
     }
@@ -705,10 +706,90 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             open("readonly", answerable = false); node("Synthetic read-only approval")
             check(!button("Approve once").isEnabled && count() == 4)
             open("stale-identity"); reveal("Approve once", "Review synthetic stale-identity"); tap("Approve once"); reviewed()
+            val (staleQuestion, staleDraft, staleComposer) = main {
+                val question = checkNotNull(model.conversationQuestions.singleOrNull())
+                val draft = checkNotNull(QuestionPolicies.savedDraft(model.drafts, target, question))
+                val composer = checkNotNull(QuestionPolicies.savedDraft(model.drafts, target, null))
+                check(model.selected?.target == target && model.activityVerified && !model.detailBusy &&
+                    question.id == "stale-identity" && question.hash == "hash-stale-identity" && question.run == target.run &&
+                    question.conversation == target.conversation && draft.status == "editing" && draft.requestId.isEmpty() &&
+                    !model.answerInFlight(draft) && model.pendingQuestionSend == null && composer.text == "Keep unrelated composer")
+                val answer = QuestionPolicies.savedAnswers(draft.answers).getValue("approval")
+                check(answer.optionIds == listOf("1") && answer.text.isEmpty())
+                Triple(question, draft, composer)
+            }
+            val answerEntries = postStages.get(2)
+            check(!postStagesUnknown && answerEntries == 4 && count() == 4 && expected.get() == null)
+            val replacementTarget = target.copy(run = "replacement-run")
+            fun staleInspectionCurrent(): Boolean = main {
+                val question = model.conversationQuestions.singleOrNull()
+                val draft = QuestionPolicies.savedDraft(model.drafts, target, staleQuestion)
+                val composer = QuestionPolicies.savedDraft(model.drafts, target, null)
+                val proven = activity.hasWindowFocus() && model.activityVerified && !model.detailBusy &&
+                    model.selected?.target == replacementTarget && model.activity?.string("run_id") == replacementTarget.run &&
+                    model.activity?.string("conversation_id") == target.conversation && question != null && question == staleQuestion &&
+                    question.id == "stale-identity" && question.hash == "hash-stale-identity" && question.run == target.run &&
+                    question.run != replacementTarget.run && question.conversation == target.conversation && draft == staleDraft &&
+                    composer == staleComposer && !model.answerInFlight(staleDraft) && model.pendingQuestionSend == null
+                proven
+            } && !postStagesUnknown && postStages.get(2) == answerEntries && count() == 4 && expected.get() == null
             synchronized(raw) { raw.put("run_id", "replacement-run") }
-            tap("Send answer")
-            await("fresh identity refusal") { main { !model.activityVerified || model.error.isNotBlank() || model.drafts.any { it.questionId == "stale-identity" && it.status == "failed" } } }
-            check(count() == 4 && expected.get() == null)
+            // Deliver the changed inspection through production; a server-only mutation is not a fresh UI observation.
+            main { model.refreshActivity() }
+            await("delivered replacement-run inspection") { staleInspectionCurrent() }
+            check(earlySend == null && staleInspectionCurrent())
+            val ownedWindow = main {
+                check(activity.hasWindowFocus())
+                val root = checkNotNull(activity.window.decorView.createAccessibilityNodeInfo())
+                try { root.windowId.also { check(it >= 0 && root.packageName?.toString() == targetContext.packageName) } }
+                finally { root.recycle() }
+            }
+            val root = checkNotNull(uiAutomation.rootInActiveWindow)
+            check(root.refresh() && root.windowId == ownedWindow && root.packageName?.toString() == targetContext.packageName)
+            val label = checkNotNull(find(root) { exactVisible(it, "Send answer") }) { "Stale Send label is unavailable" }
+            check(label.refresh() && label.windowId == ownedWindow && exactVisible(label, "Send answer"))
+            val labelBounds = Rect().also(label::getBoundsInScreen)
+            var action = label
+            while (true) {
+                check(action.refresh() && action.windowId == ownedWindow && action.packageName?.toString() == targetContext.packageName)
+                if (action.isClickable || !action.isEnabled || action.parent == null) break
+                action = checkNotNull(action.parent)
+            }
+            check(!action.isEnabled && action.isVisibleToUser) { "Known-stale Send must remain disabled" }
+            val bounds = Rect().also(action::getBoundsInScreen)
+            val screen = targetContext.resources.displayMetrics
+            check(!bounds.isEmpty && bounds.left >= 0 && bounds.top >= 0 && bounds.right <= screen.widthPixels && bounds.bottom <= screen.heightPixels)
+            check(!labelBounds.isEmpty && labelBounds.left >= 0 && labelBounds.top >= 0 &&
+                labelBounds.right <= screen.widthPixels && labelBounds.bottom <= screen.heightPixels)
+            val actionBounds = Rect(bounds)
+            check(bounds.intersect(labelBounds) && !bounds.isEmpty)
+            check(label.refresh() && label.windowId == ownedWindow && exactVisible(label, "Send answer") &&
+                action.refresh() && action.windowId == ownedWindow && !action.isEnabled && action.isVisibleToUser && staleInspectionCurrent())
+            check(Rect().also(label::getBoundsInScreen) == labelBounds && Rect().also(action::getBoundsInScreen) == actionBounds)
+            val currentRoot = checkNotNull(uiAutomation.rootInActiveWindow)
+            check(currentRoot.refresh() && currentRoot.windowId == ownedWindow && currentRoot.packageName?.toString() == targetContext.packageName)
+            phase("stale-disabled-send:window=$ownedWindow:bounds=$bounds:answerEntry=$answerEntries")
+            staleSendEvidence = "stale-send status=UNKNOWN reason=attempt-started"
+            val down = SystemClock.uptimeMillis()
+            var traceToken: Int? = null
+            try { traceToken = main { touchTrace?.begin("Send answer", ownedWindow, down, bounds.exactCenterX(), bounds.exactCenterY()) } }
+            catch (_: Throwable) { touchTrace?.observationFailed() }
+            try {
+                // This sole negative gesture deliberately targets a freshly proven disabled control; normal tap stays strict.
+                for (type in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
+                    val event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), type, bounds.exactCenterX(), bounds.exactCenterY(), 0)
+                    event.source = InputDevice.SOURCE_TOUCHSCREEN
+                    try { check(uiAutomation.injectInputEvent(event, true)) } finally { event.recycle() }
+                    if (type == MotionEvent.ACTION_DOWN) SystemClock.sleep(100)
+                }
+            } finally {
+                try { traceToken?.let { token -> main { touchTrace?.end(token) } } }
+                catch (_: Throwable) { touchTrace?.observationFailed() }
+            }
+            requireHealthyFixture()
+            check(staleInspectionCurrent()) { "Known-stale physical attempt changed the draft, identity or answer count" }
+            check(count() == 4 && expected.get() == null && postStages.get(2) == answerEntries)
+            staleSendEvidence = "stale-send status=observed inspectedRun=replacement-run cardRun=fixture-run card=stale-identity hash=hash-stale-identity disabled=true physical=DOWN,UP holdMs=100 attempts=1 answerEntryBefore=$answerEntries answerEntryAfter=${postStages.get(2)} receipts=4 draft=unchanged composer=unchanged"
             cases += "readonly_stale_identity"
             boundary("complete", "readonly_stale_identity")
             check(main { model.draft(target).text == "Keep unrelated composer" })

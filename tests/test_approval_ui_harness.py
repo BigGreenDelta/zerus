@@ -1165,6 +1165,87 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertNotIn('sleep(', feedback)
 
 
+    def test_android_stale_case_delivers_inspection_before_one_negative_physical_attempt(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        case = source.split('            boundary("begin", "readonly_stale_identity")', 1)[1].split('            boundary("complete", "readonly_stale_identity")', 1)[0]
+        mutation = 'synchronized(raw) { raw.put("run_id", "replacement-run") }'
+        refresh = 'main { model.refreshActivity() }'
+        observed = 'await("delivered replacement-run inspection") { staleInspectionCurrent() }'
+        gesture = 'for (type in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP))'
+        self.assertLess(case.index('tap("Approve once"); reviewed()'), case.index(mutation))
+        self.assertLess(case.index(mutation), case.index(refresh))
+        self.assertLess(case.index(refresh), case.index(observed))
+        self.assertLess(case.index(observed), case.index('val root = checkNotNull(uiAutomation.rootInActiveWindow)'))
+        self.assertLess(case.index('check(!action.isEnabled && action.isVisibleToUser)'), case.index(gesture))
+        self.assertLess(case.index(gesture), case.index('requireHealthyFixture()'))
+        self.assertLess(case.index('requireHealthyFixture()'), case.index('check(staleInspectionCurrent())'))
+        self.assertEqual(case.count(refresh), 1)
+        self.assertEqual(case.count(gesture), 1)
+        self.assertEqual(case.count('uiAutomation.injectInputEvent(event, true)'), 1)
+        self.assertIn('if (type == MotionEvent.ACTION_DOWN) SystemClock.sleep(100)', case)
+        self.assertIn('check(!postStagesUnknown && answerEntries == 4 && count() == 4 && expected.get() == null)', case)
+        self.assertIn('check(count() == 4 && expected.get() == null && postStages.get(2) == answerEntries)', case)
+        self.assertIn('stale-send status=observed inspectedRun=replacement-run cardRun=fixture-run', case)
+        self.assertIn('answerEntryBefore=$answerEntries answerEntryAfter=${postStages.get(2)} receipts=4 draft=unchanged composer=unchanged', case)
+        self.assertIn('$staleSendEvidence\\n', source)
+        after_mutation = case.split(mutation, 1)[1]
+        for forbidden in ('tap(', 'reviewed()', 'expect(', 'expected.set(', 'expected.compareAndSet(',
+                          'model.edit(', 'model.sendQuestion(', 'model.draft(', 'performAction(', 'ACTION_CLICK'):
+            self.assertNotIn(forbidden, after_mutation)
+
+    def test_android_stale_inspection_source_predicate_refuses_every_unknown_or_changed_identity(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        case = source.split('            boundary("begin", "readonly_stale_identity")', 1)[1].split('            boundary("complete", "readonly_stale_identity")', 1)[0]
+        condition = case.split('                val proven =', 1)[1].split('\n                proven', 1)[0]
+        fields = {'activity.hasWindowFocus()': 'focused', 'model.activityVerified': 'verified', 'model.detailBusy': 'busy',
+                  'model.selected?.target': 'selected_target', 'replacementTarget.run': 'replacement_run', 'replacementTarget': 'replacement_target',
+                  'model.activity?.string("run_id")': 'inspected_run', 'model.activity?.string("conversation_id")': 'inspected_conversation',
+                  'question != null': 'question_present', 'question == staleQuestion': 'card_unchanged', 'question.id': 'card_id',
+                  'question.hash': 'card_hash', 'question.run': 'card_run', 'question.conversation': 'card_conversation',
+                  'target.run': 'old_run', 'target.conversation': 'old_conversation', 'draft == staleDraft': 'draft_unchanged',
+                  'composer == staleComposer': 'composer_unchanged', 'model.answerInFlight(staleDraft)': 'in_flight',
+                  'model.pendingQuestionSend': 'pending_consent'}
+        for old, new in sorted(fields.items(), key=lambda item: -len(item[0])):
+            condition = condition.replace(old, new)
+        condition = ' '.join(re.sub(r'!(?!=)', 'not ', condition).replace('&&', 'and').replace('null', 'None').split())
+        valid = dict(focused=True, verified=True, busy=False, selected_target='replacement', replacement_target='replacement',
+                     inspected_run='replacement-run', replacement_run='replacement-run', inspected_conversation='conversation',
+                     old_run='fixture-run', old_conversation='conversation', question_present=True, card_unchanged=True,
+                     card_id='stale-identity', card_hash='hash-stale-identity', card_run='fixture-run', card_conversation='conversation',
+                     draft_unchanged=True, composer_unchanged=True, in_flight=False, pending_consent=None)
+        self.assertTrue(finite_source_predicate(condition, valid))
+        departures = dict(focused=False, verified=False, busy=True, selected_target='old', inspected_run=None,
+                          inspected_conversation=None, question_present=False, card_unchanged=False, card_id='old', card_hash='old',
+                          card_run='replacement-run', card_conversation='other', draft_unchanged=False, composer_unchanged=False,
+                          in_flight=True, pending_consent='consent')
+        for field, value in departures.items():
+            with self.subTest(field=field):
+                self.assertFalse(finite_source_predicate(condition, {**valid, field: value}))
+        self.assertIn('} && !postStagesUnknown && postStages.get(2) == answerEntries && count() == 4 && expected.get() == null', case)
+
+    def test_android_stale_negative_gesture_requires_fresh_owned_disabled_label_and_unchanged_bounds(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        case = source.split('            boundary("begin", "readonly_stale_identity")', 1)[1].split('            boundary("complete", "readonly_stale_identity")', 1)[0]
+        before_touch = case.split('            val ownedWindow = main {', 1)[1].split('            val down = SystemClock.uptimeMillis()', 1)[0]
+        for required in ('activity.window.decorView.createAccessibilityNodeInfo()', 'check(activity.hasWindowFocus())',
+                         'root.windowId == ownedWindow && root.packageName?.toString() == targetContext.packageName',
+                         'checkNotNull(find(root) { exactVisible(it, "Send answer") })',
+                         'label.refresh() && label.windowId == ownedWindow && exactVisible(label, "Send answer")',
+                         '!action.isEnabled && action.isVisibleToUser', 'bounds.intersect(labelBounds) && !bounds.isEmpty',
+                         'Rect().also(label::getBoundsInScreen) == labelBounds', 'Rect().also(action::getBoundsInScreen) == actionBounds',
+                         'currentRoot.refresh() && currentRoot.windowId == ownedWindow', 'staleInspectionCurrent()'):
+            self.assertIn(required, before_touch)
+        self.assertIn('check(earlySend == null && staleInspectionCurrent())', case)
+        self.assertIn('touchTrace?.begin("Send answer", ownedWindow, down, bounds.exactCenterX(), bounds.exactCenterY())', case)
+        self.assertIn('touchTrace?.end(token)', case)
+        self.assertIn('finally { event.recycle() }', case)
+        for forbidden in ('earlySend =', 'node("Send answer")', 'button("Send answer")', 'ACTION_CLICK', 'setReviewDelayForTests'):
+            self.assertNotIn(forbidden, before_touch)
+        normal = source.split('    private fun tap(label: String)', 1)[1].split('    private fun reveal(', 1)[0]
+        self.assertIn('check(action.isEnabled && action.isClickable)', normal)
+        self.assertEqual(normal.count('uiAutomation.injectInputEvent(event, true)'), 1)
+
+
 class QuestionLayoutSourceTests(unittest.TestCase):
     def test_question_scroll_hint_reserves_space_outside_weighted_disclosure(self):
         source = (ROOT / 'mobile/android/app/src/main/java/app/zerus/mobile/QuestionUi.kt').read_text()

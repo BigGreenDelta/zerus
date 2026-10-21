@@ -23,7 +23,15 @@ The runner executes exactly: `countdown_once`, `broader_cancel`, `broader_confir
 three-second review, a separate native confirmation, exact option/text payloads and request/run/conversation/hash
 binding, four unique synthetic answer receipts, zero unexpected operations, and preservation of the unrelated composer.
 Lifecycle uses the actual Activity and window, rather than an injected foreground Boolean. The stale-run case changes
-the intercepted inspection before the UI send; no answer is admitted in that case. The fixture cannot contact its
+the intercepted inspection, calls the ordinary production refresh, and requires the verified model to observe the
+replacement run with the exact old card's run, ID and hash and both original saved drafts unchanged. A server-only
+mutation is insufficient. Before its one negative physical DOWN/UP attempt, it freshly resolves the exact visible Send
+label in the current owned window, requires that control to be disabled, and checks its current on-screen bounds. A
+missing label, changed identity/window/geometry or enabled control fails; there is no cached-node fallback, second
+gesture or further review wait. Normal enabled-action taps keep their original guard. The final evidence names this
+disabled physical attempt, and the case requires no increase in answer-entry count, exactly four receipts, unchanged
+drafts and a healthy interceptor afterward. This qualifies refusal of an already-observed stale inspection, rather
+than requiring a network inspection on every answer. No answer is admitted in that case. The fixture cannot contact its
 reserved relay: every permitted request is completed inside the interceptor, while unknown operations throw.
 Case entry/completion breadcrumbs go only to the disposable emulator's `ZerusApprovalUI` log. After a failed approval
 instrumentation attempt, the driver tries one five-second bounded read of the last 400 crash/main/system log records,
