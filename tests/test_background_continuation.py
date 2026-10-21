@@ -1,6 +1,10 @@
 """Claude's background conversations over a private tmux socket; never real user sessions."""
-import hashlib, json, subprocess, time, unittest, uuid
+import hashlib, json, os, subprocess, time, unittest, uuid
 import test_input
+
+# Claude's background process runs the hook; it descends from no session's agent,
+# as this test process does not.
+BACKGROUND = os.getpid()
 
 
 class BackgroundContinuation(unittest.TestCase):
@@ -35,17 +39,27 @@ class BackgroundContinuation(unittest.TestCase):
         self.other_path = self.state / (hashlib.sha256(name.encode()).hexdigest() + ".json")
         self.other_path.write_text(json.dumps(self.other))
 
-    def transcript(self, conversation, continued_in=None):
+    def transcript(self, conversation, continued_in=None, closed=False):
         path = self.root / ".claude/projects/-fixture" / (conversation + ".jsonl")
         path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [dict(type="user", sessionId=conversation, message=dict(role="user", content="Previous request"))]
+        lines = [dict(type="user", uuid=str(uuid.uuid4()), sessionId=conversation,
+                      message=dict(role="user", content="Previous request"))]
         if continued_in:
             lines.append(dict(type="continued-in", sessionId=conversation, continuedInSessionId=continued_in))
+        if closed:
+            # Claude's own bookkeeping after the mark, as when the foreground process exits.
+            lines += [dict(type="last-prompt", sessionId=conversation), dict(type="cost-state", sessionId=conversation)]
         path.write_text("".join(json.dumps(line) + "\n" for line in lines))
         return str(path)
 
-    def hook(self, **event):
+    def hook(self, claude=None, **event):
+        """`claude` is the Claude process that runs the hook; Claude names it
+        and the hook's conversation in the hook's environment."""
         env = dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id, HGS_AGENT="claude")
+        env.pop("CLAUDE_PID", None)
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        if claude:
+            env.update(CLAUDE_PID=str(claude), CLAUDE_CODE_SESSION_ID=event["session_id"])
         result = subprocess.run([str(test_input.HGS), "__state", "hook"], env=env, input=json.dumps(dict(event, cwd="/fixture")),
                                 text=True, capture_output=True, timeout=12)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -62,7 +76,7 @@ class BackgroundContinuation(unittest.TestCase):
         new = str(uuid.uuid4())
         path = self.transcript(new)
         self.transcript(self.other["conversation_id"], continued_in=new)
-        self.hook(hook_event_name="SessionStart", session_id=new, source="resume", transcript_path=path)
+        self.hook(BACKGROUND, hook_event_name="SessionStart", session_id=new, source="resume", transcript_path=path)
         other = self.saved(self.other_path)
         self.assertEqual((other["conversation_id"], other["transcript"]), (new, path))
         # The same conversation goes on: nothing of it is cleared.
@@ -70,11 +84,11 @@ class BackgroundContinuation(unittest.TestCase):
         self.assertEqual(self.cleared(self.other["name"]), 0)
         tool = dict(session_id=new, transcript_path=path, tool_name="Bash", tool_use_id="toolu_fixture",
                     tool_input=dict(command="true"))
-        self.hook(hook_event_name="PreToolUse", **tool)
+        self.hook(BACKGROUND, hook_event_name="PreToolUse", **tool)
         other = self.saved(self.other_path)
         self.assertEqual((other["activity"], other["phase"]), ("busy", "tool"))
-        self.hook(hook_event_name="PostToolUse", **tool)
-        self.hook(hook_event_name="Stop", session_id=new, transcript_path=path)
+        self.hook(BACKGROUND, hook_event_name="PostToolUse", **tool)
+        self.hook(BACKGROUND, hook_event_name="Stop", session_id=new, transcript_path=path)
         other = self.saved(self.other_path)
         self.assertEqual((other["activity"], other["phase"]), ("idle", "idle"))
         # The session whose token the background process inherited keeps its own conversation.
@@ -83,13 +97,20 @@ class BackgroundContinuation(unittest.TestCase):
                          (self.conversation_id, self.record["transcript"], "idle"))
         self.assertEqual(self.cleared(self.name), 0)
 
+    def test_claude_bookkeeping_after_the_mark_keeps_the_continuation(self):
+        new = str(uuid.uuid4())
+        path = self.transcript(new)
+        self.transcript(self.other["conversation_id"], continued_in=new, closed=True)
+        self.hook(BACKGROUND, hook_event_name="SessionStart", session_id=new, source="resume", transcript_path=path)
+        self.assertEqual(self.saved(self.other_path)["conversation_id"], new)
+
     def test_a_session_sent_to_the_background_keeps_its_conversation(self):
         new = str(uuid.uuid4())
         path = self.transcript(new)
         self.record.update(prompt="Previous request", last_message="Previous answer",
                            transcript=self.transcript(self.conversation_id, continued_in=new))
         self.write_record()
-        self.hook(hook_event_name="SessionStart", session_id=new, source="resume", transcript_path=path)
+        self.hook(BACKGROUND, hook_event_name="SessionStart", session_id=new, source="resume", transcript_path=path)
         own = self.saved(self.record_path)
         self.assertEqual((own["conversation_id"], own["transcript"]), (new, path))
         self.assertEqual((own["prompt"], own["last_message"]), ("Previous request", "Previous answer"))
@@ -102,23 +123,50 @@ class BackgroundContinuation(unittest.TestCase):
         self.record.update(conversation_id=new, transcript=path)
         self.write_record()
         self.transcript(self.other["conversation_id"], continued_in=new)
-        self.hook(hook_event_name="SessionStart", session_id=new, source="compact", transcript_path=path)
-        self.hook(hook_event_name="PreToolUse", session_id=new, transcript_path=path, tool_name="Bash",
+        self.hook(BACKGROUND, hook_event_name="SessionStart", session_id=new, source="compact", transcript_path=path)
+        self.hook(BACKGROUND, hook_event_name="PreToolUse", session_id=new, transcript_path=path, tool_name="Bash",
                   tool_use_id="toolu_fixture", tool_input=dict(command="true"))
         other = self.saved(self.other_path)
         self.assertEqual((other["conversation_id"], other["activity"], other["phase"]), (new, "busy", "tool"))
         self.assertEqual(self.saved(self.record_path)["phase"], "idle")
 
-    def test_a_new_conversation_of_the_session_is_still_a_clear(self):
-        new = str(uuid.uuid4())
+    def test_a_background_process_that_continues_no_session_leaves_the_token_session_alone(self):
+        # A spare process starting, or a job whose session has gone.
         self.record.update(prompt="Previous request")
         self.write_record()
-        self.hook(hook_event_name="SessionStart", session_id=new, source="clear", transcript_path=self.transcript(new))
-        own = self.saved(self.record_path)
-        self.assertEqual(own["conversation_id"], new)
-        self.assertNotIn("prompt", own)
-        self.assertEqual(self.saved(self.other_path)["conversation_id"], self.other["conversation_id"])
+        for transcript in (self.transcript(self.other["conversation_id"], continued_in=str(uuid.uuid4())),
+                           self.transcript(self.other["conversation_id"], continued_in=None)):
+            new = str(uuid.uuid4())
+            path = self.transcript(new)
+            self.hook(BACKGROUND, hook_event_name="SessionStart", session_id=new, source="startup", transcript_path=path)
+            self.hook(BACKGROUND, hook_event_name="PreToolUse", session_id=new, transcript_path=path, tool_name="Bash",
+                      tool_use_id="toolu_fixture", tool_input=dict(command="true"))
+            own = self.saved(self.record_path)
+            self.assertEqual((own["conversation_id"], own["prompt"], own["phase"]),
+                             (self.conversation_id, "Previous request", "idle"))
+            self.assertEqual(self.saved(self.other_path)["conversation_id"], self.other["conversation_id"])
+        self.assertEqual(self.cleared(self.name), 0)
 
+    def test_a_conversation_that_went_on_after_the_mark_is_not_continued_elsewhere(self):
+        new = str(uuid.uuid4())
+        path = self.transcript(new)
+        mark = self.transcript(self.other["conversation_id"], continued_in=new)
+        with open(mark, "a") as transcript:
+            transcript.write(json.dumps(dict(type="user", uuid=str(uuid.uuid4()), sessionId=self.other["conversation_id"])) + "\n")
+        self.hook(BACKGROUND, hook_event_name="SessionStart", session_id=new, source="resume", transcript_path=path)
+        self.assertEqual(self.saved(self.other_path)["conversation_id"], self.other["conversation_id"])
+        self.assertEqual(self.saved(self.record_path)["conversation_id"], self.conversation_id)
+
+    def test_a_new_conversation_of_the_session_agent_is_still_a_clear(self):
+        self.record.update(prompt="Previous request")
+        self.write_record()
+        for claude in (self.record["pid"], None):
+            new = str(uuid.uuid4())
+            self.hook(claude, hook_event_name="SessionStart", session_id=new, source="clear", transcript_path=self.transcript(new))
+            own = self.saved(self.record_path)
+            self.assertEqual(own["conversation_id"], new)
+            self.assertNotIn("prompt", own)
+        self.assertEqual(self.saved(self.other_path)["conversation_id"], self.other["conversation_id"])
 
 if __name__ == "__main__":
     unittest.main()

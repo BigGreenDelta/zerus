@@ -1206,8 +1206,13 @@ fn track(name: String, token: String, mut event: Value, started: &mut bool) -> R
     let kind = string(&event, "hook_event_name");
     let _guard = lock(None)?;
     let panes = live()?;
-    let continued = continuations::owner(&event, sid, &panes)?;
-    let Some(mut record) = continued.map_or_else(|| read_run(&name, &token), |record| Ok(Some(record)))? else {
+    let own = read_run(&name, &token)?;
+    let record = if continuations::foreign(own.as_ref(), sid) {
+        continuations::owner(&event, sid, &panes)?
+    } else {
+        own
+    };
+    let Some(mut record) = record else {
         return Ok(0);
     };
     if !matches(&record, panes.get(string(&record, "name"))) {
