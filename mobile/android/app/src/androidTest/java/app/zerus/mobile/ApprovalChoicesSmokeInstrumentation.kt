@@ -115,7 +115,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only. ${touchResultEvidence().replace("\n", " | ")} | ${actionProbeEvidence().replace("\n", " | ")} | $staleSendEvidence\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
-            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n${actionProbeEvidence()}\n$staleSendEvidence\n")
+            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n$staleSendEvidence\n${actionProbeEvidence()}\n")
             finish(Activity.RESULT_CANCELED, result)
         }
     }
@@ -751,7 +751,18 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             val root = checkNotNull(uiAutomation.rootInActiveWindow)
             check(root.refresh() && root.windowId == ownedWindow && root.packageName?.toString() == targetContext.packageName)
             val choice = checkNotNull(find(root) { exactVisible(it, "Approve once") }) { "Stale native choice is unavailable" }
-            check(choice.refresh() && choice.windowId == ownedWindow && exactVisible(choice, "Approve once") && !choice.isEnabled)
+            fun staleChoiceAction(): AccessibilityNodeInfo {
+                check(choice.refresh() && choice.windowId == ownedWindow && choice.packageName?.toString() == targetContext.packageName && exactVisible(choice, "Approve once"))
+                var candidate = choice
+                while (true) {
+                    check(candidate.refresh() && candidate.windowId == ownedWindow && candidate.packageName?.toString() == targetContext.packageName)
+                    if (candidate.isClickable || !candidate.isEnabled || candidate.parent == null) break
+                    candidate = checkNotNull(candidate.parent)
+                }
+                check(!candidate.isEnabled && candidate.isVisibleToUser) { "Known-stale native choice must remain disabled" }
+                return candidate
+            }
+            val choiceAction = staleChoiceAction()
             val label = checkNotNull(find(root) { exactVisible(it, "Send answer") }) { "Stale Send label is unavailable" }
             check(label.refresh() && label.windowId == ownedWindow && exactVisible(label, "Send answer"))
             val labelBounds = Rect().also(label::getBoundsInScreen)
@@ -771,7 +782,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             check(bounds.intersect(labelBounds) && !bounds.isEmpty)
             check(label.refresh() && label.windowId == ownedWindow && exactVisible(label, "Send answer") &&
                 action.refresh() && action.windowId == ownedWindow && !action.isEnabled && action.isVisibleToUser && staleInspectionCurrent())
-            check(choice.refresh() && choice.windowId == ownedWindow && exactVisible(choice, "Approve once") && !choice.isEnabled)
+            check(staleChoiceAction() == choiceAction)
             check(Rect().also(label::getBoundsInScreen) == labelBounds && Rect().also(action::getBoundsInScreen) == actionBounds)
             val currentRoot = checkNotNull(uiAutomation.rootInActiveWindow)
             check(currentRoot.refresh() && currentRoot.windowId == ownedWindow && currentRoot.packageName?.toString() == targetContext.packageName)

@@ -1241,7 +1241,9 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('check(earlySend == null && staleInspectionCurrent())', case)
         self.assertIn('QuestionPolicies.complete(question.prompts, mapOf("approval" to setOf("1")), emptyMap(), QuestionPolicies.formReplyText(question))', case)
         self.assertIn('check(QuestionSendPolicies.bound(question, target) && QuestionSendPolicies.available(question, target, draft.answers))', case)
-        self.assertEqual(case.count('choice.refresh() && choice.windowId == ownedWindow && exactVisible(choice, "Approve once") && !choice.isEnabled'), 2)
+        self.assertIn('choice.refresh() && choice.windowId == ownedWindow && choice.packageName?.toString() == targetContext.packageName && exactVisible(choice, "Approve once")', case)
+        self.assertIn('val choiceAction = staleChoiceAction()', case)
+        self.assertIn('check(staleChoiceAction() == choiceAction)', case)
         self.assertIn('touchTrace?.begin("Send answer", ownedWindow, down, bounds.exactCenterX(), bounds.exactCenterY())', case)
         self.assertIn('touchTrace?.end(token)', case)
         self.assertIn('finally { event.recycle() }', case)
@@ -1284,6 +1286,37 @@ class ApprovalHarnessTests(unittest.TestCase):
                          'readOnly = !QuestionPolicies.inputEnabled(question, editing)'):
             self.assertIn(required, card)
         self.assertIn('if (question != null) NativeQuestionCard(model, target, question, available', ui)
+
+    def test_android_stale_choice_resolves_disabled_action_ancestor_independently_of_label_enabled_state(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        walker = source.split('            fun staleChoiceAction(): AccessibilityNodeInfo {', 1)[1].split('            val choiceAction = staleChoiceAction()', 1)[0]
+        self.assertIn('exactVisible(choice, "Approve once")', walker)
+        self.assertNotIn('!choice.isEnabled', walker)
+        self.assertIn('candidate = checkNotNull(candidate.parent)', walker)
+        guard = walker.split('check(candidate.refresh() &&', 1)[1].split(')\n', 1)[0]
+        guard = 'refreshed and ' + guard.replace('candidate.windowId', 'window').replace('candidate.packageName?.toString()', 'package').replace('targetContext.packageName', 'owned_package').replace('ownedWindow', 'owned_window').replace('&&', 'and')
+        stop = walker.split('if (', 1)[1].split(') break', 1)[0]
+        stop = stop.replace('candidate.isClickable', 'clickable').replace('!candidate.isEnabled', 'not enabled').replace('candidate.parent', 'parent').replace('null', 'None').replace('||', 'or')
+        disabled = walker.split('check(!candidate.isEnabled &&', 1)[1].split(') {', 1)[0]
+        disabled = 'not enabled and ' + disabled.replace('candidate.isVisibleToUser', 'visible')
+        def resolve(nodes):
+            for index, node in enumerate(nodes):
+                state = dict(owned_window=7, owned_package='app.zerus.mobile', parent=index + 1 if index + 1 < len(nodes) else None, **node)
+                if not finite_source_predicate(guard, state): return None
+                if finite_source_predicate(stop, state):
+                    return index if finite_source_predicate(disabled, state) else None
+            return None
+        label = dict(refreshed=True, window=7, package='app.zerus.mobile', clickable=False, enabled=True, visible=True)
+        button = {**label, 'clickable': True, 'enabled': False}
+        self.assertEqual(resolve([label, button]), 1)
+        self.assertEqual(resolve([{**label, 'enabled': False}]), 0)
+        for changed in ({'refreshed': False}, {'window': 8}, {'package': 'foreign'}, {'enabled': True}, {'visible': False}):
+            with self.subTest(changed=changed):
+                self.assertIsNone(resolve([label, {**button, **changed}]))
+        self.assertIsNone(resolve([label]))
+        self.assertIn('check(staleChoiceAction() == choiceAction)', source)
+        self.assertNotIn('injectInputEvent', walker)
+        self.assertNotIn('performAction', walker)
 
 
 class QuestionLayoutSourceTests(unittest.TestCase):
