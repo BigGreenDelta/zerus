@@ -1176,7 +1176,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertLess(case.index(mutation), case.index(refresh))
         self.assertLess(case.index(refresh), case.index(observed))
         self.assertLess(case.index(observed), case.index('val root = checkNotNull(uiAutomation.rootInActiveWindow)'))
-        self.assertLess(case.index('check(!action.isEnabled && action.isVisibleToUser)'), case.index(gesture))
+        self.assertLess(case.index('val action = staleDisabledAction(label, "Send answer")'), case.index(gesture))
         self.assertLess(case.index(gesture), case.index('requireHealthyFixture()'))
         self.assertLess(case.index('requireHealthyFixture()'), case.index('check(staleInspectionCurrent())'))
         self.assertEqual(case.count(refresh), 1)
@@ -1234,16 +1234,17 @@ class ApprovalHarnessTests(unittest.TestCase):
                          'root.windowId == ownedWindow && root.packageName?.toString() == targetContext.packageName',
                          'checkNotNull(find(root) { exactVisible(it, "Send answer") })',
                          'label.refresh() && label.windowId == ownedWindow && exactVisible(label, "Send answer")',
-                         '!action.isEnabled && action.isVisibleToUser', 'bounds.intersect(labelBounds) && !bounds.isEmpty',
+                         'staleDisabledAction(label, "Send answer") == action', 'bounds.intersect(labelBounds) && !bounds.isEmpty',
                          'Rect().also(label::getBoundsInScreen) == labelBounds', 'Rect().also(action::getBoundsInScreen) == actionBounds',
                          'currentRoot.refresh() && currentRoot.windowId == ownedWindow', 'staleInspectionCurrent()'):
             self.assertIn(required, before_touch)
         self.assertIn('check(earlySend == null && staleInspectionCurrent())', case)
         self.assertIn('QuestionPolicies.complete(question.prompts, mapOf("approval" to setOf("1")), emptyMap(), QuestionPolicies.formReplyText(question))', case)
         self.assertIn('check(QuestionSendPolicies.bound(question, target) && QuestionSendPolicies.available(question, target, draft.answers))', case)
-        self.assertIn('choice.refresh() && choice.windowId == ownedWindow && choice.packageName?.toString() == targetContext.packageName && exactVisible(choice, "Approve once")', case)
-        self.assertIn('val choiceAction = staleChoiceAction()', case)
-        self.assertIn('check(staleChoiceAction() == choiceAction)', case)
+        self.assertIn('label.refresh() && label.windowId == ownedWindow && label.packageName?.toString() == targetContext.packageName && exactVisible(label, text)', case)
+        self.assertIn('check(!question.prompts.single().multi)', case)
+        self.assertIn('val choiceAction = staleDisabledAction(choice, "Approve once")', case)
+        self.assertIn('check(staleDisabledAction(choice, "Approve once") == choiceAction && Rect().also(choiceAction::getBoundsInScreen) == choiceBounds)', case)
         self.assertIn('touchTrace?.begin("Send answer", ownedWindow, down, bounds.exactCenterX(), bounds.exactCenterY())', case)
         self.assertIn('touchTrace?.end(token)', case)
         self.assertIn('finally { event.recycle() }', case)
@@ -1289,32 +1290,46 @@ class ApprovalHarnessTests(unittest.TestCase):
 
     def test_android_stale_choice_resolves_disabled_action_ancestor_independently_of_label_enabled_state(self):
         source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
-        walker = source.split('            fun staleChoiceAction(): AccessibilityNodeInfo {', 1)[1].split('            val choiceAction = staleChoiceAction()', 1)[0]
-        self.assertIn('exactVisible(choice, "Approve once")', walker)
-        self.assertNotIn('!choice.isEnabled', walker)
+        walker = source.split('            fun staleDisabledAction(label: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo {', 1)[1].split('            val choice = checkNotNull(', 1)[0]
+        roles = dict(re.findall(r'"([^"]+)" -> "([^"]+)"', walker))
+        self.assertEqual(roles, {'Approve once': 'android.widget.RadioButton', 'Send answer': 'android.widget.Button'})
+        self.assertIn('else -> error("Unknown stale action label")', walker)
+        self.assertIn('exactVisible(label, text)', walker)
         self.assertIn('candidate = checkNotNull(candidate.parent)', walker)
+        limit = int(re.search(r'for \(depth in 0 until (\d+)\)', walker)[1])
+        self.assertEqual(limit, 16)
+        self.assertIn('if (candidate.className?.toString() == role)', walker)
+        self.assertNotIn('candidate.isClickable ||', walker)
+        self.assertNotIn('!candidate.isEnabled ||', walker)
         guard = walker.split('check(candidate.refresh() &&', 1)[1].split(')\n', 1)[0]
         guard = 'refreshed and ' + guard.replace('candidate.windowId', 'window').replace('candidate.packageName?.toString()', 'package').replace('targetContext.packageName', 'owned_package').replace('ownedWindow', 'owned_window').replace('&&', 'and')
-        stop = walker.split('if (', 1)[1].split(') break', 1)[0]
-        stop = stop.replace('candidate.isClickable', 'clickable').replace('!candidate.isEnabled', 'not enabled').replace('candidate.parent', 'parent').replace('null', 'None').replace('||', 'or')
         disabled = walker.split('check(!candidate.isEnabled &&', 1)[1].split(') {', 1)[0]
         disabled = 'not enabled and ' + disabled.replace('candidate.isVisibleToUser', 'visible')
-        def resolve(nodes):
-            for index, node in enumerate(nodes):
+        def resolve(nodes, role):
+            for index, node in enumerate(nodes[:limit]):
                 state = dict(owned_window=7, owned_package='app.zerus.mobile', parent=index + 1 if index + 1 < len(nodes) else None, **node)
                 if not finite_source_predicate(guard, state): return None
-                if finite_source_predicate(stop, state):
+                if node['role'] == role:
                     return index if finite_source_predicate(disabled, state) else None
+                if state['parent'] is None: return None
             return None
-        label = dict(refreshed=True, window=7, package='app.zerus.mobile', clickable=False, enabled=True, visible=True)
-        button = {**label, 'clickable': True, 'enabled': False}
-        self.assertEqual(resolve([label, button]), 1)
-        self.assertEqual(resolve([{**label, 'enabled': False}]), 0)
-        for changed in ({'refreshed': False}, {'window': 8}, {'package': 'foreign'}, {'enabled': True}, {'visible': False}):
-            with self.subTest(changed=changed):
-                self.assertIsNone(resolve([label, {**button, **changed}]))
-        self.assertIsNone(resolve([label]))
-        self.assertIn('check(staleChoiceAction() == choiceAction)', source)
+        label = dict(refreshed=True, window=7, package='app.zerus.mobile', role='android.widget.TextView', enabled=True, visible=True)
+        for action_name, role in roles.items():
+            with self.subTest(action=action_name):
+                action = {**label, 'role': role, 'enabled': False}
+                self.assertEqual(resolve([label, action], role), 1)
+                self.assertEqual(resolve([action], role), 0)
+                self.assertIsNone(resolve([{**label, 'enabled': False}, {**action, 'enabled': True}], role))
+                self.assertIsNone(resolve([{**label, 'enabled': False}], role))
+                self.assertIsNone(resolve([{**action, 'role': 'android.view.View'}], role))
+                self.assertIsNone(resolve([label] * limit + [action], role))
+                for changed in ({'refreshed': False}, {'window': 8}, {'package': 'foreign'}, {'enabled': True}, {'visible': False},
+                                {'role': next(value for value in roles.values() if value != role)}):
+                    with self.subTest(changed=changed):
+                        self.assertIsNone(resolve([label, {**action, **changed}], role))
+                self.assertIsNone(resolve([label], role))
+        self.assertIn('staleDisabledAction(choice, "Approve once") == choiceAction', source)
+        self.assertIn('staleDisabledAction(label, "Send answer") == action', source)
         self.assertNotIn('injectInputEvent', walker)
         self.assertNotIn('performAction', walker)
 

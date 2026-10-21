@@ -716,6 +716,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                     !model.answerInFlight(draft) && model.pendingQuestionSend == null && composer.text == "Keep unrelated composer")
                 val answer = QuestionPolicies.savedAnswers(draft.answers).getValue("approval")
                 check(answer.optionIds == listOf("1") && answer.text.isEmpty())
+                check(!question.prompts.single().multi)
                 check(QuestionPolicies.complete(question.prompts, mapOf("approval" to setOf("1")), emptyMap(), QuestionPolicies.formReplyText(question)))
                 check(QuestionSendPolicies.bound(question, target) && QuestionSendPolicies.available(question, target, draft.answers))
                 Triple(question, draft, composer)
@@ -750,29 +751,32 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             }
             val root = checkNotNull(uiAutomation.rootInActiveWindow)
             check(root.refresh() && root.windowId == ownedWindow && root.packageName?.toString() == targetContext.packageName)
-            val choice = checkNotNull(find(root) { exactVisible(it, "Approve once") }) { "Stale native choice is unavailable" }
-            fun staleChoiceAction(): AccessibilityNodeInfo {
-                check(choice.refresh() && choice.windowId == ownedWindow && choice.packageName?.toString() == targetContext.packageName && exactVisible(choice, "Approve once"))
-                var candidate = choice
-                while (true) {
-                    check(candidate.refresh() && candidate.windowId == ownedWindow && candidate.packageName?.toString() == targetContext.packageName)
-                    if (candidate.isClickable || !candidate.isEnabled || candidate.parent == null) break
-                    candidate = checkNotNull(candidate.parent)
+            fun staleDisabledAction(label: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo {
+                val role = when (text) {
+                    "Approve once" -> "android.widget.RadioButton"
+                    "Send answer" -> "android.widget.Button"
+                    else -> error("Unknown stale action label")
                 }
-                check(!candidate.isEnabled && candidate.isVisibleToUser) { "Known-stale native choice must remain disabled" }
-                return candidate
+                check(label.refresh() && label.windowId == ownedWindow && label.packageName?.toString() == targetContext.packageName && exactVisible(label, text))
+                var candidate = label
+                for (depth in 0 until 16) {
+                    check(candidate.refresh() && candidate.windowId == ownedWindow && candidate.packageName?.toString() == targetContext.packageName)
+                    if (candidate.className?.toString() == role) {
+                        check(!candidate.isEnabled && candidate.isVisibleToUser) { "Known-stale $text $role must remain disabled" }
+                        return candidate
+                    }
+                    candidate = checkNotNull(candidate.parent) { "Known-stale $text has no $role ancestor" }
+                }
+                error("Known-stale $text exceeded the action ancestor bound")
             }
-            val choiceAction = staleChoiceAction()
+            val choice = checkNotNull(find(root) { exactVisible(it, "Approve once") }) { "Stale native choice is unavailable" }
+            val choiceAction = staleDisabledAction(choice, "Approve once")
+            val choiceBounds = Rect().also(choiceAction::getBoundsInScreen)
+            check(!choiceBounds.isEmpty)
             val label = checkNotNull(find(root) { exactVisible(it, "Send answer") }) { "Stale Send label is unavailable" }
             check(label.refresh() && label.windowId == ownedWindow && exactVisible(label, "Send answer"))
             val labelBounds = Rect().also(label::getBoundsInScreen)
-            var action = label
-            while (true) {
-                check(action.refresh() && action.windowId == ownedWindow && action.packageName?.toString() == targetContext.packageName)
-                if (action.isClickable || !action.isEnabled || action.parent == null) break
-                action = checkNotNull(action.parent)
-            }
-            check(!action.isEnabled && action.isVisibleToUser) { "Known-stale Send must remain disabled" }
+            val action = staleDisabledAction(label, "Send answer")
             val bounds = Rect().also(action::getBoundsInScreen)
             val screen = targetContext.resources.displayMetrics
             check(!bounds.isEmpty && bounds.left >= 0 && bounds.top >= 0 && bounds.right <= screen.widthPixels && bounds.bottom <= screen.heightPixels)
@@ -781,8 +785,8 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             val actionBounds = Rect(bounds)
             check(bounds.intersect(labelBounds) && !bounds.isEmpty)
             check(label.refresh() && label.windowId == ownedWindow && exactVisible(label, "Send answer") &&
-                action.refresh() && action.windowId == ownedWindow && !action.isEnabled && action.isVisibleToUser && staleInspectionCurrent())
-            check(staleChoiceAction() == choiceAction)
+                staleDisabledAction(label, "Send answer") == action && staleInspectionCurrent())
+            check(staleDisabledAction(choice, "Approve once") == choiceAction && Rect().also(choiceAction::getBoundsInScreen) == choiceBounds)
             check(Rect().also(label::getBoundsInScreen) == labelBounds && Rect().also(action::getBoundsInScreen) == actionBounds)
             val currentRoot = checkNotNull(uiAutomation.rootInActiveWindow)
             check(currentRoot.refresh() && currentRoot.windowId == ownedWindow && currentRoot.packageName?.toString() == targetContext.packageName)
@@ -807,7 +811,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             requireHealthyFixture()
             check(staleInspectionCurrent()) { "Known-stale physical attempt changed the draft, identity or answer count" }
             check(count() == 4 && expected.get() == null && postStages.get(2) == answerEntries)
-            staleSendEvidence = "stale-send status=observed inspectedRun=replacement-run cardRun=fixture-run card=stale-identity hash=hash-stale-identity binding=false completeAnswerAllowed=false nativeChoiceDisabled=true disabled=true physical=DOWN,UP holdMs=100 attempts=1 answerEntryBefore=$answerEntries answerEntryAfter=${postStages.get(2)} receipts=4 draft=unchanged composer=unchanged"
+            staleSendEvidence = "stale-send status=observed inspectedRun=replacement-run cardRun=fixture-run card=stale-identity hash=hash-stale-identity binding=false completeAnswerAllowed=false choiceRole=android.widget.RadioButton sendRole=android.widget.Button nativeChoiceDisabled=true disabled=true physical=DOWN,UP holdMs=100 attempts=1 answerEntryBefore=$answerEntries answerEntryAfter=${postStages.get(2)} receipts=4 draft=unchanged composer=unchanged"
             cases += "readonly_stale_identity"
             boundary("complete", "readonly_stale_identity")
             check(main { model.draft(target).text == "Keep unrelated composer" })

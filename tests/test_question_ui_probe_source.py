@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN = "mobile/android/app/src/main/java/app/zerus/mobile/"
 FIXTURE = "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
 ORIGINAL_UI = "3687bd4bb2f7243c06fc99865c08120795360b273aa8291b612794a9bfdf57bf"
-ORIGINAL_FIXTURE = "3a520c223714739b415d1b9bf6df7c9d03f090d4f91ebb24d5ddfd623cdda5cb"
+ORIGINAL_FIXTURE = "ce42f10d3a0948ec9390b3a01313b0feac16867ec86f13785118ce6578e71aa8"
 
 
 def strip_probe(source, expected):
@@ -75,7 +75,7 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
     def test_failure_classifiers_and_post_observations_leave_all_original_client_and_ui_code_exact(self):
         source = (ROOT / FIXTURE).read_text()
         self.assertEqual(hashlib.sha256(strip_send_diagnostics(source).encode()).hexdigest(),
-            "9981df96454151f6ed7ac27f66ce2867db5cc544f2c0fa4f55b32db3ddef52ca")
+            "7f7e7cf3b30e1c8b46471bfe3a4c6895b41b95b56b19bd90d63f6fe9d95319ef")
         model = source.split("    private fun modelEvidence(", 1)[1].split("    private fun set(", 1)[0]
         self.assertTrue(model.startswith('model: ZerusViewModel, target: Target, activity: MainActivity, offered: JSONObject?): String = main {'))
         self.assertIn('failureText(model.error)', model)
