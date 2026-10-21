@@ -1706,22 +1706,9 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
         if (*reported) return;
         *reported = true;
         m_messagesInFlight.remove(key);
-        // A failed start can be reported inside start(), before the caller has
-        // registered this request. Keep the claim synchronous, the result queued.
-        QTimer::singleShot(0, this, [this, request, host, name, detail, uncertain] {
-            emit messageFailed(request, host, name, detail, uncertain);
-        });
+        emit messageFailed(request, host, name, detail, uncertain);
     };
-    const auto timeout = [process, fail]() {
-        fail(tr("Delivery timed out. The message may have reached the agent; inspect Terminal before retrying."), true);
-        process->kill();
-    };
-    connect(process, &QProcess::started, process, [process, timer, reported, payload, fail, timeout]() {
-        if (*reported || timer->remainingTime() <= 0) {
-            if (!*reported) timeout(); else process->kill();
-            process->closeWriteChannel();
-            return;
-        }
+    connect(process, &QProcess::started, process, [process, payload, fail]() {
         // The request and file bytes never appear in argv, a shell command, or a
         // clipboard. closeWriteChannel drains QProcess's pending bytes before EOF.
         if (process->write(payload) != payload.size()) {
@@ -1730,7 +1717,10 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
         }
         process->closeWriteChannel();
     });
-    connect(timer, &QTimer::timeout, process, timeout);
+    connect(timer, &QTimer::timeout, process, [process, fail]() {
+        fail(tr("Delivery timed out. The message may have reached the agent; inspect Terminal before retrying."), true);
+        process->kill();
+    });
     connect(process, &QProcess::errorOccurred, process,
         [process, timer, fail](QProcess::ProcessError error) {
             if (error == QProcess::FailedToStart) {
@@ -1774,12 +1764,7 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
         });
     m_messagesInFlight.insert(key);
     timer->start(host.isEmpty() ? 15000 : 45000);
-    // Return the request ID before native startup can reenter the event loop.
-    QTimer::singleShot(0, process, [process, timer, reported, timeout] {
-        if (*reported) { process->deleteLater(); return; }
-        if (timer->remainingTime() <= 0) { timeout(); process->deleteLater(); return; }
-        process->start();
-    });
+    process->start();
     return request;
 }
 
@@ -1919,22 +1904,15 @@ quint64 HgsClient::requestQueueSendNow(const QString &host, const QString &name,
     auto *timer = new QTimer(process); timer->setSingleShot(true);
     auto reported = std::make_shared<bool>(false);
     const auto fail = [this, request, reported](const QString &error) {
-        if (*reported) return; *reported = true;
-        QTimer::singleShot(0, this, [this, request, error] { emit queueSendFinished(request, false, {}, error); });
+        if (*reported) return; *reported = true; emit queueSendFinished(request, false, {}, error);
     };
-    const auto timeout = [process, fail] {
-        fail(tr("Queue action timed out. Check Terminal before retrying.")); process->kill();
-    };
-    connect(process, &QProcess::started, process, [process, timer, reported, payload, fail, timeout] {
-        if (*reported || timer->remainingTime() <= 0) {
-            if (!*reported) timeout(); else process->kill();
-            process->closeWriteChannel();
-            return;
-        }
+    connect(process, &QProcess::started, process, [process, payload, fail] {
         if (process->write(payload) != payload.size()) { fail(tr("Queue action failed. Check Terminal before retrying.")); process->kill(); }
         process->closeWriteChannel();
     });
-    connect(timer, &QTimer::timeout, process, timeout);
+    connect(timer, &QTimer::timeout, process, [process, fail] {
+        fail(tr("Queue action timed out. Check Terminal before retrying.")); process->kill();
+    });
     connect(process, &QProcess::errorOccurred, process, [process, timer, fail](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) { timer->stop(); fail(process->errorString()); process->deleteLater(); }
     });
@@ -1954,14 +1932,7 @@ quint64 HgsClient::requestQueueSendNow(const QString &host, const QString &name,
         }
         process->deleteLater();
     });
-    timer->start(host.isEmpty() ? 20000 : 35000);
-    // Return the request ID before native startup can reenter the event loop.
-    QTimer::singleShot(0, process, [process, timer, reported, timeout] {
-        if (*reported) { process->deleteLater(); return; }
-        if (timer->remainingTime() <= 0) { timeout(); process->deleteLater(); return; }
-        process->start();
-    });
-    return request;
+    timer->start(host.isEmpty() ? 20000 : 35000); process->start(); return request;
 }
 
 quint64 HgsClient::requestEffort(const QString &host, const QString &name, const QString &effort, const QString &run, const QString &conversation)
@@ -2025,22 +1996,15 @@ quint64 HgsClient::requestSettings(const QString &host, const QString &name, con
     auto *timer = new QTimer(process); timer->setSingleShot(true);
     auto reported = std::make_shared<bool>(false);
     const auto fail = [this, request, reported](const QString &error) {
-        if (*reported) return; *reported = true;
-        QTimer::singleShot(0, this, [this, request, error] { emit settingsFinished(request, false, {}, error); });
+        if (*reported) return; *reported = true; emit settingsFinished(request, false, {}, error);
     };
-    const auto timeout = [process, fail, timedOut] {
-        fail(timedOut); process->kill();
-    };
-    connect(process, &QProcess::started, process, [process, timer, reported, payload, fail, transferFailed, timeout] {
-        if (*reported || timer->remainingTime() <= 0) {
-            if (!*reported) timeout(); else process->kill();
-            process->closeWriteChannel();
-            return;
-        }
+    connect(process, &QProcess::started, process, [process, payload, fail, transferFailed] {
         if (process->write(payload) != payload.size()) { fail(transferFailed); process->kill(); }
         process->closeWriteChannel();
     });
-    connect(timer, &QTimer::timeout, process, timeout);
+    connect(timer, &QTimer::timeout, process, [process, fail, timedOut] {
+        fail(timedOut); process->kill();
+    });
     connect(process, &QProcess::errorOccurred, process, [process, timer, fail](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) { timer->stop(); fail(process->errorString()); process->deleteLater(); }
     });
@@ -2061,14 +2025,7 @@ quint64 HgsClient::requestSettings(const QString &host, const QString &name, con
         }
         process->deleteLater();
     });
-    timer->start(host.isEmpty() ? 20000 : 35000);
-    // Return the request ID before native startup can reenter the event loop.
-    QTimer::singleShot(0, process, [process, timer, reported, timeout] {
-        if (*reported) { process->deleteLater(); return; }
-        if (timer->remainingTime() <= 0) { timeout(); process->deleteLater(); return; }
-        process->start();
-    });
-    return request;
+    timer->start(host.isEmpty() ? 20000 : 35000); process->start(); return request;
 }
 
 quint64 HgsClient::requestNotifications(const QString &host, const QString &name, const QJsonObject &payload)
