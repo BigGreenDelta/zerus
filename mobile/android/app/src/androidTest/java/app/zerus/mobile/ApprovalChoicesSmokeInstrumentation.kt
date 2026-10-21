@@ -1057,7 +1057,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                             return null
                         }
                         if (owner.className?.toString() == "android.view.View" && owner.isVisibleToUser &&
-                            !owner.isEnabled && owner.isCheckable && owner.isChecked) {
+                            !owner.isEnabled && owner.isCheckable) {
                             val ownerBounds = Rect().also(owner::getBoundsInScreen)
                             val display = targetContext.resources.displayMetrics
                             check(!ownerBounds.isEmpty && ownerBounds.left >= 0 && ownerBounds.top >= 0 &&
@@ -1091,7 +1091,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                     val found = owners.singleOrNull()
                     if (found != null) {
                         check(found.first.refresh() && !found.first.isEnabled && found.first.isVisibleToUser &&
-                            found.first.className?.toString() == "android.view.View" && found.first.isCheckable && found.first.isChecked &&
+                            found.first.className?.toString() == "android.view.View" && found.first.isCheckable &&
                             found.first.windowId == ownedWindow && found.first.packageName?.toString() == targetContext.packageName)
                         check(found.second.refresh() && found.second.windowId == ownedWindow &&
                             found.second.packageName?.toString() == targetContext.packageName && found.second.parent == found.first && roleOnly(found.second))

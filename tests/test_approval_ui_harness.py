@@ -16,7 +16,7 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
-# Fixture pins include stale-open phase markers; their reverse projection retains the full f556 fixture.
+# Fixture pins include the parent-selection correction; its exact two-term reverse retains full 96fc.
 
 
 def android_approval_progress():
@@ -316,6 +316,8 @@ def compose_option_memory(source, label, binding, current=lambda: True):
         assert exact in body
     owner_expression = body.split('if (owner.className?.toString() == "android.view.View"', 1)[1].split(') {', 1)[0]
     owner_expression = 'owner.className?.toString() == "android.view.View"' + owner_expression
+    fresh_expression = body.split('check(found.first.refresh() &&', 1)[1].split(')\n', 1)[0]
+    fresh_expression = 'found.first.refresh() &&' + fresh_expression
     role_expression = body.split('fun roleOnly(child: AccessibilityNodeInfo): Boolean =\n', 1)[1].split('                var accepted:', 1)[0].strip()
     click_actions = 'child.actionList.none {\n                        it.id == AccessibilityNodeInfo.ACTION_CLICK || it.id == AccessibilityNodeInfo.ACTION_LONG_CLICK\n                    }'
     assert click_actions in role_expression
@@ -324,14 +326,16 @@ def compose_option_memory(source, label, binding, current=lambda: True):
         replacements = {'className?.toString()': 'role', 'isVisibleToUser': 'visible', 'isEnabled': 'enabled',
             'isCheckable': 'checkable', 'isChecked': 'checked', 'isSelected': 'selected',
             'isClickable': 'clickable', 'isLongClickable': 'long_clickable', 'childCount': 'child_count',
+            'refresh()': 'refreshed', 'windowId': 'window', 'packageName?.toString()': 'package',
             'text.isNullOrEmpty()': 'empty_text', 'contentDescription.isNullOrEmpty()': 'empty_description'}
         for original, name in sorted(replacements.items(), key=lambda item: -len(item[0])):
             expression = expression.replace(prefix + '.' + original, name)
+        expression = expression.replace('ownedWindow', 'owned_window').replace('targetContext.packageName', 'owned_package')
         expression = expression.replace('&&', ' and ').replace('||', ' or ').replace('!', 'not ')
         values = {name: getattr(node, name) for name in ('role', 'visible', 'enabled', 'checkable', 'checked',
-            'selected', 'clickable', 'long_clickable')}
+            'selected', 'clickable', 'long_clickable', 'refreshed', 'window', 'package')}
         values.update(child_count=len(node.children), empty_text=not node.text, empty_description=not node.description,
-                      no_click_action=not (node.actions & {'click', 'long-click'}))
+                      no_click_action=not (node.actions & {'click', 'long-click'}), owned_window=9, owned_package='app.zerus.mobile')
         return finite_source_predicate(' '.join(expression.splitlines()), values)
     def owned(node):
         assert node is not None and node.refreshed and node.window == 9 and node.package == 'app.zerus.mobile'
@@ -367,7 +371,7 @@ def compose_option_memory(source, label, binding, current=lambda: True):
     if not owners: return None
     owner, witness, bounds = owners[0]
     owned(owner); owned(witness); owned(label)
-    assert evaluate(owner_expression, owner, 'owner') and evaluate(role_expression, witness, 'child')
+    assert evaluate(fresh_expression, owner, 'found.first') and evaluate(role_expression, witness, 'child')
     assert witness.parent is owner and owner.bounds == witness.bounds == bounds and label.bounds == label_bounds
     found = (owner, witness, bounds, label_bounds)
     if binding:
@@ -375,6 +379,18 @@ def compose_option_memory(source, label, binding, current=lambda: True):
     else:
         binding.update(owner=owner, witness=witness, geometry=found[2:])
     return owner
+
+
+def restore_stale_owner_checked(source):
+    """Reverse only the two reviewed parent-selection preconditions; no Kotlin execution."""
+    terms = (
+        ('!owner.isEnabled && owner.isCheckable) {', '!owner.isEnabled && owner.isCheckable && owner.isChecked) {'),
+        ('found.first.isCheckable &&\n', 'found.first.isCheckable && found.first.isChecked &&\n'),
+    )
+    for corrected, original in terms:
+        assert source.count(corrected) == 1 and original not in source
+        source = source.replace(corrected, original, 1)
+    return source
 
 
 def compose_option_nodes():
@@ -743,7 +759,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
             'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
         # Baseline includes guarded preparation and passive lifecycle checkpoints; progress stripping stays exact.
-        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), 'a346cb7aed1f49bda999a2643a9114d6b4fb0b23f470955976c52b411dc476c8')
+        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), '7c2010d0dda27284e44ba3bab0167446f4f0371da36ba4e17c21a0cba539f4da')
         definition = source.split('// BEGIN APPROVAL_PROGRESS definition\n', 1)[1].split('// END APPROVAL_PROGRESS definition', 1)[0]
         self.assertIn('check(progressSequence in 0 until 32)', definition)
         self.assertIn('check(record.length <= 160)', definition)
@@ -769,7 +785,7 @@ class ApprovalHarnessTests(unittest.TestCase):
                  'primary-failure-capture-begin', 'finally-begin']
         self.assertEqual([match[2] for match in pattern.finditer(source)], names)
         self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(),
-                         'b8d7f559c1b4b9f346ce13c4e8547f153f6c1f71119ee0298083042c60e27758')
+                         '383010e1e8d816cc7e98d85df737d0e939074d84ddbbbbc67bb0302ceb83e2ff')
         stages = ['RESUMED_MAIN_RETURNED', 'BODY_RESTORE_BEGIN', 'BODY_RESTORE_PASSED',
                   'CONFIRM_RETIRE_BEGIN', 'CONFIRM_RETIRE_PASSED', 'DISABLED_SEND_BEGIN', 'DISABLED_SEND_PASSED',
                   'PRIMARY_FAILURE_CAPTURE_BEGIN', 'FINALLY_BEGIN']
@@ -1147,7 +1163,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(projected.count(constructor), 1)
         projected = projected.replace(constructor, 'private data class EarlySend(val node: AccessibilityNodeInfo,')
         self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(),
-                         'e79eaa6fe78a9fd1a8763fedcc2059191064e42cb3fd2b403e0c1eb2e6b463a8')
+                         'adb00c075f257a89a84aef23227de0342a0e4cd103894bda923487f00fd1d480')
         reader = lambda value: value.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
         self.assertEqual(reader(source), reader(projected))
         early = source.split('        fun earlyReview(', 1)[1].split('        var primaryFailure:', 1)[0]
@@ -2179,11 +2195,12 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
     def test_source_bound_role_predicate_refuses_decorative_foreign_ambiguous_and_pseudo_roles(self):
         source = self.source()
         changes = [lambda f: setattr(f.owner, 'enabled', True),
-            lambda f: setattr(f.owner, 'checkable', False), lambda f: setattr(f.owner, 'checked', False),
+            lambda f: setattr(f.owner, 'checkable', False),
             lambda f: setattr(f.owner, 'visible', False), lambda f: setattr(f.witness, 'bounds', (10, 100, 50, 150)),
             lambda f: setattr(f.witness, 'text', 'android.widget.RadioButton'),
             lambda f: setattr(f.witness, 'description', 'Approve once'),
-            lambda f: setattr(f.witness, 'checkable', True), lambda f: setattr(f.witness, 'selected', True),
+            lambda f: setattr(f.witness, 'checkable', True), lambda f: setattr(f.witness, 'checked', True),
+            lambda f: setattr(f.witness, 'selected', True),
             lambda f: setattr(f.witness, 'clickable', True), lambda f: setattr(f.witness, 'long_clickable', True),
             lambda f: setattr(f.witness, 'actions', {'click'}), lambda f: setattr(f.witness, 'actions', {'long-click'}),
             lambda f: setattr(f.witness, 'window', 10), lambda f: setattr(f.witness, 'package', 'foreign'),
@@ -2205,6 +2222,38 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
         self.assertIs(compose_option_memory(changed, f.label, {}), f.owner)
         f.witness.actions = {'accessibility-focus'}; f.witness.text = ''
         self.assertIs(compose_option_memory(source, f.label, {}), f.owner)
+
+    def test_two_parent_checked_removals_reverse_to_every_96fc_fixture_byte(self):
+        source = self.source()
+        original = restore_stale_owner_checked(source)
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+                         '9b35c3ca5a5a3e9839a34ba53410ab45957f83ada14f7bad30f8d81c7c6b5d53')
+        self.assertEqual(source.count('!child.isCheckable && !child.isChecked && !child.isSelected'), 1)
+        self.assertEqual(source.split('            fun staleDisabledAction(', 1)[1],
+                         original.split('            fun staleDisabledAction(', 1)[1])
+
+    def test_both_parent_selection_states_need_the_same_role_and_actual_fresh_predicate(self):
+        # Source-bound finite stand-in, not compiled Kotlin or an observed child hierarchy.
+        source = self.source()
+        for checked in (False, True):
+            f, binding = compose_option_nodes(), {}
+            f.owner.checked = checked
+            with self.subTest(parent_checked=checked):
+                self.assertIs(compose_option_memory(source, f.label, binding), f.owner)
+                self.assertIs(compose_option_memory(source, f.label, binding), f.owner)
+                f.witness.checked = True
+                self.assertIsNone(compose_option_memory(source, f.label, {}))
+        old = restore_stale_owner_checked(source)
+        only_admission_fixed = source.replace('found.first.isCheckable &&\n',
+            'found.first.isCheckable && found.first.isChecked &&\n', 1)
+        only_fresh_fixed = source.replace('!owner.isEnabled && owner.isCheckable) {',
+            '!owner.isEnabled && owner.isCheckable && owner.isChecked) {', 1)
+        for name, candidate in (('old', old), ('only-admission', only_admission_fixed), ('only-fresh', only_fresh_fixed)):
+            f = compose_option_nodes(); f.owner.checked = False
+            with self.subTest(correction=name):
+                try: result = compose_option_memory(candidate, f.label, {})
+                except AssertionError: result = None
+                self.assertIsNone(result)
 
     def test_complete_child_and_ancestor_bounds_and_unknown_current_cannot_admit(self):
         source = self.source()
@@ -2263,8 +2312,9 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
     def test_retained_diagnostic_seams_restore_all_9a4_bytes_and_original_throwable_path(self):
         source = self.source()
         original = strip_stale_option_evidence(source)
+        # This diagnostic projection includes only the two corrected parent predicates; the full 96fc reverse is separate.
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
-                         '2faf47b7c2d2f8e948e859e3a16eb5e85dd96fdf88896c1335e3bb99cd129d4f')
+                         'ec824f50ae31c873d76d9c60b9f946366ceab85ccaa5cd040f67f0c0111a732d')
         walker = lambda value: value.split('            fun staleDisabledAction(', 1)[1].split('            val choice =', 1)[0]
         self.assertEqual(walker(source), walker(original))
         passed = next(line for line in source.splitlines() if 'Approval choices smoke passed:' in line)
@@ -2326,8 +2376,9 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
     def test_stale_open_phase_seams_restore_every_f556_byte_and_all_earlier_observers(self):
         source = self.source()
         original = strip_stale_open_phases(source)
+        # This phase projection includes only the two corrected parent predicates; the full 96fc reverse is separate.
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
-                         '11c782d130599196259e5cdac97d96f5eaad572788e7533d4b7f8991a3e01c05')
+                         '71a90f9f9776fd2b485498f0d2e40ad616efcd749d9075e91775e0c74d4bd135')
         self.assertEqual(source.split('            // BEGIN STALE_COMPOSE_ROLE definition', 1)[1],
                          original.split('            // BEGIN STALE_COMPOSE_ROLE definition', 1)[1])
         self.assertEqual(source.split('        fun open(', 1)[0], original.split('        fun open(', 1)[0])

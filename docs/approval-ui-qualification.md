@@ -29,7 +29,7 @@ mutation is insufficient. After that proof, the existing bounded inner-disclosur
 when the refresh has reset its viewport. The same stale inspection, drafts and answer count must still be proved before
 binding the owned window and fresh action nodes; the scroll neither selects an answer nor retries the negative gesture.
 The stale single-choice proof accepts the original RadioButton ancestor or the fixed synthetic-role-child shape in
-Compose UI 1.8.3 (BOM 2025.06.01). For that shape the exact label must belong to a unique visible, disabled, checked,
+Compose UI 1.8.3 (BOM 2025.06.01). For that shape the exact label must belong to a unique visible, disabled,
 checkable View owner with a unique direct role-only RadioButton leaf covering the same full bounds. The label's enabled
 bit and the decorative radio do not prove disabled ownership. Complete child enumeration is capped at 32 for each of at
 most 16 owned ancestors; unknown, foreign, ambiguous, clipped or changed geometry refuses. The first owner, witness and
@@ -47,6 +47,13 @@ only after constructing a bounded addition of at most 25,600 characters, includi
 The snapshot describes the helper's own observations, not a later walker or unvisited children. The retained 9a4b failure
 again completed six cases and four receipts, but preserved no class descriptors through its logcat-only route; its actual
 class shape and helper return route remain unknown.
+The retained 96fc failure completed six cases and four receipts, then recorded an owned, visible, disabled, checkable
+View parent with `checked=false` and two children. No child-role facts were retained, so their role shape remains unknown. Compose
+maps the parent's checked bit from its selection state independently of its role. A changed run also keys the UI's
+options to the new target's draft while the stale-case oracle preserves the old target's saved answer. The fixture
+therefore accepts either parent checked state only after the same complete owner/role-child proof, including fresh
+revalidation. The role-only child's `!checked` requirement is unchanged. Source-bound memory controls cover the two
+parent states and refuse either partial correction; they are not compiled Kotlin or native qualification.
 Six fixed BEFORE/RETURNED phase markers bracket only the existing refresh-main, visible-title and verified-model waits
 in `open("stale-identity")`. Other open cases emit no new markers. The original calls, predicates and order stay exact;
 marker faults cannot prevent those calls. These markers use the existing 64-row phase ring and logcat channel, whose
