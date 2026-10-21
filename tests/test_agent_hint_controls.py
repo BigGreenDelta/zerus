@@ -362,6 +362,41 @@ class HintFixtureControls(unittest.TestCase):
                         fixture.HintContract.image_seals(value)
                     path.write_bytes(payload)
 
+    def test_initial_portable_refusal_happens_before_first_execute(self):
+        import tempfile
+        events = []
+        class Portable(fixture.HintContract, unittest.TestCase):
+            def execute(self, argv, **options):
+                events.append('execute')
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            payload = b'synthetic initial portable input'
+            wanted = hashlib.sha256(payload).hexdigest()
+            paths = [root / name for name in ('hgs.exe', 'conpty.dll', 'OpenConsole.exe')]
+            for path in paths: path.write_bytes(payload)
+            value = Portable()
+            value.hgs_exe, value.phase, value.real = paths[0], 'candidate', {}
+            value.inputs = dict(candidate=dict(path='/fixture/admitted/hgs.exe', sha256=wanted))
+            value.conpty_inputs = {path.name: dict(sha256=wanted) for path in paths[1:]}
+            value.env, value.project = {}, root
+            value.cleaning, value.end, value.row_end, value.gate_end = False, 100, 160, None
+            verify = fixture.verify_image_seals
+            def sealed(expected, end):
+                events.append('seal')
+                return verify(expected, end)
+            with patch.object(fixture.time, 'monotonic', return_value=0), \
+                    patch.object(fixture, 'verify_image_seals', side_effect=sealed):
+                value.hgs('session-host', 'install', '--json')
+                self.assertEqual(events, ['seal', 'execute'])
+                for path in paths:
+                    events.clear()
+                    path.write_bytes(b'changed synthetic initial portable input')
+                    with self.subTest(path=path.name), self.assertRaises(AssertionError):
+                        value.hgs('session-host', 'install', '--json')
+                    self.assertEqual(events, ['seal'], 'changed initial copy must prevent execute')
+                    path.write_bytes(payload)
+
 
 if __name__ == '__main__':
     unittest.main()

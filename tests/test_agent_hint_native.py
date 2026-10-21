@@ -309,10 +309,13 @@ class HintContract:
         verify_image_seals([('conpty_input:' + name, Path(value['path']), value['sha256'])
                             for name, value in self.conpty_inputs.items()], self.end)
         super().install()
+        self.initial_portable_seals(self.end)
+
+    def initial_portable_seals(self, end):
         expected = [('initial_portable_candidate', self.hgs_exe, self.inputs['candidate']['sha256'])]
         expected += [('initial_portable_conpty:' + name, self.hgs_exe.parent / name, value['sha256'])
                      for name, value in self.conpty_inputs.items()]
-        verify_image_seals(expected, self.end)
+        return verify_image_seals(expected, end)
 
     def close_model(self):
         if not hasattr(self, 'model'):
@@ -363,8 +366,13 @@ class HintContract:
 
     def hgs(self, *args, input=None, rc=0, cwd=None):
         # Per-instance source selection. Never change imported fixture globals.
-        executable = getattr(self, 'real', {}).get(self.phase,
+        phases = getattr(self, 'real', {})
+        executable = phases.get(self.phase,
                     getattr(self, 'hgs_exe', Path(self.inputs[self.phase]['path'])))
+        if self.phase not in phases and hasattr(self, 'hgs_exe'):
+            # NativeAgent.install calls this before it returns. Refuse changed
+            # initial portable CLI/ConPTY copies before their first execution.
+            self.initial_portable_seals(self.row_end if self.cleaning else self.end)
         env = dict(self.env)
         if os.name != 'nt':
             env['HGS_EXECUTABLE'] = str(executable)
