@@ -421,7 +421,18 @@ impl<N: Native + 'static> Connector<N> {
                 ("expected_run_id", "run_id"),
                 ("expected_conversation_id", "conversation_id"),
             ] {
-                if payload.get(expected).is_some_and(|v| v != &detail[field]) {
+                // An unconfirmed launch reports an explicit null conversation,
+                // which clients address as "". A missing field stays unknown.
+                if payload
+                    .get(expected)
+                    .is_some_and(|expected| match detail.get(field) {
+                        Some(Value::Null) if field == "conversation_id" => {
+                            expected.as_str() != Some("")
+                        }
+                        Some(actual) => expected != actual,
+                        None => true,
+                    })
+                {
                     return Err(Failure::text("fresh native target identity did not match"));
                 }
             }
