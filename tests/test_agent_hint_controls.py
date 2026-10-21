@@ -319,6 +319,49 @@ class HintFixtureControls(unittest.TestCase):
             self.assertFalse(root.exists())
             self.assertEqual(value.steps[-3:], ['model', 'post-stop-images', 'complete-observer'])
 
+    def test_every_declared_input_private_copy_and_current_stable_image_rejects_change(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            payload = b'synthetic sealed fixture executable'
+            wanted = hashlib.sha256(payload).hexdigest()
+            paths = {}
+            for label in ('candidate_input', 'pre_feature_input', 'observer_input', 'candidate_private_cli',
+                          'pre_feature_private_cli', 'observer_private', 'native_input', 'native_private',
+                          'current_stable_cli', 'initial_portable_candidate'):
+                paths[label] = root / label / 'image.bin'
+                paths[label].parent.mkdir()
+                paths[label].write_bytes(payload)
+            value = SimpleNamespace(inputs={name: dict(path=str(paths[name + '_input']), sha256=wanted)
+                                            for name in ('candidate', 'pre_feature', 'observer')},
+                                    real={phase: paths[phase + '_private_cli'] for phase in ('candidate', 'pre_feature')},
+                                    observer_exe=paths['observer_private'], native_input=paths['native_input'],
+                                    native_copy=paths['native_private'], native_sha256=wanted,
+                                    real_hook=paths['current_stable_cli'], phase='candidate', row_end=100,
+                                    hgs_exe=paths['initial_portable_candidate'])
+            value.conpty_inputs = {}
+            for name in ('conpty.dll', 'OpenConsole.exe'):
+                source = root / ('conpty-input-' + name)
+                source.write_bytes(payload)
+                value.conpty_inputs[name] = dict(path=str(source), sha256=wanted)
+                paths['conpty_input:' + name] = source
+                for phase in ('candidate', 'pre_feature'):
+                    path = value.real[phase].parent / name
+                    path.write_bytes(payload)
+                    paths[phase + '_conpty:' + name] = path
+                path = value.hgs_exe.parent / name
+                path.write_bytes(payload)
+                paths['initial_portable_conpty:' + name] = path
+            with patch.object(fixture.time, 'monotonic', return_value=0):
+                rows = fixture.HintContract.image_seals(value)
+                self.assertEqual({row['label'] for row in rows}, set(paths))
+                self.assertTrue(all(row['sha256'] == wanted for row in rows))
+                for label, path in paths.items():
+                    path.write_bytes(b'changed synthetic fixture executable')
+                    with self.subTest(label=label), self.assertRaisesRegex(AssertionError, label):
+                        fixture.HintContract.image_seals(value)
+                    path.write_bytes(payload)
+
 
 if __name__ == '__main__':
     unittest.main()

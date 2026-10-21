@@ -73,6 +73,17 @@ def sha256(path, end=None):
     return value.hexdigest()
 
 
+def verify_image_seals(expected, end):
+    """Read-only copy/input checks; actual hashes are retained only on success."""
+    rows = []
+    for label, path, wanted in expected:
+        actual = sha256(path, end)
+        if actual != wanted:
+            raise AssertionError('changed fixture executable: ' + label)
+        rows.append(dict(label=label, path=str(path), sha256=actual))
+    return rows
+
+
 def stream_bytes(value):
     """Validate complete captured AND forwarded bytes; never infer the latter."""
     raw = base64.b64decode(value['base64'], validate=True)
@@ -257,13 +268,17 @@ class HintContract:
             folder.mkdir()
             self.real[phase] = folder / ('hgs' + suffix)
             shutil.copy2(self.inputs[phase]['path'], self.real[phase])
+            verify_image_seals([(phase + '_private_cli', self.real[phase], self.inputs[phase]['sha256'])], self.end)
             if os.name == 'nt' and getattr(self, 'CONPTY', None):
                 for name in ('conpty.dll', 'OpenConsole.exe'):
                     shutil.copy2(Path(self.CONPTY) / name, folder / name)
+                    verify_image_seals([(phase + '_conpty:' + name, folder / name,
+                                         self.conpty_inputs[name]['sha256'])], self.end)
         self.observer = self.root / 'observer'
         self.observer.mkdir(mode=0o700)
         self.observer_exe = self.observer / ('hgs' + suffix)
         shutil.copy2(self.inputs['observer']['path'], self.observer_exe)
+        verify_image_seals([('observer_private', self.observer_exe, self.inputs['observer']['sha256'])], self.end)
         self.settings_path = self.agent_home / ('settings.json' if self.AGENT == 'claude' else 'hooks.json')
         self.set_phase('candidate')
         self.install_observer_entry()
@@ -283,6 +298,21 @@ class HintContract:
         # NativeAgent's ordinary fixture may link; this contract needs its own
         # bytes so an updater staging beside the executable cannot alter input.
         shutil.copy2(self.BINARY, self.bin / (self.AGENT + '.exe'))
+
+    def install(self):
+        # NativeAgent's same private install; validate its existing ConPTY input
+        # pair first, then seal the exact initial portable copies it produced.
+        self.assertTrue(getattr(self, 'CONPTY', None), 'reviewed ConPTY input pair is required')
+        pin = read_json(test_pause.REPO / 'packaging/windows/conpty.json', 8192)
+        self.conpty_inputs = {name: dict(path=str(Path(self.CONPTY) / name), sha256=pin['files'][name]['sha256'])
+                              for name in ('conpty.dll', 'OpenConsole.exe')}
+        verify_image_seals([('conpty_input:' + name, Path(value['path']), value['sha256'])
+                            for name, value in self.conpty_inputs.items()], self.end)
+        super().install()
+        expected = [('initial_portable_candidate', self.hgs_exe, self.inputs['candidate']['sha256'])]
+        expected += [('initial_portable_conpty:' + name, self.hgs_exe.parent / name, value['sha256'])
+                     for name, value in self.conpty_inputs.items()]
+        verify_image_seals(expected, self.end)
 
     def close_model(self):
         if not hasattr(self, 'model'):
@@ -919,12 +949,28 @@ class HintContract:
                 self.save_cleanup('UNKNOWN: runtime removal incomplete', problems)
         self.assertTrue(self.cleanup_verified, 'UNKNOWN owned cleanup; retained namespaces: ' + str(getattr(self, 'root', '')))
 
+    def image_seals(self):
+        expected = [(name + '_input', Path(value['path']), value['sha256']) for name, value in self.inputs.items()]
+        expected += [(phase + '_private_cli', self.real[phase], self.inputs[phase]['sha256'])
+                     for phase in ('candidate', 'pre_feature')]
+        expected += [('observer_private', self.observer_exe, self.inputs['observer']['sha256']),
+                     ('native_input', self.native_input, self.native_sha256),
+                     ('native_private', self.native_copy, self.native_sha256),
+                     ('current_stable_cli', self.real_hook, self.inputs[self.phase]['sha256'])]
+        if hasattr(self, 'hgs_exe'):
+            expected.append(('initial_portable_candidate', self.hgs_exe, self.inputs['candidate']['sha256']))
+        if hasattr(self, 'conpty_inputs'):
+            for name in ('conpty.dll', 'OpenConsole.exe'):
+                value = self.conpty_inputs[name]
+                expected.append(('conpty_input:' + name, Path(value['path']), value['sha256']))
+                for phase in ('candidate', 'pre_feature'):
+                    expected.append((phase + '_conpty:' + name, self.real[phase].parent / name, value['sha256']))
+                expected.append(('initial_portable_conpty:' + name, self.hgs_exe.parent / name, value['sha256']))
+        return verify_image_seals(expected, self.row_end)
+
     def keep_evidence(self, stage):
         destination = self.result_dir
-        self.assertEqual(sha256(self.native_input, self.row_end), self.native_sha256)
-        self.assertEqual(sha256(self.native_copy, self.row_end), self.native_sha256)
-        self.checkpoints.append(dict(native_input_sha256=self.native_sha256,
-                                     private_native_sha256=self.native_sha256, stage=stage))
+        self.checkpoints.append(dict(stage=stage, phase=self.phase, image_seals=self.image_seals()))
         for name, path in (('settings.json', self.settings_path), ('requests.jsonl', self.api_root / 'requests.jsonl')):
             if path.exists(): shutil.copy2(path, destination / name)
         (destination / 'checkpoints.json').write_text(json.dumps(self.checkpoints, indent=2))
