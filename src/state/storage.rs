@@ -303,6 +303,7 @@ pub(super) fn supervisor_command(
     record: &Value,
     executable: &str,
     argv: Vec<String>,
+    hint_environment: &[String],
 ) -> Vec<String> {
     #[cfg(unix)]
     let mut launch = {
@@ -318,6 +319,7 @@ pub(super) fn supervisor_command(
                 string(record, "account_id"),
                 string(record, "agent"),
                 string(record, "agent_home"),
+                hint_environment,
             ),
             executable.into(),
             "0".into(),
@@ -325,7 +327,7 @@ pub(super) fn supervisor_command(
     };
     #[cfg(windows)]
     let mut launch = {
-        let _ = record;
+        let _ = (record, hint_environment);
         vec![executable.into(), "--run".into(), "0".into()]
     };
     launch.extend(argv);
@@ -344,5 +346,61 @@ pub(super) fn account_variables(record: &Value) -> Vec<String> {
         )
     } else {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod agent_hint_tests {
+    use super::*;
+
+    #[test]
+    fn agent_hint_transport_keeps_project_launchers_user_flags_and_native_argv() {
+        let hint = vec!["HGS_AGENT_HINT=1".into(), "HGS_AGENT_HINT_OFF=".into()];
+        for (agent, argv) in [
+            (
+                "claude",
+                vec![
+                    "project-claude",
+                    "--resume",
+                    "conversation",
+                    "--append-system-prompt",
+                    "user append",
+                    "--system-prompt",
+                    "user system",
+                    "--settings",
+                    "user.json",
+                ],
+            ),
+            (
+                "codex",
+                vec![
+                    "project-codex",
+                    "resume",
+                    "conversation",
+                    "-c",
+                    "developer_instructions=\"User instructions\"",
+                    "--profile",
+                    "work",
+                ],
+            ),
+        ] {
+            let record = json!({"agent":agent,"account_id":"work-account","agent_home":"/private/profile","shell":"/private/login-shell"});
+            let native = argv.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            let command = supervisor_command(&record, "/stable/hgs", native.clone(), &hint);
+            assert_eq!(&command[command.len() - native.len()..], native.as_slice());
+            #[cfg(unix)]
+            {
+                assert_eq!(&command[..2], &["/private/login-shell", "-lic"]);
+                let script = shell_words::split(&command[2]).unwrap();
+                assert!(script.contains(&"HGS_AGENT_HINT=1".into()));
+                assert!(script.contains(&"HGS_AGENT_HINT_OFF=".into()));
+                assert!(!script
+                    .iter()
+                    .any(|word| word.starts_with("HGS_CONFIG_DIR=")));
+                assert_eq!(&command[3..5], &["/stable/hgs", "0"]);
+            }
+            #[cfg(windows)]
+            assert_eq!(&command[..3], &["/stable/hgs", "--run", "0"]);
+        }
     }
 }

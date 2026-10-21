@@ -144,6 +144,7 @@ const SESSION_CONTEXT: &[&str] = &[
     "HGS_FRESH_REPLACES",
     "HGS_FORK_PARENT_ID",
     "HGS_FORK_SOURCE_NAME",
+    "HGS_FORK_AGENT_HINT_REVISION",
     "HGS_LAUNCH_ID",
     "HGS_ACCOUNT_ID",
     "HGS_TRACKING",
@@ -1893,6 +1894,30 @@ mod tests {
         assert!(session_environment(Environment::default(), &["NOVALUE".into()], "h").is_err());
     }
 
+    #[test]
+    fn agent_hint_snapshot_replaces_stale_controls_without_changing_config_paths() {
+        let client = Environment::parse([
+            "HGS_AGENT_HINT=0",
+            "HGS_AGENT_HINT_OFF=native-claude",
+            r"HGS_CONFIG_DIR=C:\private\unchanged",
+            "HGS_FORK_AGENT_HINT_REVISION=1",
+        ])
+        .unwrap();
+        let environment = session_environment(
+            client,
+            &["HGS_AGENT_HINT=1".into(), "HGS_AGENT_HINT_OFF=".into()],
+            r"C:\stable\hgs.exe",
+        )
+        .unwrap();
+        assert!(environment.contains(&"HGS_AGENT_HINT=1".into()));
+        assert!(!environment
+            .iter()
+            .any(|entry| entry.starts_with("HGS_AGENT_HINT_OFF=")));
+        assert!(environment.contains(&r"HGS_CONFIG_DIR=C:\private\unchanged".into()));
+        assert!(!environment
+            .iter()
+            .any(|entry| entry.starts_with("HGS_FORK_AGENT_HINT_REVISION=")));
+    }
     #[test]
     fn creates_carry_the_launch_id_that_a_retry_repeats() {
         let command = [r"C:\Users\u\.local\bin\hgs.exe", "--run", "0", "fake_agent"];

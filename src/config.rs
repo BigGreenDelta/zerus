@@ -7,7 +7,7 @@ use crate::{
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -235,6 +235,164 @@ pub fn config_dir(home: &str) -> PathBuf {
     )
 }
 
+const HINT_KEYS: [&str; 2] = ["HGS_AGENT_HINT", "HGS_AGENT_HINT_OFF"];
+const HINT_POLICY_DIAGNOSTIC: &str =
+    "hgs: optional agent hint disabled: invalid or unreadable hint policy";
+
+#[derive(Debug, PartialEq, Eq)]
+struct HintPolicy {
+    enabled: bool,
+    off: String,
+}
+
+impl HintPolicy {
+    fn environment(self) -> Vec<String> {
+        vec![
+            format!("HGS_AGENT_HINT={}", if self.enabled { "1" } else { "0" }),
+            format!("HGS_AGENT_HINT_OFF={}", self.off),
+        ]
+    }
+
+    fn allows(&self, account: &str) -> bool {
+        self.enabled && !self.off.split_whitespace().any(|id| id == account)
+    }
+}
+
+fn hint_policy(
+    text: &str,
+    home: &str,
+    mut environment: impl FnMut(&str) -> std::result::Result<Option<String>, ()>,
+) -> std::result::Result<HintPolicy, ()> {
+    let mut values = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((key, raw)) = line.split_once('=') else {
+            // Unrelated configuration keeps its existing validation behavior.
+            if HINT_KEYS.iter().any(|key| {
+                line == *key
+                    || line
+                        .strip_prefix(*key)
+                        .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+            }) {
+                return Err(());
+            }
+            continue;
+        };
+        let key = key.trim();
+        if HINT_KEYS.contains(&key) {
+            let value = assignment_value(raw, home, &values).map_err(|_| ())?;
+            values.insert(key.to_owned(), value);
+        }
+    }
+    for key in HINT_KEYS {
+        if let Some(value) = environment(key)? {
+            values.insert(key.to_owned(), value);
+        }
+    }
+    let enabled = match values.get(HINT_KEYS[0]).map(String::as_str).unwrap_or("1") {
+        "0" => false,
+        "1" => true,
+        _ => return Err(()),
+    };
+    let off = values.get(HINT_KEYS[1]).cloned().unwrap_or_default();
+    if off.len() > 8192 {
+        return Err(());
+    }
+    Ok(HintPolicy {
+        enabled,
+        off: off.split_whitespace().collect::<Vec<_>>().join(" "),
+    })
+}
+
+fn read_hint_policy(directory: &Path, home: &str) -> std::result::Result<HintPolicy, ()> {
+    let mut text = String::new();
+    match fs::File::open(directory.join("config")) {
+        Ok(file) => {
+            file.take(65_537)
+                .read_to_string(&mut text)
+                .map_err(|_| ())?;
+            if text.len() > 65_536 {
+                return Err(());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(()),
+    }
+    hint_policy(&text, home, |key| match env::var(key) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err(()),
+    })
+}
+
+/// Resolve only the optional hint controls in this caller. Forward effective
+/// values, including an empty exclusion list, after shell startup and on every
+/// new native process. No config path or policy goes into the saved recipe.
+pub(crate) fn agent_hint_environment(provider: &str) -> Vec<String> {
+    if !["claude", "codex"].contains(&provider) {
+        return Vec::new();
+    }
+    let policy = platform::home()
+        .ok_or(())
+        .and_then(|home| read_hint_policy(&config_dir(&home), &home));
+    hint_policy_environment(policy)
+}
+
+fn hint_policy_environment(policy: std::result::Result<HintPolicy, ()>) -> Vec<String> {
+    match policy {
+        Ok(policy) => policy.environment(),
+        Err(()) => {
+            eprintln!("{HINT_POLICY_DIAGNOSTIC}");
+            HintPolicy {
+                enabled: false,
+                off: String::new(),
+            }
+            .environment()
+        }
+    }
+}
+
+/// A tracked hook consumes a complete process snapshot; it never supplements
+/// it from a different default config. Windows removes an empty environment
+/// entry, so absent OFF with a resolved 0/1 means the empty exclusion list.
+pub(crate) fn resolved_agent_hint(account: &str) -> bool {
+    let get = |key| match env::var(key) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err(()),
+    };
+    let policy = get(HINT_KEYS[0]).and_then(|enabled| {
+        get(HINT_KEYS[1]).and_then(|off| resolved_hint_policy(enabled.as_deref(), off.as_deref()))
+    });
+    match policy {
+        Ok(policy) => policy.allows(account),
+        _ => {
+            eprintln!("{HINT_POLICY_DIAGNOSTIC}");
+            false
+        }
+    }
+}
+
+fn resolved_hint_policy(
+    enabled: Option<&str>,
+    off: Option<&str>,
+) -> std::result::Result<HintPolicy, ()> {
+    let enabled = match enabled {
+        Some("0") => false,
+        Some("1") => true,
+        _ => return Err(()),
+    };
+    let off = off.unwrap_or("");
+    if off.len() > 8192 {
+        return Err(());
+    }
+    Ok(HintPolicy {
+        enabled,
+        off: off.into(),
+    })
+}
+
 pub struct Project {
     pub name: String,
     pub dir: String,
@@ -324,6 +482,108 @@ fn assignment_value(
 mod tests {
     use super::*;
 
+    fn policy(text: &str, overrides: &[(&str, &str)]) -> std::result::Result<HintPolicy, ()> {
+        hint_policy(text, "/home/fixture", |key| {
+            Ok(overrides
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).into()))
+        })
+    }
+
+    #[test]
+    fn agent_hint_policy_defaults_and_exact_account_exclusions() {
+        assert_eq!(
+            policy("", &[]).unwrap().environment(),
+            ["HGS_AGENT_HINT=1", "HGS_AGENT_HINT_OFF="]
+        );
+        let selected = policy(
+            "export HGS_AGENT_HINT=1 # enabled\nHGS_AGENT_HINT_OFF='native-codex work'\n",
+            &[],
+        )
+        .unwrap();
+        assert!(selected.allows("native-claude"));
+        assert!(!selected.allows("native-codex") && !selected.allows("work"));
+        assert!(selected.allows("codex") && selected.allows("work-other"));
+        assert!(!policy("HGS_AGENT_HINT=0", &[])
+            .unwrap()
+            .allows("native-claude"));
+    }
+
+    #[test]
+    fn agent_hint_environment_overrides_file_and_clears_stale_exclusions() {
+        let text = "HGS_AGENT_HINT=0\nHGS_AGENT_HINT_OFF='native-claude native-codex'\n";
+        let values = policy(text, &[("HGS_AGENT_HINT", "1"), ("HGS_AGENT_HINT_OFF", "")]).unwrap();
+        assert!(values.allows("native-claude") && values.allows("native-codex"));
+        let snapshot = values.environment();
+        let mut stale = HashMap::from([
+            ("HGS_AGENT_HINT", "0".to_owned()),
+            ("HGS_AGENT_HINT_OFF", "native-claude".to_owned()),
+            ("HGS_CONFIG_DIR", "/unchanged/private-config".to_owned()),
+        ]);
+        for entry in &snapshot {
+            let (key, value) = entry.split_once('=').unwrap();
+            stale.insert(key, value.into());
+        }
+        assert_eq!(stale["HGS_AGENT_HINT"], "1");
+        assert_eq!(stale["HGS_AGENT_HINT_OFF"], "");
+        assert_eq!(stale["HGS_CONFIG_DIR"], "/unchanged/private-config");
+        // A new caller resolves its current policy; a saved delivery mark is
+        // not a policy snapshot that could override this file change.
+        assert_ne!(
+            snapshot,
+            policy("HGS_AGENT_HINT=0", &[]).unwrap().environment()
+        );
+        assert_eq!(
+            policy("HGS_AGENT_HINT_OFF=work", &[("HGS_AGENT_HINT", "1")])
+                .unwrap()
+                .off,
+            "work"
+        );
+    }
+
+    #[test]
+    fn agent_hint_invalid_policy_does_not_parse_unrelated_values_or_execute_shell() {
+        assert!(policy("HGS_PEERS=$(unrelated)\nHGS_TAB='unterminated\n", &[]).is_ok());
+        for text in [
+            "HGS_AGENT_HINT=maybe",
+            "HGS_AGENT_HINT=",
+            "HGS_AGENT_HINT 0",
+            "HGS_AGENT_HINT_OFF=$(must_not_execute)",
+            "HGS_AGENT_HINT_OFF='unterminated",
+        ] {
+            assert!(policy(text, &[]).is_err(), "{text}");
+        }
+        assert!(policy("", &[("HGS_AGENT_HINT", "maybe")]).is_err());
+        assert!(hint_policy("", "/home/fixture", |_| Err(())).is_err());
+        assert_eq!(
+            hint_policy_environment(Err(())),
+            ["HGS_AGENT_HINT=0", "HGS_AGENT_HINT_OFF="]
+        );
+        for provider in ["kimi", "opencode", "dsh", "sh"] {
+            assert!(agent_hint_environment(provider).is_empty());
+        }
+        let absent = tempfile::tempdir().unwrap();
+        // A directory in place of the file is an optional-policy read failure.
+        fs::create_dir(absent.path().join("config")).unwrap();
+        assert!(read_hint_policy(absent.path(), "/home/fixture").is_err());
+    }
+
+    #[test]
+    fn agent_hint_resolved_windows_empty_list_never_supplements_a_different_file() {
+        let windows = resolved_hint_policy(Some("1"), None).unwrap();
+        let unix = resolved_hint_policy(Some("1"), Some("")).unwrap();
+        assert_eq!(windows, unix);
+        assert!(windows.allows("native-claude") && windows.allows("work"));
+        assert!(!resolved_hint_policy(Some("0"), None)
+            .unwrap()
+            .allows("native-claude"));
+        assert!(!resolved_hint_policy(Some("1"), Some("work"))
+            .unwrap()
+            .allows("work"));
+        assert!(resolved_hint_policy(None, Some("work")).is_err());
+        assert!(resolved_hint_policy(Some(""), None).is_err());
+    }
     #[test]
     fn assignment_quotes_comments_and_expansions_match_supported_shell_format() {
         let values = HashMap::from([("BOX".to_owned(), "arch".to_owned())]);

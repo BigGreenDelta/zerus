@@ -975,14 +975,22 @@ fn copy_account(config: &Config, args: &[String], dry: bool) -> Result<Value> {
 
 /// Account selection is reapplied after shell startup on resume/fork as on initial launch.
 #[cfg(unix)]
-pub fn run_script(account: &str, provider: &str, home: &str) -> String {
-    let environment = run_environment(account, provider, home);
+pub fn run_script(account: &str, provider: &str, home: &str, extra: &[String]) -> String {
+    let mut environment = run_environment(account, provider, home);
+    environment.extend_from_slice(extra);
+    supervisor_script(&environment)
+}
+
+/// Explicit assignments follow login-shell startup, ahead of the unchanged
+/// supervisor and native arguments. The empty hint exclusion list is explicit.
+#[cfg(unix)]
+pub fn supervisor_script(environment: &[String]) -> String {
     if environment.is_empty() {
         return "exec \"$0\" --run \"$@\"".into();
     }
     format!(
         "exec env {} \"$0\" --run \"$@\"",
-        platform::join(&environment)
+        platform::join(environment)
     )
 }
 
@@ -1016,6 +1024,44 @@ pub fn run_environment(account: &str, provider: &str, home: &str) -> Vec<String>
 #[cfg(test)]
 mod permission_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_hint_effective_values_follow_shell_startup_without_config_redirect_or_argv_change() {
+        let hint = vec!["HGS_AGENT_HINT=1".into(), "HGS_AGENT_HINT_OFF=".into()];
+        let script = run_script(
+            "work-account",
+            "claude",
+            "/private/profile with space",
+            &hint,
+        );
+        let words = shell_words::split(&script).unwrap();
+        assert_eq!(&words[..2], &["exec", "env"]);
+        assert_eq!(&words[words.len() - 3..], &["$0", "--run", "$@"]);
+        assert!(words.contains(&"CLAUDE_CONFIG_DIR=/private/profile with space".into()));
+        assert!(words.contains(&"HGS_ACCOUNT_ID=work-account".into()));
+        assert_eq!(&words[words.len() - 5..words.len() - 3], hint.as_slice());
+        assert!(!words.iter().any(|word| word.starts_with("HGS_CONFIG_DIR=")));
+        assert_eq!(supervisor_script(&[]), "exec \"$0\" --run \"$@\"");
+        assert_eq!(
+            shell_words::split(&run_script("", "codex", "", &hint)).unwrap(),
+            [
+                "exec",
+                "env",
+                "HGS_AGENT_HINT=1",
+                "HGS_AGENT_HINT_OFF=",
+                "$0",
+                "--run",
+                "$@"
+            ]
+        );
+        let quoted = vec![
+            "HGS_AGENT_HINT=1".into(),
+            "HGS_AGENT_HINT_OFF=work 'quoted' $(not-executed)".into(),
+        ];
+        let words = shell_words::split(&supervisor_script(&quoted)).unwrap();
+        assert_eq!(&words[2..4], quoted.as_slice());
+    }
     #[test]
     fn account_defaults_respect_explicit_launch_mode_and_prompt_delimiter() {
         for (provider, flag) in [("claude","--permission-mode"),("codex","--sandbox"),("kimi","--yolo")] {

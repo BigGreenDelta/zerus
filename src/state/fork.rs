@@ -238,7 +238,8 @@ pub(super) fn start_scoped(
     };
     let argv = fork_argv(&record, new_id.as_deref())?;
     let executable = runner_executable()?;
-    let launch = supervisor_command(&record, &executable, argv);
+    let hint_environment = crate::config::agent_hint_environment(agent);
+    let launch = supervisor_command(&record, &executable, argv, &hint_environment);
     let new_run=uuid::Uuid::new_v4().to_string();
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", target.clone()),
@@ -259,6 +260,7 @@ pub(super) fn start_scoped(
             string(&record, "conversation_id").into(),
         ),
         ("HGS_FORK_SOURCE_NAME", name.into()),
+        (agent_hint::FORK_REVISION_ENV, agent_hint::fork_revision(&record)),
         ("HGS_TRACKING", "1".into()),
         (
             "HGS_CLIENT",
@@ -276,6 +278,7 @@ pub(super) fn start_scoped(
             .into_iter()
             .map(|(key, value)| format!("{key}={value}"))
             .chain(account_variables(&record))
+            .chain(hint_environment)
             .collect(),
         command: launch,
         detached: true,

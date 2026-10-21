@@ -101,6 +101,52 @@ message search finds their public mentions; Android session search finds mention
 in the available session metadata and previews. A task mention alone does not
 establish a unique session identity.
 
+### Static agent guidance
+
+The static hint source currently covers tracked Claude Code and Codex main
+conversations. Its native delivery contract still requires qualification on the
+reviewed versions before adoption. Kimi, OpenCode and DeepSeek channels remain
+separate work; older hgs peers inject nothing.
+
+The hint points to `hgs guide` with fixed English text, independent of session
+name, computer and hgs version. It uses the existing SessionStart hook context,
+without changing user instruction flags, project launchers or saved native
+arguments. It is not sent as a person's Activity message. New conversations and
+previously unmarked conversations receive an attempt; repeated resumes suppress
+another attempt. Clear and compaction replace context and request a new copy.
+A fork inherits suppression only from the exact marked context it forks.
+Renaming does not change the text or hint revision. Arbitrary commands and native
+subagents receive no hint.
+
+Configure optional injection in the hgs config file or caller environment:
+
+```sh
+HGS_AGENT_HINT=0                         # disable new hint injection globally
+HGS_AGENT_HINT_OFF="native-codex work"   # exclude exact account IDs
+```
+
+Injection defaults to enabled. The global value accepts `0` or `1`; the exclusion
+list is whitespace-separated and uses `native-claude` or `native-codex` for the
+provider's own login. Environment values take precedence, including an explicitly
+empty exclusion list. Invalid or unreadable hint policy disables only optional
+injection with a bounded diagnostic; unrelated configuration validation is
+unchanged. `hgs guide` and `hgs self` remain available when injection is disabled.
+Opt-out does not remove context already retained by the provider.
+
+Each fresh start, resume, recovery, archive restore and fork resolves the current
+caller's effective hint policy again. Only those effective hint values enter the
+new process environment, after login-shell startup on Unix. The hgs config path
+is unchanged and policy is not stored in the saved launch recipe or binding.
+This is a process snapshot: editing the file does not live-reload a running
+native process. An `hgs` invocation inside that agent inherits the snapshot as
+ordinary environment overrides, which can continue to shadow later file edits.
+On Windows, an absent exclusion variable alongside the resolved global value
+means an empty list; the hook does not supplement it from another default file.
+
+The private conversation/revision mark suppresses retries; it does not prove
+stdout delivery or native acceptance. An output failure reports unknown delivery
+and is not automatically retried. There is no crash-atomic exactly-once promise.
+
 <a id="recovery"></a>
 
 ## Pause, resume and reboot

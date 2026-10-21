@@ -2076,6 +2076,10 @@ fn launch(
         }
     }
     let executable = executable_path()?.to_string_lossy().into_owned();
+    let hint_environment = crate::config::agent_hint_environment(&command_name);
+    #[cfg(unix)]
+    let supervisor_environment = account_environment
+        .iter().chain(&hint_environment).cloned().collect::<Vec<_>>();
     // The Unix login shell is the pane's root process. On Windows PowerShell
     // runs under `--run` as well: the host starts every root process as a new
     // process group, which ignores Ctrl+C together with everything it starts,
@@ -2087,14 +2091,7 @@ fn launch(
         let mut words = vec![
             shell,
             "-lic".into(),
-            if account_environment.is_empty() {
-                "exec \"$0\" --run \"$@\"".into()
-            } else {
-                format!(
-                    "exec env {} \"$0\" --run \"$@\"",
-                    platform::join(&account_environment)
-                )
-            },
+            crate::accounts::supervisor_script(&supervisor_environment),
             executable.clone(),
         ];
         // The supervisor starts directly, with the session's variables, which
@@ -2145,6 +2142,7 @@ fn launch(
         environment.push(format!("HGS_LAUNCH_ID={id}"));
     }
     environment.extend(account_environment);
+    environment.extend(hint_environment);
     environment.extend(platform::gui_env());
     if !options.fresh
         && (requested_saved || (options.resume_id.is_none() && binding_exists(config, &session)?))

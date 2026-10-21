@@ -1,5 +1,15 @@
 # Explicit waits between independent sessions
 
+Agents can read compact coordination instructions with `hgs guide` and identify
+their verified current session with `hgs self --json`. The optional fixed
+[static hint](reference.md#static-agent-guidance) points tracked Claude Code and
+Codex main conversations to that guide; its current source awaits pinned native
+qualification. Global and exact-account opt-outs affect new injection attempts,
+while `guide` and `self` remain available. Hint policy is resolved for each new
+process, including resume, and inherited environment overrides are a process
+snapshot, not live configuration reload. Native children and arbitrary commands
+are outside this hint channel.
+
 An independent session is not a native subagent. Declare dependencies through
 `hgs wait`. Prose, a submitted message, Beads status, a native Stop and an idle
 producer do not declare or complete a wait. The protocol supports every provider.
