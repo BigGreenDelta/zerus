@@ -158,6 +158,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             val event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), type, bounds.exactCenterX(), bounds.exactCenterY(), 0)
             event.source = InputDevice.SOURCE_TOUCHSCREEN
             try { check(uiAutomation.injectInputEvent(event, true)) } finally { event.recycle() }
+            if (type == MotionEvent.ACTION_DOWN) SystemClock.sleep(100)
         }
         phase("touch-up:$label")
         } finally {
