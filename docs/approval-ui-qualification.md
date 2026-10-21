@@ -28,6 +28,16 @@ replacement run with the exact old card's run, ID and hash and both original sav
 mutation is insufficient. After that proof, the existing bounded inner-disclosure scroll reveals the original option
 when the refresh has reset its viewport. The same stale inspection, drafts and answer count must still be proved before
 binding the owned window and fresh action nodes; the scroll neither selects an answer nor retries the negative gesture.
+The stale single-choice proof accepts the original RadioButton ancestor or the fixed synthetic-role-child shape in
+Compose UI 1.8.3 (BOM 2025.06.01). For that shape the exact label must belong to a unique visible, disabled, checked,
+checkable View owner with a unique direct role-only RadioButton leaf covering the same full bounds. The label's enabled
+bit and the decorative radio do not prove disabled ownership. Complete child enumeration is capped at 32 for each of at
+most 16 owned ancestors; unknown, foreign, ambiguous, clipped or changed geometry refuses. The first owner, witness and
+label/owner geometry are retained for the final fresh proof. The Send Button admission remains unchanged. On refusal,
+at most 48 fixed class/flag/geometry descriptors from the failing walk, plus one UNKNOWN marker, may reach the existing
+logcat tag; logging is cooperative and cannot turn a refusal into acceptance. Source-bound memory controls exercise this
+source-supported shape, not compiled Kotlin or observed native classes. The retained 4233 failure completed six cases
+and four receipts before the ancestor-only option proof refused; its failing class shape remains unknown.
 Before its one negative physical DOWN/UP attempt, it freshly resolves the exact visible Send
 label in the current owned window, requires that control to be disabled, and checks its current on-screen bounds. A
 missing label, changed identity/window/geometry or enabled control fails; there is no cached-node fallback, second

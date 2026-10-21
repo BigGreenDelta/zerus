@@ -16,7 +16,7 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
-# Fixture pins include the one-time post-resume live-label preparation; its four-seam reverse projection retains 95ef exactly.
+# Fixture pins include the option-only Compose role seam; its reverse projection retains the full 4233 fixture.
 
 
 def android_approval_progress():
@@ -240,6 +240,100 @@ def review_clock_memory(source, observation, clock, current_card=lambda: True):
         record = observation(None)
         return state['start'] <= clock.now < state['end'] and record.generation >= state['bound'] and record.eligible and record.start is not None and state['start'] <= record.start <= clock.now
     return SimpleNamespace(begin=begin, bind=bind, current=current, state=state)
+
+
+def compose_option_memory(source, label, binding, current=lambda: True):
+    """Source-bound predicates over finite memory nodes; never executed Kotlin or native class evidence."""
+    body = source.split('            fun composeStaleOptionAction(label: AccessibilityNodeInfo): AccessibilityNodeInfo? {', 1)[1].split(
+        '            // END STALE_COMPOSE_ROLE definition', 1)[0]
+    ancestor_limit = int(re.search(r'for \(depth in 0 until (\d+)\)', body)[1])
+    child_limit = int(re.search(r'check\(children in 1\.\.(\d+)\)', body)[1])
+    assert (ancestor_limit, child_limit) == (16, 32)
+    for exact in ('check(owner !in seen)', 'check(candidate == null)', 'check(owners.size <= 1)',
+                  'check(witnesses.size <= 1)', 'check(owner.childCount == children)',
+                  'parent.refresh() && parent == owner', 'if (roleOnly(child) && childBounds == ownerBounds)',
+                  'composeOptionOwner == found.first && composeOptionWitness == found.second &&',
+                  'composeOptionBounds == geometry', 'roleOnly(found.second)',
+                  'Rect().also(found.second::getBoundsInScreen) == found.third',
+                  'Rect().also(label::getBoundsInScreen) == labelBounds'):
+        assert exact in body
+    owner_expression = body.split('if (owner.className?.toString() == "android.view.View"', 1)[1].split(') {', 1)[0]
+    owner_expression = 'owner.className?.toString() == "android.view.View"' + owner_expression
+    role_expression = body.split('fun roleOnly(child: AccessibilityNodeInfo): Boolean =\n', 1)[1].split('                var accepted:', 1)[0].strip()
+    click_actions = 'child.actionList.none {\n                        it.id == AccessibilityNodeInfo.ACTION_CLICK || it.id == AccessibilityNodeInfo.ACTION_LONG_CLICK\n                    }'
+    assert click_actions in role_expression
+    role_expression = role_expression.replace(click_actions, 'no_click_action')
+    def evaluate(expression, node, prefix):
+        replacements = {'className?.toString()': 'role', 'isVisibleToUser': 'visible', 'isEnabled': 'enabled',
+            'isCheckable': 'checkable', 'isChecked': 'checked', 'isSelected': 'selected',
+            'isClickable': 'clickable', 'isLongClickable': 'long_clickable', 'childCount': 'child_count',
+            'text.isNullOrEmpty()': 'empty_text', 'contentDescription.isNullOrEmpty()': 'empty_description'}
+        for original, name in sorted(replacements.items(), key=lambda item: -len(item[0])):
+            expression = expression.replace(prefix + '.' + original, name)
+        expression = expression.replace('&&', ' and ').replace('||', ' or ').replace('!', 'not ')
+        values = {name: getattr(node, name) for name in ('role', 'visible', 'enabled', 'checkable', 'checked',
+            'selected', 'clickable', 'long_clickable')}
+        values.update(child_count=len(node.children), empty_text=not node.text, empty_description=not node.description,
+                      no_click_action=not (node.actions & {'click', 'long-click'}))
+        return finite_source_predicate(' '.join(expression.splitlines()), values)
+    def owned(node):
+        assert node is not None and node.refreshed and node.window == 9 and node.package == 'app.zerus.mobile'
+    def contains(outer, inner):
+        return outer[0] <= inner[0] < inner[2] <= outer[2] and outer[1] <= inner[1] < inner[3] <= outer[3]
+    assert current()
+    owned(label)
+    assert label.visible and (label.text == 'Approve once' or label.description == 'Approve once')
+    label_bounds = label.bounds
+    assert contains(label_bounds, label_bounds)
+    node, seen, owners = label, [], []
+    for _ in range(ancestor_limit):
+        if node is None: break
+        assert all(node is not old for old in seen)
+        seen.append(node); owned(node)
+        if node.role == 'android.widget.RadioButton':
+            assert not binding
+            return None  # Delegate to the original direct-role walker, rather than accepting it here.
+        if evaluate(owner_expression, node, 'owner'):
+            assert contains((0, 0, 1080, 2400), node.bounds) and contains(node.bounds, label_bounds)
+            children = tuple(node.children)
+            assert 1 <= len(children) <= child_limit
+            witnesses = []
+            for child in children:
+                owned(child); owned(child.parent)
+                assert child.parent is node
+                if child.role == 'android.widget.RadioButton' and evaluate(role_expression, child, 'child') and child.bounds == node.bounds:
+                    witnesses.append(child)
+            assert tuple(node.children) == children and len(witnesses) <= 1
+            if witnesses: owners.append((node, witnesses[0], node.bounds))
+        node = node.parent
+    assert node is None and len(owners) <= 1 and current()
+    if not owners: return None
+    owner, witness, bounds = owners[0]
+    owned(owner); owned(witness); owned(label)
+    assert evaluate(owner_expression, owner, 'owner') and evaluate(role_expression, witness, 'child')
+    assert witness.parent is owner and owner.bounds == witness.bounds == bounds and label.bounds == label_bounds
+    found = (owner, witness, bounds, label_bounds)
+    if binding:
+        assert binding['owner'] is owner and binding['witness'] is witness and binding['geometry'] == found[2:]
+    else:
+        binding.update(owner=owner, witness=witness, geometry=found[2:])
+    return owner
+
+
+def compose_option_nodes():
+    """Finite synthetic role-child shape from pinned source, not an observed Android hierarchy."""
+    def node(**changes):
+        values = dict(role='android.view.View', visible=True, enabled=True, checkable=False, checked=False,
+            selected=False, clickable=False, long_clickable=False, text='', description='', actions=set(),
+            children=[], parent=None, refreshed=True, window=9, package='app.zerus.mobile', bounds=(0, 0, 1000, 2000))
+        values.update(changes)
+        return SimpleNamespace(**values)
+    root = node()
+    owner = node(enabled=False, checkable=True, checked=True, parent=root, bounds=(10, 100, 990, 300))
+    label = node(role='android.widget.TextView', text='Approve once', parent=owner, bounds=(80, 140, 400, 200))
+    witness = node(role='android.widget.RadioButton', parent=owner, bounds=owner.bounds)
+    owner.children = [label, witness]; root.children = [owner]
+    return SimpleNamespace(root=root, owner=owner, label=label, witness=witness, node=node)
 
 
 def early_probe_main_depths(source):
@@ -592,7 +686,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
             'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
         # Baseline includes guarded preparation and passive lifecycle checkpoints; progress stripping stays exact.
-        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), '22d50ceb2ca6b26b190a03b9986d3f448ec6cd0b3483c2b97a86850f134405d8')
+        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), 'b5a82298ef8ba0650355f8640af902998c7241bcd375462b56085fbe4a7510a0')
         definition = source.split('// BEGIN APPROVAL_PROGRESS definition\n', 1)[1].split('// END APPROVAL_PROGRESS definition', 1)[0]
         self.assertIn('check(progressSequence in 0 until 32)', definition)
         self.assertIn('check(record.length <= 160)', definition)
@@ -618,7 +712,7 @@ class ApprovalHarnessTests(unittest.TestCase):
                  'primary-failure-capture-begin', 'finally-begin']
         self.assertEqual([match[2] for match in pattern.finditer(source)], names)
         self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(),
-                         '537f1b787c2eb212dd4a392517b54758fd43ef6bf296724bb1397e3ab2d7f945')
+                         '03dcc71866c2aac07e84b85dae489feb904eeaaf59f4548d5d6b34d740158658')
         stages = ['RESUMED_MAIN_RETURNED', 'BODY_RESTORE_BEGIN', 'BODY_RESTORE_PASSED',
                   'CONFIRM_RETIRE_BEGIN', 'CONFIRM_RETIRE_PASSED', 'DISABLED_SEND_BEGIN', 'DISABLED_SEND_PASSED',
                   'PRIMARY_FAILURE_CAPTURE_BEGIN', 'FINALLY_BEGIN']
@@ -996,7 +1090,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(projected.count(constructor), 1)
         projected = projected.replace(constructor, 'private data class EarlySend(val node: AccessibilityNodeInfo,')
         self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(),
-                         'f25ae6ce985f886661a7285c76ad7000429084eff21b11e26358e690a537442d')
+                         'dbd60787f4828c29653e35d4e09689d078bbed984141a46d5182d80b0f7f701d')
         reader = lambda value: value.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
         self.assertEqual(reader(source), reader(projected))
         early = source.split('        fun earlyReview(', 1)[1].split('        var primaryFailure:', 1)[0]
@@ -1981,6 +2075,126 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('staleDisabledAction(label, "Send answer") == action', source)
         self.assertNotIn('injectInputEvent', walker)
         self.assertNotIn('performAction', walker)
+
+
+class StaleComposeRoleSourceTests(unittest.TestCase):
+    def source(self):
+        return (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+
+    def test_option_only_seams_restore_every_byte_of_4233_and_the_send_walker(self):
+        source = self.source()
+        pattern = re.compile(r'^([ ]*)// BEGIN STALE_COMPOSE_ROLE ([a-z-]+)\n[\s\S]*?^\1// END STALE_COMPOSE_ROLE \2\n', re.M)
+        self.assertEqual([m[2] for m in pattern.finditer(source)], ['definition', 'admission'])
+        original = pattern.sub('', source)
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+                         'e61677c18f4ca75f8c78df130f0c6da8573af81524bc5770b273572465253f90')
+        walker = source.split('            fun staleDisabledAction(', 1)[1].split('            val choice =', 1)[0]
+        self.assertEqual(pattern.findall(walker)[0][1], 'admission')
+        self.assertIn('if (depth == 0 && text == "Approve once") composeStaleOptionAction(label)?.let { return it }', walker)
+        legacy = original.split('            fun staleDisabledAction(', 1)[1].split('            val choice =', 1)[0]
+        self.assertEqual(pattern.sub('', walker), legacy)
+        self.assertEqual(source.split('            val choice =', 1)[1], original.split('            val choice =', 1)[1])
+        for forbidden in ('performAction', 'injectInputEvent', 'sleep(', 'await(', 'Thread(', 'sendStatus(', 'bindReview(', 'resumeEnd ='):
+            self.assertNotIn(forbidden, pattern.search(source)[0])
+
+    def test_pinned_synthetic_role_shape_has_a_source_bound_legacy_counterexample(self):
+        source, f = self.source(), compose_option_nodes()
+        walker = source.split('            fun staleDisabledAction(', 1)[1].split('            val choice =', 1)[0]
+        comparison = re.search(r'if \((candidate.className\?\.toString\(\) == role)\)', walker)[1]
+        comparison = comparison.replace('candidate.className?.toString()', 'actual')
+        self.assertFalse(any(finite_source_predicate(comparison, dict(actual=n.role, role='android.widget.RadioButton'))
+                             for n in (f.label, f.owner, f.root)))
+        self.assertIs(compose_option_memory(source, f.label, {}), f.owner)
+        # The synthetic source model succeeds with an enabled text label and enabled role-only witness.
+        self.assertTrue(f.label.enabled and f.witness.enabled)
+        self.assertFalse(f.owner.enabled)
+        self.assertEqual(f.witness.actions, set())
+        direct = compose_option_nodes(); direct.owner.role = 'android.widget.RadioButton'
+        self.assertIsNone(compose_option_memory(source, direct.label, {}))  # Only the old walker may admit this shape.
+
+    def test_source_bound_role_predicate_refuses_decorative_foreign_ambiguous_and_pseudo_roles(self):
+        source = self.source()
+        changes = [lambda f: setattr(f.owner, 'enabled', True),
+            lambda f: setattr(f.owner, 'checkable', False), lambda f: setattr(f.owner, 'checked', False),
+            lambda f: setattr(f.owner, 'visible', False), lambda f: setattr(f.witness, 'bounds', (10, 100, 50, 150)),
+            lambda f: setattr(f.witness, 'text', 'android.widget.RadioButton'),
+            lambda f: setattr(f.witness, 'description', 'Approve once'),
+            lambda f: setattr(f.witness, 'checkable', True), lambda f: setattr(f.witness, 'selected', True),
+            lambda f: setattr(f.witness, 'clickable', True), lambda f: setattr(f.witness, 'long_clickable', True),
+            lambda f: setattr(f.witness, 'actions', {'click'}), lambda f: setattr(f.witness, 'actions', {'long-click'}),
+            lambda f: setattr(f.witness, 'window', 10), lambda f: setattr(f.witness, 'package', 'foreign'),
+            lambda f: setattr(f.witness, 'parent', f.root), lambda f: setattr(f.witness, 'refreshed', False),
+            lambda f: setattr(f.label, 'text', 'Other choice'), lambda f: setattr(f.label, 'refreshed', False),
+            lambda f: f.owner.children.append(f.node(role='android.widget.RadioButton', parent=f.owner, bounds=f.owner.bounds)),
+            lambda f: setattr(f.owner, 'children', [f.label]),
+            lambda f: setattr(f.owner, 'parent', f.owner)]
+        for index, change in enumerate(changes):
+            with self.subTest(refusal=index):
+                f = compose_option_nodes(); change(f)
+                try: result = compose_option_memory(source, f.label, {})
+                except AssertionError: result = None
+                self.assertIsNone(result)
+        f = compose_option_nodes(); f.witness.text = 'pseudo role'
+        self.assertIsNone(compose_option_memory(source, f.label, {}))
+        # Mutating the actual source predicate changes this controlled result: it is not a hard-coded mirror.
+        changed = source.replace('child.text.isNullOrEmpty() && ', '', 1)
+        self.assertIs(compose_option_memory(changed, f.label, {}), f.owner)
+        f.witness.actions = {'accessibility-focus'}; f.witness.text = ''
+        self.assertIs(compose_option_memory(source, f.label, {}), f.owner)
+
+    def test_complete_child_and_ancestor_bounds_and_unknown_current_cannot_admit(self):
+        source = self.source()
+        for kind in ('children', 'unknown-child', 'ancestors', 'ambiguous-owner', 'outside', 'foreign-sibling'):
+            f = compose_option_nodes()
+            if kind == 'children':
+                f.owner.children.extend(f.node(parent=f.owner) for _ in range(31))
+            elif kind == 'unknown-child': f.owner.children.append(None)
+            elif kind == 'ancestors':
+                tail = f.root
+                for _ in range(16):
+                    tail.parent = f.node(); tail = tail.parent
+            elif kind == 'ambiguous-owner':
+                f.root.enabled = False; f.root.checkable = f.root.checked = True
+                f.root.children.append(f.node(role='android.widget.RadioButton', parent=f.root, bounds=f.root.bounds))
+            elif kind == 'outside': f.label.bounds = (0, 0, 1000, 500)
+            else:
+                f.owner.children = [f.label]; f.witness.parent = f.root; f.root.children.append(f.witness)
+            with self.subTest(kind=kind):
+                try: result = compose_option_memory(source, f.label, {})
+                except AssertionError: result = None
+                self.assertIsNone(result)
+        for values in ((False,), (True, False)):
+            f = compose_option_nodes(); states = iter(values)
+            with self.assertRaises(AssertionError): compose_option_memory(source, f.label, {}, lambda: next(states))
+
+    def test_final_proof_rejects_replaced_witness_owner_or_label_geometry(self):
+        source = self.source()
+        for changed in ('witness', 'owner', 'geometry', 'role-shape'):
+            f, binding = compose_option_nodes(), {}
+            self.assertIs(compose_option_memory(source, f.label, binding), f.owner)
+            if changed == 'witness':
+                f.owner.children[1] = f.node(role='android.widget.RadioButton', parent=f.owner, bounds=f.owner.bounds)
+            elif changed == 'owner':
+                replacement = f.node(enabled=False, checkable=True, checked=True, parent=f.root, bounds=f.owner.bounds)
+                replacement.children = [f.label, f.witness]; f.label.parent = f.witness.parent = replacement
+            elif changed == 'geometry': f.label.bounds = (90, 145, 390, 195)
+            else: f.owner.role = 'android.widget.RadioButton'
+            with self.subTest(changed=changed), self.assertRaises(AssertionError):
+                compose_option_memory(source, f.label, binding)
+
+    def test_failure_descriptors_are_bounded_observations_with_no_admission_effect(self):
+        source = self.source()
+        helper = source.split('            fun composeStaleOptionAction(', 1)[1].split('            // END STALE_COMPOSE_ROLE definition', 1)[0]
+        self.assertIn('if (facts.size >= 48) { factsOverflow = true; return }', helper)
+        self.assertIn('node.className?.toString()?.take(120)', helper)
+        self.assertIn('if (accepted == null && !directRole) try {', helper)
+        self.assertIn('stale-option-node UNKNOWN descriptor-cap-or-fault', helper)
+        self.assertEqual(helper.count('Log.i('), 2)
+        fact = helper.split('fun fact(', 1)[1].split('                fun roleOnly(', 1)[0]
+        for forbidden in ('node.text', 'node.contentDescription', 'main {', 'refresh()', 'performAction', 'injectInputEvent'):
+            self.assertNotIn(forbidden, fact)
+        self.assertIn('finally {', helper)
+        self.assertNotIn('catch (error:', helper)
 
 
 class QuestionLayoutSourceTests(unittest.TestCase):

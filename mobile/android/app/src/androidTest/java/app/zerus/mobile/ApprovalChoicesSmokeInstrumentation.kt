@@ -969,6 +969,121 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             }
             val root = checkNotNull(uiAutomation.rootInActiveWindow)
             check(root.refresh() && root.windowId == ownedWindow && root.packageName?.toString() == targetContext.packageName)
+            // BEGIN STALE_COMPOSE_ROLE definition
+            // Compose UI 1.8.3 emits a role-only child for a merging selectable owner with children.
+            // This is one fixed single-choice shape, not permission to use any disabled ancestor.
+            var composeOptionOwner: AccessibilityNodeInfo? = null
+            var composeOptionWitness: AccessibilityNodeInfo? = null
+            var composeOptionBounds: Pair<Rect, Rect>? = null
+            fun composeStaleOptionAction(label: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+                val facts = mutableListOf<String>()
+                var factsOverflow = false
+                fun fact(kind: String, index: Int, node: AccessibilityNodeInfo) {
+                    // Diagnostic work cannot alter admission or replace its original failure.
+                    try {
+                        if (facts.size >= 48) { factsOverflow = true; return }
+                        val type = node.className?.toString()?.take(120)?.map {
+                            if (it.isLetterOrDigit() || it in ".$" || it == '_') it else '?'
+                        }?.joinToString("") ?: "UNKNOWN"
+                        val rect = Rect().also(node::getBoundsInScreen)
+                        facts += "stale-option-node kind=$kind index=$index class=$type ownedWindow=${node.windowId == ownedWindow} ownedPackage=${node.packageName?.toString() == targetContext.packageName} visible=${node.isVisibleToUser} enabled=${node.isEnabled} checkable=${node.isCheckable} checked=${node.isChecked} children=${node.childCount} bounds=$rect"
+                    } catch (_: Throwable) { factsOverflow = true }
+                }
+                fun roleOnly(child: AccessibilityNodeInfo): Boolean =
+                    child.className?.toString() == "android.widget.RadioButton" && child.isVisibleToUser &&
+                    child.text.isNullOrEmpty() && child.contentDescription.isNullOrEmpty() && child.childCount == 0 &&
+                    !child.isCheckable && !child.isChecked && !child.isSelected &&
+                    !child.isClickable && !child.isLongClickable && child.actionList.none {
+                        it.id == AccessibilityNodeInfo.ACTION_CLICK || it.id == AccessibilityNodeInfo.ACTION_LONG_CLICK
+                    }
+                var accepted: AccessibilityNodeInfo? = null
+                var directRole = false
+                try {
+                    check(staleInspectionCurrent()) { "Known-stale option identity changed before role proof" }
+                    check(label.refresh() && label.windowId == ownedWindow &&
+                        label.packageName?.toString() == targetContext.packageName && exactVisible(label, "Approve once"))
+                    val labelBounds = Rect().also(label::getBoundsInScreen)
+                    check(!labelBounds.isEmpty)
+                    val seen = mutableListOf<AccessibilityNodeInfo>()
+                    val owners = mutableListOf<Triple<AccessibilityNodeInfo, AccessibilityNodeInfo, Rect>>()
+                    var candidate: AccessibilityNodeInfo? = label
+                    for (depth in 0 until 16) {
+                        val owner = candidate ?: break
+                        check(owner !in seen) { "Known-stale option ancestry is ambiguous" }
+                        seen += owner
+                        check(owner.refresh() && owner.windowId == ownedWindow &&
+                            owner.packageName?.toString() == targetContext.packageName)
+                        fact("ancestor", depth, owner)
+                        // Retain the original direct-role admission, including its disabled check.
+                        if (owner.className?.toString() == "android.widget.RadioButton") {
+                            check(composeOptionOwner == null) { "Known-stale option role shape changed" }
+                            directRole = true
+                            return null
+                        }
+                        if (owner.className?.toString() == "android.view.View" && owner.isVisibleToUser &&
+                            !owner.isEnabled && owner.isCheckable && owner.isChecked) {
+                            val ownerBounds = Rect().also(owner::getBoundsInScreen)
+                            val display = targetContext.resources.displayMetrics
+                            check(!ownerBounds.isEmpty && ownerBounds.left >= 0 && ownerBounds.top >= 0 &&
+                                ownerBounds.right <= display.widthPixels && ownerBounds.bottom <= display.heightPixels &&
+                                ownerBounds.contains(labelBounds)) { "Known-stale option owner geometry is unproven" }
+                            val children = owner.childCount
+                            check(children in 1..32) { "Known-stale option child enumeration is unknown or exhausted" }
+                            val witnesses = mutableListOf<AccessibilityNodeInfo>()
+                            for (index in 0 until children) {
+                                val child = checkNotNull(owner.getChild(index)) { "Known-stale option child is unknown" }
+                                check(child.refresh() && child.windowId == ownedWindow &&
+                                    child.packageName?.toString() == targetContext.packageName)
+                                val parent = checkNotNull(child.parent)
+                                check(parent.refresh() && parent == owner && parent.windowId == ownedWindow &&
+                                    parent.packageName?.toString() == targetContext.packageName)
+                                if (child.className?.toString() == "android.widget.RadioButton") {
+                                    fact("role-child", index, child)
+                                    val childBounds = Rect().also(child::getBoundsInScreen)
+                                    if (roleOnly(child) && childBounds == ownerBounds) witnesses += child
+                                }
+                            }
+                            check(owner.childCount == children) { "Known-stale option child enumeration changed" }
+                            check(witnesses.size <= 1) { "Known-stale option role witness is ambiguous" }
+                            if (witnesses.size == 1) owners += Triple(owner, witnesses.single(), Rect(ownerBounds))
+                        }
+                        candidate = owner.parent
+                    }
+                    check(candidate == null) { "Known-stale option exceeded the action ancestor bound" }
+                    check(owners.size <= 1) { "Known-stale option owner is ambiguous" }
+                    check(staleInspectionCurrent()) { "Known-stale option identity changed after role proof" }
+                    val found = owners.singleOrNull()
+                    if (found != null) {
+                        check(found.first.refresh() && !found.first.isEnabled && found.first.isVisibleToUser &&
+                            found.first.className?.toString() == "android.view.View" && found.first.isCheckable && found.first.isChecked &&
+                            found.first.windowId == ownedWindow && found.first.packageName?.toString() == targetContext.packageName)
+                        check(found.second.refresh() && found.second.windowId == ownedWindow &&
+                            found.second.packageName?.toString() == targetContext.packageName && found.second.parent == found.first && roleOnly(found.second))
+                        check(label.refresh() && label.windowId == ownedWindow &&
+                            label.packageName?.toString() == targetContext.packageName && exactVisible(label, "Approve once") &&
+                            Rect().also(label::getBoundsInScreen) == labelBounds)
+                        check(Rect().also(found.second::getBoundsInScreen) == found.third &&
+                            Rect().also(found.first::getBoundsInScreen) == found.third)
+                        val geometry = Rect(found.third) to Rect(labelBounds)
+                        if (composeOptionOwner == null) {
+                            check(composeOptionWitness == null && composeOptionBounds == null)
+                            composeOptionOwner = found.first
+                            composeOptionWitness = found.second
+                            composeOptionBounds = geometry
+                        } else check(composeOptionOwner == found.first && composeOptionWitness == found.second &&
+                            composeOptionBounds == geometry) { "Known-stale option owner, role witness or label geometry changed" }
+                    }
+                    accepted = found?.first
+                    return accepted
+                } finally {
+                    // Fixed bounded descriptors from this walk, emitted only on refusal. Log I/O is cooperative.
+                    if (accepted == null && !directRole) try {
+                        for (line in facts) Log.i("ZerusApprovalUI", line)
+                        if (factsOverflow) Log.i("ZerusApprovalUI", "stale-option-node UNKNOWN descriptor-cap-or-fault")
+                    } catch (_: Throwable) { /* Diagnostic failure never converts a refusal to admission. */ }
+                }
+            }
+            // END STALE_COMPOSE_ROLE definition
             fun staleDisabledAction(label: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo {
                 val role = when (text) {
                     "Approve once" -> "android.widget.RadioButton"
@@ -983,6 +1098,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                         check(!candidate.isEnabled && candidate.isVisibleToUser) { "Known-stale $text $role must remain disabled" }
                         return candidate
                     }
+                    // BEGIN STALE_COMPOSE_ROLE admission
+                    if (depth == 0 && text == "Approve once") composeStaleOptionAction(label)?.let { return it }
+                    // END STALE_COMPOSE_ROLE admission
                     candidate = checkNotNull(candidate.parent) { "Known-stale $text has no $role ancestor" }
                 }
                 error("Known-stale $text exceeded the action ancestor bound")
