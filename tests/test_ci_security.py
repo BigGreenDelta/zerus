@@ -151,6 +151,16 @@ class WorkflowSecurityTests(unittest.TestCase):
                 text = text.replace(caller, '')
             elif path.name == 'dev-android.yml':
                 continue
+            elif path.name == 'android-release.yml':
+                stable = job(text, 'android')
+                self.assertEqual(field(stable, 'environment'), 'release')
+                self.assertEqual(set(re.findall(r'secrets\.(\w+)', text)), names)
+                for guard in ("github.repository == 'ufna/zerus'", "github.ref == 'refs/heads/main'",
+                              "github.event_name == 'workflow_dispatch'"):
+                    self.assertIn(guard, field(stable, 'if'))
+                self.assertLess(stable.index('android-stable-candidate.py admit'), stable.index('secrets.ANDROID_'))
+                self.assertNotRegex(text, r'contents: write|actions: write|actions/cache|secrets: inherit')
+                continue
             for name in names:
                 with self.subTest(workflow=path.name, secret=name):
                     self.assertNotIn(name, text)
@@ -1048,7 +1058,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertNotIn("windows-x86_64", dev)
 
     def test_privileged_publishers_have_no_cache_access(self):
-        for name in ("publish.yml", "publish-nightly.yml", "dev.yml", "dev-android.yml", "publish-dev.yml"):
+        for name in ("publish.yml", "publish-nightly.yml", "dev.yml", "dev-android.yml", "android-release.yml", "publish-dev.yml"):
             with self.subTest(workflow=name):
                 text = (ROOT / ".github/workflows" / name).read_text()
                 self.assertRegex(text, r"(?m)^cache-mode: none$")

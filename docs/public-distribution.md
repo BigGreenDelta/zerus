@@ -11,6 +11,41 @@ The schema is specified in [mobile architecture](mobile-architecture.md#public-d
 These catalogs do not use relay credentials. The mirror does not build, publish
 to GitHub/AUR, dispatch hosted CI, or install anything on a client.
 
+## Stable Android candidate
+
+The manual `android-release.yml` workflow creates a candidate only, using the
+existing release-environment Android signer and private Firebase configuration.
+It neither publishes a release nor updates a catalog. Select upstream `main` and
+provide the exact selected SHA, committed stable version and `VERSION_CODE`, a
+completed successful full main-push `ci.yml` run for that SHA, and the previously
+reviewed existing signing-certificate SHA-256. PR/manual CI cannot authorize the
+signing step. Both exact main CI gates must have succeeded in the selected
+attempt; an absent earlier-attempt gate is refused rather than guessed.
+
+Before dispatch, pause and drain Dev publication and check every public channel
+and distributed private preview code. The workflow checks committed identity;
+it cannot discover undisclosed private APKs or replace that distribution-floor
+review. It has no arbitrary ref, command, signing fallback or publishing mode.
+
+The candidate builds an exclusive clean source extraction with JDK 17, SDK 36
+and at most two Gradle workers, without Dev/version overrides or shared caches.
+Its original thirty-minute end includes admission, tooling, build, APK/R8
+validation and cleanup, reserving one minute for cleanup. Kernel stalls and
+unproven detached descendants do not establish successful cleanup. Unknown
+process custody or cleanup refuses the artifact and retains the private root.
+
+The exact-build Crashlytics mapping upload must execute successfully, rather
+than be skipped, cached or up-to-date. Before private cleanup, a durable receipt
+binds APK/source hashes, the R8 map identity/hash and successful task evidence.
+The existing private Crashlytics route retains the mapping; no raw mapping,
+signing input, Firebase configuration or build log is uploaded as an artifact.
+After cleanup, the public candidate contains only a `release/` folder with the
+existing four APK/source/`release-info.json`/`SHA256SUMS` files, and a nonsecret
+`candidate-provenance.json` beside it. The Actions artifact digest binds both;
+publish only the four `release/` files. Their existing v1 checksum/asset family is
+unchanged, and the provenance receipt never becomes a catalog/release asset.
+Publishing and final installed/upgrade checks remain separate reviewed actions.
+
 ## Verified main dev channel
 
 ### Version rule

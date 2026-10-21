@@ -1,0 +1,20 @@
+{
+  "fixture_kind": "Synthetic run/source identity with root-confirmed successful main1111 gate names and example job IDs",
+  "source": "Root independent read, 2026-10-21; ci.yml automatic/gate plus checks.yml gate name contract",
+  "jobs": [
+    {
+      "id": 118902907985,
+      "name": "CI gate",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 118902869022,
+      "name": "Trusted main checks / Suite results",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    }
+  ]
+}
