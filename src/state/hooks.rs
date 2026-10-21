@@ -1321,9 +1321,14 @@ pub(super) fn hook() -> Result<i32> {
             journal::log_event(&record, &clear)?;
         }
     }
+    let hint = agent_hint::start(&mut record, &event);
     write(&mut record)?;
     if kind == "SessionStart" && string(&event, "agent_id").is_empty() {
         archive::confirm_restore(&mut record)?;
+    }
+    if let Some(hint) = hint {
+        let stdout = io::stdout();
+        agent_hint::output(&mut stdout.lock(), hint)?;
     }
     Ok(0)
 }

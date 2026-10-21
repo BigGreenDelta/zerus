@@ -310,6 +310,9 @@ pub enum RunError {
     Failed,
     /// This computer cannot answer the question.
     #[cfg_attr(unix, allow(dead_code))]
+    // Windows retains the unsupported enumeration API for explicit capability
+    // queries; fork readiness now uses known-path holder discovery instead.
+    #[cfg_attr(windows, allow(dead_code))]
     Unsupported,
 }
 

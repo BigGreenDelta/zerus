@@ -1,0 +1,171 @@
+name: Agent hint native contract (opt-in)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - '.github/workflows/agent-hint.yml'
+      - 'scripts/ci/prepare-agent-hint.py'
+      - 'scripts/ci/agent-compatibility.py'
+      - 'tests/test_agent_hint_native.py'
+      - 'tests/test_agent_hint_controls.py'
+      - 'examples/session_start_observer.rs'
+      - 'src/**'
+
+permissions:
+  contents: read
+cache-mode: none
+
+jobs:
+  native:
+    name: Hint ${{ matrix.os }} ${{ matrix.agent }}
+    if: >-
+      github.repository == 'ufna/zerus' && github.event.repository.private == false &&
+      (github.event_name == 'workflow_dispatch' ||
+       contains(github.event.pull_request.labels.*.name, 'native-agent-hint'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            agent: claude
+          - os: ubuntu-24.04
+            agent: codex
+          - os: macos-15
+            agent: claude
+          - os: windows-2025
+            agent: claude
+          - os: windows-2025
+            agent: codex
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+        working-directory: candidate
+    env:
+      HINT_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+      HINT_AGENT: ${{ matrix.agent }}
+      CARGO_INCREMENTAL: 0
+      CARGO_BUILD_JOBS: 2
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      PYTHONUTF8: 1
+      PYTHONDONTWRITEBYTECODE: 1
+    steps:
+      - name: Check out text files unchanged
+        working-directory: .
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HINT_SOURCE }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce
+          path: pre-feature
+          persist-credentials: false
+      # Before any interpreter starts: Linux sockaddr_un needs a short root.
+      - name: Fresh private caches and runtime
+        run: |
+          umask 077
+          hint_private="$RUNNER_TEMP/agent-hint-private"
+          mkdir "$hint_private"
+          mkdir "$hint_private/home" "$hint_private/cargo" "$hint_private/rustup"
+          if [ "$RUNNER_OS" = Windows ]; then
+            mkdir "$hint_private/runtime"
+            hint_tmp=$(cygpath -w "$hint_private/runtime")
+            hint_private=$(cygpath -w "$hint_private")
+          else
+            hint_tmp=$(mktemp -d /tmp/zh.XXXXXX)
+            test "${#hint_tmp}" -le 24
+          fi
+          {
+            echo "HOME=$hint_private/home"
+            echo "CARGO_HOME=$hint_private/cargo"
+            echo "RUSTUP_HOME=$hint_private/rustup"
+            echo "TMPDIR=$hint_tmp"
+            echo "TMP=$hint_tmp"
+            echo "TEMP=$hint_tmp"
+          } >> "$GITHUB_ENV"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13.15'
+      - name: Linux test dependencies
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config
+      - name: Pinned tmux with verified input-mode support
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/tmux"
+          echo "$RUNNER_TEMP/tmux/bin" >> "$GITHUB_PATH"
+      - name: macOS test dependencies
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        run: brew install tmux python
+      - name: Private reviewed Rust toolchain
+        timeout-minutes: 10
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Pinned ConPTY pair
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: |
+          mkdir -p ../artifacts
+          python scripts/fetch-conpty.py --output "$RUNNER_TEMP/conpty" </dev/null > ../artifacts/conpty-fetch.log 2>&1
+      - name: Public fetch and exact-source build receipts
+        timeout-minutes: 45
+        run: |
+          cargo_bin=$(rustup which --toolchain 1.99.1 cargo)
+          rustc_bin=$(rustup which --toolchain 1.99.1 rustc)
+          if [ "$RUNNER_OS" = Windows ]; then
+            python scripts/ci/msvc-env.py python scripts/ci/prepare-agent-hint.py \
+              --source "$HINT_SOURCE" --pre-feature ../pre-feature --cargo "$cargo_bin" --rustc "$rustc_bin" \
+              --agent "$HINT_AGENT" --output ../artifacts/inputs </dev/null
+          else
+            python scripts/ci/prepare-agent-hint.py \
+              --source "$HINT_SOURCE" --pre-feature ../pre-feature --cargo "$cargo_bin" --rustc "$rustc_bin" \
+              --agent "$HINT_AGENT" --output ../artifacts/inputs </dev/null
+          fi
+      - name: Four hint methods per selected pin (Unix)
+        if: runner.os != 'Windows'
+        timeout-minutes: 45
+        run: |
+          python scripts/ci/agent-compatibility.py --contract agent-hint --agent "$HINT_AGENT" \
+            --hgs ../artifacts/inputs/candidate-target/debug/hgs --hgs-source "$HINT_SOURCE" \
+            --pre-feature-hgs ../artifacts/inputs/pre-feature-target/debug/hgs \
+            --hook-observer ../artifacts/inputs/candidate-target/debug/examples/session_start_observer \
+            --observer-source "$HINT_SOURCE" --native-package-cache ../artifacts/inputs/packages \
+            --results ../artifacts/results </dev/null
+      # Reuse the existing launcher unchanged. Its host cleanup is separate
+      # from the row's 60-second reserve; see docs/ci-and-aur.md.
+      - name: Four hint methods through real Windows session hosts
+        if: runner.os == 'Windows'
+        timeout-minutes: 28
+        run: |
+          HGS_TEST_BIN=$(cygpath -w "$PWD/../artifacts/inputs/candidate-target/debug/hgs.exe")
+          HGS_TEST_CONPTY_DIR=$(cygpath -w "$RUNNER_TEMP/conpty")
+          export HGS_TEST_BIN HGS_TEST_CONPTY_DIR
+          python scripts/ci/outside-job.py --timeout 1320 --end "$HGS_TEST_BIN" \
+            --end '*\hgs-host-*\*.exe' --end '*\hgs-hint-host-*\*.exe' --end '*\zerus-hint-compat-*\*.exe' \
+            --log ../artifacts/results/windows-host.log -- \
+            python scripts/ci/agent-compatibility.py --contract agent-hint --agent "$HINT_AGENT" \
+              --hgs "$HGS_TEST_BIN" --hgs-source "$HINT_SOURCE" \
+              --pre-feature-hgs ../artifacts/inputs/pre-feature-target/debug/hgs.exe \
+              --hook-observer ../artifacts/inputs/candidate-target/debug/examples/session_start_observer.exe \
+              --observer-source "$HINT_SOURCE" --native-package-cache ../artifacts/inputs/packages \
+              --results ../artifacts/results </dev/null
+      - name: Retain raw contracts and build receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent-hint-${{ matrix.os }}-${{ matrix.agent }}-${{ env.HINT_SOURCE }}
+          path: |
+            artifacts/conpty-fetch.log
+            artifacts/inputs/*.json
+            artifacts/inputs/*.log
+            artifacts/results
+          retention-days: 3

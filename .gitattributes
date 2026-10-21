@@ -3,6 +3,9 @@
 *.sh text eol=lf
 *.py text eol=lf
 
+# Reviewed official manifests are hash-pinned raw upstream bytes on every host.
+scripts/ci/kimi-native-manifests/*.json -text
+
 # Captured terminal screens intentionally preserve whitespace and blank lines.
 # They and the recorded screen data are embedded with include_str!, so checkouts
 # keep their bytes exactly (no CRLF conversion on Windows).

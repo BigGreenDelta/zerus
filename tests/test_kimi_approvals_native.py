@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Kimi's own tool approval panel against a localhost-only model, never a
-user's account. Linux only for now: /proc proves the running image, its start
-and its environment. Run with HGS_KIMI_TEST_BIN=/absolute/path/to/a/pinned/kimi
+user's account. Linux uses /proc; macOS reuses test_kimi_native's reviewed
+exec capture and kernel argument-area oracle for the image, start and private
+environment. Run with HGS_KIMI_TEST_BIN=/absolute/path/to/a/pinned/kimi
 and HGS_KIMI_TEST_SHA256 set to one reviewed pin (otherwise skipped).
 
 Kimi's updater replaces the executable it runs from, so each case runs its own
@@ -19,7 +20,15 @@ an unfinished wire in a real Kimi; their refusals are unit-tested.
 import hashlib, http.server, io, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest, uuid
 from pathlib import Path
 from unittest import mock
-import test_pause as lifecycle
+if os.name != 'nt':
+    import test_pause as lifecycle
+    import test_kimi_native as guard
+else:
+    # The shared model, request assertions and finite controls remain importable
+    # by the ConPTY fixture without importing Unix-only pty/test_pause.
+    from types import SimpleNamespace
+    lifecycle = SimpleNamespace(Harness=unittest.TestCase,
+                                HGS=Path(os.environ.get('HGS_TEST_BIN', 'hgs.exe')))
 
 KIMI = os.environ.get('HGS_KIMI_TEST_BIN')
 KIMI_SHA256 = os.environ.get('HGS_KIMI_TEST_SHA256', '')
@@ -27,7 +36,9 @@ GUARDED = [Path(path) for path in os.environ.get('HGS_KIMI_GUARD', '').split(os.
 EVIDENCE = os.environ.get('HGS_KIMI_EVIDENCE_DIR')
 # The reviewed builds: the maintained Kimi and the one installed for new sessions.
 REVIEWED = {'66f47536e40b02bb1d577cdd324768f73d39b8b9472e0ca140e73d8e225cd7de': '2.1.1',
-            '8ee7405d82958f0a50a3aab0773aba9e01057978bad93ba379eaf89e5b6111af': '2.2.0'}
+            '8ee7405d82958f0a50a3aab0773aba9e01057978bad93ba379eaf89e5b6111af': '2.2.0',
+            '4bab6f96c2c289368b7f05a04f66737c53a59ce740f932d8f149240584758efb': '2.1.1',
+            'dab42ead275f8a49e9ce30a6263f614fce5926455bed103d0d16940655619bf5': '2.2.0'}
 PLATFORM = '/kimi-platform'
 # Exactly these private values reach Kimi; no other KIMI_ key and no credential prefix.
 REQUIRED = ('HOME', 'KIMI_CODE_HOME', 'KIMI_CODE_BASE_URL', 'KIMI_CODE_NO_AUTO_UPDATE', 'KIMI_DISABLE_TELEMETRY',
@@ -106,7 +117,10 @@ def bounded(run, seconds=HELPER_SECONDS):
 
 
 def proc_start(pid):
-    """The process's start in clock ticks since boot (/proc/PID/stat field 22)."""
+    """The process's kernel start: Linux ticks or macOS seconds+microseconds."""
+    if sys.platform == 'darwin':
+        info = guard.MacProcess.info(pid)
+        return info.start_sec, info.start_usec
     return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
 
 
@@ -250,9 +264,54 @@ def serve(command):
     return server
 
 
-@unittest.skipUnless(KIMI and sys.platform.startswith('linux'),
-                     'Set HGS_KIMI_TEST_BIN on Linux to test a pinned native Kimi against a local fake API')
-class NativeKimiApprovals(lifecycle.Harness):
+class ApprovalCases:
+    # -- cases -----------------------------------------------------------
+    def test_approve_once_runs_the_command(self):
+        self.assertEqual(self.decide(self.answerable(), option='1'), {'decision': 'approved'})
+        self.assertEqual((self.project / 'approved-marker').read_text(), 'approved')
+
+    def test_approve_for_this_session_records_its_scope(self):
+        self.assertEqual(self.decide(self.answerable(), option='2'), {'decision': 'approved', 'scope': 'session'})
+        self.assertTrue((self.project / 'approved-marker').exists())
+
+    def test_reject_never_runs_the_command(self):
+        self.assertEqual(self.decide(self.answerable(), option='3'), {'decision': 'rejected'})
+        self.assertFalse((self.project / 'approved-marker').exists())
+
+    def test_reject_with_feedback_reaches_the_model(self):
+        self.assertEqual(self.decide(self.answerable(), text=FEEDBACK), {'decision': 'rejected', 'feedback': FEEDBACK})
+        self.assertFalse((self.project / 'approved-marker').exists())
+        self.assertTrue(any('Reason: ' + FEEDBACK in json.dumps(result) for result in self.tool_results()),
+                        self.tool_results())
+
+    def test_a_danger_warning_is_part_of_the_reviewed_request(self):
+        card = self.answerable()
+        self.assertIn('Dangerous: recursive delete', card['questions'][0]['body'])
+        self.assertEqual(self.decide(card, option='3'), {'decision': 'rejected'})
+        self.assertTrue((self.project / 'scratch-fixture').is_dir())
+
+    def test_an_unviewed_clipped_panel_grows_until_answerable(self):
+        self.assertEqual(self.height(), 12)
+        card = self.answerable()
+        self.assertGreater(self.height(), 12)
+        self.assertEqual(self.t('show-options', '-w', '-v', '-t', '=' + self.name + ':', 'window-size').strip(), '')
+        self.assertEqual(self.decide(card, option='3'), {'decision': 'rejected'})
+
+    def test_a_viewed_clipped_panel_is_never_resized_or_answered(self):
+        self.attach_client()
+        before = self.height()
+        card = self.card()
+        self.assertFalse(card['can_answer'])
+        self.assertIn('enlarge Terminal', card['answer_unavailable_reason'])
+        self.assertEqual(self.height(), before)
+        self.assertIn('enlarge Terminal', self.call('answer', self.payload(card, option='1'), success=False))
+        self.assertIsNone(self.resolved())
+        self.assertFalse((self.project / 'approved-marker').exists())
+
+
+@unittest.skipUnless(KIMI and (sys.platform.startswith('linux') or sys.platform == 'darwin'),
+                     'Set HGS_KIMI_TEST_BIN on Linux/macOS for a pinned native Kimi and local fake API')
+class NativeKimiApprovals(ApprovalCases, lifecycle.Harness):
     command = MARKER
     rows = None
 
@@ -299,7 +358,20 @@ class NativeKimiApprovals(lifecycle.Harness):
         self.image.chmod(0o755)
         self.assertEqual(digest(self.image), KIMI_SHA256)
         (self.bin / 'kimi').unlink()
-        (self.bin / 'kimi').symlink_to(self.image)
+        self.image_digest = KIMI_SHA256
+        if sys.platform == 'darwin':
+            self.captures = self.root.resolve() / 'kimi-exec'
+            self.captures.mkdir(mode=0o700)
+            source = self.root / 'kimi-shim.c'
+            source.write_text(guard.shim_source(self.captures, self.image))
+            build = subprocess.run(['/usr/bin/cc', '-std=c11', '-O1', '-Wall', '-Werror',
+                                    '-o', str(self.bin / 'kimi'), str(source)],
+                                   env=dict(PATH='/usr/bin:/bin', HOME=str(self.root)),
+                                   capture_output=True, text=True, timeout=120)
+            self.assertEqual(build.returncode, 0, 'the reviewed Kimi exec shim did not build: ' + build.stderr[-2000:])
+            self.env['LANG'] = 'en_US.UTF-8'
+        else:
+            (self.bin / 'kimi').symlink_to(self.image)
         (self.project / 'scratch-fixture').mkdir()
         server, home = self.server, self.home
         home.mkdir()
@@ -309,12 +381,15 @@ class NativeKimiApprovals(lifecycle.Harness):
             '[models.fixture]\nprovider = "fixture"\nmodel = "fixture"\nmax_context_size = 32768\n'
             '[loop_control]\nmax_attempts_per_step = 1\n' % server.server_port)
         (home / 'tui.toml').write_text('[upgrade]\nauto_install = false\n')
-        self.assertEqual(Path(shutil.which('kimi', path=self.env['PATH'])).resolve(), self.image)
+        self.assertEqual(Path(shutil.which('kimi', path=self.env['PATH'])).resolve(),
+                         (self.bin / 'kimi').resolve() if sys.platform == 'darwin' else self.image)
         self.name = 'kimi/p/approval'
         self.launch()
 
     # -- process proof ---------------------------------------------------
     def assert_process(self, stage):
+        if sys.platform == 'darwin':
+            return guard.NativeKimi.assert_process(self, self.name, stage)
         record = self.binding(self.name)
         pid = record['pid']
 
@@ -341,6 +416,12 @@ class NativeKimiApprovals(lifecycle.Harness):
         self.assertEqual(findings['keys'], {key: 'match' for key in REQUIRED})
         self.assertEqual(findings['forbidden'], [])
         self.assertEqual(findings['unexpected_kimi'], [])
+
+    # The actual R2 implementations, including all kernel/owner/parent checks.
+    if os.name != 'nt':
+        process_sample = guard.NativeKimi.process_sample
+        environment = guard.NativeKimi.environment
+        launched_environment = guard.NativeKimi.launched_environment
 
     def seal(self):
         """Every after-hash, printed and compared; never raises."""
@@ -401,7 +482,9 @@ class NativeKimiApprovals(lifecycle.Harness):
     def height(self):
         return int(self.t('display-message', '-p', '-t', '=' + self.name + ':', '#{window_height}'))
 
-    def until(self, predicate, seconds=60):
+    def until(self, predicate, name=None, seconds=60):
+        if name is not None:
+            self.assertEqual(name, self.name)
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             result = predicate()
@@ -443,7 +526,7 @@ class NativeKimiApprovals(lifecycle.Harness):
                            answers=[dict(question_id='trust', selected_option_ids=['trust_0'], text='')])
             self.assertEqual(self.call('answer', payload)['status'], 'answered')
         else:
-            self.assertTrue(trust_chooser_2_2(screen, self.project), screen)
+            self.assertTrue(trust_chooser_2_2(screen, self.project.resolve()), screen)
             print('ZERUS_KIMI_TRUST=' + json.dumps(dict(case=self.id(), version=self.version, screen=screen)), flush=True)
             self.t('send-keys', '-t', '=' + self.name + ':', 'Enter')
 
@@ -513,7 +596,7 @@ class NativeKimiApprovals(lifecycle.Harness):
         self.assertEqual(card['answer_transport'], 'kimi_tui')
         item = card['questions'][0]
         self.assertEqual((item['question'], item['header']), ('Run this command?', 'Bash'))
-        self.assertIn('cwd: ' + str(self.project), item['body'])
+        self.assertIn('cwd: ' + self.project.resolve().as_posix(), item['body'].split('\n'))
         self.assertIn('$ ' + self.command, item['body'])
         self.assertEqual([option['label'] for option in item['options']],
                          ['Approve once', 'Approve for this session', 'Reject'])
@@ -529,48 +612,6 @@ class NativeKimiApprovals(lifecycle.Harness):
         return [message.get('content') for body in self.server.requests for message in body.get('messages', [])
                 if message.get('role') == 'tool']
 
-    # -- cases -----------------------------------------------------------
-    def test_approve_once_runs_the_command(self):
-        self.assertEqual(self.decide(self.answerable(), option='1'), {'decision': 'approved'})
-        self.assertEqual((self.project / 'approved-marker').read_text(), 'approved')
-
-    def test_approve_for_this_session_records_its_scope(self):
-        self.assertEqual(self.decide(self.answerable(), option='2'), {'decision': 'approved', 'scope': 'session'})
-        self.assertTrue((self.project / 'approved-marker').exists())
-
-    def test_reject_never_runs_the_command(self):
-        self.assertEqual(self.decide(self.answerable(), option='3'), {'decision': 'rejected'})
-        self.assertFalse((self.project / 'approved-marker').exists())
-
-    def test_reject_with_feedback_reaches_the_model(self):
-        self.assertEqual(self.decide(self.answerable(), text=FEEDBACK), {'decision': 'rejected', 'feedback': FEEDBACK})
-        self.assertFalse((self.project / 'approved-marker').exists())
-        self.assertTrue(any('Reason: ' + FEEDBACK in json.dumps(result) for result in self.tool_results()),
-                        self.tool_results())
-
-    def test_a_danger_warning_is_part_of_the_reviewed_request(self):
-        card = self.answerable()
-        self.assertIn('Dangerous: recursive delete', card['questions'][0]['body'])
-        self.assertEqual(self.decide(card, option='3'), {'decision': 'rejected'})
-        self.assertTrue((self.project / 'scratch-fixture').is_dir())
-
-    def test_an_unviewed_clipped_panel_grows_until_answerable(self):
-        self.assertEqual(self.height(), 12)
-        card = self.answerable()
-        self.assertGreater(self.height(), 12)
-        self.assertEqual(self.t('show-options', '-w', '-v', '-t', '=' + self.name + ':', 'window-size').strip(), '')
-        self.assertEqual(self.decide(card, option='3'), {'decision': 'rejected'})
-
-    def test_a_viewed_clipped_panel_is_never_resized_or_answered(self):
-        self.attach_client()
-        before = self.height()
-        card = self.card()
-        self.assertFalse(card['can_answer'])
-        self.assertIn('enlarge Terminal', card['answer_unavailable_reason'])
-        self.assertEqual(self.height(), before)
-        self.assertIn('enlarge Terminal', self.call('answer', self.payload(card, option='1'), success=False))
-        self.assertIsNone(self.resolved())
-        self.assertFalse((self.project / 'approved-marker').exists())
 
 
 class FixtureControls(unittest.TestCase):

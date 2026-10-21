@@ -129,6 +129,285 @@ fn checked_process(record: &Value) -> Result<u64> {
     Ok(pid)
 }
 
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy)]
+struct ForkScanLimits {
+    entries: usize,
+    depth: usize,
+    bytes: usize,
+    elapsed: std::time::Duration,
+}
+
+#[cfg(any(windows, test))]
+const FORK_SCAN_LIMITS: ForkScanLimits = ForkScanLimits {
+    entries: 16_384,
+    depth: 8,
+    bytes: 16 * 1024 * 1024,
+    elapsed: std::time::Duration::from_secs(2),
+};
+
+#[cfg(any(windows, test))]
+fn history_link(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    metadata.file_type().is_symlink()
+}
+
+#[cfg(any(windows, test))]
+fn history_directory(path: &Path) -> Result<fs::File> {
+    let before = fs::symlink_metadata(path).map_err(|_| "Cannot inspect fork history directory")?;
+    if history_link(&before) || !before.is_dir() {
+        return Err("Fork history directory is not a plain directory".into());
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    crate::platform::refuse_link(&mut options);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        // Keep each account/ancestor directory open without delete sharing while
+        // walking it. A final link/junction is opened itself and then refused.
+        options
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "Cannot open fork history directory")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "Cannot verify fork history directory")?;
+    if history_link(&metadata) || !metadata.is_dir() {
+        return Err("Fork history directory changed or is a link".into());
+    }
+    Ok(file)
+}
+
+#[cfg(any(windows, test))]
+struct ForkScan<'a, H, E> {
+    record: &'a Value,
+    root: PathBuf,
+    cwd: &'a Path,
+    pid: u32,
+    limits: ForkScanLimits,
+    entries: usize,
+    bytes: usize,
+    children: std::collections::BTreeSet<(PathBuf, String)>,
+    holds: H,
+    elapsed: E,
+}
+
+#[cfg(any(windows, test))]
+impl<H, E> ForkScan<'_, H, E>
+where
+    H: FnMut(u32, &Path) -> std::result::Result<bool, crate::platform::RunError>,
+    E: FnMut() -> std::time::Duration,
+{
+    fn within_end(&mut self) -> Result<()> {
+        if (self.elapsed)() >= self.limits.elapsed {
+            return Err("Fork history verification time limit exhausted".into());
+        }
+        Ok(())
+    }
+
+    fn visit(&mut self, folder: &Path, depth: usize) -> Result<()> {
+        self.within_end()?;
+        if depth > self.limits.depth {
+            return Err("Fork history directory depth limit exhausted".into());
+        }
+        let _directory = history_directory(folder)?;
+        let entries =
+            fs::read_dir(folder).map_err(|_| "Cannot enumerate fork history directory")?;
+        self.within_end()?;
+        for entry in entries {
+            self.within_end()?;
+            self.entries += 1;
+            if self.entries > self.limits.entries {
+                return Err("Fork history entry limit exhausted".into());
+            }
+            let entry = entry.map_err(|_| "Incomplete fork history directory enumeration")?;
+            let path = entry.path();
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|_| "Cannot inspect fork history entry")?;
+            if history_link(&metadata) {
+                return Err("Fork history contains a link or reparse point".into());
+            }
+            let path = crate::platform::canonical(&path)
+                .map_err(|_| "Cannot resolve fork history entry")?;
+            if !path.starts_with(&self.root) {
+                return Err("Fork history entry is outside the selected account".into());
+            }
+            if metadata.is_dir() {
+                self.visit(&path, depth + 1)?;
+            } else if metadata.is_file() {
+                if path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("rollout-"))
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension == "jsonl")
+                {
+                    self.rollout(&path)?;
+                }
+            } else {
+                return Err("Fork history contains an unknown entry type".into());
+            }
+        }
+        self.within_end()
+    }
+
+    fn rollout(&mut self, path: &Path) -> Result<()> {
+        self.within_end()?;
+        if !path.starts_with(&self.root) {
+            return Err("Fork history candidate is outside the selected account".into());
+        }
+        let entry =
+            fs::symlink_metadata(path).map_err(|_| "Cannot inspect fork history candidate")?;
+        if history_link(&entry) || !entry.is_file() {
+            return Err("Fork history candidate is not a plain file".into());
+        }
+        let canonical = crate::platform::canonical(path)
+            .map_err(|_| "Cannot resolve fork history candidate")?;
+        if !canonical.starts_with(&self.root) {
+            return Err("Fork history candidate escaped the selected account".into());
+        }
+        let path = canonical.as_path();
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        crate::platform::refuse_link(&mut options);
+        crate::platform::never_block(&mut options);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+            options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        }
+        let file = options
+            .open(path)
+            .map_err(|_| "Cannot read fork history header")?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| "Cannot verify fork history file")?;
+        if !metadata.is_file() || history_link(&metadata) {
+            return Err("Fork history changed or is not a plain file".into());
+        }
+        let identity = crate::platform::FileIdentity::of(&file)
+            .map_err(|_| "Cannot identify fork history file")?;
+        let same_file = |path: &Path| {
+            crate::platform::file_identity(path).is_some_and(|other| {
+                (other.device, other.inode) == (identity.device, identity.inode)
+            })
+        };
+        if !same_file(path) {
+            return Err("Fork history file changed before verification".into());
+        }
+        let remaining = self.limits.bytes.saturating_sub(self.bytes);
+        if remaining == 0 {
+            return Err("Fork history header byte limit exhausted".into());
+        }
+        let maximum = remaining.min(256 * 1024);
+        let mut line = Vec::new();
+        BufReader::new(&file)
+            .take((maximum + 1) as u64)
+            .read_until(b'\n', &mut line)
+            .map_err(|_| "Cannot read fork history header")?;
+        if line.len() > maximum {
+            return Err("Fork history header byte limit exhausted".into());
+        }
+        self.bytes += line.len();
+        self.within_end()?;
+        let meta: Value =
+            serde_json::from_slice(&line).map_err(|_| "Cannot verify fork history header")?;
+        let id = string(&meta["payload"], "id");
+        if meta["type"] == "session_meta"
+            && uuid::Uuid::parse_str(id).is_ok()
+            && id != string(self.record, "fork_parent_id")
+            && meta["payload"]["forked_from_id"] == self.record["fork_parent_id"]
+            && meta["payload"]["source"] == "cli"
+            && crate::platform::canonical(string(&meta["payload"], "cwd"))
+                .is_ok_and(|path| path == self.cwd)
+        {
+            self.within_end()?;
+            let owned = (self.holds)(self.pid, path).map_err(open_files_error)?;
+            self.within_end()?;
+            if !same_file(path) {
+                return Err("Fork history file changed during ownership verification".into());
+            }
+            if owned {
+                self.children.insert((path.to_owned(), id.to_owned()));
+                if self.children.len() > 1 {
+                    return Err("Codex has opened multiple verified fork histories".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Windows can verify a known file's holder, but cannot list the process's
+/// files. A complete bounded account-only scan supplies candidates, never proof.
+#[cfg(any(windows, test))]
+fn windows_fork_children<H, E>(
+    record: &Value,
+    pid: u32,
+    sessions: &Path,
+    cwd: &Path,
+    holds: H,
+    elapsed: E,
+    limits: ForkScanLimits,
+) -> Result<std::collections::BTreeSet<(PathBuf, String)>>
+where
+    H: FnMut(u32, &Path) -> std::result::Result<bool, crate::platform::RunError>,
+    E: FnMut() -> std::time::Duration,
+{
+    let _account = history_directory(sessions.parent().ok_or("Missing fork history account")?)?;
+    let _sessions = history_directory(sessions)?;
+    let root = crate::platform::canonical(sessions)
+        .map_err(|_| "Forked conversation history is unavailable")?;
+    let mut scan = ForkScan {
+        record,
+        root: root.clone(),
+        cwd,
+        pid,
+        limits,
+        entries: 0,
+        bytes: 0,
+        children: std::collections::BTreeSet::new(),
+        holds,
+        elapsed,
+    };
+    complete_fork_scan(&mut scan, |scan| scan.visit(&root, 0))
+}
+
+#[cfg(any(windows, test))]
+fn complete_fork_scan<'a, H, E>(
+    scan: &mut ForkScan<'a, H, E>,
+    discover: impl FnOnce(&mut ForkScan<'a, H, E>) -> Result<()>,
+) -> Result<std::collections::BTreeSet<(PathBuf, String)>>
+where
+    H: FnMut(u32, &Path) -> std::result::Result<bool, crate::platform::RunError>,
+    E: FnMut() -> std::time::Duration,
+{
+    // A matching held candidate never turns a partial/error enumeration into
+    // proof that this process owns exactly one eligible child.
+    discover(scan)?;
+    scan.within_end()?;
+    if scan.children.len() != 1 {
+        return Err("Codex has not opened a single verified fork of this conversation yet".into());
+    }
+    Ok(std::mem::take(&mut scan.children))
+}
+
 /// A fork has no requested child ID yet. The native process must own exactly
 /// one interactive rollout whose header links a distinct ID to the saved parent.
 pub(super) fn fork_ready(record: &Value) -> Result<()> {
@@ -141,10 +420,28 @@ pub(super) fn fork_ready(record: &Value) -> Result<()> {
     } else {
         PathBuf::from(string(record, "agent_home"))
     };
+    #[cfg(windows)]
+    let sessions = agent_home.join("sessions");
+    #[cfg(not(windows))]
     let sessions = crate::platform::canonical(agent_home.join("sessions"))
         .map_err(|_| "Forked conversation history is unavailable")?;
     let cwd = fork_directory(record)?;
+    #[cfg(windows)]
+    let children = {
+        let started = std::time::Instant::now();
+        windows_fork_children(
+            record,
+            agent_pid(pid)?,
+            &sessions,
+            &cwd,
+            crate::platform::holds_open,
+            || started.elapsed(),
+            FORK_SCAN_LIMITS,
+        )?
+    };
+    #[cfg(not(windows))]
     let mut children = std::collections::BTreeSet::new();
+    #[cfg(not(windows))]
     for path in crate::platform::open_files(agent_pid(pid)?).map_err(open_files_error)? {
         if !path
             .file_name()
@@ -288,5 +585,368 @@ mod tests {
         assert!(lifecycle::safe_to_pause(&confirmed));
         confirmed["active_tools"] = json!({"tool": {}});
         assert!(!lifecycle::safe_to_pause(&confirmed));
+    }
+
+    const FORK_PARENT: &str = "11111111-1111-4111-8111-111111111111";
+    const FORK_CHILD: &str = "22222222-2222-4222-8222-222222222222";
+
+    struct ForkHistory {
+        temporary: tempfile::TempDir,
+        record: Value,
+        sessions: PathBuf,
+        cwd: PathBuf,
+        rollout: PathBuf,
+    }
+
+    impl ForkHistory {
+        fn new() -> Self {
+            let temporary = tempfile::tempdir().unwrap();
+            let sessions = temporary.path().join("account/sessions");
+            let cwd = temporary.path().join("workspace");
+            fs::create_dir_all(&sessions).unwrap();
+            fs::create_dir(&cwd).unwrap();
+            let sessions = crate::platform::canonical(sessions).unwrap();
+            let rollout = sessions.join("rollout-child.jsonl");
+            let value = Self {
+                temporary,
+                record: json!({"fork_parent_id":FORK_PARENT}),
+                sessions,
+                cwd: crate::platform::canonical(cwd).unwrap(),
+                rollout,
+            };
+            value.write_header(&value.rollout, &value.header());
+            value
+        }
+
+        fn header(&self) -> Value {
+            json!({"type":"session_meta","payload":{"id":FORK_CHILD,
+                "forked_from_id":FORK_PARENT,"source":"cli","cwd":self.cwd}})
+        }
+
+        fn write_header(&self, path: &Path, header: &Value) {
+            fs::write(path, format!("{header}\n")).unwrap();
+        }
+
+        fn prove<H>(
+            &self,
+            holds: H,
+            limits: ForkScanLimits,
+        ) -> Result<std::collections::BTreeSet<(PathBuf, String)>>
+        where
+            H: FnMut(u32, &Path) -> std::result::Result<bool, crate::platform::RunError>,
+        {
+            windows_fork_children(
+                &self.record,
+                42,
+                &self.sessions,
+                &self.cwd,
+                holds,
+                || std::time::Duration::ZERO,
+                limits,
+            )
+        }
+    }
+
+    #[test]
+    fn windows_fork_unsupported_enumeration_needs_positive_exact_file_ownership() {
+        let fixture = ForkHistory::new();
+        // This is the old production Windows discovery operation's result and
+        // its actual error mapper, not a metadata-only substitute for ownership.
+        let old: std::result::Result<Vec<PathBuf>, crate::platform::RunError> =
+            Err(crate::platform::RunError::Unsupported);
+        assert_eq!(
+            old.map_err(open_files_error).unwrap_err(),
+            "Cannot verify the Codex process's open history files"
+        );
+        let mut observed = Vec::new();
+        let child = fixture
+            .prove(
+                |pid, path| {
+                    observed.push((pid, path.to_owned()));
+                    Ok(true)
+                },
+                FORK_SCAN_LIMITS,
+            )
+            .unwrap();
+        assert_eq!(
+            observed,
+            [(42, crate::platform::canonical(&fixture.rollout).unwrap())]
+        );
+        assert_eq!(
+            child,
+            std::collections::BTreeSet::from([(
+                crate::platform::canonical(&fixture.rollout).unwrap(),
+                FORK_CHILD.into()
+            )])
+        );
+        assert!(fixture.prove(|_, _| Ok(false), FORK_SCAN_LIMITS).is_err());
+        assert!(fixture
+            .prove(
+                |_, _| Err(crate::platform::RunError::Unsupported),
+                FORK_SCAN_LIMITS
+            )
+            .is_err());
+        assert!(fixture
+            .prove(
+                |_, _| Err(crate::platform::RunError::Io(io::Error::other(
+                    "synthetic ownership error"
+                ))),
+                FORK_SCAN_LIMITS
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn windows_fork_never_uses_an_unopened_neighbor_or_ambiguous_held_children() {
+        let fixture = ForkHistory::new();
+        let neighbor = fixture.sessions.join("rollout-neighbor.jsonl");
+        let mut second = fixture.header();
+        second["payload"]["id"] = json!("33333333-3333-4333-8333-333333333333");
+        fixture.write_header(&neighbor, &second);
+        assert!(fixture.prove(|_, _| Ok(true), FORK_SCAN_LIMITS).is_err());
+        let child = fixture
+            .prove(
+                |_, path| Ok(path == crate::platform::canonical(&fixture.rollout).unwrap()),
+                FORK_SCAN_LIMITS,
+            )
+            .unwrap();
+        assert_eq!(child.len(), 1);
+        assert_eq!(child.first().unwrap().1, FORK_CHILD);
+        // Neither a newer neighbor nor the saved parent is ownership evidence.
+        let mut parent = fixture.header();
+        parent["payload"]["id"] = json!(FORK_PARENT);
+        fixture.write_header(&fixture.rollout, &parent);
+        assert!(fixture
+            .prove(
+                |_, path| Ok(path != crate::platform::canonical(&neighbor).unwrap()),
+                FORK_SCAN_LIMITS
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn windows_fork_rejects_wrong_header_parent_source_cwd_and_non_child_ids() {
+        let fixture = ForkHistory::new();
+        for (key, value) in [
+            ("id", json!(FORK_PARENT)),
+            ("id", json!("not-a-uuid")),
+            ("forked_from_id", json!(FORK_CHILD)),
+            ("source", json!("exec")),
+            ("cwd", json!(fixture.sessions)),
+        ] {
+            let mut header = fixture.header();
+            header["payload"][key] = value;
+            fixture.write_header(&fixture.rollout, &header);
+            let mut queried = false;
+            assert!(fixture
+                .prove(
+                    |_, _| {
+                        queried = true;
+                        Ok(true)
+                    },
+                    FORK_SCAN_LIMITS
+                )
+                .is_err());
+            assert!(!queried, "invalid header reached ownership lookup: {key}");
+        }
+    }
+
+    #[test]
+    fn windows_fork_complete_discovery_is_required_even_after_a_held_candidate() {
+        let fixture = ForkHistory::new();
+        let mut scan = ForkScan {
+            record: &fixture.record,
+            root: crate::platform::canonical(&fixture.sessions).unwrap(),
+            cwd: &fixture.cwd,
+            pid: 42,
+            limits: FORK_SCAN_LIMITS,
+            entries: 0,
+            bytes: 0,
+            children: std::collections::BTreeSet::new(),
+            holds: |_, _: &Path| Ok(true),
+            elapsed: || std::time::Duration::ZERO,
+        };
+        let result = complete_fork_scan(&mut scan, |scan| {
+            scan.rollout(&fixture.rollout)?;
+            assert_eq!(scan.children.len(), 1);
+            Err("synthetic partial enumeration".into())
+        });
+        assert_eq!(result.unwrap_err(), "synthetic partial enumeration");
+        // The production completion seam also refuses a genuine missing/read
+        // error after a first candidate has already passed ownership.
+        assert!(complete_fork_scan(&mut scan, |scan| {
+            scan.rollout(&fixture.sessions.join("rollout-missing.jsonl"))
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn windows_fork_injected_foreign_account_candidates_never_reach_ownership() {
+        let fixture = ForkHistory::new();
+        let foreign = fixture
+            .temporary
+            .path()
+            .join("other-account/rollout-foreign.jsonl");
+        fs::create_dir(foreign.parent().unwrap()).unwrap();
+        fixture.write_header(&foreign, &fixture.header());
+        let mut queried = false;
+        let mut scan = ForkScan {
+            record: &fixture.record,
+            root: crate::platform::canonical(&fixture.sessions).unwrap(),
+            cwd: &fixture.cwd,
+            pid: 42,
+            limits: FORK_SCAN_LIMITS,
+            entries: 0,
+            bytes: 0,
+            children: std::collections::BTreeSet::new(),
+            holds: |_, _: &Path| {
+                queried = true;
+                Ok(true)
+            },
+            elapsed: || std::time::Duration::ZERO,
+        };
+        assert!(complete_fork_scan(&mut scan, |scan| scan.rollout(&foreign)).is_err());
+        assert!(!queried);
+    }
+
+    #[test]
+    fn windows_fork_refuses_entry_depth_and_total_or_individual_header_exhaustion() {
+        let fixture = ForkHistory::new();
+        let exact = fs::read(&fixture.rollout).unwrap().len();
+        assert!(fixture
+            .prove(
+                |_, _| Ok(true),
+                ForkScanLimits {
+                    entries: 0,
+                    ..FORK_SCAN_LIMITS
+                }
+            )
+            .is_err());
+        assert!(fixture
+            .prove(
+                |_, _| Ok(true),
+                ForkScanLimits {
+                    bytes: exact - 1,
+                    ..FORK_SCAN_LIMITS
+                }
+            )
+            .is_err());
+        assert!(fixture
+            .prove(
+                |_, _| Ok(true),
+                ForkScanLimits {
+                    bytes: exact,
+                    ..FORK_SCAN_LIMITS
+                }
+            )
+            .is_ok());
+        let neighbor = fixture.sessions.join("rollout-neighbor.jsonl");
+        fixture.write_header(&neighbor, &fixture.header());
+        assert!(fixture
+            .prove(
+                |_, path| Ok(path == crate::platform::canonical(&fixture.rollout).unwrap()),
+                ForkScanLimits {
+                    bytes: exact,
+                    ..FORK_SCAN_LIMITS
+                }
+            )
+            .is_err());
+        assert!(fixture
+            .prove(
+                |_, path| Ok(path == crate::platform::canonical(&fixture.rollout).unwrap()),
+                ForkScanLimits {
+                    bytes: exact * 2,
+                    ..FORK_SCAN_LIMITS
+                }
+            )
+            .is_ok());
+        fs::remove_file(neighbor).unwrap();
+        let nested = fixture.sessions.join("nested");
+        fs::create_dir(&nested).unwrap();
+        assert!(fixture
+            .prove(
+                |_, _| Ok(true),
+                ForkScanLimits {
+                    depth: 0,
+                    ..FORK_SCAN_LIMITS
+                }
+            )
+            .is_err());
+        fs::remove_dir(nested).unwrap();
+        let mut oversized = fixture.header();
+        oversized["payload"]["padding"] = json!("x".repeat(256 * 1024));
+        fixture.write_header(&fixture.rollout, &oversized);
+        assert!(fixture.prove(|_, _| Ok(true), FORK_SCAN_LIMITS).is_err());
+    }
+
+    #[test]
+    fn windows_fork_unknown_headers_and_missing_account_root_never_admit() {
+        let fixture = ForkHistory::new();
+        for raw in [
+            b"".as_slice(),
+            b"not json\n".as_slice(),
+            b"{\"type\":\"session_meta\"}\n".as_slice(),
+        ] {
+            fs::write(&fixture.rollout, raw).unwrap();
+            assert!(fixture.prove(|_, _| Ok(true), FORK_SCAN_LIMITS).is_err());
+        }
+        fs::remove_file(&fixture.rollout).unwrap();
+        fs::remove_dir(&fixture.sessions).unwrap();
+        assert!(fixture.prove(|_, _| Ok(true), FORK_SCAN_LIMITS).is_err());
+    }
+
+    #[test]
+    fn windows_fork_original_time_limit_cannot_accept_a_late_ownership_result() {
+        let fixture = ForkHistory::new();
+        let late = std::cell::Cell::new(false);
+        let result = windows_fork_children(
+            &fixture.record,
+            42,
+            &fixture.sessions,
+            &fixture.cwd,
+            |_, _| {
+                late.set(true);
+                Ok(true)
+            },
+            || {
+                if late.get() {
+                    FORK_SCAN_LIMITS.elapsed
+                } else {
+                    std::time::Duration::ZERO
+                }
+            },
+            FORK_SCAN_LIMITS,
+        );
+        assert!(result.is_err());
+        let mut queried = false;
+        let result = windows_fork_children(
+            &fixture.record,
+            42,
+            &fixture.sessions,
+            &fixture.cwd,
+            |_, _| {
+                queried = true;
+                Ok(true)
+            },
+            || FORK_SCAN_LIMITS.elapsed,
+            FORK_SCAN_LIMITS,
+        );
+        assert!(result.is_err());
+        assert!(!queried);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn windows_fork_candidate_scan_refuses_symlinks_including_an_unrelated_entry() {
+        use std::os::unix::fs::symlink;
+        let fixture = ForkHistory::new();
+        let alias = fixture.sessions.join("unrelated-link");
+        symlink(&fixture.cwd, &alias).unwrap();
+        assert!(fixture.prove(|_, _| Ok(true), FORK_SCAN_LIMITS).is_err());
+        fs::remove_file(alias).unwrap();
+        fs::remove_file(&fixture.rollout).unwrap();
+        fs::remove_dir(&fixture.sessions).unwrap();
+        symlink(&fixture.cwd, &fixture.sessions).unwrap();
+        assert!(fixture.prove(|_, _| Ok(true), FORK_SCAN_LIMITS).is_err());
     }
 }

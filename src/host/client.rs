@@ -348,7 +348,8 @@ mod windows {
                 "cannot start the session host: {error}"
             )))
         };
-        let mut environment = Environment::current().map_err(|e| failed(&e))?;
+        let mut environment = Environment::current_with_optional_hint_controls()
+            .map_err(|e| failed(&e))?;
         let state = state_dir
             .to_str()
             .ok_or_else(|| failed(&"the state directory is not Unicode"))?;

@@ -71,6 +71,9 @@ unset TMUX
 # bare new-session line, so give the suite a desktop-like env; the injection has its own tests.
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-test}" DISPLAY="${DISPLAY:-:9}" \
        XAUTHORITY="${XAUTHORITY:-$tmp/xauth-test}"
+# The exact transport pair is part of every Claude/Codex launch assertion.
+export HGS_AGENT_HINT=1 HGS_AGENT_HINT_OFF=
+hint_env="-e HGS_AGENT_HINT=1 -e HGS_AGENT_HINT_OFF="
 pass=0; fail=0
 
 # check <name> <want-rc> <grep -E pattern> [args...]  — runs hgs with args
@@ -98,45 +101,45 @@ check_not() {
 
 P="$tmp/proj/sample-project"
 # --- naming / project resolution ---
-check "map name -> new-session in project dir" 0 "tmux -u new-session -e HGS_CLIENT=local -s claude/sample-project -c $P " --dry-run claude sample-project
-check "path project -> name from basename"     0 "new-session -e HGS_CLIENT=local -s claude/sample-project -c $P " --dry-run claude "$P"
-check "dot in project name -> underscore"       0 "new-session -e HGS_CLIENT=local -s claude/example_com "       --dry-run claude example.com
-check "tag -> /tag suffix"                      0 "new-session -e HGS_CLIENT=local -s claude/sample-project/review " --dry-run claude sample-project -n review
+check "map name -> new-session in project dir" 0 "tmux -u new-session -e HGS_CLIENT=local $hint_env -s claude/sample-project -c $P " --dry-run claude sample-project
+check "path project -> name from basename"     0 "new-session -e HGS_CLIENT=local $hint_env -s claude/sample-project -c $P " --dry-run claude "$P"
+check "dot in project name -> underscore"       0 "new-session -e HGS_CLIENT=local $hint_env -s claude/example_com "       --dry-run claude example.com
+check "tag -> /tag suffix"                      0 "new-session -e HGS_CLIENT=local $hint_env -s claude/sample-project/review " --dry-run claude sample-project -n review
 check "unknown project -> rc 1 + known list"    1 "unknown project 'nope'.*sample-project" --dry-run claude nope
-check "detached flag"                           0 "new-session -d -e HGS_CLIENT=local -s claude/sample-project " --dry-run claude sample-project -d
+check "detached flag"                           0 "new-session -d -e HGS_CLIENT=local $hint_env -s claude/sample-project " --dry-run claude sample-project -d
 # A project alias created as a symlink remains the user's chosen project name.
 ln -s "$P" "$tmp/proj/site-alias"
-check "symlink project keeps alias session name" 0 "new-session -e HGS_CLIENT=local -s claude/site-alias " --dry-run claude "$tmp/proj/site-alias"
+check "symlink project keeps alias session name" 0 "new-session -e HGS_CLIENT=local $hint_env -s claude/site-alias " --dry-run claude "$tmp/proj/site-alias"
 check "symlink project keeps logical launch directory" 0 " -c $tmp/proj/site-alias " --dry-run claude "$tmp/proj/site-alias"
 # --- HGS_CLIENT: who is looking at the session (hgs paste reads it; README "Картинка по Ctrl+V") ---
-check "client: local create -> -e HGS_CLIENT=local" 0 "^tmux -u new-session -e HGS_CLIENT=local -s claude/sample-project " --dry-run claude sample-project
-check "client: --client mac create -> -e HGS_CLIENT=mac" 0 "^tmux -u new-session -e HGS_CLIENT=mac -s claude/sample-project " --client mac --dry-run claude sample-project
-check "client: detached keeps -e"                   0 "^tmux -u new-session -d -e HGS_CLIENT=local -s claude/sample-project " --dry-run claude sample-project -d
+check "client: local create -> -e HGS_CLIENT=local" 0 "^tmux -u new-session -e HGS_CLIENT=local $hint_env -s claude/sample-project " --dry-run claude sample-project
+check "client: --client mac create -> -e HGS_CLIENT=mac" 0 "^tmux -u new-session -e HGS_CLIENT=mac $hint_env -s claude/sample-project " --client mac --dry-run claude sample-project
+check "client: detached keeps -e"                   0 "^tmux -u new-session -d -e HGS_CLIENT=local $hint_env -s claude/sample-project " --dry-run claude sample-project -d
 check "client: --client without name -> rc 1"       1 "needs a peer name" --client
 check "client: a -> set-environment then attach"    0 "^tmux set-environment -t =claude/x HGS_CLIENT local\$" --dry-run a claude/x
 check "client: --client mac a -> mac"               0 "^tmux set-environment -t =claude/x HGS_CLIENT mac\$" --client mac --dry-run a claude/x
 check "client: a still prints attach"               0 "^tmux -u attach-session -t =claude/x\$" --dry-run a claude/x
 out="$(cd "$P" && "$HGS" --dry-run claude 2>&1)"; rc=$?
-if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qE -- "new-session -e HGS_CLIENT=local -s claude/sample-project -c $P "; then pass=$((pass+1)); echo "ok   cwd project"; else fail=$((fail+1)); echo "FAIL cwd project"; printf '%s\n' "$out"; fi
+if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qE -- "new-session -e HGS_CLIENT=local $hint_env -s claude/sample-project -c $P "; then pass=$((pass+1)); echo "ok   cwd project"; else fail=$((fail+1)); echo "FAIL cwd project"; printf '%s\n' "$out"; fi
 
-# --- launch command: $SHELL -lic 'exec "$0" --run "$@"' <hgs> <n> <resume...> <base...> ---
+# --- launch command: $SHELL -lic 'exec env HGS_AGENT_HINT=1 HGS_AGENT_HINT_OFF= "$0" --run "$@"' <hgs> <n> <resume...> <base...> ---
 # n=0 -> no resume variant: a new session starts a NEW conversation unless -c is given.
-check "default -> new conversation"     0 " -lic 'exec \"\\\$0\" --run \"\\\$@\"' [^ ]+/hgs 0 claude\$" --dry-run claude sample-project
+check "default -> new conversation"     0 " -lic 'exec env HGS_AGENT_HINT=1 HGS_AGENT_HINT_OFF= \"\\\$0\" --run \"\\\$@\"' [^ ]+/hgs 0 claude\$" --dry-run claude sample-project
 check "claude -c -> resume variant"     0 "/hgs 2 claude -c claude\$"                --dry-run claude sample-project -c
 check "--resume is an alias of -c"      0 "/hgs 2 claude -c claude\$"                --dry-run claude sample-project --resume
 check "--fresh beats -c"                0 "/hgs 0 claude\$"                          --dry-run claude sample-project -c --fresh
 check "-c, no claude history -> fresh"  0 "/hgs 0 claude\$"                          --dry-run claude example.com -c
 check "tag -> new conversation"         0 "/hgs 0 claude\$"                          --dry-run claude sample-project -n review
-check "tag + -c -> resume in tag"       0 "new-session -e HGS_CLIENT=local -s claude/sample-project/review .*/hgs 2 claude -c claude\$" --dry-run claude sample-project -n review -c
-check "launcher: run_claude.sh used"    0 "new-session -e HGS_CLIENT=local -s claude/wl .*/hgs 0 [^ ]+/run_claude.sh\$" --dry-run claude wl
-check "launcher: -c both variants"      0 "new-session -e HGS_CLIENT=local -s claude/wl .*/hgs 2 [^ ]+/run_claude.sh -c [^ ]+/run_claude.sh\$" --dry-run claude wl -c
+check "tag + -c -> resume in tag"       0 "new-session -e HGS_CLIENT=local $hint_env -s claude/sample-project/review .*/hgs 2 claude -c claude\$" --dry-run claude sample-project -n review -c
+check "launcher: run_claude.sh used"    0 "new-session -e HGS_CLIENT=local $hint_env -s claude/wl .*/hgs 0 [^ ]+/run_claude.sh\$" --dry-run claude wl
+check "launcher: -c both variants"      0 "new-session -e HGS_CLIENT=local $hint_env -s claude/wl .*/hgs 2 [^ ]+/run_claude.sh -c [^ ]+/run_claude.sh\$" --dry-run claude wl -c
 check "launcher: --bare -> plain agent" 0 "/hgs 0 claude\$"                          --dry-run claude wl --bare
-check "launcher: only matching cmd"     0 "new-session -e HGS_CLIENT=local -s codex/wl .*/hgs 0 codex\$" --dry-run codex wl
+check "launcher: only matching cmd"     0 "new-session -e HGS_CLIENT=local $hint_env -s codex/wl .*/hgs 0 codex\$" --dry-run codex wl
 # Codex uses a subcommand for resume; both runner variants must use the project launcher.
 printf '#!/bin/sh\nexec codex "$@"\n' > "$tmp/proj/withlauncher/run_codex.sh"
 check "codex launcher: non-executable ignored" 0 "/hgs 0 codex\$" --dry-run codex wl
 chmod +x "$tmp/proj/withlauncher/run_codex.sh"
-check "codex launcher: fresh"          0 "new-session -e HGS_CLIENT=local -s codex/wl .*/hgs 0 [^ ]+/run_codex.sh\$" --dry-run codex wl
+check "codex launcher: fresh"          0 "new-session -e HGS_CLIENT=local $hint_env -s codex/wl .*/hgs 0 [^ ]+/run_codex.sh\$" --dry-run codex wl
 check "codex launcher: resume both variants" 0 "/hgs 3 [^ ]+/run_codex.sh resume --last [^ ]+/run_codex.sh\$" --dry-run codex wl -c
 check "codex launcher: bare resume"    0 "/hgs 3 codex resume --last codex\$" --dry-run codex wl -c --bare
 check "codex launcher: fresh beats resume" 0 "/hgs 0 [^ ]+/run_codex.sh\$" --dry-run codex wl -c --fresh
@@ -180,8 +183,8 @@ check "explicit invalid resume ID is rejected" 1 "." --dry-run codex sample-proj
 check "explicit empty resume ID is rejected" 1 "." --dry-run codex sample-project --resume=
 
 # --- @host ---
-check "@self -> local"                0 "^tmux -u new-session -e HGS_CLIENT=local -s claude/sample-project " --dry-run @testhost claude sample-project
-check "@self alias -> local"          0 "^tmux -u new-session -e HGS_CLIENT=local -s claude/sample-project " --dry-run @arch claude sample-project
+check "@self -> local"                0 "^tmux -u new-session -e HGS_CLIENT=local $hint_env -s claude/sample-project " --dry-run @testhost claude sample-project
+check "@self alias -> local"          0 "^tmux -u new-session -e HGS_CLIENT=local $hint_env -s claude/sample-project " --dry-run @arch claude sample-project
 # the marker ssh touches on connecting is what tells a dropped link from a peer that never answered
 check "@peer -> ssh -t + link marker"  0 "^ssh -t -o PermitLocalCommand=yes -o 'LocalCommand=touch [^']+/up' nowhere ~/.local/bin/hgs --client testhost claude sample-project --dry-run\$" --dry-run @nowhere claude sample-project
 check "@peer -d -> ssh without -t"    0 "^ssh -o BatchMode=yes nowhere ~/.local/bin/hgs --client testhost claude sample-project -d --dry-run\$" --dry-run @nowhere claude sample-project -d
@@ -673,7 +676,7 @@ assert byname['sample-project']['src'] == 'local', d
 assert byname['sample-project']['dir'].endswith('/proj/withlauncher'), d
 assert len([p for p in d if p['name'] == 'sample-project']) == 1, d
 " project ls --json
-check "project: резолвер видит переопределение" 0 "new-session -e HGS_CLIENT=local -s claude/sample-project -c $tmp/proj/withlauncher " --dry-run claude sample-project
+check "project: резолвер видит переопределение" 0 "new-session -e HGS_CLIENT=local $hint_env -s claude/sample-project -c $tmp/proj/withlauncher " --dry-run claude sample-project
 json_ok "project: карта в ls --json тоже слита" "
 assert d['projects']['sample-project'].endswith('/proj/withlauncher'), d['projects']
 assert 'sample-tray' in d['projects'], d['projects']
@@ -856,27 +859,27 @@ gui_case "systemd values -> -e for all three" \
   "DISPLAY=:1
 WAYLAND_DISPLAY=wayland-0
 XAUTHORITY=$tmp/gui-xauth" "$tmp/emptyrt" \
-  "new-session -e HGS_CLIENT=local -e WAYLAND_DISPLAY=wayland-0 -e DISPLAY=:1 -e XAUTHORITY=$tmp/gui-xauth -s claude/sample-project "
+  "new-session -e HGS_CLIENT=local $hint_env -e WAYLAND_DISPLAY=wayland-0 -e DISPLAY=:1 -e XAUTHORITY=$tmp/gui-xauth -s claude/sample-project "
 gui_case "systemd quotes a value -> quotes stripped" \
   "WAYLAND_DISPLAY=\"wayland-0\"" "$tmp/emptyrt" "-e WAYLAND_DISPLAY=wayland-0 -s "
 gui_case "stale XAUTHORITY (no such file) -> not passed on" \
   "DISPLAY=:1
 XAUTHORITY=$tmp/gone/xauth" "$tmp/emptyrt" "-e DISPLAY=:1 -s " "XAUTHORITY"
 gui_case "no systemd, no socket -> nothing added" "" "$tmp/emptyrt" \
-  "new-session -e HGS_CLIENT=local -s claude/sample-project " "WAYLAND_DISPLAY|DISPLAY=|XAUTHORITY"
+  "new-session -e HGS_CLIENT=local $hint_env -s claude/sample-project " "WAYLAND_DISPLAY|DISPLAY=|XAUTHORITY"
 # fallback when the systemd manager knows nothing: the compositor socket in XDG_RUNTIME_DIR
 if command -v python3 >/dev/null 2>&1; then
   mkdir -p "$tmp/rt"
   python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$tmp/rt/wayland-9" 2>/dev/null
   gui_case "no systemd -> WAYLAND_DISPLAY from the socket scan" "" "$tmp/rt" \
-    "new-session -e HGS_CLIENT=local -e WAYLAND_DISPLAY=wayland-9 -s " "DISPLAY=:|XAUTHORITY"
+    "new-session -e HGS_CLIENT=local $hint_env -e WAYLAND_DISPLAY=wayland-9 -s " "DISPLAY=:|XAUTHORITY"
 else
   echo "skip gui env socket-scan test (no python3)"
 fi
 # the local case: env already has them, tmux inherits them, hgs adds nothing
 out="$(PATH="$tmp/guibin:$PATH" WAYLAND_DISPLAY=wayland-0 DISPLAY=:1 XAUTHORITY="$tmp/gui-xauth" \
        FAKE_SYSENV="WAYLAND_DISPLAY=wayland-9" "$HGS" --dry-run claude sample-project 2>&1)"
-if printf '%s\n' "$out" | grep -q -- "-e HGS_CLIENT=local -s claude/sample-project "; then
+if printf '%s\n' "$out" | grep -q -- "-e HGS_CLIENT=local $hint_env -s claude/sample-project "; then
   pass=$((pass+1)); echo "ok   gui env: env already set -> nothing added"
 else
   fail=$((fail+1)); echo "FAIL gui env: env already set -> nothing added"; printf '%s\n' "$out" | sed 's/^/     /'

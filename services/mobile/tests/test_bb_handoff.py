@@ -16,7 +16,8 @@ import signal
 import unittest
 
 from connector_harness import (IMPLEMENTATION, PYTHON_COMMAND, RESTART_ERROR, SESSION, STARTUP_FAILURE,
-                               BlackBoxCase, Journal, acknowledgement, connector_command, stopped_journal)
+                               BlackBoxCase, Journal, acknowledgement, connector_command,
+                               recover_stopped_journal, stopped_journal)
 
 WEEK = 7 * 86400
 EXPIRED = {"state": "completed", "result": {"status": "history_expired"},
@@ -150,6 +151,7 @@ class HandoffTests(BlackBoxCase):
             process.stop()
             if request is not None:
                 self.age(WEEK + 1, request)
+        recover_stopped_journal(self.state_dir)
         self.assertNotIn(b"BB-PRIVATE", (self.state_dir / "journal.sqlite3").read_bytes())
         for request in (early, later):
             self.assertEqual(self.journal.row(request["request_id"])["state"], "completed")
