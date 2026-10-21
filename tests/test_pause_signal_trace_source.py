@@ -5,7 +5,7 @@ import copy
 import hashlib
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 from types import SimpleNamespace
 import unittest
@@ -21,7 +21,7 @@ assert {node.name for node in SELECTED} == {"direct_signal_agent", "DirectSignal
 
 
 def load(**values):
-    namespace = {"AGENT": AGENT, "json": json, "hashlib": hashlib, "Path": Path, "re": re,
+    namespace = {"AGENT": AGENT, "json": json, "hashlib": hashlib, "Path": PurePosixPath, "re": re,
                  "time": SimpleNamespace(monotonic_ns=lambda: 100), **values}
     exec(compile(ast.Module(body=copy.deepcopy(SELECTED), type_ignores=[]), "<pause-signal-source>", "exec"), namespace)
     return namespace
@@ -117,11 +117,11 @@ class SignalTraceSource(unittest.TestCase):
     def test_agent_labels_and_paths_are_finite_and_cannot_mix(self):
         namespace = load()
         for agent in ("claude", "codex", "kimi"):
-            trace = namespace['DirectSignalTrace'](Path('/fixture'), agent)
+            trace = namespace['DirectSignalTrace'](MemoryPath('/fixture'), agent)
             self.assertEqual(trace.agent, agent)
         for agent in ("opencode", "../codex", "codex/other", "", None, False):
             with self.subTest(agent=agent), self.assertRaises(ValueError):
-                namespace['DirectSignalTrace'](Path('/fixture'), agent)
+                namespace['DirectSignalTrace'](MemoryPath('/fixture'), agent)
         self.assertIn('home / ("direct-signal-agent-" + agent + ".jsonl")', namespace['direct_signal_agent']())
         self.assertIn('self.root / ("direct-signal-agent-" + self.agent + ".jsonl")', SOURCE)
         self.assertNotIn('glob(', ast.get_source_segment(SOURCE, SELECTED[1]))
@@ -146,7 +146,7 @@ class SignalTraceSource(unittest.TestCase):
                 open=operation('open', 19), fstat=operation('fstat', SimpleNamespace(st_size=0)), write=operation('write'), close=operation('close'),
                 O_WRONLY=1, O_CREAT=2, O_APPEND=4, O_CLOEXEC=8, O_NOFOLLOW=16)
             namespace = dict(os=memory_os, time=SimpleNamespace(monotonic_ns=operation('clock', 12)), json=json,
-                             home=Path('/fixture'), agent='kimi', sid='conversation')
+                             home=MemoryPath('/fixture'), agent='kimi', sid='conversation')
             exec(compile(ast.Module(body=[copy.deepcopy(function)], type_ignores=[]), '<phase-source>', 'exec'), namespace)
             namespace['signal_phase']('handler_enter')
             if written:
@@ -187,7 +187,7 @@ class SignalTraceSource(unittest.TestCase):
 
     def test_capture_keeps_agent_and_before_identity_without_adopting_an_unknown_target(self):
         namespace = load()
-        trace = namespace['DirectSignalTrace'](Path('/fixture'), 'kimi')
+        trace = namespace['DirectSignalTrace'](MemoryPath('/fixture'), 'kimi')
         calls = []
         identities = {17: {'pid': 17, 'ppid': 3, 'birth': 90}, 41: {'pid': 41, 'ppid': 17, 'birth': 100}}
 
@@ -214,32 +214,36 @@ class SignalTraceSource(unittest.TestCase):
     def test_failure_reader_rejects_other_agent_rows_and_keeps_bounds_without_disk(self):
         row = {'agent': 'kimi', 'phase': 'handler_registered', 'pid': 41, 'run': 'run', 'conversation': 'conversation', 'at_ns': 12}
         raw = (json.dumps(row) + '\n' + json.dumps({**row, 'agent': 'codex'}) + '\n').encode()
-        paths = []; reads = []; retained = []; syncs = []
+        for path_kind in (PurePosixPath, PureWindowsPath):
+            with self.subTest(artifact_path=path_kind.__name__):
+                paths = []; reads = []; retained = []; syncs = []
 
-        def opened(path, mode):
-            paths.append(str(path))
-            self.assertEqual(str(path), '/fixture/direct-signal-agent-kimi.jsonl')
-            self.assertEqual(mode, 'rb')
-            return MemoryFile(raw, reads)
+                def opened(path, mode):
+                    paths.append(str(path))
+                    self.assertEqual(str(path), '/fixture/direct-signal-agent-kimi.jsonl')
+                    self.assertEqual(mode, 'rb')
+                    return MemoryFile(raw, reads)
 
-        def temporary(**options):
-            self.assertEqual(options['prefix'], 'direct-signal-')
-            self.assertEqual(str(options['dir']), '/repo/artifacts/test-results/python')
-            return MemoryArtifact(retained)
+                def temporary(**options):
+                    self.assertEqual(options['prefix'], 'direct-signal-')
+                    self.assertEqual(str(options['dir']), '/repo/artifacts/test-results/python')
+                    return MemoryArtifact(retained)
 
-        namespace = load(open=opened, REPO=MemoryPath('/repo'), tempfile=SimpleNamespace(NamedTemporaryFile=temporary),
-                         os=SimpleNamespace(open=lambda *args: 23, close=lambda fd: syncs.append(('close', fd)),
-                                            fsync=lambda fd: syncs.append(('sync', fd)), O_RDONLY=0, O_DIRECTORY=1, O_CLOEXEC=2))
-        trace = namespace['DirectSignalTrace'](Path('/fixture'), 'kimi')
-        message = trace.failure()
-        self.assertIn('file and parent synced', message)
-        self.assertEqual(paths, ['/fixture/direct-signal-agent-kimi.jsonl'])
-        self.assertEqual(reads, [8705])
-        saved = json.loads(retained[0])
-        self.assertEqual(saved['agent'], 'kimi')
-        self.assertEqual(saved['agent_phases'], [row])
-        self.assertEqual(saved['malformed_or_incomplete_rows'], 1)
-        self.assertEqual(syncs, [('sync', 17), ('sync', 23), ('close', 23)])
+                namespace = load(Path=path_kind, open=opened, REPO=MemoryPath('/repo'),
+                                 tempfile=SimpleNamespace(NamedTemporaryFile=temporary),
+                                 os=SimpleNamespace(open=lambda *args: 23, close=lambda fd: syncs.append(('close', fd)),
+                                                    fsync=lambda fd: syncs.append(('sync', fd)), O_RDONLY=0, O_DIRECTORY=1, O_CLOEXEC=2))
+                trace = namespace['DirectSignalTrace'](MemoryPath('/fixture'), 'kimi')
+                message = trace.failure()
+                expected_artifact = path_kind('artifacts/test-results/python/direct-signal-memory.json')
+                self.assertIn('artifact=' + str(expected_artifact) + ', persistence=file and parent synced', message)
+                self.assertEqual(paths, ['/fixture/direct-signal-agent-kimi.jsonl'])
+                self.assertEqual(reads, [8705])
+                saved = json.loads(retained[0])
+                self.assertEqual(saved['agent'], 'kimi')
+                self.assertEqual(saved['agent_phases'], [row])
+                self.assertEqual(saved['malformed_or_incomplete_rows'], 1)
+                self.assertEqual(syncs, [('sync', 17), ('sync', 23), ('close', 23)])
 
 
 if __name__ == '__main__':
