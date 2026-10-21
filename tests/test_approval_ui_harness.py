@@ -2,6 +2,7 @@
 """SDK-free admission/result/project controls; never count these as native UI results."""
 import importlib.util
 import ast
+import copy
 import hashlib
 import json
 import math
@@ -101,6 +102,209 @@ def question_scroll_hint_findings(source):
     if any(modifier in header for modifier in ('.offset(', '.zIndex(', '.height(', '.size(', '.weight(', '.graphicsLayer(')):
         findings.append('hint-must-retain-measured-sibling-size')
     return findings
+
+
+def ios_cleanup_memory(*, now=100.0, whole=900.0, duration=0.0, spawn_delay=0.0, live_after_wait=False):
+    """Execute the exact nested driver functions with memory IO/process/clock only."""
+    source = (ROOT / "scripts/ci/ios-approval-ui.py").read_text()
+    main = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "main")
+    selected = [copy.deepcopy(node) for node in main.body if isinstance(node, ast.FunctionDef)
+                and node.name in {"save", "enter_cleanup", "run"}]
+    assert {node.name for node in selected} == {"save", "enter_cleanup", "run"}
+    tail = next(node for node in main.body if isinstance(node, ast.Try)).finalbody[-2:]
+    assert isinstance(tail[0], ast.Assign) and tail[0].targets[0].id == "success"
+    assert isinstance(tail[1], ast.Expr) and tail[1].value.func.id == "save"
+    final = main.body[-1]
+    assert isinstance(final, ast.Assert) and "final persistence" in ast.literal_eval(final.msg)
+    clock = SimpleNamespace(now=now)
+    events, files, descriptors, children, faults = [], {}, {}, [], {}
+
+    class MemoryFile:
+        def __init__(self, name):
+            self.name = name; self.data = []; self.fd = len(descriptors) + 10
+            descriptors[self.fd] = self
+        def __enter__(self): return self
+        def __exit__(self, *error):
+            events.append(("close", self.name))
+            if faults.get("close_name") == self.name:
+                clock.now += faults.pop("close_delay")
+        def write(self, value): self.data.append(value); return len(value)
+        def flush(self): pass
+        def fileno(self): return self.fd
+
+    class MemoryPath:
+        def __init__(self, name): self.name = name
+        def __truediv__(self, child): return MemoryPath(self.name + "/" + child)
+        def open(self, mode):
+            assert mode in {"x", "xb"} and self.name not in files
+            value = MemoryFile(self.name); files[self.name] = value
+            return value
+
+    class Pipe:
+        def __init__(self, identifier): self.identifier = identifier; self.reads = 0
+        def fileno(self): return self.identifier
+        def close(self): events.append(("pipe-close", self.identifier))
+
+    class Child:
+        pid = 41
+        def __init__(self, argv, **options):
+            assert options["stdin"] == "memory-DEVNULL" and options["stdout"] == options["stderr"] == "memory-PIPE"
+            self.stdout, self.stderr = Pipe(1), Pipe(2)
+            self.returncode = None; self.signaled = False
+            children.append(self); events.append(("spawn", argv)); clock.now += spawn_delay
+            self.ready_at = clock.now + duration
+        def wait(self, timeout):
+            assert timeout > 0; events.append(("wait", timeout))
+            if faults.get("fail_reap") or (live_after_wait and not self.signaled):
+                clock.now += timeout
+                raise TimeoutError("memory process stayed live")
+            self.returncode = 0
+        def poll(self): return self.returncode
+        def terminate(self): self.signaled = True; events.append(("terminate", self.pid))
+        def kill(self): self.signaled = True; events.append(("kill", self.pid))
+
+    class Selector:
+        def __init__(self): self.keys = {}
+        def __enter__(self): return self
+        def __exit__(self, *error): pass
+        def register(self, pipe, event, output): self.keys[pipe] = SimpleNamespace(fileobj=pipe, data=output)
+        def unregister(self, pipe): del self.keys[pipe]
+        def get_map(self): return self.keys
+        def select(self, timeout):
+            assert 0 <= timeout <= .1
+            child = children[-1]
+            if clock.now < child.ready_at:
+                clock.now = min(child.ready_at, clock.now + timeout)
+                if clock.now < child.ready_at: return []
+            return [(key, 1) for key in self.keys.values()]
+
+    payload = json.dumps({"devices": {"runtime": [{"udid": "owned", "name": "fixture", "state": "Shutdown"}]}}).encode()
+    def read(identifier, amount):
+        assert amount == 65536
+        pipe = children[-1].stdout if identifier == 1 else children[-1].stderr
+        pipe.reads += 1
+        return payload if identifier == 1 and pipe.reads == 1 else b""
+    def fsync(identifier):
+        name = descriptors[identifier].name; events.append(("fsync", name))
+        if faults.get("fsync_name") == name:
+            clock.now += faults.pop("fsync_delay")
+
+    class MemoryBuffer(bytearray):
+        def decode(self, *arguments, **keywords):
+            value = super().decode(*arguments, **keywords)
+            clock.now += faults.pop("decode_delay", 0)
+            return value
+
+    namespace = dict(whole=whole, root=MemoryPath("/evidence"), project="/project", environment={},
+                     time=SimpleNamespace(monotonic=lambda: clock.now), json=json, bytearray=MemoryBuffer,
+                     os=SimpleNamespace(fsync=fsync, read=read),
+                     subprocess=SimpleNamespace(Popen=Child, DEVNULL="memory-DEVNULL", PIPE="memory-PIPE"),
+                     selectors=SimpleNamespace(DefaultSelector=Selector, EVENT_READ=1))
+    wrapper = ast.parse("def bind():\n    end = whole\n    cleanup_started = cleanup_end = None\n    unknown_child = False\n    commands = []\n").body[0]
+    wrapper.body.extend(selected)
+    wrapper.body.extend(ast.parse("def state():\n    return dict(end=end, cleanup_started=cleanup_started, cleanup_end=cleanup_end, unknown_child=unknown_child, commands=commands)\n").body)
+    wrapper.body.extend(ast.parse("return enter_cleanup, run, save, state").body)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])), "<ios-cleanup-memory-source>", "exec"), namespace)
+    enter, run, save, state = namespace["bind"]()
+    final_code = compile(ast.Module(body=copy.deepcopy([*tail, final]), type_ignores=[]), "<ios-cleanup-memory-final>", "exec")
+    def finalize():
+        values = {**namespace, **state(), "save": save, "success": True, "same": True, "tools_same": True, "cleanup": []}
+        exec(final_code, values)
+        return values
+    return SimpleNamespace(clock=clock, enter=enter, run=run, save=save, state=state, finalize=finalize,
+                           faults=faults, events=events, files=files, children=children)
+
+
+class IosCleanupBudgetTests(unittest.TestCase):
+    def test_cleanup_end_is_once_and_clamped_by_original_whole(self):
+        for whole, expected in ((900, 160), (125, 125)):
+            memory = ios_cleanup_memory(whole=whole)
+            self.assertEqual(memory.enter(), expected)
+            memory.clock.now += 30
+            self.assertEqual(memory.enter(), expected)
+            self.assertEqual(memory.state()["cleanup_started"], 100)
+
+    def test_exact_identity_metadata_can_finish_after_eight_seconds_within_fifteen(self):
+        memory = ios_cleanup_memory(duration=8.043)
+        value = json.loads(memory.run("cleanup-identity", ["memory-simctl", "list", "devices"], 15, True))
+        ios = module("ios_approval_ui", "scripts/ci/ios-approval-ui.py")
+        self.assertEqual(ios.owned_device(value, "runtime", "owned", "fixture")["state"], "Shutdown")
+        self.assertAlmostEqual(memory.clock.now, 108.043)
+        self.assertEqual(memory.state()["commands"][0]["deadline_monotonic"], 115)
+        self.assertFalse(memory.state()["unknown_child"])
+        self.assertTrue(memory.finalize()["success"])
+
+    def test_metadata_cap_expiry_refuses_and_preserves_owned_stop_uncertainty(self):
+        memory = ios_cleanup_memory(duration=15)
+        with self.assertRaisesRegex(AssertionError, "command deadline"):
+            memory.run("cleanup-identity", ["memory-simctl"], 15, True)
+        self.assertEqual(len(memory.children), 1)
+        self.assertTrue(memory.state()["unknown_child"])
+        self.assertIn(("terminate", 41), memory.events)
+        with self.assertRaises(AssertionError): memory.finalize()
+
+    def test_expired_sixty_or_whole_end_never_admits_a_following_command(self):
+        for whole, expired in ((900, 160), (125, 125)):
+            memory = ios_cleanup_memory(whole=whole)
+            memory.run("cleanup-identity", ["memory-simctl"], 15, True)
+            original_files = set(memory.files)
+            memory.clock.now = expired
+            with self.assertRaises(AssertionError): memory.run("cleanup-stopped", ["memory-simctl"], 15, True)
+            self.assertEqual(len(memory.children), 1)
+            self.assertEqual(set(memory.files), original_files)
+            with self.assertRaises(AssertionError): memory.finalize()
+
+    def test_earlier_owned_stop_starts_the_same_phase_and_reap_stays_inside_it(self):
+        memory = ios_cleanup_memory(duration=1.1)
+        with self.assertRaises(AssertionError): memory.run("work", ["memory-child"], 1)
+        first_end = memory.state()["cleanup_end"]
+        self.assertAlmostEqual(first_end, 161)
+        memory.clock.now = 150
+        self.assertEqual(memory.enter(), first_end)
+        self.assertTrue(memory.state()["commands"][0]["reaped"])
+        self.assertTrue(all(0 < event[1] <= 3 for event in memory.events if event[0] == "wait"))
+        memory.clock.now = first_end - .5
+        with self.assertRaises(AssertionError): memory.run("cleanup-stopped", ["memory-simctl"], 15, True)
+        self.assertEqual(memory.state()["cleanup_end"], first_end)
+        self.assertEqual([event for event in memory.events if event[0] == "terminate"], [("terminate", 41)])
+
+    def test_unreaped_owned_child_stays_unknown_and_cannot_qualify(self):
+        memory = ios_cleanup_memory(duration=1.1)
+        memory.faults["fail_reap"] = True
+        with self.assertRaises(AssertionError): memory.run("work", ["memory-child"], 1)
+        command = memory.state()["commands"][0]
+        self.assertFalse(command["reaped"])
+        self.assertFalse(command["forced_child_stop"])
+        self.assertTrue(memory.state()["unknown_child"])
+        self.assertAlmostEqual(memory.state()["cleanup_end"], 161)
+        self.assertEqual([event for event in memory.events if event[0] == "wait"], [("wait", 3), ("wait", 3)])
+        with self.assertRaises(AssertionError): memory.finalize()
+
+    def test_command_cap_is_not_renewed_after_admission_or_spawn(self):
+        memory = ios_cleanup_memory(spawn_delay=15)
+        with self.assertRaises(AssertionError): memory.run("cleanup-identity", ["memory-simctl"], 15, True)
+        self.assertEqual(memory.state()["commands"][0]["deadline_monotonic"], 115)
+        memory = ios_cleanup_memory()
+        memory.faults.update(fsync_name="/evidence/cleanup-identity.command.json", fsync_delay=15)
+        with self.assertRaisesRegex(AssertionError, "before spawn"):
+            memory.run("cleanup-identity", ["memory-simctl"], 15, True)
+        self.assertEqual(memory.children, [])
+
+    def test_late_fsync_and_final_file_close_cannot_qualify(self):
+        memory = ios_cleanup_memory()
+        memory.faults["decode_delay"] = 15
+        with self.assertRaisesRegex(AssertionError, "after persistence and close"):
+            memory.run("cleanup-identity", ["memory-simctl"], 15, True)
+        for stage in ("fsync", "close"):
+            memory = ios_cleanup_memory()
+            memory.faults.update({stage + "_name": "/evidence/cleanup-identity.stdout", stage + "_delay": 15})
+            with self.subTest(stage=stage), self.assertRaisesRegex(AssertionError, "after persistence and close"):
+                memory.run("cleanup-identity", ["memory-simctl"], 15, True)
+            memory = ios_cleanup_memory()
+            memory.enter()
+            memory.faults.update({stage + "_name": "/evidence/outcome.json", stage + "_delay": 60})
+            with self.subTest(final_stage=stage), self.assertRaisesRegex(AssertionError, "final persistence"):
+                memory.finalize()
 
 
 class ApprovalHarnessTests(unittest.TestCase):
@@ -266,9 +470,9 @@ class ApprovalHarnessTests(unittest.TestCase):
                 ios.hosted_user_environment({**valid, **changes})
         source = (ROOT / "scripts/ci/ios-approval-ui.py").read_text()
         self.assertIn('run("runtimes", ["/usr/bin/xcrun", "simctl", "list", "runtimes", "--json"], 120)', source)
-        self.assertIn('run("cleanup-identity", ["/usr/bin/xcrun", "simctl", "list", "devices", "--json"], 8, True)', source)
+        self.assertIn('run("cleanup-identity", ["/usr/bin/xcrun", "simctl", "list", "devices", "--json"], 15, True)', source)
         self.assertIn("end = time.monotonic() + 900", source)
-        self.assertIn("(0 if cleaning else 60)", source)
+        self.assertIn("phase_end = enter_cleanup() if cleaning else end - 60", source)
 
     def test_android_failure_diagnostics_stay_owned_bounded_and_cannot_replace_failure(self):
         self.ui.select_suite(["--approval-choices"])

@@ -123,8 +123,12 @@ Apple tools retain the VM's validated standard `HOME`, `TMPDIR`, `USER`, and `LO
 are recorded with command timings. Evidence, DerivedData, package outputs and XDG paths remain private. The standard
 hosted Apple account and its caches are in scope; an artificial empty home is not an isolation guarantee. Earlier
 CoreSimulator inventory timeouts remain setup/unknown outcomes, with no proven cause attributed to the home directory.
-The first cold `simctl list runtimes` has a 120-second cap without retry; later inventory and cleanup caps stay unchanged.
-The driver imposes one original 900-second budget, reserves 60 seconds for cleanup, bounds boot to 120 seconds and build/test to
+The first cold `simctl list runtimes` has a 120-second cap without retry; later work inventory keeps its existing caps.
+The driver imposes one original 900-second budget and one cleanup phase ending at the earlier of that original end or
+60 seconds after cleanup first begins, including an earlier forced owned-child stop. That phase is never renewed.
+The two fresh cleanup identity/state inventories have 15-second caps, shutdown has 10 seconds and delete has 8 seconds,
+all within that same cleanup end. Exact created UUID/name/runtime/state guards and native command order stay unchanged.
+The driver bounds boot to 120 seconds and build/test to
 600 seconds or the remaining shared budget, caps raw output at 32 MiB per command, owns the unreaped direct child before
 later fallible calls, and retains failures without retry. A forced child stop is failed/unknown, never passing cleanup
 evidence. The exact native assertions are the seven
@@ -201,7 +205,11 @@ before the original separate Send/Confirm and final option2 payload. This path i
 The configured XCTest default/maximum allowance stays30 seconds. Apple documents that
 [`executionTimeAllowance`](https://developer.apple.com/documentation/xctest/xctestcase/executiontimeallowance) rounds to
 minute granularity; a reported43.737-second case alone does not prove a violation of the configured value. The original
-900-second driver end,60-second cleanup reserve and every command cap remain unchanged.
+900-second driver end, the 60-second cleanup phase and UI/boot/build caps remain unchanged. The two cleanup metadata caps
+are reallocated from 8 to 15 seconds within that shared phase; they do not extend the whole or cleanup end. A timeout does
+not establish the underlying host cause. Command deadlines are fixed before spawning and cover persistence and final close.
+Final outcome persistence must also meet the cleanup end before the driver returns zero; a partial outcome JSON alone
+cannot qualify a campaign whose final deadline or process cleanup failed.
 
 Retain the source map, raw stdout/stderr, result bundle and actual test inventory before cleanup. Re-hash every source
 entry and the built fixture products. Shut down and delete only the newly returned simulator UUID after matching its

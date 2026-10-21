@@ -3,6 +3,8 @@
 
 Requires separately reviewed exact Xcode-build/runtime/device-type inputs. No latest fallback,
 runtime installation, keychain, physical device, product app launch, or broad cleanup command.
+Cleanup shares one nonrenewable 60s end inside the original 900s whole end, including
+owned-child stop/reap and the final qualification check. Late evidence cannot authorize success.
 """
 import hashlib
 import json
@@ -91,6 +93,7 @@ def main():
     name = "Zerus approval " + str(uuid.uuid4())
     success = False
     unknown_child = False
+    cleanup_started = cleanup_end = None
     source_before = {}
     tools_before = {}
 
@@ -98,21 +101,32 @@ def main():
         with (root / filename).open("x") as stream:
             json.dump(value, stream, indent=2, sort_keys=True); stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
 
+    def enter_cleanup():
+        nonlocal cleanup_started, cleanup_end
+        if cleanup_end is None:
+            cleanup_started = time.monotonic()
+            cleanup_end = min(end, cleanup_started + 60)
+        return cleanup_end
+
     def run(label, arguments, cap=30, cleaning=False):
         nonlocal unknown_child
-        remaining = min(cap, end - time.monotonic() - (0 if cleaning else 60))
+        phase_end = enter_cleanup() if cleaning else end - 60
+        started = time.monotonic()
+        deadline = min(phase_end, started + cap)
+        remaining = deadline - started
         assert remaining > 0, "original whole deadline"
         save(label + ".command.json", {"argv": list(map(str, arguments)), "remaining": remaining})
-        command = {"label": label, "argv": list(map(str, arguments)), "started_monotonic": time.monotonic(),
-                   "whole_end_monotonic": end, "cap_seconds": cap}; commands.append(command)
+        command = {"label": label, "argv": list(map(str, arguments)), "started_monotonic": started,
+                   "whole_end_monotonic": end, "phase_end_monotonic": phase_end,
+                   "deadline_monotonic": deadline, "cap_seconds": cap}; commands.append(command)
         out, err = root / (label + ".stdout"), root / (label + ".stderr")
         value = bytearray()
         with out.open("xb") as stdout, err.open("xb") as stderr:
+            assert time.monotonic() < deadline, "command deadline before spawn"
             child = subprocess.Popen(command["argv"], cwd=project, env=environment, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             command["pid"] = child.pid  # Own the unreaped child before any later fallible call.
             try:
-                deadline = min(end, time.monotonic() + remaining)
                 with selectors.DefaultSelector() as selector:
                     selector.register(child.stdout, selectors.EVENT_READ, stdout)
                     selector.register(child.stderr, selectors.EVENT_READ, stderr)
@@ -127,29 +141,44 @@ def main():
                             assert total <= 32 * 1024 * 1024, "bounded raw output"
                             key.data.write(data)
                             if key.fileobj is child.stdout: value.extend(data)
-                    child.wait(timeout=max(.001, deadline - time.monotonic()))
+                    remaining = deadline - time.monotonic()
+                    assert remaining > 0, "command deadline before reap"
+                    child.wait(timeout=remaining)
                 command["returncode"] = child.returncode
                 assert child.returncode == 0 and time.monotonic() < deadline
             finally:
                 if child.poll() is None:
                     success_stop = False
+                    unknown_child = True  # Failed or late owned stop cannot be reusable success.
                     try:
-                        child.terminate(); child.wait(timeout=min(3, max(.001, end - time.monotonic())))
+                        stop_end = enter_cleanup()
+                        assert time.monotonic() < stop_end, "cleanup deadline before terminate"
+                        child.terminate()
+                        remaining = min(3, stop_end - time.monotonic())
+                        assert remaining > 0, "cleanup deadline before terminate reap"
+                        child.wait(timeout=remaining)
                         success_stop = True
                     except BaseException:
                         try:
-                            child.kill(); child.wait(timeout=min(3, max(.001, end - time.monotonic())))
+                            stop_end = enter_cleanup()
+                            assert time.monotonic() < stop_end, "cleanup deadline before kill"
+                            child.kill()
+                            remaining = min(3, stop_end - time.monotonic())
+                            assert remaining > 0, "cleanup deadline before kill reap"
+                            child.wait(timeout=remaining)
                             success_stop = True
                         except BaseException:
                             pass
                     command["forced_child_stop"] = success_stop
-                    unknown_child = True  # A forced parent exit is never all-descendant proof or a passing gate.
                 command["reaped"] = child.returncode is not None
                 for pipe in (child.stdout, child.stderr): pipe.close()
                 stdout.flush(); os.fsync(stdout.fileno()); stderr.flush(); os.fsync(stderr.fileno())
                 command["finished_monotonic"] = time.monotonic()
                 command["elapsed_seconds"] = command["finished_monotonic"] - command["started_monotonic"]
-        return value.decode("utf-8", errors="strict")
+        text = value.decode("utf-8", errors="strict")
+        command["closed_monotonic"] = time.monotonic()
+        assert command["closed_monotonic"] < deadline, "command deadline after persistence and close"
+        return text
 
     try:
         save("hosted-environment.json", {"environment": environment,
@@ -196,13 +225,14 @@ def main():
                                        "scope": "separate unsigned simulator fixture; no maintained app"})
         success = True
     finally:
+        enter_cleanup()  # Reuses an earlier owned-stop phase; never starts another 60s allowance.
         try:
             if identifier:
-                current = json.loads(run("cleanup-identity", ["/usr/bin/xcrun", "simctl", "list", "devices", "--json"], 8, True))
+                current = json.loads(run("cleanup-identity", ["/usr/bin/xcrun", "simctl", "list", "devices", "--json"], 15, True))
                 state = owned_device(current, runtime, identifier, name)["state"]
                 assert state in {"Booted", "Shutdown"}
                 if state == "Booted": run("shutdown", ["/usr/bin/xcrun", "simctl", "shutdown", identifier], 10, True)
-                stopped = json.loads(run("cleanup-stopped", ["/usr/bin/xcrun", "simctl", "list", "devices", "--json"], 8, True))
+                stopped = json.loads(run("cleanup-stopped", ["/usr/bin/xcrun", "simctl", "list", "devices", "--json"], 15, True))
                 assert owned_device(stopped, runtime, identifier, name)["state"] == "Shutdown"
                 run("delete", ["/usr/bin/xcrun", "simctl", "delete", identifier], 8, True)
                 cleanup.append({"udid": identifier, "shutdown_and_deleted": True})
@@ -210,10 +240,11 @@ def main():
             success = False; cleanup.append({"unknown": type(error).__name__})
         same = bool(source_before) and all(digest(project / path) == value for path, value in source_before.items())
         tools_same = bool(tools_before) and all(digest(path) == value for path, value in tools_before.items())
-        success = success and same and tools_same and not unknown_child and time.monotonic() < end
+        success = success and same and tools_same and not unknown_child and time.monotonic() < cleanup_end
         save("outcome.json", {"qualified": success, "source_unchanged": same, "tools_unchanged": tools_same, "cleanup": cleanup, "commands": commands,
+                              "cleanup_started_monotonic": cleanup_started, "cleanup_end_monotonic": cleanup_end, "whole_end_monotonic": end,
                               "unknown_child": unknown_child, "scope": "seven native SwiftUI/memory callback cases only; no real delivery, owner device or keychain"})
-    assert success
+    assert success and time.monotonic() < cleanup_end, "qualification including final persistence must meet original cleanup/whole end"
 
 
 if __name__ == "__main__":
