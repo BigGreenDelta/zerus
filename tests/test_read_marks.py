@@ -161,6 +161,101 @@ class ReadMarks(unittest.TestCase):
         row = self.listing()
         self.assertNotEqual(row['read']['attention_signature'], row['attention_signature'])
 
+    def test_repeated_current_mark_keeps_the_exact_legacy_file(self):
+        reply = self.reply(100.5)
+        first = self.mark(reply_id=reply)
+        path = self.state / 'read-marks.json'
+        before = path.read_bytes(), path.stat()
+        duplicate = self.mark(reply_id=reply)
+        self.assertTrue(duplicate['applied']['reply_id'])
+        self.assertEqual(duplicate['read'], first['read'])
+        self.assertEqual(path.read_bytes(), before[0])
+        self.assertEqual((path.stat().st_ino, path.stat().st_mtime_ns),
+                         (before[1].st_ino, before[1].st_mtime_ns))
+
+    def test_existing_owner_retains_other_marks_until_new_owner_admission(self):
+        self.mark(reply_id=self.reply(100.5))
+        path = self.state / 'read-marks.json'
+        marks = json.loads(path.read_text())
+        abandoned = {'old-conversation': {'reply_id': 'old', 'at': 1.0}}
+        marks['sessions']['codex/abandoned/session'] = abandoned
+        path.write_text(json.dumps(marks))
+        self.mark(reply_id=self.reply(200.5))
+        self.assertEqual(json.loads(path.read_text())['sessions']['codex/abandoned/session'], abandoned)
+        # Removing this owner's entry makes its next write a new admission.
+        marks = json.loads(path.read_text())
+        del marks['sessions'][self.name]
+        path.write_text(json.dumps(marks))
+        self.mark(reply_id=self.listing()['reply_id'])
+        self.assertNotIn('codex/abandoned/session', json.loads(path.read_text())['sessions'])
+
+    def test_corrupt_existing_store_is_not_reset_by_a_current_read(self):
+        reply = self.reply(100.5)
+        path = self.state / 'read-marks.json'
+        for text in ('{', '{"version":2,"sessions":{}}', '{"version":1,"sessions":[]}'):
+            path.write_text(text)
+            path.chmod(0o600)
+            before = path.stat()
+            result = self.read(reply_id=reply)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, '')
+            self.assertIn('Shared read marks could not be read', result.stderr)
+            self.assertEqual(path.read_text(), text)
+            self.assertEqual((path.stat().st_ino, path.stat().st_mtime_ns),
+                             (before.st_ino, before.st_mtime_ns))
+
+    def test_read_does_not_reconcile_an_unrelated_completed_binding(self):
+        reply = self.reply(100.5)
+        # This complete stopped legacy Claude binding is eligible for the normal
+        # global archive sweep, but not for this selected-session read command.
+        other = dict(version=1, name='claude/other/finished', agent='claude',
+                     run_id=str(uuid.uuid4()), conversation_id=str(uuid.uuid4()),
+                     conversation_state='ended', pid=0, process_start='',
+                     phase='idle', activity='idle', created=1.0)
+        other['session_end'] = dict(run_id=other['run_id'],
+                                   conversation_id=other['conversation_id'], reason='prompt_input_exit')
+        path = self.state / (hashlib.sha256(other['name'].encode()).hexdigest() + '.json')
+        path.write_text(json.dumps(other))
+        before = path.read_bytes()
+        self.mark(reply_id=reply)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse((self.state / 'archives').exists())
+        self.listing()  # Ordinary lifecycle/listing reconciliation still runs.
+        self.assertFalse(path.exists())
+        self.assertTrue(list((self.state / 'archives').glob('*.json')))
+
+    def test_selected_archived_identity_is_refused_even_with_a_live_pane(self):
+        reply = self.reply(100.5)
+        self.mark(reply_id=reply)
+        marks = (self.state / 'read-marks.json').read_bytes()
+        archives = self.state / 'archives'
+        archives.mkdir()
+        archive_id = str(uuid.uuid4())
+        archived = dict(self.record, archive_id=archive_id, archived_at=1.0, state='archived')
+        (archives / (archive_id + '.json')).write_text(json.dumps(archived))
+        # No intervening listing primes the archive metadata index.
+        result = self.read(reply_id=reply)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout), {'ok': False, 'error': 'not_found'})
+        self.assertEqual((self.state / 'read-marks.json').read_bytes(), marks)
+        self.assertTrue(self.record_path.exists())
+
+    def test_selected_clean_completion_is_still_archived_before_reading(self):
+        reply = self.reply(100.5)
+        self.mark(reply_id=reply)
+        marks = (self.state / 'read-marks.json').read_bytes()
+        self.tmux('kill-session', '-t', '=' + self.name)
+        self.record.update(conversation_state='ended', pid=0, process_start='',
+                           completion_source='supervisor', completion_reason='clean_exit', exit_code=0,
+                           session_end=dict(run_id=self.run_id, conversation_id=self.conversation_id, reason='other'))
+        self.write_record()
+        result = self.read(reply_id=reply)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout), {'ok': False, 'error': 'not_found'})
+        self.assertFalse(self.record_path.exists())
+        self.assertTrue(list((self.state / 'archives').glob('*.json')))
+        self.assertEqual((self.state / 'read-marks.json').read_bytes(), marks)
+
     def test_second_identity_less_error_is_unacknowledged(self):
         self.record.update(phase='error', activity='attention', active_tools={}, turn_started=100.0)
         self.write_record()

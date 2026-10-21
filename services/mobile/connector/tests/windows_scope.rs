@@ -346,3 +346,292 @@ fn held_admission_refuses_changed_revision_before_journal_or_runtime() {
     // This exercises the shared admission routine, not Windows lock/process
     // behavior. The native Save/Start ordering case remains a separate gate.
 }
+
+/// Native calls are recorded stand-ins; the real journal still owns receipts.
+/// The six conversation rows in PR290 motivated the explicit-null cases below.
+struct FreshLaunch {
+    detail: RefCell<Value>,
+    calls: RefCell<Vec<Call>>,
+    writes: Cell<usize>,
+    refuse_write: bool,
+}
+impl Native for FreshLaunch {
+    async fn call(&self, call: Call) -> NativeResult {
+        self.calls.borrow_mut().push(call.clone());
+        if call.argv.first().map(String::as_str) == Some("inspect") {
+            assert_eq!(
+                call.argv,
+                ["inspect", "codex/project/test", "--skip-processes"]
+            );
+            return Ok(Output::Json(self.detail.borrow().clone()));
+        }
+        self.writes.set(self.writes.get() + 1);
+        if self.refuse_write {
+            return Err(zerus_mobile_connector::native::NativeError::Failed(
+                "synthetic native gate refusal",
+            ));
+        }
+        match call.argv.first().map(String::as_str) {
+            Some("send") => {
+                assert_eq!(call.argv, ["send", "codex/project/test", "--json"]);
+                Ok(Output::Json(json!({"status":"submitted"})))
+            }
+            Some("session-action") => {
+                assert_eq!(
+                    call.argv,
+                    ["session-action", "codex/project/test", "--json"]
+                );
+                let payload = call.payload.as_ref().unwrap();
+                assert_eq!(payload["action"], "terminate");
+                Ok(Output::Json(
+                    json!({"request_id":payload["request_id"],"name":"codex/project/test",
+                    "run_id":payload["expected_run_id"],"conversation_id":payload["expected_conversation_id"],"status":"completed"}),
+                ))
+            }
+            other => panic!("unexpected native operation {other:?}"),
+        }
+    }
+}
+fn fresh_detail(conversation: Option<Value>) -> Value {
+    let mut detail = json!({"name":"codex/project/test","run_id":"run","agent":"codex"});
+    if let Some(conversation) = conversation {
+        detail["conversation_id"] = conversation;
+    }
+    detail
+}
+fn fresh_connector(
+    scratch: &Scratch,
+    windows: bool,
+    detail: Value,
+    refuse_write: bool,
+) -> Connector<FreshLaunch> {
+    let connector = Connector::new(
+        FreshLaunch {
+            detail: RefCell::new(detail),
+            calls: RefCell::new(Vec::new()),
+            writes: Cell::new(0),
+            refuse_write,
+        },
+        Journal::open(&scratch.path("state"), "fixture", EPOCH).unwrap(),
+        Settings {
+            interval: 5.0,
+            binding: "fixture".into(),
+            default_timeout: 45.0,
+            clock_scale: 1.0,
+        },
+        Box::new(|| EPOCH),
+    );
+    let flags = Flags {
+        lifecycle: true,
+        ..Flags::default()
+    };
+    connector.flags.set(if windows {
+        flags.windows_local()
+    } else {
+        flags
+    });
+    connector
+        .state
+        .borrow_mut()
+        .sessions
+        .insert("codex/project/test".into());
+    connector
+}
+fn fresh_request(operation: &str, conversation: &str) -> Value {
+    let mut request = json!({"request_id":"00000000-0000-4000-8000-000000000012","operation":operation,"session":"codex/project/test",
+        "payload":{"request_id":"00000000-0000-4000-8000-000000000012","expected_run_id":"run","expected_conversation_id":conversation}});
+    if operation == "send" {
+        request["payload"]["text"] = json!("fixture input");
+    }
+    request
+}
+fn fresh_payload_unchanged(connector: &Connector<FreshLaunch>, request: &Value) {
+    let mut payload = request["payload"].clone();
+    if request["operation"] == "terminate" {
+        payload["action"] = json!("terminate");
+    }
+    assert_eq!(
+        connector
+            .native
+            .calls
+            .borrow()
+            .last()
+            .unwrap()
+            .payload
+            .as_ref(),
+        Some(&payload)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn windows_fresh_conversation_requires_explicit_null_or_exact_string() {
+    for operation in ["send", "terminate"] {
+        for (label, reported, expected, delivered) in [
+            ("explicit-null", Some(Value::Null), "", true),
+            ("empty", Some(json!("")), "", true),
+            (
+                "confirmed",
+                Some(json!("conversation")),
+                "conversation",
+                true,
+            ),
+            ("missing", None, "", false),
+            (
+                "null-vs-confirmed",
+                Some(Value::Null),
+                "conversation",
+                false,
+            ),
+            ("confirmed-vs-empty", Some(json!("conversation")), "", false),
+            (
+                "other-conversation",
+                Some(json!("conversation")),
+                "other",
+                false,
+            ),
+            ("boolean", Some(json!(false)), "", false),
+            ("number", Some(json!(0)), "", false),
+            ("array", Some(json!([])), "", false),
+            ("object", Some(json!({})), "", false),
+        ] {
+            let scratch = Scratch::new("fresh-conversation");
+            let connector = fresh_connector(&scratch, true, fresh_detail(reported), false);
+            let request = fresh_request(operation, expected);
+            let answer = finished(connector.execute(request.clone()).await.unwrap());
+            assert_eq!(
+                answer["state"],
+                if delivered { "completed" } else { "failed" },
+                "{operation} {label}: {answer}"
+            );
+            assert_eq!(
+                connector.native.writes.get(),
+                usize::from(delivered),
+                "{operation} {label}"
+            );
+            assert_eq!(
+                connector.native.calls.borrow().len(),
+                1 + usize::from(delivered)
+            );
+            if delivered {
+                fresh_payload_unchanged(&connector, &request);
+            } else {
+                assert_eq!(
+                    answer["error"],
+                    "fresh native target identity did not match"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn windows_fresh_target_keeps_exact_run_and_provider_requirements() {
+    for operation in ["send", "terminate"] {
+        for (field, value) in [
+            ("run_id", None),
+            ("run_id", Some(Value::Null)),
+            ("run_id", Some(json!(""))),
+            ("run_id", Some(json!(0))),
+            ("run_id", Some(json!(false))),
+            ("run_id", Some(json!("other"))),
+            ("agent", None),
+            ("agent", Some(Value::Null)),
+            ("agent", Some(json!("opencode"))),
+            ("agent", Some(json!("dsh"))),
+            ("agent", Some(json!("unknown"))),
+        ] {
+            let scratch = Scratch::new("fresh-run-provider");
+            let mut detail = fresh_detail(Some(Value::Null));
+            if let Some(value) = value {
+                detail[field] = value;
+            } else {
+                detail.as_object_mut().unwrap().remove(field);
+            }
+            let connector = fresh_connector(&scratch, true, detail, false);
+            let answer = finished(
+                connector
+                    .execute(fresh_request(operation, ""))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(answer["state"], "failed", "{operation} {field}: {answer}");
+            assert_eq!(connector.native.calls.borrow().len(), 1);
+            assert_eq!(connector.native.writes.get(), 0);
+            assert_eq!(
+                answer["error"],
+                if field == "run_id" {
+                    "fresh native target identity did not match"
+                } else {
+                    zerus_mobile_connector::capabilities::WINDOWS_PROVIDER_REFUSAL
+                }
+            );
+        }
+        for (expected, inspections) in [
+            (None, 0),
+            (Some(Value::Null), 0),
+            (Some(json!("")), 0),
+            (Some(json!(false)), 0),
+            (Some(json!(0)), 0),
+            (Some(json!("other")), 1),
+        ] {
+            let scratch = Scratch::new("fresh-request-run");
+            let connector = fresh_connector(&scratch, true, fresh_detail(Some(Value::Null)), false);
+            let mut request = fresh_request(operation, "");
+            if let Some(expected) = expected {
+                request["payload"]["expected_run_id"] = expected;
+            } else {
+                request["payload"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("expected_run_id");
+            }
+            let answer = finished(connector.execute(request).await.unwrap());
+            assert_eq!(answer["state"], "failed", "{operation}: {answer}");
+            assert_eq!(connector.native.calls.borrow().len(), inspections);
+            assert_eq!(connector.native.writes.get(), 0);
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fresh_null_cannot_bypass_native_refusal_or_replay_a_delivery() {
+    for operation in ["send", "terminate"] {
+        for refused in [false, true] {
+            let scratch = Scratch::new("fresh-native-gate");
+            let connector =
+                fresh_connector(&scratch, true, fresh_detail(Some(Value::Null)), refused);
+            let request = fresh_request(operation, "");
+            let answer = finished(connector.execute(request.clone()).await.unwrap());
+            assert_eq!(
+                answer["state"],
+                if refused { "uncertain" } else { "completed" }
+            );
+            if refused {
+                assert_eq!(answer["error"], "synthetic native gate refusal");
+            }
+            assert_eq!(connector.native.writes.get(), 1);
+            fresh_payload_unchanged(&connector, &request);
+            let calls = connector.native.calls.borrow().len();
+            *connector.native.detail.borrow_mut() = json!({"agent":"unknown"});
+            assert_eq!(connector.execute(request).await.unwrap(), Outcome::Replayed);
+            assert_eq!(connector.native.calls.borrow().len(), calls);
+            assert_eq!(connector.native.writes.get(), 1);
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unix_mutations_do_not_gain_a_windows_fresh_inspection_or_payload_rewrite() {
+    for operation in ["send", "terminate"] {
+        for conversation in [None, Some(Value::Null), Some(json!(false))] {
+            let scratch = Scratch::new("fresh-unix-unchanged");
+            let connector = fresh_connector(&scratch, false, fresh_detail(conversation), false);
+            let request = fresh_request(operation, "");
+            let answer = finished(connector.execute(request.clone()).await.unwrap());
+            assert_eq!(answer["state"], "completed");
+            assert_eq!(connector.native.calls.borrow().len(), 1);
+            assert_eq!(connector.native.writes.get(), 1);
+            fresh_payload_unchanged(&connector, &request);
+        }
+    }
+}

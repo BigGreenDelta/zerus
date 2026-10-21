@@ -1,0 +1,91 @@
+name: iOS approval choices UI qualification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/ios-approval-ui.yml'
+      - 'mobile/ios/ApprovalUIFixture/**'
+      - 'scripts/ci/ios-approval-ui*.py'
+      - 'tests/test_approval_ui_harness.py'
+      - 'mobile/ios/Zerus/Conversation/QuestionCard.swift'
+      - 'mobile/ios/Zerus/App/Theme.swift'
+      - 'mobile/ios/Zerus/Common/MarkdownView.swift'
+      - 'mobile/ios/ZerusKit/**'
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Reviewed exact source commit (40 lowercase hex characters)
+        required: true
+        type: string
+      xcode_application:
+        description: Exact installed Xcode application basename from the reviewed hosted inventory
+        required: true
+        type: string
+      xcode_build:
+        description: Exact Xcode build identifier from that inventory (no latest fallback)
+        required: true
+        type: string
+      runtime_identifier:
+        description: Exact available iOS simulator runtime identifier
+        required: true
+        type: string
+      device_type_identifier:
+        description: Exact available iPhone simulator device-type identifier
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# A fresh hosted VM only; neither PR nor manual qualification consumes or writes caches.
+cache-mode: none
+
+jobs:
+  approval-ui:
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha }}
+      EXPECTED_XCODE_APPLICATION: ${{ github.event_name == 'pull_request' && 'Xcode_26.3.app' || inputs.xcode_application }}
+      EXPECTED_XCODE_BUILD: ${{ github.event_name == 'pull_request' && '17C529' || inputs.xcode_build }}
+      EXPECTED_RUNTIME: ${{ github.event_name == 'pull_request' && 'com.apple.CoreSimulator.SimRuntime.iOS-26-2' || inputs.runtime_identifier }}
+      EXPECTED_DEVICE_TYPE: ${{ github.event_name == 'pull_request' && 'com.apple.CoreSimulator.SimDeviceType.iPhone-16' || inputs.device_type_identifier }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.EXPECTED_SOURCE }}
+          persist-credentials: false
+      - name: Validate reviewed input and disposable hosted scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test -z "$(git status --porcelain)"
+          python3 -I -B - <<'PY'
+          import os, re
+          assert re.fullmatch('[0-9a-f]{40}', os.environ['EXPECTED_SOURCE'])
+          assert re.fullmatch(r'Xcode_[0-9]+(?:\.[0-9]+)*\.app', os.environ['EXPECTED_XCODE_APPLICATION'])
+          assert re.fullmatch('[0-9A-Za-z]{3,32}', os.environ['EXPECTED_XCODE_BUILD'])
+          PY
+          echo "DEVELOPER_DIR=/Applications/$EXPECTED_XCODE_APPLICATION/Contents/Developer" >> "$GITHUB_ENV"
+      - name: Check SDK-free admission, inventory and ownership controls
+        run: python3 -I -B tests/test_approval_ui_harness.py
+      - name: One unsigned native simulator UI campaign
+        run: python3 -I -B scripts/ci/ios-approval-ui.py
+      - name: Retain raw tests, source identity and exact simulator cleanup
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-approval-ui-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ios-approval-ui-evidence/*.json
+            ${{ runner.temp }}/ios-approval-ui-evidence/*.stdout
+            ${{ runner.temp }}/ios-approval-ui-evidence/*.stderr
+            ${{ runner.temp }}/ios-approval-ui-evidence/project
+            ${{ runner.temp }}/ios-approval-ui-evidence/result.xcresult
+            ${{ runner.temp }}/ios-approval-ui-evidence/derived/Build/Products/Debug-iphonesimulator/ApprovalUIFixture.app
+            ${{ runner.temp }}/ios-approval-ui-evidence/derived/Build/Products/Debug-iphonesimulator/ApprovalUIFixtureTests-Runner.app
+          if-no-files-found: error
+          retention-days: 3

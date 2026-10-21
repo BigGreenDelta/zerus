@@ -1,0 +1,165 @@
+name: Android approval choices UI qualification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/android-approval-ui.yml'
+      - 'scripts/ci/android-project-ui*'
+      - 'tests/test_approval_ui_harness.py'
+      - 'tests/test_android_project_ui.py'
+      - 'tests/fixtures/android-project-ui-java-release.txt'
+      - 'mobile/android/**'
+      - 'src/state/project*'
+      - 'src/state/swarm*'
+      - 'services/mobile/**'
+      - 'tests/fixtures/mobile-*.json'
+      - 'docs/mobile-session-projects.md'
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Reviewed exact source commit (40 lowercase hex characters)
+        required: true
+        type: string
+      emulator_revision:
+        description: Must equal the reviewed stable pin (no automatic version fallback)
+        default: '37.2.12'
+        required: true
+        type: string
+      system_image_revision:
+        description: Must equal the reviewed API35 image pin
+        default: '9.0.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# This qualification consumes no cache; PR code receives no cache-write token.
+cache-mode: none
+
+jobs:
+  approval-ui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EXPECTED_SOURCE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_sha }}
+      EXPECTED_EMULATOR_REVISION: '37.2.12'
+      EXPECTED_SYSTEM_IMAGE_REVISION: '9.0.0'
+      REQUESTED_EMULATOR_REVISION: ${{ github.event_name == 'pull_request' && '37.2.12' || inputs.emulator_revision }}
+      REQUESTED_SYSTEM_IMAGE_REVISION: ${{ github.event_name == 'pull_request' && '9.0.0' || inputs.system_image_revision }}
+    steps:
+      - name: Validate immutable input and hosted image
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -B - <<'PY'
+          import hashlib, json, os, re
+          from pathlib import Path
+          HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1"})
+          os.umask(0o077)
+          folder = Path(os.environ['RUNNER_TEMP']) / 'android-project-ui-admission'
+          folder.mkdir(mode=0o700)
+          admission = {
+              'actual_image': os.environ.get('ImageVersion'),
+              'allowed_images': sorted(HOSTED_IMAGES),
+              'environment': os.environ.get('RUNNER_ENVIRONMENT'),
+              'source': os.environ.get('EXPECTED_SOURCE'),
+              'expected_java': '17.0.20.1+1',
+              'checks': {},
+              'scope': 'Admission metadata only; not an SDK or UI result.'
+          }
+          def record():
+              with (folder / 'runner.json').open('x') as output:
+                  json.dump(admission, output, indent=2)
+                  output.write('\n')
+                  output.flush()
+                  os.fsync(output.fileno())
+          def require(name, passed):
+              admission['checks'][name] = bool(passed)
+              if not passed:
+                  admission['failed_guard'] = name
+                  record()
+                  raise SystemExit('Hosted admission refused: ' + name)
+          def java_release(text):
+              """Exact published base/build, with only the recognized optional LTS suffix."""
+              assert len(text.encode("utf-8")) <= 65536, "java_release_size"
+              fields = {}
+              for line in text.splitlines():
+                  if not line:
+                      continue
+                  match = re.fullmatch(r'([A-Z][A-Z0-9_]*)="([^"\r\n]*)"', line)
+                  assert match and match[1] not in fields, "java_release_fields"
+                  fields[match[1]] = match[2]
+              full = r"17\.0\.20\.1\+1(?:-LTS)?"
+              assert fields.get("JAVA_VERSION") == "17.0.20.1" or re.fullmatch(full, fields.get("JAVA_VERSION", "")), "JAVA_VERSION"
+              proof = bool(re.fullmatch(full, fields["JAVA_VERSION"]))
+              for name in ("JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION", "FULL_VERSION", "SEMANTIC_VERSION", "JVM_VERSION"):
+                  if name not in fields:
+                      continue
+                  pattern = (r"(?:Temurin-)?" if name == "IMPLEMENTOR_VERSION" else "") + full
+                  assert re.fullmatch(pattern, fields[name]), name
+                  proof = True
+              assert proof, "java_build_unknown"
+              return {name: fields[name] for name in ("JAVA_VERSION", "JAVA_RUNTIME_VERSION", "IMPLEMENTOR_VERSION", "FULL_VERSION", "SEMANTIC_VERSION", "JVM_VERSION", "IMPLEMENTOR") if name in fields}
+          require('source_sha', re.fullmatch('[0-9a-f]{40}', os.environ.get('EXPECTED_SOURCE', '')))
+          require('emulator_revision', os.environ.get('REQUESTED_EMULATOR_REVISION') == os.environ.get('EXPECTED_EMULATOR_REVISION') == '37.2.12')
+          require('system_image_revision', os.environ.get('REQUESTED_SYSTEM_IMAGE_REVISION') == os.environ.get('EXPECTED_SYSTEM_IMAGE_REVISION') == '9.0.0')
+          require('hosted_environment', os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted')
+          require('hosted_image', os.environ.get('ImageVersion') in HOSTED_IMAGES)
+          require('java_home', bool(os.environ.get('JAVA_HOME_17_X64')))
+          release = Path(os.environ['JAVA_HOME_17_X64']) / 'release'
+          try:
+              with release.open('rb') as source:
+                  raw = source.read(65537)
+          except OSError as error:
+              admission['release_error'] = type(error).__name__
+              require('java_release_read', False)
+          require('java_release_size', len(raw) <= 65536)
+          with (folder / 'java-release.txt').open('xb') as output:
+              output.write(raw)
+          admission['java_release_sha256'] = hashlib.sha256(raw).hexdigest()
+          try:
+              admission['java'] = java_release(raw.decode('utf-8'))
+          except (AssertionError, UnicodeError) as error:
+              admission['release_error'] = str(error)
+              require('java_base_build', False)
+          require('java_base_build', True)
+          record()
+          PY
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.EXPECTED_SOURCE }}
+          persist-credentials: false
+      - name: Check result and APK admission controls without an SDK
+        run: |
+          python3 -I -B tests/test_android_project_ui.py
+          python3 -I -B tests/test_approval_ui_harness.py
+      - name: Enable KVM only on this disposable hosted VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Build and qualify the disposable approval fixture once
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test -z "$(git status --porcelain)"
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export PATH="$JAVA_HOME/bin:/usr/bin:/bin"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          python3 -I -B scripts/ci/android-project-ui.py --approval-choices
+      - name: Retain tool/source/APK identities and raw synthetic results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-approval-ui-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/android-project-ui-admission
+            ${{ runner.temp }}/android-project-ui-evidence
+          if-no-files-found: error
+          retention-days: 3

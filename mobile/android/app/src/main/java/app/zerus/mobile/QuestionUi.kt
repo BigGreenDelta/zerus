@@ -97,9 +97,11 @@ import org.json.JSONObject
     }
 }
 
-@Composable private fun NativeQuestionCard(model: ZerusViewModel, target: Target, question: Question, available: Boolean,
+@Composable private fun NativeQuestionCard(model: ZerusViewModel, target: Target, question: Question, frameAvailable: Boolean,
     visible: Boolean, viewport: Rect?, maxHeight: Dp, page: Int, onPage: (Int) -> Unit, scrollOffset: Int, onScroll: (Int) -> Unit,
     expanded: Boolean, onExpand: () -> Unit, onCollapse: () -> Unit, onReview: (Draft) -> Unit) {
+    val bound = QuestionSendPolicies.bound(question, target)
+    val available = frameAvailable && bound
     val draft = model.draft(target, question)
     val native = QuestionPolicies.submitted(question, target)
     val saved = remember(draft.answers, native) {
@@ -113,7 +115,7 @@ import org.json.JSONObject
     }
     fun answers() = QuestionPolicies.answers(question.prompts, options, texts)
     fun persist() { model.edit(target, texts.values.filter { it.isNotBlank() }.joinToString("\n"), question, answers().toString()) }
-    val editing = draft.status == "editing" && native == null && model.pendingQuestionSend == null
+    val editing = bound && draft.status == "editing" && native == null && model.pendingQuestionSend == null
     val formReplyText = QuestionPolicies.formReplyText(question)
     val error = QuestionPolicies.answerError(question.prompts, options, texts, formReplyText)
     val complete = QuestionPolicies.complete(question.prompts, options, texts, formReplyText)
@@ -170,6 +172,9 @@ import org.json.JSONObject
     val step = QuestionSteps.current(question.prompts, page, options, texts, formReplyText)
     val pageIndex = step.page
     fun primaryAction() {
+        // BEGIN QUESTION_UI_PROBE entry
+        if (QuestionUiProbe.enabled) QuestionUiProbe.entry(question, options, step.nextPage != null, step.canAdvance, editing, submitPending, choices, reviewed, broader.open)
+        // END QUESTION_UI_PROBE entry
         if (step.nextPage != null) {
             if (editing && !submitPending && step.canAdvance) {
                 persist(); navigate(step.nextPage)
@@ -178,10 +183,24 @@ import org.json.JSONObject
         else if (reviewed) {
             // A broader option sends only from its own confirmation.
             val confirmation = broader.request(question, options, true)
+            // BEGIN QUESTION_UI_PROBE request
+            if (QuestionUiProbe.enabled) QuestionUiProbe.requested(question, options, confirmation)
+            // END QUESTION_UI_PROBE request
             if (confirmation.open) broader = confirmation else submitAnswer()
         }
     }
     val primaryEnabled = if (step.nextPage != null) editing && !submitPending && step.canAdvance else sendEnabled && (!choices || reviewed)
+    // BEGIN QUESTION_UI_PROBE committed
+    if (QuestionUiProbe.enabled) {
+        val committedOptions = options
+        val committed = QuestionUiProbe.Committed(reviewEligible, remaining, reviewed, primaryEnabled,
+            available, editing, submitPending, complete, disclosureInWindow, foreground, window.isWindowFocused,
+            step.nextPage != null, step.canAdvance, choices, broader.open, inDialog, visible,
+            LocalConversationObscuration.current?.obscured == true, question.canAnswer, approvalSupported || permission || choices,
+            review.startedAt)
+        SideEffect { QuestionUiProbe.committed(question, committedOptions, committed) }
+    }
+    // END QUESTION_UI_PROBE committed
     val currentPrompts = question.prompts.getOrNull(pageIndex)?.let(::listOf).orEmpty()
     val otherPrompts = currentPrompts.mapNotNull { prompt -> QuestionPolicies.textField(question, prompt)?.let { prompt to it } }
     val submitVisible = QuestionPolicies.submitVisible(question)
@@ -247,10 +266,11 @@ import org.json.JSONObject
                     }
                 }
             }
-            if (bodyScroll.canScrollForward) Surface(color = Color(0xFF2B2923), modifier = Modifier.align(Alignment.BottomCenter)) {
+            }
+            // Reserve a sibling row: Surface also blocks touches behind its bounds.
+            if (bodyScroll.canScrollForward) Surface(color = Color(0xFF2B2923), modifier = Modifier.align(Alignment.CenterHorizontally)) {
                 Text("Scroll for options ↓", Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                     color = Color(0xFFFFCB7D), style = MaterialTheme.typography.labelSmall)
-            }
             }
             otherPrompts.forEachIndexed { index,(prompt,field) ->
                 var focused by remember(target.key,question.id,question.hash,prompt.id) { mutableStateOf(false) }
@@ -388,6 +408,9 @@ import org.json.JSONObject
     options: Map<String, Set<String>>, eligible: Boolean, onChange: (BroaderChoiceConfirmation) -> Unit, send: () -> Unit) {
     val choice = confirmation.showing(question, options, eligible)
     LaunchedEffect(confirmation, choice) { if (confirmation.open && choice == null) onChange(confirmation.cancel()) }
+    // BEGIN QUESTION_UI_PROBE showing
+    if (QuestionUiProbe.enabled) SideEffect { QuestionUiProbe.showing(question, options, confirmation, eligible, choice) }
+    // END QUESTION_UI_PROBE showing
     if (choice == null) return
     ObscureConversation()
     ZerusAlertDialog(onDismissRequest = { onChange(confirmation.cancel()) },

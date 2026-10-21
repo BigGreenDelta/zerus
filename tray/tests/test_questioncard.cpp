@@ -189,6 +189,7 @@ private slots:
     void openCodePermissionListsNativeChoicesAndConfirmsAlwaysAllow();
     void openCodeFormTextMayStartWithSlashOrBang();
     void claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes();
+    void kimiNativeChoicesReviewFeedbackAndReplacementGuards();
     void unreadableApprovalPointsToTerminal();
     void kimiPlanReviewShowsPlanAndNamedRevise();
     void optionalQuestionsHaveExplicitSkipAndKeepDrafts();
@@ -482,6 +483,62 @@ void TestQuestionCard::claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes()
     option(card,"4")->click();QTRY_VERIFY(submit(card)->isEnabled());submit(card)->click();QCOMPARE(sent.size(),2);
     QCOMPARE(sent.last()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(),QJsonArray{"4"});
     const auto preview=qEnvironmentVariable("HGS_APPROVAL_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(card.grab().save(preview+"/claude-approval.png"));}
+}
+
+void TestQuestionCard::kimiNativeChoicesReviewFeedbackAndReplacementGuards()
+{
+    QuestionCard card; card.resize(700, 500); card.show(); card.activateWindow(); QApplication::setActiveWindow(&card);
+    auto approval = request("kimi-approval:fixture", "first");
+    approval["approval"] = true; approval["approval_choices"] = true; approval["source"] = "kimi_tool_approval";
+    approval["questions"] = QJsonArray{QJsonObject{{"id", "approval"}, {"question", "Run this synthetic command?"},
+        {"body", "printf fixture # *literal*"}, {"allow_other", true}, {"other_label", "Reject with feedback"},
+        {"options", QJsonArray{QJsonObject{{"id", "1"}, {"label", "Approve once"}, {"scope", "once"}},
+            QJsonObject{{"id", "2"}, {"label", "Approve for this session"}, {"description", "Exact command for this session only"}, {"scope", "broader"}},
+            QJsonObject{{"id", "3"}, {"label", "Reject"}, {"scope", "once"}}}}}};
+    setQuestionReady(card, "session", approval);
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    QVERIFY(option(card, "2")); QTest::mouseClick(option(card, "2"), Qt::LeftButton);
+    QVERIFY(!submit(card)->isEnabled());
+    // Exercise the unchanged production delay, rather than setReviewDelayForTests.
+    QTest::qWait(1000); QVERIFY(!submit(card)->isEnabled()); QCOMPARE(sent.size(), 0);
+    card.hide(); QTest::qWait(150); card.show(); card.activateWindow(); QApplication::setActiveWindow(&card);
+    QTest::qWait(1000); QVERIFY(!submit(card)->isEnabled()); QCOMPARE(sent.size(), 0);
+    QTRY_VERIFY_WITH_TIMEOUT(submit(card)->isEnabled(), 4000);
+    QTest::mouseClick(submit(card), Qt::LeftButton);
+    QCOMPARE(sent.size(), 0); QCOMPARE(submit(card)->text(), QString("Confirm"));
+    QVERIFY(card.findChild<QLabel *>("questionStatus")->text().contains("beyond this request"));
+    // Selecting another native choice cancels the broader second step, without sending it.
+    QTest::mouseClick(option(card, "3"), Qt::LeftButton);
+    QCOMPARE(submit(card)->text(), QString("Submit answer")); QCOMPARE(sent.size(), 0);
+    QTest::mouseClick(option(card, "2"), Qt::LeftButton); QTest::mouseClick(submit(card), Qt::LeftButton);
+    QCOMPARE(sent.size(), 0); QCOMPARE(submit(card)->text(), QString("Confirm"));
+    // A replacement card cannot consume the old confirmation or its elapsed review.
+    approval["question_hash"] = "replacement"; setQuestionReady(card, "session", approval);
+    QVERIFY(!submit(card)->isEnabled()); QCOMPARE(sent.size(), 0);
+    QTest::mouseClick(option(card, "2"), Qt::LeftButton);
+    QTRY_VERIFY_WITH_TIMEOUT(submit(card)->isEnabled(), 4000);
+    QTest::mouseClick(submit(card), Qt::LeftButton); QCOMPARE(sent.size(), 0);
+    QCOMPARE(submit(card)->text(), QString("Confirm"));
+    QTest::mouseClick(submit(card), Qt::LeftButton); QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent.first()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(), QJsonArray{"2"});
+    QCOMPARE(sent.first()[2].toJsonArray().first().toObject().value("text").toString(), QString());
+
+    approval["question_hash"] = "feedback"; setQuestionReady(card, "session", approval);
+    QVERIFY(other(card, "approval")); QTest::mouseClick(other(card, "approval"), Qt::LeftButton);
+    auto *editor = text(card, "approval"); QVERIFY(editor); editor->setFocus();
+    QTest::keyClicks(editor, "Use a safer command"); QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(sent.size(), 1); QVERIFY(!submit(card)->isEnabled());
+    QTRY_VERIFY_WITH_TIMEOUT(submit(card)->isEnabled(), 4000);
+    QTest::keyClick(editor, Qt::Key_Return); QCOMPARE(sent.size(), 2);
+    const auto feedback = sent.last()[2].toJsonArray().first().toObject();
+    QCOMPARE(feedback.value("selected_option_ids").toArray(), QJsonArray());
+    QCOMPARE(feedback.value("text").toString(), QString("Use a safer command"));
+    // Read-only replacement retains literal choices but cannot emit a callback, including Enter.
+    approval["question_hash"] = "readonly"; approval["can_answer"] = false;
+    approval["answer_unavailable_reason"] = "Synthetic request is no longer current";
+    setQuestionReady(card, "session", approval);
+    QVERIFY(!submit(card)->isEnabled()); QVERIFY(!option(card, "1")->isEnabled());
+    QTest::keyClick(&card, Qt::Key_Return); QCOMPARE(sent.size(), 2);
 }
 
 void TestQuestionCard::nativeCountdownPreservesScrollChoiceAndReview()

@@ -149,7 +149,7 @@ event("SessionEnd")
 
 
 def direct_signal_agent():
-    """Opt-in diagnostics for Archive's one Linux Codex signal case only.
+    """Opt-in diagnostics for Archive's three Linux direct-signal subcases only.
 
     Keep AGENT itself unchanged: all other cases still write its exact bytes.
     A failed diagnostic append must never change the fake's signal behavior.
@@ -157,10 +157,12 @@ def direct_signal_agent():
     trace = r'''
 def signal_phase(phase):
     try:
-        row = {"phase": phase, "pid": os.getpid(), "run": os.environ.get("HGS_RUN_ID", "")[:128],
+        if agent not in ("claude", "codex", "kimi"):
+            return
+        row = {"agent": agent, "phase": phase, "pid": os.getpid(), "run": os.environ.get("HGS_RUN_ID", "")[:128],
                "conversation": sid[:128], "at_ns": time.monotonic_ns()}
         data = (json.dumps(row, separators=(",", ":")) + "\n").encode()
-        fd = os.open(home / "direct-signal-agent.jsonl",
+        fd = os.open(home / ("direct-signal-agent-" + agent + ".jsonl"),
                      os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
             if os.fstat(fd).st_size <= 8192 and len(data) <= 512:
@@ -198,8 +200,10 @@ class DirectSignalTrace:
     is sampled only for the exact target and supervisor from the captured binding.
     Every read is bounded; unknown evidence stays unknown, not a readiness proof.
     """
-    def __init__(self, root):
-        self.root, self.samples = root, []
+    def __init__(self, root, agent):
+        if agent not in ("claude", "codex", "kimi"):
+            raise ValueError("unexpected direct-signal agent")
+        self.root, self.agent, self.samples = root, agent, []
 
     @staticmethod
     def process(pid, expected=None):
@@ -223,7 +227,7 @@ class DirectSignalTrace:
             masks = {}
             for line in status.decode().splitlines():
                 key, _, value = line.partition(":")
-                if key in ("SigBlk", "SigIgn", "SigCgt") and re.fullmatch(r"[0-9a-fA-F]{1,32}", value.strip()):
+                if key in ("SigBlk", "SigIgn", "SigCgt", "SigPnd", "ShdPnd") and re.fullmatch(r"[0-9a-fA-F]{1,32}", value.strip()):
                     masks[key] = value.strip()
             if identity() != before:
                 return {"unknown": "identity changed during sample"}
@@ -252,13 +256,13 @@ class DirectSignalTrace:
             # Sample the target last, immediately before returning to os.kill.
             parent = process(supervisor.get("pid"), "supervisor")
             child = process(record.get("pid"), "child")
-            sample = {"phase": phase, "at_ns": time.monotonic_ns(), "run": field(record.get("run_id")),
+            sample = {"agent": self.agent, "phase": phase, "at_ns": time.monotonic_ns(), "run": field(record.get("run_id")),
                       "conversation": field(record.get("conversation_id")), "pane": field(record.get("pane")),
                       "saved_pid": field(record.get("pid")), "saved_start": field(record.get("process_start")),
                       "saved_supervisor": {key: field(supervisor.get(key)) for key in ("pid", "start")},
                       "child": child, "supervisor": parent}
         except Exception as error:
-            sample = {"phase": phase, "unknown": type(error).__name__}
+            sample = {"agent": self.agent, "phase": phase, "unknown": type(error).__name__}
         self.samples.append(sample)
         return sample
 
@@ -267,7 +271,7 @@ class DirectSignalTrace:
         try:
             raw, trace_error = b"", None
             try:
-                with open(self.root / "direct-signal-agent.jsonl", "rb") as file:
+                with open(self.root / ("direct-signal-agent-" + self.agent + ".jsonl"), "rb") as file:
                     raw = file.read(8705)
             except Exception as error:
                 trace_error = type(error).__name__
@@ -279,7 +283,8 @@ class DirectSignalTrace:
                 try:
                     row = json.loads(line)
                     if (len(line) > 512 or not isinstance(row, dict)
-                            or set(row) != {"phase", "pid", "run", "conversation", "at_ns"}
+                            or set(row) != {"agent", "phase", "pid", "run", "conversation", "at_ns"}
+                            or row["agent"] != self.agent
                             or row["phase"] not in ("handler_enter", "SessionEnd_begin", "SessionEnd_end",
                                                      "handler_exit_143", "handler_registered",
                                                      "SessionStart_begin", "SessionStart_end")
@@ -291,7 +296,7 @@ class DirectSignalTrace:
                     phases.append(row)
                 except (ValueError, TypeError):
                     malformed += 1
-            data = {"schema": 1, "samples": self.samples, "agent_phases": phases,
+            data = {"schema": 1, "agent": self.agent, "samples": self.samples, "agent_phases": phases,
                     "agent_trace_sha256": hashlib.sha256(raw).hexdigest(),
                     "agent_trace_error": trace_error, "rows_omitted": max(0, len(lines) - 32),
                     "malformed_or_incomplete_rows": malformed, "trace_truncated": len(raw) > 8704}
@@ -321,6 +326,298 @@ class DirectSignalTrace:
             return "Direct signal diagnostics unavailable: " + type(error).__name__
 
 
+# BEGIN private Mac pause fixture observer.
+MAC_PAUSE_CASE = "test_pause.Lifecycle.test_claude_status_line_is_not_registered_where_claude_would_differ"
+MAC_PAUSE_PHASES = ("handler_registered", "SessionStart_returned", "stdin_enter", "term_handler_enter",
+                    "SessionEnd_begin", "SessionEnd_returned", "handler_exit143")
+MAC_PAUSE_RECEIVER = r'''
+# Diagnostic only: Python callback/self-mask observations, never kernel delivery proof.
+import hashlib as _mp_hashlib, stat as _mp_stat
+_mp_root, _mp_nonce, _mp_root_id = pathlib.Path(__MP_ROOT__), __MP_NONCE__, __MP_ROOT_ID__
+_mp_file_id, _mp_seq, _mp_busy, _mp_off = None, 0, False, False
+_mp_run = _mp_hashlib.sha256(os.environ.get("HGS_RUN_ID", "").encode()).hexdigest()
+_mp_conversation = _mp_hashlib.sha256(sid.encode()).hexdigest()
+def mac_pause_phase(phase):
+    global _mp_file_id, _mp_seq, _mp_busy, _mp_off
+    if agent != "claude" or os.environ.get("HGS_SESSION") != "claude/p/own" or _mp_off:
+        return
+    if _mp_busy:
+        _mp_off = True  # Reentrant telemetry is unknown; the original handler still runs.
+        return
+    _mp_busy = True
+    directory, fd = None, None
+    try:
+        if _mp_seq >= 7:
+            raise ValueError("phase bound")
+        try:
+            at = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+            if type(at) is not int or not 0 <= at < 2 ** 64:
+                at = None
+        except Exception:
+            at = None
+        handler = signal.getsignal(signal.SIGTERM)
+        disposition = ("stop_callback" if handler is stop else "ignore" if handler == signal.SIG_IGN
+                       else "default" if handler == signal.SIG_DFL else "other_callback" if callable(handler) else "unknown")
+        try:
+            blocked = signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        except Exception:
+            blocked = None
+        try:
+            pending = signal.SIGTERM in signal.sigpending()
+        except Exception:
+            pending = None
+        # Marker existence is fixture state, not a reason to change the stop.
+        row = {"v": 1, "role": "receiver", "seq": _mp_seq + 1, "phase": phase, "nonce": _mp_nonce,
+               "pid": os.getpid(), "ppid": os.getppid(), "clock": "CLOCK_MONOTONIC", "at": at,
+               "run": _mp_run, "conversation": _mp_conversation, "handler": disposition,
+               "term_blocked": blocked, "term_pending": pending,
+               "ignore_marker": (home / "ignore-term").exists(),
+               "delay_marker": (home / ("delay-term-" + sid)).exists()}
+        data = (json.dumps(row, separators=(",", ":")) + "\n").encode()
+        if len(data) > 768:
+            raise ValueError("row bound")
+        directory = os.open(_mp_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        meta = os.fstat(directory)
+        if ((meta.st_dev, meta.st_ino) != _mp_root_id or meta.st_uid != os.geteuid()
+                or not _mp_stat.S_ISDIR(meta.st_mode) or _mp_stat.S_IMODE(meta.st_mode) != 0o700):
+            raise ValueError("root identity")
+        flags = os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        flags |= os.O_CREAT | os.O_EXCL if _mp_file_id is None else os.O_APPEND
+        fd = os.open("receiver.jsonl", flags, 0o600, dir_fd=directory)
+        meta = os.fstat(fd)
+        identity = (meta.st_dev, meta.st_ino)
+        if (not _mp_stat.S_ISREG(meta.st_mode) or meta.st_uid != os.geteuid()
+                or _mp_stat.S_IMODE(meta.st_mode) != 0o600 or meta.st_nlink != 1
+                or (_mp_file_id is not None and identity != _mp_file_id)
+                or meta.st_size > 7 * 768 - len(data)):
+            raise ValueError("file identity or bound")
+        _mp_file_id = identity  # Only the original own run wins the exclusive creator.
+        if os.write(fd, data) != len(data):
+            raise ValueError("partial diagnostic write")
+        _mp_seq += 1
+    except Exception:
+        _mp_off = True
+    finally:
+        for owned in (fd, directory):
+            if owned is not None:
+                try:
+                    os.close(owned)
+                except Exception:
+                    _mp_off = True
+        _mp_busy = False
+'''
+
+
+class MacPauseProbe:
+    """Two private bounded role files for one synthetic Mac pause, never a gate.
+
+    The sender's pre-kill kernel birth remains UNKNOWN. Python's cached handler,
+    current thread's mask and self-pending sample do not describe other threads
+    or the receiver during a stall. SessionEnd_returned is the fake function's
+    return, not a receipt that its hook subprocess succeeded or ended.
+    """
+    def __init__(self, root):
+        self.root = (root / ".pause-signal").resolve()
+        self.root.mkdir(mode=0o700)
+        meta = self.root.stat()
+        self.root_id, self.nonce = (meta.st_dev, meta.st_ino), uuid.uuid4().hex
+        self.context, self.unknown = None, None
+        try:
+            self.created_at = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        except Exception:
+            self.created_at = None
+
+    @staticmethod
+    def selected(platform, case, legacy):
+        return platform == "darwin" and case == MAC_PAUSE_CASE and not legacy
+
+    def agent(self):
+        trace = MAC_PAUSE_RECEIVER.replace("__MP_ROOT__", repr(str(self.root)))
+        trace = trace.replace("__MP_NONCE__", repr(self.nonce)).replace("__MP_ROOT_ID__", repr(self.root_id))
+        replacements = (
+            ('def stop(*args):', trace + '\ndef stop(*args):\n    mac_pause_phase("term_handler_enter")'),
+            ('    event("SessionEnd", reason="exit" if agent == "kimi" else "other")',
+             '    mac_pause_phase("SessionEnd_begin")\n'
+             '    event("SessionEnd", reason="exit" if agent == "kimi" else "other")\n'
+             '    mac_pause_phase("SessionEnd_returned")'),
+            ('    sys.exit(143)', '    mac_pause_phase("handler_exit143")\n    sys.exit(143)'),
+            ('signal.signal(signal.SIGTERM, stop)',
+             'signal.signal(signal.SIGTERM, stop)\nmac_pause_phase("handler_registered")'),
+            ('event("SessionStart")\nfor line in sys.stdin:',
+             'event("SessionStart")\nmac_pause_phase("SessionStart_returned")\n'
+             'mac_pause_phase("stdin_enter")\nfor line in sys.stdin:'),
+        )
+        source = AGENT
+        for before, after in replacements:
+            if source.count(before) != 1:
+                raise ValueError("Mac pause diagnostic source no longer matches AGENT")
+            source = source.replace(before, after, 1)
+        return source
+
+    def environment(self, args, env, binding):
+        if args != ("pause", "claude/p/own"):
+            return env
+        try:
+            if self.context is not None:
+                raise ValueError("diagnostic already reserved")
+            record = binding("claude/p/own")
+            if record.get("name") != "claude/p/own" or type(record.get("pid")) is not int or record["pid"] <= 0:
+                raise ValueError("missing fixture identity")
+            values = {}
+            for key, source in (("run", "run_id"), ("conversation", "conversation_id"),
+                                ("pane", "pane"), ("saved_start", "process_start")):
+                value = record.get(source)
+                if not isinstance(value, str) or not value or len(value) > 256 or any(ord(c) < 32 for c in value):
+                    raise ValueError("unknown fixture identity")
+                values[key] = hashlib.sha256(value.encode()).hexdigest()
+            context = dict(version=1, nonce=self.nonce, target_pid=record["pid"],
+                           root_dev=self.root_id[0], root_ino=self.root_id[1], **values)
+            data = (json.dumps(context, separators=(",", ":")) + "\n").encode()
+            directory = self.directory()
+            try:
+                fd = os.open("manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                             | os.O_NONBLOCK | os.O_CLOEXEC, 0o600, dir_fd=directory)
+                try:
+                    if len(data) > 1024 or os.write(fd, data) != len(data):
+                        raise ValueError("incomplete context")
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(directory)
+            self.context = context
+            return dict(env, HGS_TEST_MAC_PAUSE_OBSERVER="1", HGS_TEST_MAC_PAUSE_ROOT=str(self.root))
+        except Exception as error:
+            self.unknown = type(error).__name__
+            return env  # Diagnostics never suppress or retry the original pause.
+
+    def directory(self):
+        import stat
+        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            meta = os.fstat(fd)
+            if ((meta.st_dev, meta.st_ino) != self.root_id or meta.st_uid != os.geteuid()
+                    or not stat.S_ISDIR(meta.st_mode) or stat.S_IMODE(meta.st_mode) != 0o700):
+                raise ValueError("changed private root")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    @staticmethod
+    def decode(raw, role, context, lower, upper):
+        """A malformed/partial/stale stream stays unknown; never infer a signal."""
+        maximum = 2 if role == "sender" else 7 if role == "receiver" else 0
+        if not maximum or not raw or len(raw) > maximum * 768 or not raw.endswith(b"\n"):
+            raise ValueError("missing or bounded stream")
+        lines, rows, phases = raw.splitlines(keepends=True), [], set()
+        if len(lines) > maximum:
+            raise ValueError("row count")
+        common = {"v", "role", "seq", "phase", "nonce", "pid", "clock", "at", "run", "conversation"}
+        extra = ({"target", "pane", "saved_start", "birth_before", "sender_birth_after", "target_birth_after", "rc", "errno"}
+                 if role == "sender" else {"ppid", "handler", "term_blocked", "term_pending", "ignore_marker", "delay_marker"})
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate diagnostic field")
+                result[key] = value
+            return result
+
+        for number, line in enumerate(lines, 1):
+            row = json.loads(line, object_pairs_hook=unique)
+            if (len(line) > 768 or not isinstance(row, dict) or set(row) != common | extra
+                    or type(row["v"]) is not int or row["v"] != 1 or row["role"] != role
+                    or type(row["seq"]) is not int or row["seq"] != number
+                    or row["nonce"] != context["nonce"] or row["clock"] != "CLOCK_MONOTONIC"
+                    or type(row["pid"]) is not int or not 0 < row["pid"] < 2 ** 31
+                    or row["run"] != context["run"] or row["conversation"] != context["conversation"]
+                    or row["at"] is not None and (type(row["at"]) is not int or not 0 <= row["at"] < 2 ** 64
+                                                  or type(lower) is not int or type(upper) is not int
+                                                  or not lower <= row["at"] <= upper)):
+                raise ValueError("unexpected diagnostic fields")
+            if role == "sender":
+                if (row["phase"] != ("kill_before", "kill_return_or_errno")[number - 1]
+                        or type(row["target"]) is not int or row["target"] != context["target_pid"]
+                        or row["pane"] != context["pane"]
+                        or row["saved_start"] != context["saved_start"] or row["birth_before"] != "unknown"
+                        or any(value is not None and (not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,20}:[0-9]{1,6}", value))
+                               for value in (row["sender_birth_after"], row["target_birth_after"]))
+                        or number == 1 and (row["rc"] is not None or row["errno"] is not None)
+                        or number == 2 and (type(row["rc"]) is not int or row["rc"] not in (0, -1)
+                                             or row["rc"] == 0 and row["errno"] is not None
+                                             or row["rc"] != 0 and (type(row["errno"]) is not int or row["errno"] <= 0))):
+                    raise ValueError("unknown sender identity or result")
+            elif (row["phase"] not in MAC_PAUSE_PHASES or row["phase"] in phases
+                    or row["pid"] != context["target_pid"] or type(row["ppid"]) is not int or row["ppid"] <= 0
+                    or row["handler"] not in ("stop_callback", "ignore", "default", "other_callback", "unknown")
+                    or any(row[key] is not None and type(row[key]) is not bool for key in ("term_blocked", "term_pending"))
+                    or any(type(row[key]) is not bool for key in ("ignore_marker", "delay_marker"))):
+                raise ValueError("unknown receiver identity or phase")
+            if rows and row["at"] is not None and rows[-1]["at"] is not None and row["at"] < rows[-1]["at"]:
+                raise ValueError("nonmonotonic role clock")
+            phases.add(row["phase"])
+            rows.append(row)
+        if role == "sender" and (len(rows) != 2 or rows[0]["pid"] != rows[1]["pid"]):
+            raise ValueError("incomplete sender")
+        return rows
+
+    def failure(self, deadline):
+        try:
+            if self.context is None:
+                raise ValueError("missing reserved context")
+            rows, errors = [], {}
+            directory = self.directory()
+            try:
+                import stat
+                for role, limit in (("sender", 1536), ("receiver", 5376)):
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("existing report deadline")
+                    try:
+                        fd = os.open(role + ".jsonl", os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=directory)
+                        try:
+                            before = os.fstat(fd)
+                            if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                                    or stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or before.st_size > limit):
+                                raise ValueError("nonprivate role file")
+                            raw = os.read(fd, limit + 1)
+                            after = os.fstat(fd)
+                            if ((before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size)
+                                    or len(raw) != before.st_size or time.monotonic() >= deadline):
+                                raise ValueError("changed, partial or late role read")
+                            try:
+                                upper = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+                            except Exception:
+                                upper = None
+                            rows.extend(self.decode(raw, role, self.context, self.created_at, upper))
+                        finally:
+                            os.close(fd)
+                    except Exception as error:
+                        errors[role] = type(error).__name__
+            finally:
+                os.close(directory)
+            data = {"schema": 1, "observer": "private_mac_pause", "rows": rows, "unknown": errors,
+                    "kernel_birth_before_kill": "unknown", "during_stall_thread_state": "unknown",
+                    "clock_domain": "same-host CLOCK_MONOTONIC; null timestamps are unknown",
+                    "python_state": "cached callback and calling-thread mask/pending only",
+                    "session_end_return": "fake function return, not hook success or hook PID"}
+            encoded = (json.dumps(data, separators=(",", ":")) + "\n").encode()
+            if len(rows) > 9 or len(encoded) > 8192 or time.monotonic() >= deadline:
+                raise ValueError("late or oversized diagnostic")
+            folder = REPO / "artifacts/test-results/python"
+            folder.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(prefix="mac-pause-", suffix=".json", dir=folder, delete=False) as file:
+                if file.write(encoded) != len(encoded):
+                    raise ValueError("partial diagnostic artifact")
+                file.flush()
+                os.fsync(file.fileno())  # Failure collector only; never the handler.
+            if time.monotonic() >= deadline:
+                raise TimeoutError("late diagnostic artifact")
+            return "Mac pause diagnostic artifact=" + str(Path(file.name).relative_to(REPO)) + "\n" + encoded.decode()
+        except Exception as error:
+            return "Mac pause diagnostic UNKNOWN: " + type(error).__name__
+# END private Mac pause fixture observer.
+
+
 @unittest.skipUnless(TMUX, "tmux is required")
 class Harness(unittest.TestCase):
     def setUp(self):
@@ -339,8 +636,21 @@ class Harness(unittest.TestCase):
                         PATH=str(self.bin) + ":" + os.environ["PATH"])
         for k in ("TMUX", "TMUX_PANE", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"):
             self.env.pop(k, None)
+        # The exact selected Darwin fake alone gets passive signal diagnostics.
+        self.mac_pause_probe = None
+        if MacPauseProbe.selected(sys.platform, self.id(), LEGACY_STATE):
+            try:
+                self.mac_pause_probe = MacPauseProbe(self.root)
+            except Exception:
+                pass  # Unavailable telemetry must not change the original fixture.
         for name in ("claude", "codex", "kimi"):
-            self.script(name, AGENT)
+            source = AGENT
+            if name == "claude" and self.mac_pause_probe is not None:
+                try:
+                    source = self.mac_pause_probe.agent()
+                except Exception:
+                    self.mac_pause_probe = None
+            self.script(name, source)
         # Fake agents need no login. Never read or unlock the real macOS keychain.
         self.script("security", "#!/bin/sh\nexit 0\n")
         self.script("shell", '#!/bin/sh\nshift\nexec /bin/bash -c "$@"\n')
@@ -413,7 +723,9 @@ class Harness(unittest.TestCase):
         path.chmod(0o755)
 
     def hgs(self, *args, rc=0, cwd=None):
-        p = subprocess.run([str(HGS), *args], env=self.env,
+        probe = getattr(self, "mac_pause_probe", None)
+        env = probe.environment(args, self.env, self.binding) if probe is not None else self.env
+        p = subprocess.run([str(HGS), *args], env=env,
                            capture_output=True, text=True, timeout=20, cwd=cwd)
         stalled = p.returncode != rc and args[:1] == ("pause",) and "did not exit after SIGTERM" in p.stderr
         self.assertEqual(p.returncode, rc, p.stdout + p.stderr + (self.stop_report() if stalled else ""))
@@ -596,6 +908,9 @@ class Harness(unittest.TestCase):
                 lines.append(f"stack {row['pid']}: +{len(threads) - STOP_REPORT_THREADS} threads omitted")
 
         try:
+            probe = getattr(self, "mac_pause_probe", None)
+            if probe is not None:
+                step("Mac pause trace", lambda: lines.append(probe.failure(deadline)))
             step("panes", panes)
             step("records", records)
             step("processes", processes)
@@ -2576,7 +2891,7 @@ class Archive(Harness):
     def test_pause_and_agent_signal_remain_saved(self):
         for agent in ("claude", "codex", "kimi"):
             with self.subTest(agent=agent):
-                trace = DirectSignalTrace(self.root) if agent == "codex" and sys.platform == "linux" else None
+                trace = DirectSignalTrace(self.root, agent) if sys.platform == "linux" else None
                 if trace:
                     self.script(agent, direct_signal_agent())
                 try:

@@ -527,11 +527,21 @@ class NativeHarness(unittest.TestCase):
         chosen={'provider':'hgs-test','model':'test-b','reasoningEffort':'off'}
         self.cli('settings',parent,self.payload(parent,model='hgs-test/test-b',effort='off'))
         self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
-        def child_row():
-            return next((r for r in self.rpc('list')['items']
-                         if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent'),None)
+        child=None
+        def held_child_row():
+            nonlocal child
+            row=next((r for r in self.rpc('list')['items']
+                      if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent'),None)
+            if row is None:
+                return None
+            if child is None:
+                child=row['sessionId']
+            self.assertEqual(row['sessionId'],child)
+            # Registry membership precedes the first turn. Admit only this
+            # child's held pre-step and running state under the original wait.
+            return row if (self.root/'holds'/(hold+'.waiting')).exists() and row.get('running') is True else None
         try:
-            row=self.wait(child_row);child=row['sessionId']
+            row=self.wait(held_child_row)
             self.assertTrue(row['running'])
             self.assertEqual(row['selection'],chosen)
             native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})

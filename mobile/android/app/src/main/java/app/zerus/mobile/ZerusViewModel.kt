@@ -236,6 +236,29 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun contextOperation(target: Target) = contextOperations.lastOrNull { ContextPolicies.sameSessionRun(it.target, target) && it.blocksSending }
         ?: contextOperations.lastOrNull { ContextPolicies.sameSessionRun(it.target, target) }
     fun contextBlocked(target: Target) = sessionActions.any { it.target == target && it.blocksSending } || clearExpectation?.let { ContextPolicies.sameSessionRun(it.target, target) } == true || contextOperations.any { ContextPolicies.sameSessionRun(it.target, target) && it.blocksSending }
+    // BEGIN QUESTION_AVAILABILITY_PROBE definitions
+    private fun questionVerificationProbe(writer: QuestionUiProbe.VerificationWriter) {
+        if (!QuestionUiProbe.enabled) return
+        try {
+            val frame = activeFrame
+            QuestionUiProbe.verification(selected?.target, writer, activityVerified, activeFrameVerified,
+                frame != null, frame?.presentation != null, frame != null && frame.target == selected?.target)
+        } catch (_: Throwable) { QuestionUiProbe.observationFailed() }
+    }
+    internal fun questionAvailabilityProbe(target: Target, online: Boolean): QuestionUiProbe.Availability? {
+        if (!QuestionUiProbe.enabled) return null
+        return try {
+            val verified = activityVerified
+            val preview = demo
+            val blocked = contextBlocked(target)
+            val actionBlocked = sessionActions.any { it.target == target && it.blocksSending }
+            val clearBlocked = clearExpectation?.let { ContextPolicies.sameSessionRun(it.target, target) } == true
+            val operationBlocked = contextOperations.any { ContextPolicies.sameSessionRun(it.target, target) && it.blocksSending }
+            QuestionUiProbe.Availability(verified, preview, online, blocked, actionBlocked, clearBlocked,
+                operationBlocked, selected?.target == target, online && verified && !blocked)
+        } catch (_: Throwable) { QuestionUiProbe.observationFailed(); null }
+    }
+    // END QUESTION_AVAILABILITY_PROBE definitions
     private var messageState by mutableStateOf(MessageState())
     private val messageRepository = MessagePersistence.get(application)
     private var persistence: OrderedStatePersistence<MessageState>? = null
@@ -719,6 +742,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var conversationHistoryTruncated by mutableStateOf(false); private set
     private data class Frame(val target: Target, val raw: JSONObject, val events: List<Event>, val questions: List<Question>, val observedAt: Long, val bytes: Int, val truncated: Boolean = false, var presentation: Presentation? = null,val window:HistoryWindow?=null,val indexComplete:Boolean=false,val indexing:Boolean=false,val unreadBoundary:String?=null,val inspectedEvents:List<Event> = emptyList(),val settingsInspectionStartNanos:Long=0)
     private data class Presentation(val messages: List<OutgoingMessage>, val events: List<Event>, val questions: List<Question>)
+    private data class FrameInstall(val source: Frame, val frame: Frame, val guarded: HistoryWindow?, val changed: Boolean)
+    private data class FramePreparation(val install: FrameInstall, val state: MessageState,
+        val messages: List<OutgoingMessage>, val window: HistoryWindow?, val revision: Long,
+        val complete: Boolean, val indexing: Boolean, val selection: Session, val catalog: List<Session>)
     private val pageCache=ConversationPageCache(application)
     private val historyCache = ConversationCache(application)
     private val frames = LinkedHashMap<String, Frame>(24, 0.75f, true)
@@ -900,7 +927,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         frames[frame.target.key] = frame
         while (frames.size > 20 || frames.values.sumOf { it.bytes.toLong() } > 20L * 1024 * 1024) frames.remove(frames.keys.first())
     }
-    private fun installFrame(source: Frame, verified: Boolean) {
+    private fun frameInstall(source: Frame): FrameInstall {
         val retained=listOfNotNull(activeFrame?.takeIf { SessionNotificationPreferences.sameConversation(it.target,source.target) }?.raw,
             selected?.takeIf { SessionNotificationPreferences.sameConversation(it.target,source.target) }?.raw,
             catalogSessions.firstOrNull { SessionNotificationPreferences.sameConversation(it.target,source.target) }?.raw)
@@ -909,16 +936,23 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val window=historyWindows[incoming.target.key]
         val priorInspection=activeFrame?.takeIf { previous -> previous.target==incoming.target }?.inspectedEvents.orEmpty()
         val changed=window!=null && incoming.window!=window && HistoryInspection.changed(window,incoming.inspectedEvents,priorInspection)
-        if(changed) currentHistoryHeads-=ConversationReadPolicies.key(incoming.target)
         val guarded=window?.let { HistoryInspection.retain(it,incoming.window,incoming.inspectedEvents,priorInspection) }
         val frame=if(guarded!=null && (incoming.window!=guarded || incoming.events!=guarded.displayed)) incoming.copy(events=guarded.displayed,presentation=null,truncated=incoming.truncated || guarded.hasBefore || guarded.hasAfter,window=guarded,indexComplete=historyComplete && !changed,indexing=historyIndexing) else incoming
-        if(guarded!=null) historyWindows[incoming.target.key]=guarded
+        return FrameInstall(source, frame, guarded, changed)
+    }
+    private fun installFrame(source: Frame, verified: Boolean, staged: FrameInstall? = null) {
+        val install = staged ?: frameInstall(source)
+        check(install.source === source)
+        val frame = install.frame
+        val guarded = install.guarded
+        if(install.changed) currentHistoryHeads-=ConversationReadPolicies.key(frame.target)
+        if(guarded!=null) historyWindows[frame.target.key]=guarded
         activeFrame = frame; activeFrameVerified = verified
-        if (frame.presentation == null) { activityVerified = false; historyCached = activity != null }
+        if (frame.presentation == null) { activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-install-wait-presentation */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.INSTALL_WAIT_PRESENTATION) /* END QUESTION_AVAILABILITY_PROBE writer-install-wait-presentation */; historyCached = activity != null }
         frame.presentation?.let { prepared ->
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 conversationEvents = prepared.events; conversationOutgoing = prepared.messages; conversationQuestions = prepared.questions
-                activity = frame.raw; activityVerified = verified; historyCached = !verified; conversationHistoryTruncated = frame.truncated
+                activity = frame.raw; activityVerified = verified /* BEGIN QUESTION_AVAILABILITY_PROBE writer-install-presentation */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.INSTALL_PRESENTATION) /* END QUESTION_AVAILABILITY_PROBE writer-install-presentation */; historyCached = !verified; conversationHistoryTruncated = frame.truncated
                 publishPagingMetadata(frame)
                 captureUnreadBoundary(frame.target,prepared.events)
             }
@@ -953,7 +987,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if (conversationQuestions != questions) conversationQuestions = questions
                 if (conversationEvents != merged.events) conversationEvents = merged.events
                 if (conversationOutgoing != messages) conversationOutgoing = messages
-                activity = frame.raw; activityVerified = activeFrameVerified; historyCached = !activeFrameVerified; conversationHistoryTruncated = frame.truncated
+                activity = frame.raw; activityVerified = activeFrameVerified /* BEGIN QUESTION_AVAILABILITY_PROBE writer-prepare-presentation */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.PREPARE_PRESENTATION) /* END QUESTION_AVAILABILITY_PROBE writer-prepare-presentation */; historyCached = !activeFrameVerified; conversationHistoryTruncated = frame.truncated
                 publishPagingMetadata(frame)
                 if(pendingHistoryPosition==frame.target.key) { pendingHistoryPosition="";readPositionReady=true }
                 captureUnreadBoundary(frame.target,merged.events)
@@ -1538,7 +1572,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun setTerminalVisible(target:Target,visible:Boolean) {
         if(selected?.target != target) return
         terminalVisible=visible
-        if(visible) terminalSnapshot(target) else { terminalJob?.cancel();terminalLoading=false;terminalVerified=false;activityVerified=false;activeFrameVerified=false;refreshActivity() }
+        if(visible) terminalSnapshot(target) else { terminalJob?.cancel();terminalLoading=false;terminalVerified=false;activityVerified=false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-terminal-closed */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.TERMINAL_CLOSED) /* END QUESTION_AVAILABILITY_PROBE writer-terminal-closed */;activeFrameVerified=false;refreshActivity() }
     }
     fun terminalSnapshot(target:Target) {
         val reason=terminalOpenReason(target);if(reason.isNotBlank()) { terminalError=reason;return }
@@ -1779,7 +1813,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 else if(completed != null) when(SessionActionFollowUp.kind(completed,selected?.target,navigationId==navigation)) {
                     SessionActionFollowUp.Kind.Sessions -> { back();returnToSessionsSequence++;refresh() }
                     SessionActionFollowUp.Kind.OpenResult -> {
-                        activityVerified=false;activeFrameVerified=false;historyCached=activity != null
+                        activityVerified=false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-action-result */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.ACTION_RESULT) /* END QUESTION_AVAILABILITY_PROBE writer-action-result */;activeFrameVerified=false;historyCached=activity != null
                         resolveActionResult(completed,navigation,target)
                     }
                     SessionActionFollowUp.Kind.Refresh -> {
@@ -2128,7 +2162,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             machines = machines.filterNot { it.connectionId == connection.id }
             selectedMachines = selectedMachines.filterNot { it.connectionId == connection.id }.toSet()
             relayOperations = relayOperations - connection.id; machineOperations = machineOperations.filterKeys { it.connectionId != connection.id }
-            if (selected?.target?.connectionId == connection.id) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false; conversationEvents = emptyList(); conversationQuestions = emptyList(); conversationOutgoing = emptyList(); cancelCompactContinuation(); clearExpectation = null }
+            if (selected?.target?.connectionId == connection.id) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-connection-forgotten */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.CONNECTION_FORGOTTEN) /* END QUESTION_AVAILABILITY_PROBE writer-connection-forgotten */; conversationEvents = emptyList(); conversationQuestions = emptyList(); conversationOutgoing = emptyList(); cancelCompactContinuation(); clearExpectation = null }
         } catch (e: Exception) { error = "Could not revoke this phone on the gateway. The connection is preserved. ${e.message}" }
         finally { busy = false }
     }
@@ -2237,7 +2271,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         flushDrafts()
         if (!preserveProject) selectedProject = null
         navigationId++; cancelDetail()
-        selected = session; activityVerified = false; historyCached = false
+        selected = session; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-open-session */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.OPEN_SESSION) /* END QUESTION_AVAILABILITY_PROBE writer-open-session */; historyCached = false
         activeFrame = null; activity = null; conversationEvents = emptyList(); conversationQuestions = emptyList(); conversationOutgoing = emptyList(); conversationHistoryTruncated = false
         val warm = frames[session.target.key]?.takeIf { if (it.observedAt == 0L) historyCache.getMemory(it.target) != null else System.currentTimeMillis() - it.observedAt in 0..7L * 24 * 60 * 60 * 1000 }
         if (warm == null) frames.remove(session.target.key)
@@ -2331,7 +2365,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(selected?.target?.agentId?.isNotBlank() == true && parentSelection != null) { val parent=parentSelection!!;parentSelection=null;open(parent,true);return }
         cancelCompactContinuation(); clearExpectation = null
         flushDrafts()
-        if (selected != null) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false }
+        if (selected != null) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-back */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.BACK) /* END QUESTION_AVAILABILITY_PROBE writer-back */ }
         else selectedProject = null
     }
     fun refreshActivity(explicit: Boolean = false) {
@@ -2354,6 +2388,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             if (detailGate.owns(operation.id) && navigationId == navigation) detailProgress = detailGate.visible()
         }
         detailJob = viewModelScope.launch {
+        var preparingIncoming = false
+        var preparationOwner: Frame? = null
+        var publicationFrame: Frame? = null
+        fun ownsDetail() = detailGate.owns(operation.id) && navigationId == navigation &&
+            selected?.target == original.target && (!freshInspection || ownerCurrent()) && connections.any { it == connection }
         try {
             val frame = inspectOnce(connection, original.target,fresh=freshInspection,current={
                 !freshInspection || ownerCurrent() && detailGate.owns(operation.id) && navigationId==navigation && selected?.target==original.target
@@ -2362,7 +2401,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(detailReadErrorOwner==(original.target to navigation)) error=""
                 val clear = clearExpectation?.takeIf { it.navigation == navigation && ContextPolicies.sameSessionRun(it.target, frame.target) }
                 if (clear != null && frame.target.conversation != clear.target.conversation && !clear.confirmed) {
-                    activityVerified = false; activeFrameVerified = false; historyCached = activity != null
+                    activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-clear-unconfirmed */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.CLEAR_UNCONFIRMED) /* END QUESTION_AVAILABILITY_PROBE writer-clear-unconfirmed */; activeFrameVerified = false; historyCached = activity != null
                     return@launch
                 }
                 val clearOp = clear?.takeIf { it.confirmed && frame.target.conversation.isNotBlank() && frame.target.conversation != it.target.conversation }
@@ -2384,14 +2423,56 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     contextNotice = if (drafts.any { it.target == clearOp.target && it.questionId.isBlank() && it.detachedId.isBlank() })
                         "Context cleared. The previous composition remains in Saved drafts; restore it explicitly when ready." else "Context cleared. Your composition was kept."
                 } else {
-                    if (clearExpectation?.let { !ContextPolicies.sameSessionRun(it.target, frame.target) } == true) clearExpectation = null
-                    selected = original.copy(target = frame.target, status = frame.raw.string("activity", "phase", "state"), raw = frame.raw)
-                    editState { state -> state.resolveConversation(original.target, frame.target) }
-                    installFrame(frame, true)
+                    preparingIncoming = true
+                    preparationOwner = activeFrame
+                    val clearOwner = clearExpectation
+                    val result = InspectionPublication.prepare(
+                        owns = { ownsDetail() && activeFrame === preparationOwner && clearExpectation == clearOwner },
+                        capture = {
+                            FramePreparation(frameInstall(frame), messageState, outgoing.filter { it.belongsTo(frame.target) },
+                                historyWindows[frame.target.key], presentationRevision, historyComplete, historyIndexing,
+                                checkNotNull(selected), catalogSessions)
+                        },
+                        build = { captured -> withContext(Dispatchers.Default) {
+                            val incoming = captured.install.frame
+                            val state = captured.state.resolveConversation(original.target, incoming.target)
+                            val merged = if (incoming.target.archiveId.isBlank()) ConversationMerge.merge(incoming.target, incoming.events, captured.messages)
+                                else ConversationMerge.Result(incoming.events, emptySet())
+                            Presentation(captured.messages, merged.events, QuestionTracking.restore(state, incoming.target, incoming.questions))
+                        } },
+                        unchanged = { captured ->
+                            messageState === captured.state && presentationRevision == captured.revision &&
+                                historyWindows[frame.target.key] === captured.window && historyComplete == captured.complete && historyIndexing == captured.indexing &&
+                                outgoing.filter { it.belongsTo(frame.target) } == captured.messages &&
+                                selected === captured.selection && catalogSessions === captured.catalog
+                        },
+                        publish = { captured, prepared ->
+                            publicationFrame = captured.install.frame
+                            androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                                if (clearExpectation?.let { !ContextPolicies.sameSessionRun(it.target, frame.target) } == true) clearExpectation = null
+                                selected = captured.selection.copy(target = frame.target, status = frame.raw.string("activity", "phase", "state"), raw = frame.raw)
+                                editState { state -> state.resolveConversation(original.target, frame.target) }
+                                captured.install.frame.presentation = prepared
+                                installFrame(frame, true, captured.install)
+                            }
+                        })
+                    if (result == InspectionPublication.Result.SUPERSEDED) return@launch
+                    check(result == InspectionPublication.Result.PUBLISHED) { "The conversation changed. Refresh to verify it." }
                 }
             }
         } catch (e: CancellationException) { throw e }
-        catch (e: Exception) { if (detailGate.owns(operation.id) && navigationId == navigation) { activeFrameVerified = false; activityVerified = false; historyCached = activity != null; error = ReadFailure.message(e, "conversation");detailReadErrorOwner=original.target to navigation;if(!olderLoading) { readPositionReady=true;captureUnreadBoundary(original.target,conversationEvents) } } }
+        catch (e: Exception) {
+            val publishedHere = publicationFrame?.let {
+                activeFrame === it && (selected?.target == original.target || selected?.target == it.target)
+            } == true
+            val originalHere = selected?.target == original.target && (!preparingIncoming || activeFrame === preparationOwner)
+            val invalidate = if (!preparingIncoming) detailGate.owns(operation.id) && navigationId == navigation else
+                detailGate.owns(operation.id) && navigationId == navigation && (!freshInspection || ownerCurrent()) &&
+                    connections.any { it == connection } && (originalHere || publishedHere)
+            if (invalidate) {
+                activeFrameVerified = false; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-inspect-failed */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.INSPECT_FAILED) /* END QUESTION_AVAILABILITY_PROBE writer-inspect-failed */; historyCached = activity != null; error = ReadFailure.message(e, "conversation");detailReadErrorOwner=original.target to navigation;if(!olderLoading) { readPositionReady=true;captureUnreadBoundary(original.target,conversationEvents) }
+            }
+        }
         finally {
             if (detailGate.finish(operation.id)) {
                 detailTimer?.cancel(); detailBusy = false; detailProgress = false

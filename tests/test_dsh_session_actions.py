@@ -142,6 +142,7 @@ class DeepSeekScopedActions(unittest.TestCase):
         mark = {"conversation_id": "session-synthetic", "reply_id": "3:30.0", "attention_signature": None, "at": 1.0}
         other = {"dsh/example/other": {"session-other": dict(mark, conversation_id="session-other")}}
         marks.write_text(json.dumps({"version": 1, "sessions": {self.name: {"session-synthetic": mark}, **other}}))
+        marks.chmod(0o600)
         _, result = self.run_action("rename", new_name="dsh/example/new")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(json.loads(marks.read_text()), {"version": 1, "sessions": {"dsh/example/new": {"session-synthetic": mark}, **other}})

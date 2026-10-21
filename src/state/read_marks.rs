@@ -31,6 +31,27 @@ pub(super) fn load() -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
+/// Writers must not turn an unreadable store into an empty one. In particular,
+/// a current request is no authority to discard another owner's saved marks.
+fn load_writable(path: &Path) -> Result<Value> {
+    let mut file = match crate::platform::no_follow(fs::OpenOptions::new().read(true)).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(json!({})),
+        Err(error) => return Err(format!("Shared read marks could not be read: {error}")),
+    };
+    if !crate::platform::verify_private_file(&file).map_err(|error| error.to_string())? {
+        return Err("Shared read marks could not be read; the store must be a private regular file".into());
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut file, &mut text)
+        .map_err(|error| format!("Shared read marks could not be read: {error}"))?;
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .filter(|value| value["version"] == 1 && value["sessions"].is_object())
+        .map(|value| value["sessions"].clone())
+        .ok_or_else(|| "Shared read marks could not be read; no marks were changed".into())
+}
+
 pub(super) fn record<'a>(marks: &'a Value, owner: &str, conversation: &str) -> &'a Value {
     static NONE: Value = Value::Null;
     if conversation.is_empty() {
@@ -267,23 +288,18 @@ fn apply(current: &Value, questions: Option<&[Value]>, request: &Request, existi
     if attention {
         next["attention_signature"] = json!(request.signature);
     }
-    next["at"] = json!(at);
+    // A duplicate acknowledgement still applies, but it is not a new read edge.
+    // Preserve its timestamp and avoid rewriting the complete legacy file.
+    if next != *existing {
+        next["at"] = json!(at);
+    }
     (reply, attention, next)
 }
 
 /// Moves the marks of a session owned by its name (DeepSeek) to its new name;
 /// a tracked session keeps its journal name across renames.
 pub(super) fn rename_owner(old: &str, new: &str) -> Result<()> {
-    let _guard = lock(Some(&root().join("read-marks.lock")))?;
-    let mut sessions = load();
-    let Some(map) = sessions.as_object_mut() else {
-        return Ok(());
-    };
-    let Some(marks) = map.remove(old) else {
-        return Ok(());
-    };
-    map.insert(new.to_owned(), marks);
-    atomic(&path(), &format!("{}\n", json!({"version": 1, "sessions": sessions})))
+    lock_rename()?.transfer(old, new)
 }
 
 /// OpenCode renames take this writer before their bindings lock. Read writers
@@ -297,17 +313,8 @@ pub(super) struct RenameGuard {
 impl RenameGuard {
     pub(super) fn at(path: &Path) -> Result<Self> {
         let guard = lock(Some(&path.with_extension("lock")))?;
-        let sessions = match fs::read_to_string(path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => json!({}),
-            Ok(text) => serde_json::from_str::<Value>(&text)
-                .ok()
-                .filter(|value| value["version"] == 1 && value["sessions"].is_object())
-                .map(|value| value["sessions"].clone())
-                .ok_or("Shared read marks could not be read; rename was not started")?,
-            Err(_) => {
-                return Err("Shared read marks could not be read; rename was not started".into())
-            }
-        };
+        let sessions = load_writable(path)
+            .map_err(|_| "Shared read marks could not be read; rename was not started")?;
         Ok(Self {
             _guard: guard,
             path: path.to_owned(),
@@ -352,6 +359,30 @@ fn bounded(conversations: &mut serde_json::Map<String, Value>) {
     }
 }
 
+/// Only admitting a new owner can grow the global owner population. Recheck the
+/// authoritative bindings before that growth, as before; an established owner
+/// can change only its own (at most eight) conversations. Retained abandoned
+/// owners are pruned at the next admission, not on every acknowledgement.
+fn insert_with_owners(
+    sessions: &mut Value,
+    owner: &str,
+    conversation: &str,
+    next: Value,
+    owners: impl FnOnce() -> Result<std::collections::BTreeSet<String>>,
+    mut native_owner: impl FnMut(&str) -> bool,
+) -> Result<()> {
+    let map = sessions.as_object_mut().ok_or("invalid read marks")?;
+    if !map.contains_key(owner) {
+        let owners = owners()?;
+        map.retain(|key, _| key == owner || owners.contains(key) || native_owner(key));
+    }
+    let conversations = map.entry(owner.to_owned()).or_insert_with(|| json!({}));
+    let conversations = conversations.as_object_mut().ok_or("invalid read marks")?;
+    conversations.insert(conversation.to_owned(), next);
+    bounded(conversations);
+    Ok(())
+}
+
 /// A session view, its mark owner and its pending questions.
 type Current = (Value, String, Option<Vec<Value>>);
 /// The session as `hgs ls --json` shows it, its mark owner and its pending
@@ -362,12 +393,9 @@ fn current(name: &str) -> Result<Option<Current>> {
         let view=opencode::inspect(name,None)?; let questions=view["pending_questions"].as_array().cloned();return Ok(Some((view,name.to_owned(),questions)));
     }
     if dsh::exists(name) {
-        return Ok(dsh::snapshots()?
-            .into_iter()
-            .find(|session| string(session, "name") == name)
-            .map(|session| (session, name.to_owned(), Some(Vec::new()))));
+        return dsh::snapshot(name).map(|view| Some((view, name.to_owned(), Some(Vec::new()))));
     }
-    archive::reconcile()?;
+    archive::reconcile_selected(name)?;
     // An approval answered in Terminal sends no hook. As in `hgs ls`, settle it
     // from the screen first; that takes the lock, and only a pending request
     // captures the terminal.
@@ -381,7 +409,7 @@ fn current(name: &str) -> Result<Option<Current>> {
         return Ok(None);
     }
     let record = read(name)?;
-    if archive::equivalent(&record, &archive::records()?) {
+    if archive::contains_selected(&record)? {
         return Ok(None);
     }
     let snapshot = live()?;
@@ -422,25 +450,15 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         println!("{}", json!({"ok": false, "error": "not_found"}));
         return Ok(1);
     };
-    let mut sessions = load();
+    let mut sessions = load_writable(&path())?;
     let existing = record(&sessions, &owner, &request.conversation).clone();
     let mut view = view;
     keep_read_reply(&mut view, &existing);
     let (reply, attention, next) = apply(&view, questions.as_deref(), &request, &existing, now());
-    if reply || attention {
-        let owners: std::collections::BTreeSet<String> = records()?
-            .iter()
-            .map(|record| journal::journal_name(record).to_owned())
-            .collect();
-        let map = sessions.as_object_mut().ok_or("invalid read marks")?;
-        map.retain(|key, _| key == &owner || owners.contains(key) || dsh::exists(key) || opencode::exists(key));
-        let conversations = map.entry(owner.clone()).or_insert_with(|| json!({}));
-        if !conversations.is_object() {
-            *conversations = json!({});
-        }
-        let conversations = conversations.as_object_mut().ok_or("invalid read marks")?;
-        conversations.insert(request.conversation.clone(), next.clone());
-        bounded(conversations);
+    if (reply || attention) && next != existing {
+        insert_with_owners(&mut sessions, &owner, &request.conversation, next.clone(), || {
+            records().map(|records| records.iter().map(|record| journal::journal_name(record).to_owned()).collect())
+        }, |key| dsh::exists(key) || opencode::exists(key))?;
         atomic(&path(), &format!("{}\n", json!({"version": 1, "sessions": sessions})))?;
     }
     println!("{}", json!({"ok": true, "applied": {"reply_id": reply, "attention_signature": attention}, "read": next}));
@@ -450,6 +468,114 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_current_fields_apply_without_advancing_the_stored_timestamp() {
+        let mut current = waiting();
+        current["reply_id"] = json!("7:100.5");
+        let digest = signature(&current, Some(&[])).unwrap();
+        let both = request(Some("7:100.5"), Some(&digest));
+        let (_, _, saved) = apply(&current, Some(&[]), &both, &Value::Null, 20.0);
+        for repeated in [request(Some("7:100.5"), None), request(None, Some(&digest)), both] {
+            let (reply, attention, next) = apply(&current, Some(&[]), &repeated, &saved, 30.0);
+            assert_eq!(reply, repeated.reply.is_some());
+            assert_eq!(attention, repeated.signature.is_some());
+            assert_eq!(next, saved);
+        }
+        current["reply_id"] = json!("8:101.5");
+        let (_, _, newer) = apply(&current, Some(&[]), &request(Some("8:101.5"), None), &saved, 40.0);
+        assert_eq!(newer["at"], 40.0);
+        assert_eq!(newer["attention_signature"], saved["attention_signature"]);
+    }
+
+    #[test]
+    fn established_owner_has_a_constant_retention_scope() {
+        let mut sessions = json!({"original":{"old":{"at":1.0}},"abandoned":{"other":{"at":2.0}}});
+        for index in 0..20 {
+            insert_with_owners(&mut sessions, "original", &format!("conversation-{index}"), json!({"at":10.0+f64::from(index)}),
+                || panic!("existing owner must not enumerate bindings"),
+                |_| panic!("existing owner must not enumerate native owners")).unwrap();
+        }
+        assert_eq!(sessions.as_object().unwrap().len(), 2);
+        assert_eq!(sessions["original"].as_object().unwrap().len(), MAX_CONVERSATIONS);
+        assert_eq!(sessions["abandoned"], json!({"other":{"at":2.0}}));
+        assert!(sessions["original"].get("old").is_none());
+    }
+
+    #[test]
+    fn new_owner_prunes_authoritatively_before_the_owner_population_grows() {
+        let mut sessions = json!({"renamed-original":{"a":{"at":1.0}},"native":{"b":{"at":2.0}},"abandoned":{"c":{"at":3.0}}});
+        let scans = std::cell::Cell::new(0);
+        insert_with_owners(&mut sessions, "new", "d", json!({"at":4.0}), || {
+            scans.set(scans.get()+1);
+            Ok(["renamed-original".to_owned()].into_iter().collect())
+        }, |name| name == "native").unwrap();
+        assert_eq!(scans.get(), 1);
+        assert_eq!(sessions, json!({"renamed-original":{"a":{"at":1.0}},"native":{"b":{"at":2.0}},"new":{"d":{"at":4.0}}}));
+        let before = sessions.clone();
+        assert!(insert_with_owners(&mut sessions, "unadmitted", "e", json!({"at":5.0}),
+            || Err("binding inventory unavailable".into()), |_| false).is_err());
+        assert_eq!(sessions, before);
+    }
+
+    #[test]
+    fn writable_storage_preserves_legacy_marks_and_refuses_unreadable_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("read-marks.json");
+        assert_eq!(load_writable(&path).unwrap(), json!({}));
+        let legacy = json!({"version":1,"sessions":{"owner":{"conversation":{"reply_id":"one","at":1.0}}}});
+        atomic(&path, &legacy.to_string()).unwrap();
+        assert_eq!(load_writable(&path).unwrap(), legacy["sessions"]);
+        // A legacy writer holds the same lock and replaces exactly this v1 file.
+        let mut guard = RenameGuard::at(&path).unwrap();
+        guard.transfer("owner", "renamed").unwrap();
+        drop(guard);
+        let mut old_writer: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(old_writer["version"], 1);
+        old_writer["sessions"]["renamed"]["conversation"]["reply_id"] = json!("two");
+        atomic(&path, &old_writer.to_string()).unwrap();
+        assert_eq!(load_writable(&path).unwrap()["renamed"]["conversation"]["reply_id"], "two");
+        for text in ["{", r#"{"version":2,"sessions":{}}"#, r#"{"version":1,"sessions":[]}"#] {
+            atomic(&path, text).unwrap();
+            assert!(load_writable(&path).is_err());
+            assert!(RenameGuard::at(&path).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        }
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(load_writable(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_storage_refuses_links_nonprivate_files_and_a_fifo_without_blocking() {
+        use std::os::unix::fs::{symlink, FileTypeExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("read-marks.json");
+        let target = dir.path().join("target.json");
+        atomic(&target, r#"{"version":1,"sessions":{}}"#).unwrap();
+        let unchanged = fs::read(&target).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(load_writable(&path).is_err());
+        assert_eq!(fs::read(&target).unwrap(), unchanged);
+        fs::remove_file(&path).unwrap();
+        symlink(dir.path().join("missing"), &path).unwrap();
+        assert!(load_writable(&path).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::hard_link(&target, &path).unwrap();
+        assert!(load_writable(&path).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::rename(&target, &path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_writable(&path).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(load_writable(&path).unwrap(), json!({}));
+        fs::remove_file(&path).unwrap();
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        assert!(load_writable(&path).is_err());
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
+    }
 
     #[test]
     fn skipped_ticks_never_move_a_read_reply_back() {

@@ -361,7 +361,8 @@ class WorkflowSecurityTests(unittest.TestCase):
             with self.subTest(forbidden=text):
                 self.assertNotIn(text, android.replace("$ANDROID_HOME/", ""))
         self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", android),
-                         ["actions/checkout", "actions/cache/restore", "actions/cache/save", "actions/upload-artifact"])
+                         ["actions/checkout", "actions/cache/restore", "actions/upload-artifact",
+                          "actions/cache/save", "actions/upload-artifact"])
         listed = self.checks_steps("android")
         names = [re.match(r"      - (?:name|uses): (.*)", step)[1] for step in listed]
         configure, gradle = (names.index("JDK 17 and synthetic Firebase configuration"),
@@ -378,6 +379,24 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("        working-directory: mobile/android\n"
                       "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true\n", listed[gradle])
         self.assertIn("-PzerusFirebase=true", signed)
+        # Retain the three actual JVM suites on success as well as failure, using
+        # only explicit files staged outside all cache paths. Missing any
+        # suite must fail collection rather than silently yielding partial proof.
+        collect = names.index("Collect approval publication and binding unit results")
+        retain = names.index("Retain approval publication and binding unit results")
+        self.assertLess(gradle, collect)
+        self.assertLess(collect, retain)
+        for step in (listed[collect], listed[retain]):
+            self.assertIn("        if: always()\n", step)
+        result_names = ("InspectionPublicationTest", "QuestionSendConfirmationTest", "QuestionReviewProbeTest")
+        self.assertEqual(re.findall(r"^          cp (.+)$", listed[collect], re.M), [
+            f"mobile/android/app/build/test-results/testDebugUnitTest/TEST-app.zerus.mobile.{name}.xml "
+            "artifacts/android-approval-unit-results/" for name in result_names])
+        self.assertNotIn("|| true", listed[collect])
+        self.assertEqual(self.step_paths(listed[retain]), [
+            f"artifacts/android-approval-unit-results/TEST-app.zerus.mobile.{name}.xml"
+            for name in result_names])
+        self.assertIn("          if-no-files-found: error\n", listed[retain])
         # The notices must list exactly the resolved release classpath, with its artifacts,
         # of the same Firebase build; the generator downloads only missing POM files.
         notices = names.index("Android library notices match the release classpath")

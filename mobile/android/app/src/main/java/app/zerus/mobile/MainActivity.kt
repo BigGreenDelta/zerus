@@ -771,6 +771,12 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val ownSendId = model.ownSendId(target)
     // Exact inspection evidence supersedes the older computer catalog while reading.
     val online = model.activityVerified || model.demo
+    // BEGIN QUESTION_AVAILABILITY_PROBE committed
+    if (QuestionUiProbe.enabled) {
+        val observedAvailability = model.questionAvailabilityProbe(target, online)
+        if (observedAvailability != null) SideEffect { QuestionUiProbe.availability(target, observedAvailability) }
+    }
+    // END QUESTION_AVAILABILITY_PROBE committed
     val warning = if (model.demo) "" else raw?.string("pending_questions_error", "provider_messages_error").orEmpty()
     val queueVisible = target.agentId.isBlank() && !archived && raw?.optJSONObject("input_queue")?.string("id").orEmpty().isNotBlank()
     val unreadBoundary = model.firstUnreadEventId.takeIf { id -> events.any { it.id == id } }.orEmpty()
@@ -811,8 +817,13 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val scrollMutex = remember { Mutex() }
     var viewportHeight by remember { mutableIntStateOf(0) }
     var viewportBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
-    // A pending question is what the reader acts on; leave a quarter for the history above it.
-    val cardMaxHeight = with(LocalDensity.current) { (viewportHeight.toDp() * .75f).coerceAtLeast(160.dp) }
+    // Keep history above the card unless the IME has already reduced its measured viewport.
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    val cardMaxHeight = with(density) {
+        if (imeVisible) viewportHeight.toDp().coerceAtLeast(0.dp)
+        else (viewportHeight.toDp() * .75f).coerceAtLeast(160.dp)
+    }
     val scope = rememberCoroutineScope()
     val currentHistoryTarget by rememberUpdatedState(target.key)
     val window = LocalWindowInfo.current

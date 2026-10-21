@@ -8,6 +8,7 @@ from pathlib import Path
 import struct
 import tempfile
 import textwrap
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -16,6 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("android_project_ui", ROOT / "scripts/ci/android-project-ui.py")
 UI = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(UI)
+
+TOUCH_SPEC = importlib.util.spec_from_file_location("android_touch_observer_controls", ROOT / "tests/android_touch_observer_controls.py")
+TOUCH_CONTROLS = importlib.util.module_from_spec(TOUCH_SPEC)
+TOUCH_SPEC.loader.exec_module(TOUCH_CONTROLS)
+OwnedWindowTouchObserverTests = TOUCH_CONTROLS.OwnedWindowTouchObserverTests
 
 
 def output(ids=UI.CASES, count="6", code="-1", stream="Session project smoke passed: synthetic fixture"):
@@ -45,6 +51,12 @@ def dex(descriptor, defined=True):
 class InstrumentationOutcomeTests(unittest.TestCase):
     def test_complete_exact_ordered_result_is_accepted(self):
         self.assertEqual(UI.instrumentation_result(output())["project_cases"], "6")
+
+    def test_approval_diagnostic_statuses_cannot_qualify_the_project_runner(self):
+        for status in ('INSTRUMENTATION_STATUS: zerus_approval_progress=1|1|ON_START|-|0|1001\nINSTRUMENTATION_STATUS_CODE: 1\n',
+                       'INSTRUMENTATION_STATUS_CODE: 1\n'):
+            with self.subTest(status=status), self.assertRaises(AssertionError):
+                UI.instrumentation_result(status + output())
 
     def test_failed_or_unknown_finish_code_is_rejected(self):
         for code in ("0", "1", "-2", "-1 extra"):
@@ -263,6 +275,83 @@ class HostedJavaAdmissionTests(unittest.TestCase):
                 self.assertEqual(record.get("failed_guard"), refused)
                 if refused != "hosted_image":
                     self.assertEqual((admission / "java-release.txt").read_bytes(), raw)
+
+
+class PhoneServiceReadinessTests(unittest.TestCase):
+    def subject(self, replies, *, now=0.0, end=5.0, duration=0.0, alive_duration=0.0):
+        state = {"now": now, "calls": [], "sleeps": [], "replies": list(replies)}
+        device = ["owned-adb", "-s", "emulator-5554", "shell"]
+        def sleep(seconds):
+            self.assertGreaterEqual(seconds, 0)
+            self.assertLessEqual(seconds, 1)
+            state["sleeps"].append(seconds)
+            state["now"] += seconds
+        def alive():
+            state["now"] += alive_duration
+        def run(name, argv, cap):
+            self.assertGreater(cap, 0)
+            self.assertLessEqual(state["now"] + cap, end)
+            state["calls"].append((name, argv, cap))
+            state["now"] += duration
+            reply = state["replies"].pop(0)
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+        def invoke():
+            with patch.object(UI, "time", SimpleNamespace(monotonic=lambda: state["now"], sleep=sleep)):
+                UI.phone_service_ready(run, alive, device, end)
+        return invoke, state, device
+
+    def test_ready_and_missing_then_ready_use_only_the_fixed_service_metadata(self):
+        for replies in (["Service phone: found\n"], ["Service phone: not found\n", "Service phone: found\n"]):
+            with self.subTest(replies=replies):
+                invoke, state, device = self.subject(replies, end=30, duration=.25)
+                invoke()
+                self.assertEqual([row[0] for row in state["calls"]], ["phone-ready-" + str(i) for i in range(len(replies))])
+                self.assertTrue(all(row[1] == device + ["service", "check", "phone"] and row[2] == 10 for row in state["calls"]))
+                self.assertEqual(len(state["sleeps"]), len(replies) - 1)
+
+    def test_permanently_missing_expires_the_same_end_without_an_extra_command(self):
+        invoke, state, _ = self.subject(["Service phone: not found"] * 8, end=4, duration=1)
+        with self.assertRaisesRegex(AssertionError, "phone service boot deadline"):
+            invoke()
+        self.assertEqual(len(state["calls"]), 2)
+        self.assertEqual(state["now"], 4)
+
+    def test_late_found_and_expiry_before_or_during_alive_cannot_authorize_readiness(self):
+        for parameters, count in [({"end": 3, "duration": 3}, 1),
+                                  ({"now": 3, "end": 3}, 0),
+                                  ({"now": 2, "end": 3, "alive_duration": 1}, 0)]:
+            with self.subTest(parameters=parameters):
+                invoke, state, _ = self.subject(["Service phone: found"], **parameters)
+                with self.assertRaisesRegex(AssertionError, "phone service boot deadline"):
+                    invoke()
+                self.assertEqual(len(state["calls"]), count)
+
+    def test_command_error_and_unknown_response_are_not_retried_or_ignored(self):
+        original = RuntimeError("owned command failed")
+        for response in (original, "Service phone: found\nextra", "", "1"):
+            with self.subTest(response=response):
+                invoke, state, _ = self.subject([response, "Service phone: found"])
+                with self.assertRaises((RuntimeError, AssertionError)) as error:
+                    invoke()
+                if response is original:
+                    self.assertIs(error.exception, original)
+                self.assertEqual(len(state["calls"]), 1)
+                self.assertEqual(state["sleeps"], [])
+
+    def test_remaining_original_budget_caps_the_command_and_main_preserves_disable_order(self):
+        invoke, state, _ = self.subject(["Service phone: found"], now=4.5, end=5, duration=.25)
+        invoke()
+        self.assertEqual(state["calls"][0][2], .5)
+        source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
+        self.assertEqual(source.count('boot_end = min(end - 20, time.monotonic() + 180)'), 1)
+        self.assertIn('assert booted\n        device = [*adb_args, "-s", SERIAL, "shell"]\n        phone_service_ready(run, alive, device, boot_end)', source)
+        self.assertIn('(("wifi-off", ["svc", "wifi", "disable"]), ("data-off", ["svc", "data", "disable"]),\n                           ("airplane", ["cmd", "connectivity", "airplane-mode", "enable"]))', source)
+        self.assertIn('if "Active default network: none" in state and time.monotonic() < network_end:', source)
+        function = source.split('def phone_service_ready(', 1)[1].split('\ndef failure_diagnostics(', 1)[0]
+        self.assertNotIn('180', function)
+        self.assertNotIn('except', function)
 
 
 class WorkflowBoundaryTests(unittest.TestCase):

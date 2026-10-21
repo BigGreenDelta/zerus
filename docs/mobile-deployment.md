@@ -57,6 +57,12 @@ peers, DeepSeek/OpenCode and speech/voice are unavailable. Capability publicatio
 and request dispatch both enforce this restriction; existing durable UUID and
 uncertain-delivery handling still applies. No live gateway migration is implied.
 
+The connector is not the relay server. To self-host the relay on a Windows PC,
+use the existing Linux image through Docker Desktop's Linux containers; see
+[Windows relay hosting](../services/mobile/README.md#windows-hosts-use-linux-containers)
+for WSL setup, persistent volumes, private configuration and HTTPS. A native
+Windows relay port is not part of this deployment.
+
 ## Start the relay
 
 The [relay README](../services/mobile/README.md) documents Rust and Docker

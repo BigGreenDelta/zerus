@@ -2382,7 +2382,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("read-marks.json");
         let bytes = b"{\"version\":1, \"sessions\":{\"other\":{\"conversation\":{\"reply_id\":\"same\"}}}}\n";
-        fs::write(&path, bytes).unwrap();
+        atomic(&path, std::str::from_utf8(bytes).unwrap()).unwrap();
         let mut guard = read_marks::RenameGuard::at(&path).unwrap();
         guard.transfer("missing", "new").unwrap();
         guard.transfer("other", "other").unwrap();

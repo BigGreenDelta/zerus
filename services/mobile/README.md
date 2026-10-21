@@ -102,6 +102,70 @@ may be shared safely; this capacity multiplies by worker count. Keep their
 permissions 0700 and include them in host disk monitoring. Do not move the
 spool to tmpfs under the 256 MiB worker memory limit.
 
+### Windows hosts: use Linux containers
+
+Run the same Linux relay image on Windows; a native Windows relay port is not
+provided. The relay is the HTTPS server shared by phones and computers. It is
+separate from the [Windows outbound connector](../../docs/mobile-deployment.md#windows-gateway),
+which runs beside `hgs.exe` and exposes that computer's sessions to a relay.
+The relay may run on the same PC or on another host.
+
+For Docker Desktop, use a Windows version covered by
+[Docker's current requirements](https://docs.docker.com/desktop/setup/install/windows-install/),
+select **Linux containers**, enable its WSL 2 backend and
+[integration with your WSL distribution](https://docs.docker.com/desktop/features/wsl/).
+Run the commands below in that distribution's Linux shell, from a checkout in
+its Linux filesystem. Keep private configuration there too, rather than under
+`/mnt/c` or another Windows-drive mount: the relay requires real Linux ownership,
+private file modes and locking. Docker Desktop
+[does not support Windows Server](https://docs.docker.com/desktop/troubleshoot-and-support/faqs/windowsfaqs/#can-i-run-docker-desktop-on-windows-server);
+use a Linux VM or a separate Linux Docker host for that case.
+
+For a **new** single-worker SQLite installation:
+
+```sh
+cd services/mobile
+docker compose --project-name zerus-relay build relay
+docker compose --project-name zerus-relay run --rm relay provision \
+  --name 'Example workspace' --computer-name 'Example computer'
+docker compose --project-name zerus-relay up -d relay
+```
+
+Use the same Compose project name for every later command. An existing deployment
+must keep its original project name and volumes; choosing a different name starts
+with different state. The supplied `relay-data` and `relay-spool` named volumes
+keep SQLite and spool storage inside Docker's Linux filesystem. The image owns
+their initial directories as UID/GID 10001 with mode 0700. Keep these volumes
+when recreating containers; volume deletion, `down --volumes`, pruning or a
+Docker Desktop data reset can destroy credentials, receipts and conversation
+data. Follow the stopped/online SQLite backup rule above before changing storage.
+See [Docker's volume lifecycle](https://docs.docker.com/engine/storage/volumes/).
+
+Keep the `127.0.0.1:8787:8787` publication. After replacing `relay.example.com`
+in `Caddyfile` with your domain and arranging DNS, host/router access to ports
+80 and 443 and valid HTTPS, start the supplied proxy with:
+
+```sh
+docker compose --project-name zerus-relay --profile tls up -d relay caddy
+```
+
+An existing TLS proxy can use the published loopback port instead. Container
+addresses and Compose names are internal; no host-network mode is required.
+Use the relay's reachable HTTPS URL for the phone and the desktop connector,
+rather than `localhost` or the Compose name `relay`. Enter the provisioned computer
+credential in **Settings → Mobile connection**, then use **Phones** to make an
+invitation for that workspace. Keep provision output private. Retain the proxy
+trust and private/shared relay limits described above.
+
+For multiple workers, use the PostgreSQL profile below, adding
+`--project-name zerus-relay` to each Compose command too. Leave database storage
+in its named volume. Private configuration and
+Compose secret files must stay in the WSL Linux filesystem with the documented
+0600 modes and container-readable ownership; a Windows bind mount or more
+permissive mode is not a substitute. Never publish PostgreSQL's port. This uses
+the existing API, pairing credentials and durable receipts; moving an existing
+relay or gateway still requires its separate backup and cutover procedure.
+
 ## PostgreSQL production profile
 
 Read the [relay implementation contract](../../docs/relay-architecture.md) before

@@ -23,6 +23,9 @@ internal data class QuestionSendIntent(val target: Target, val navigation: Long,
 }
 
 internal object QuestionSendPolicies {
+    /** Startup cards can share an empty conversation; every card still belongs to one exact nonblank run. */
+    fun bound(question: Question, target: Target) = target.run.isNotBlank() &&
+        question.run == target.run && question.conversation == target.conversation
     // Kimi's reviewed native chooser already asks how to handle its cold cache.
     fun requiresCacheConsent(question: Question, cold: Boolean) = cold &&
         !(question.source == "kimi_cache_hint" && question.toolCallId == "kimi_cache_hint")
@@ -33,6 +36,7 @@ internal object QuestionSendPolicies {
             it.copy(choices = it.choices.toList())
         }), draft.copy(attachments = draft.attachments.toList()), answers)
     fun available(question: Question, target: Target, answers: String): Boolean {
+        if (!bound(question, target)) return false
         if (QuestionPolicies.submitted(question, target) != null) return false
         val rows = runCatching { JSONArray(answers).objects() }.getOrNull() ?: return false
         if (rows.size != question.prompts.size || rows.isEmpty() ||
