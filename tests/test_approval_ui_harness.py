@@ -245,10 +245,8 @@ def review_clock_memory(source, observation, clock, current_card=lambda: True):
 def strip_stale_option_evidence(source):
     pattern = re.compile(r'^([ ]*)// BEGIN STALE_OPTION_EVIDENCE ([a-z-]+)\n[\s\S]*?^\1// END STALE_OPTION_EVIDENCE \2\n', re.M)
     assert [match[2] for match in pattern.finditer(source)] == [
-        'state', 'completed-state', 'delegate-complete', 'return-complete', 'publish']
-    inline = '/* BEGIN STALE_OPTION_EVIDENCE failure-stream */ + "$staleOptionFailureEvidence\\n"/* END STALE_OPTION_EVIDENCE failure-stream */'
-    assert source.count(inline) == 1
-    return pattern.sub('', source).replace(inline, '')
+        'state', 'failure-stream', 'completed-state', 'delegate-complete', 'return-complete', 'publish']
+    return pattern.sub('', source)
 
 
 def stale_option_evidence_memory(source, facts, *, completed, direct=False, accepted=None, overflow=False, capture_fault=False):
@@ -737,7 +735,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
             'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
         # Baseline includes guarded preparation and passive lifecycle checkpoints; progress stripping stays exact.
-        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), 'fb5977209925e863cc07c7dac808e52a0234f4e5d71ee35e19ba57a3b05cd2c9')
+        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), 'd4fdb656823e8840ef99e46d46ef211698aa203cbbbfb8a22032870336ed6e28')
         definition = source.split('// BEGIN APPROVAL_PROGRESS definition\n', 1)[1].split('// END APPROVAL_PROGRESS definition', 1)[0]
         self.assertIn('check(progressSequence in 0 until 32)', definition)
         self.assertIn('check(record.length <= 160)', definition)
@@ -763,7 +761,7 @@ class ApprovalHarnessTests(unittest.TestCase):
                  'primary-failure-capture-begin', 'finally-begin']
         self.assertEqual([match[2] for match in pattern.finditer(source)], names)
         self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(),
-                         'f1b961c9ecb956aa766ba1ffa7eea1186a568b3fbbeae0f7f4a483be7e0a7a73')
+                         '9038830aa2ce426acf4cbedab84075606b4c356e14f14a35e5fa6b9ed95d8c3c')
         stages = ['RESUMED_MAIN_RETURNED', 'BODY_RESTORE_BEGIN', 'BODY_RESTORE_PASSED',
                   'CONFIRM_RETIRE_BEGIN', 'CONFIRM_RETIRE_PASSED', 'DISABLED_SEND_BEGIN', 'DISABLED_SEND_PASSED',
                   'PRIMARY_FAILURE_CAPTURE_BEGIN', 'FINALLY_BEGIN']
@@ -1141,7 +1139,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(projected.count(constructor), 1)
         projected = projected.replace(constructor, 'private data class EarlySend(val node: AccessibilityNodeInfo,')
         self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(),
-                         '04ba75ac86cf9b625ac8ed569020802ee5709a785480236374d11b62c07425d7')
+                         '30cbaf982eb4f1ac41cb19e8d404aafc293bd34dca6130f050b63d3024cfc320')
         reader = lambda value: value.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
         self.assertEqual(reader(source), reader(projected))
         early = source.split('        fun earlyReview(', 1)[1].split('        var primaryFailure:', 1)[0]
@@ -2263,7 +2261,16 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
         self.assertEqual(walker(source), walker(original))
         passed = next(line for line in source.splitlines() if 'Approval choices smoke passed:' in line)
         self.assertNotIn('staleOptionFailureEvidence', passed)
-        self.assertIn('/* BEGIN STALE_OPTION_EVIDENCE failure-stream */', source)
+        failure_line = lambda value: next(line for line in value.splitlines() if 'result.putString("stream", "Approval choices smoke failed:' in line)
+        self.assertEqual(failure_line(source), failure_line(original))
+        publication = source.split('// BEGIN STALE_OPTION_EVIDENCE failure-stream\n', 1)[1].split('// END STALE_OPTION_EVIDENCE failure-stream', 1)[0]
+        self.assertIn('val addition = "\\n" + staleOptionFailureEvidence', publication)
+        self.assertIn('check(addition.length <= 25_600)', publication)
+        self.assertLess(publication.index('check(addition.length'), publication.index('val retained = failureEvidence + addition'))
+        self.assertLess(publication.index('val retained = failureEvidence + addition'), publication.index('failureEvidence = retained'))
+        self.assertEqual(publication.count('failureEvidence ='), 1)
+        for forbidden in ('refresh(', 'getChild(', 'SystemClock', 'main {', 'Log.', 'throw ', 'error.', 'sendStatus'):
+            self.assertNotIn(forbidden, publication)
         helper = source.split('            fun composeStaleOptionAction(', 1)[1].split('// END STALE_COMPOSE_ROLE definition', 1)[0]
         self.assertEqual(helper.count('diagnosticCompleted = true'), 2)
         self.assertIn('diagnosticCompleted = true\n                            // END STALE_OPTION_EVIDENCE delegate-complete\n                            return null', helper)

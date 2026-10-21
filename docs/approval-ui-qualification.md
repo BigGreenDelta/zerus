@@ -40,8 +40,10 @@ source-supported shape, not compiled Kotlin or observed native classes. The reta
 and four receipts before the ancestor-only option proof refused; its failing class shape remains unknown.
 The helper also copies only those existing strings into bounded memory on every exit, including direct-role delegation.
 The existing failure result stream appends that snapshot with a fixed completion/outcome sentinel; the pass stream stays
-unchanged. At most 48 rows of 512 characters plus fixed markers fit within 25,600 characters. Copy faults, interruption or
+unchanged. At most 48 rows of 512 characters plus fixed markers fit within 25,600 characters. Helper copy faults, interruption or
 truncation report UNKNOWN and preserve the original failure. Reporting does not read accessibility nodes or clocks.
+The original failure serializer line stays exact: a guarded memory-only block adds the snapshot to prior failure evidence
+only after constructing a bounded addition of at most 25,600 characters, including its leading newline. A prepublication fault leaves prior evidence untouched.
 The snapshot describes the helper's own observations, not a later walker or unvisited children. The retained 9a4b failure
 again completed six cases and four receipts, but preserved no class descriptors through its logcat-only route; its actual
 class shape and helper return route remain unknown.

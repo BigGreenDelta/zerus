@@ -220,7 +220,15 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only. ${touchResultEvidence().replace("\n", " | ")} | ${actionProbeEvidence().replace("\n", " | ")} | $staleSendEvidence\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
-            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n$staleSendEvidence\n${actionProbeEvidence()}\n"/* BEGIN STALE_OPTION_EVIDENCE failure-stream */ + "$staleOptionFailureEvidence\n"/* END STALE_OPTION_EVIDENCE failure-stream */)
+            // BEGIN STALE_OPTION_EVIDENCE failure-stream
+            try {
+                val addition = "\n" + staleOptionFailureEvidence
+                check(addition.length <= 25_600)
+                val retained = failureEvidence + addition
+                failureEvidence = retained
+            } catch (_: Throwable) { /* Keep prior evidence and the original failure if diagnostic copying fails. */ }
+            // END STALE_OPTION_EVIDENCE failure-stream
+            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n${touchResultEvidence()}\n$staleSendEvidence\n${actionProbeEvidence()}\n")
             finish(Activity.RESULT_CANCELED, result)
         }
     }
