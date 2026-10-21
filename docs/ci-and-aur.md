@@ -902,7 +902,8 @@ python3 scripts/ci/agent-compatibility.py --latest
 
 The unshipped static coordination hint has a separately selected source candidate:
 `--contract agent-hint`. Its fixture is authored for the same reviewed Claude and
-Codex pins and targets above. It has not yet been built or executed. It selects
+Codex pins and targets above. Native acceptance requires retained successful
+results on the exact reviewed source. It selects
 exactly four methods per pin: actual hgs lifecycle (launch, compact, clear, two
 resumes, rename, fork), lost-mark output, real pre-feature first resume, and
 global/account exclusions with instruction and personal-hook preservation. The
@@ -980,10 +981,90 @@ other provider/OS selections run one row. Each selection uses the command above
 with `--agent claude` or `--agent codex` and fresh results, its OS-native binary
 paths and official public cache. Existing version/help/schema probes remain part
 of the runner. These focused disposable hosted or local jobs can be allocated
-after review; ordinary CI defaults and workflows are unchanged. No native row or
-helper/runner control has run on this source candidate.
+after review; ordinary CI defaults, suites and pins are unchanged.
 
-On Windows it takes the release build and the ConPTY pair as
+#### Opt-in hosted hint gate
+
+`agent-hint.yml` provides five disposable standard public-runner jobs. It runs
+only in the public upstream repository, through `workflow_dispatch` or a PR to
+main carrying the `native-agent-hint` label and changing one of its scoped source
+paths. A PR run checks out the exact head commit. External-contributor workflow
+approval still applies. Manual dispatch becomes available once the workflow is
+registered on the default branch; select the reviewed source ref explicitly:
+
+```sh
+gh workflow run agent-hint.yml --ref <reviewed-source-branch-or-tag>
+```
+
+| Job | Manifest pins, in order | Required methods |
+| --- | --- | --- |
+| Linux Claude | 2.1.296 linux-x64 | 4 |
+| Linux Codex | 0.160.1 then 0.162.0 linux-x64 | 8 |
+| macOS arm64 Claude | 2.1.296 darwin-arm64 | 4 |
+| Windows Claude | 2.1.296 win32-x64 | 4 |
+| Windows Codex | 0.162.0 win32-x64 | 4 |
+
+Every row must report its exact four raw IDs, four passes, zero skips/errors and
+verified owned cleanup. Linux Codex stops before the second pin if the first
+fails. Jobs collect evidence independently; all five must succeed for the
+24-occurrence campaign to qualify. The gate does not publish or release, and
+the full standard CI matrix remains required before merging the product change.
+
+Before any Python interpreter starts, the workflow creates a short private Unix
+`TMPDIR` (at most 24 bytes), with separate fresh private Cargo/rustup caches and
+home. It uses no shared Actions cache, provider credential or signing environment.
+Linux reuses the pinned tmux installer, macOS the existing Homebrew setup, and
+Windows the reviewed ConPTY fetcher and MSVC environment helper. Rust 1.99.1 is
+installed explicitly; preparation uses direct cargo/rustc paths with at most two
+compiler jobs. Public dependency downloads belong to this hosted preparation
+scope and never target an owner's installation.
+
+`scripts/ci/prepare-agent-hint.py` has one original 2400-second preparation end:
+public Cargo/npm fetches share at most 600 seconds, then candidate and pre-feature
+builds each get at most 900 seconds, clamped to that original end. Builds are
+locked and offline after fetching; dependencies must have crates.io checksums.
+Only the selected official npm URLs, filenames and SHA-512 values already in
+`agent-compatibility.json` are fetched (512 MiB maximum per package), without
+latest discovery, redirects, retries or missing-cache fallback. Candidate hgs
+and `session_start_observer` are built together from the candidate; real
+pre-feature hgs is built from exact main
+`ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce` on each OS. Preparation stops on its first
+failure and starts no provider or hgs process.
+
+The retained `build-receipt.json` binds clean pre/post Git commit/tree and lockfile
+hashes, build argv, OS/architecture, direct tool hashes, raw-log hashes, exit codes
+and all three binary hashes. Windows also records selected MSVC/SDK executable
+hashes, versions and include/library search inputs; verbose build logs retain
+compiler/linker invocation details. This associates source with build output;
+it makes no reproducible-build or kernel-isolation claim. The row runner
+independently hashes the binary inputs again.
+
+Preparation and native rows have separate finite bounds. Dependency setup steps
+have 5–10-minute caps, preparation has 45 minutes, each Unix selection 45 minutes,
+and each Windows host step 28 minutes. Every job has a 120-minute whole-job cap,
+including upload. Each native row keeps its original 1200 seconds, including the
+60-second fixture cleanup reserve, original 120-second startup gates and unchanged
+five-second hook timeout.
+
+Windows reuses `outside-job.py` unchanged: WMI creation has a 120-second cap,
+followed by a 1320-second monitor cap allowing the 1200-second row and up to 120
+seconds of ordinary host cleanup. A monitor timeout may trigger the launcher's
+separate shared 120-second cleanup allowance (30 seconds per action). Thus the
+launcher permits up to 1560 seconds of bounded waits, apart from filesystem or
+logging stalls, under the 1680-second host-step cap. This outer allowance is
+separate from the row's 60-second reserve. Executable-pattern cleanup is confined
+to these disposable Windows jobs; it cannot establish verified fixture cleanup
+or turn UNKNOWN into PASS.
+
+Three-day artifacts retain raw row logs/IDs and the full hook-output tree
+(stdout and forwarded-stream hashes, exact phase/pre-send gates, known-consent
+receipts and actual cleanup records), source/build receipts and the ConPTY fetch
+log. Failed or unknown runtime roots remain on the disposable host until it is
+discarded. The workflow neither deletes nor uploads those complete roots, build
+targets or dependency caches. A canceled host may prevent artifact upload and
+provides no successful qualification evidence.
+
+The ordinary Windows compatibility matrix takes the release build and ConPTY pair as
 [testing the session host](windows-host-testing.md#real-agents) shows. The
 generated `artifacts/test-results/agent-compatibility/summary.md` and
 `report.json` contain the coverage result and review candidates. Before changing
