@@ -9,6 +9,23 @@ ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/OwnedWindowTouchTrace.kt"
 FIXTURE = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
 
+
+def readonly_touch_model_state(source):
+    """The fixed class-member region ends at its next same-indent method, regardless of that method's name."""
+    marker = '    private fun touchModelState('
+    assert source.count(marker) == 1
+    tail = source.split(marker, 1)[1]
+    end = re.search(r'^    private fun ', tail, re.M)
+    assert end is not None
+    state = tail[:end.start()]
+    assert state.rstrip().endswith('    }')
+    assert 'QuestionPolicies.savedDraft(model.drafts, target, it)' in state
+    assert 'check(model.drafts.size <= 8)' in state
+    for denied in ('model.draft(', 'model.edit(', 'model.send(', 'uiAutomation', 'getWindowVisibleDisplayFrame'):
+        assert denied not in state, denied
+    return state
+
+
 FORWARD = '''    private fun <T> forward(record: () -> EventRecord?, dispatch: () -> T): T {
         val before = try { record() } catch (_: Throwable) { uncertain("before-record-failed"); null }
         return try {
@@ -445,11 +462,18 @@ class OwnedWindowTouchObserverTests(unittest.TestCase):
                        'injectInputEvent', 'waitForIdle', 'sleep(', 'delay(', 'recycle(', 'setAction(', 'offsetLocation('):
             self.assertNotIn(denied, dispatch)
         fixture = FIXTURE.read_text()
-        state = fixture.split('    private fun touchModelState(', 1)[1].split('    private fun smoke(', 1)[0]
-        self.assertIn('QuestionPolicies.savedDraft(model.drafts, target, it)', state)
-        self.assertIn('check(model.drafts.size <= 8)', state)
-        for denied in ('model.draft(', 'model.edit(', 'model.send(', 'uiAutomation', 'getWindowVisibleDisplayFrame'):
-            self.assertNotIn(denied, state)
+        state = readonly_touch_model_state(fixture)
+        # A preceding wrapper and an unrelated following method cannot extend the memory-only region.
+        prefix = '    private fun smoke() { model.draft(target) }\n    private fun touchModelState('
+        for next_name in ('smoke', 'smokeBody', 'unrelated'):
+            synthetic = prefix + state + '    private fun ' + next_name + '() { model.draft(target) }\n'
+            self.assertEqual(readonly_touch_model_state(synthetic), state)
+            for denied in ('model.draft(', 'model.edit(', 'model.send(', 'uiAutomation', 'getWindowVisibleDisplayFrame'):
+                with self.subTest(next_name=next_name, denied=denied), self.assertRaises(AssertionError):
+                    readonly_touch_model_state(synthetic.replace('check(model.drafts.size <= 8)',
+                        'check(model.drafts.size <= 8)\n        ' + denied, 1))
+        with self.assertRaises(AssertionError):
+            readonly_touch_model_state(prefix + state)  # Missing next member is not an admitted boundary.
         self.assertIn('scope=window-consumption-only reviewGuard=UNKNOWN', source)
         evidence = source.split('    fun evidence()', 1)[1].split('    fun close()', 1)[0]
         self.assertNotIn('window.', evidence)
