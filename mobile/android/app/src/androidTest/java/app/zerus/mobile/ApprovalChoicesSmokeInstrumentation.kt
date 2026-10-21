@@ -1000,6 +1000,108 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             val root = checkNotNull(uiAutomation.rootInActiveWindow)
             check(root.refresh() && root.windowId == ownedWindow && root.packageName?.toString() == targetContext.packageName)
             // BEGIN STALE_COMPOSE_ROLE definition
+            // Compose reports the owner with its 48 dp minimum touch target; the role
+            // child keeps its layout bounds, centred in that target on each short axis.
+            fun touchTarget(child: Rect, owner: Rect): Boolean {
+                val minimum = 48f * targetContext.resources.displayMetrics.density
+                fun axis(innerStart: Int, innerEnd: Int, outerStart: Int, outerEnd: Int): Boolean {
+                    val inner = innerEnd - innerStart
+                    val outer = outerEnd - outerStart
+                    if (inner == outer) return innerStart == outerStart
+                    return inner < outer && kotlin.math.abs(outer - minimum) <= 1f &&
+                        kotlin.math.abs((innerStart - outerStart) - (outerEnd - innerEnd)) <= 1
+                }
+                return !child.isEmpty && owner.contains(child) &&
+                    axis(child.left, child.right, owner.left, owner.right) &&
+                    axis(child.top, child.bottom, owner.top, owner.bottom)
+            }
+            // A disabled Material Button with children has the same shape: the owner
+            // keeps the plain View class and click semantics, a role-only Button child
+            // carries the role and a content-description child carries the label.
+            var composeSendOwner: AccessibilityNodeInfo? = null
+            var composeSendWitness: AccessibilityNodeInfo? = null
+            fun composeStaleButtonAction(label: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+                val facts = mutableListOf<String>()
+                fun fact(kind: String, index: Int, node: AccessibilityNodeInfo) {
+                    // Diagnostic work cannot alter admission or replace its original failure.
+                    try {
+                        if (facts.size >= 48) return
+                        val actions = node.actionList.joinToString(",") { it.id.toString() }.take(120)
+                        facts += "stale-send-node kind=$kind index=$index class=${node.className?.toString()?.take(120)} visible=${node.isVisibleToUser} enabled=${node.isEnabled} clickable=${node.isClickable} checkable=${node.isCheckable} children=${node.childCount} actions=$actions bounds=${Rect().also(node::getBoundsInScreen)}"
+                    } catch (_: Throwable) { }
+                }
+                fun roleOnlyButton(child: AccessibilityNodeInfo): Boolean =
+                    child.className?.toString() == "android.widget.Button" && child.isVisibleToUser &&
+                    child.text.isNullOrEmpty() && child.contentDescription.isNullOrEmpty() && child.childCount == 0 &&
+                    !child.isCheckable && !child.isChecked && !child.isSelected &&
+                    !child.isClickable && !child.isLongClickable && child.actionList.none {
+                        it.id == AccessibilityNodeInfo.ACTION_CLICK || it.id == AccessibilityNodeInfo.ACTION_LONG_CLICK
+                    }
+                var accepted: AccessibilityNodeInfo? = null
+                try {
+                    check(staleInspectionCurrent()) { "Known-stale Send identity changed before role proof" }
+                    check(label.refresh() && label.windowId == ownedWindow &&
+                        label.packageName?.toString() == targetContext.packageName && exactVisible(label, "Send answer"))
+                    val labelBounds = Rect().also(label::getBoundsInScreen)
+                    check(!labelBounds.isEmpty)
+                    val display = targetContext.resources.displayMetrics
+                    val seen = mutableListOf<AccessibilityNodeInfo>()
+                    val owners = mutableListOf<Pair<AccessibilityNodeInfo, AccessibilityNodeInfo>>()
+                    var candidate: AccessibilityNodeInfo? = label
+                    for (depth in 0 until 16) {
+                        val owner = candidate ?: break
+                        check(owner !in seen) { "Known-stale Send ancestry is ambiguous" }
+                        seen += owner
+                        check(owner.refresh() && owner.windowId == ownedWindow &&
+                            owner.packageName?.toString() == targetContext.packageName)
+                        fact("ancestor", depth, owner)
+                        // A direct Button role stays with the original walker and its disabled check.
+                        if (owner.className?.toString() == "android.widget.Button") return null
+                        if (owner.className?.toString() == "android.view.View" && owner.isVisibleToUser &&
+                            !owner.isEnabled && owner.isClickable) {
+                            val ownerBounds = Rect().also(owner::getBoundsInScreen)
+                            check(!ownerBounds.isEmpty && ownerBounds.left >= 0 && ownerBounds.top >= 0 &&
+                                ownerBounds.right <= display.widthPixels && ownerBounds.bottom <= display.heightPixels &&
+                                ownerBounds.contains(labelBounds)) { "Known-stale Send owner geometry is unproven" }
+                            val children = owner.childCount
+                            check(children in 1..32) { "Known-stale Send child enumeration is unknown or exhausted" }
+                            val witnesses = mutableListOf<AccessibilityNodeInfo>()
+                            for (index in 0 until children) {
+                                val child = checkNotNull(owner.getChild(index)) { "Known-stale Send child is unknown" }
+                                check(child.refresh() && child.windowId == ownedWindow &&
+                                    child.packageName?.toString() == targetContext.packageName && child.parent == owner)
+                                fact("child", index, child)
+                                if (roleOnlyButton(child) && touchTarget(Rect().also(child::getBoundsInScreen), ownerBounds)) witnesses += child
+                            }
+                            check(owner.childCount == children) { "Known-stale Send child enumeration changed" }
+                            check(witnesses.size <= 1) { "Known-stale Send role witness is ambiguous" }
+                            if (witnesses.size == 1) owners += owner to witnesses.single()
+                        }
+                        candidate = owner.parent
+                    }
+                    check(candidate == null) { "Known-stale Send exceeded the action ancestor bound" }
+                    check(owners.size <= 1) { "Known-stale Send owner is ambiguous" }
+                    check(staleInspectionCurrent()) { "Known-stale Send identity changed after role proof" }
+                    val found = owners.singleOrNull() ?: return null
+                    check(found.first.refresh() && !found.first.isEnabled && found.first.isVisibleToUser && found.first.isClickable &&
+                        found.first.actionList.none { it.id == AccessibilityNodeInfo.ACTION_CLICK } &&
+                        found.first.windowId == ownedWindow && found.first.packageName?.toString() == targetContext.packageName)
+                    check(found.second.refresh() && found.second.parent == found.first && roleOnlyButton(found.second))
+                    if (composeSendOwner == null) {
+                        composeSendOwner = found.first
+                        composeSendWitness = found.second
+                    } else check(composeSendOwner == found.first && composeSendWitness == found.second) {
+                        "Known-stale Send owner or role witness changed"
+                    }
+                    accepted = found.first
+                    return accepted
+                } finally {
+                    // Fixed bounded descriptors from this walk, emitted only on refusal. Log I/O is cooperative.
+                    if (accepted == null) try {
+                        for (line in facts) Log.i("ZerusApprovalUI", line.take(512))
+                    } catch (_: Throwable) { /* Diagnostic failure never converts a refusal to admission. */ }
+                }
+            }
             // Compose UI 1.8.3 emits a role-only child for a merging selectable owner with children.
             // This is one fixed single-choice shape, not permission to use any disabled ancestor.
             var composeOptionOwner: AccessibilityNodeInfo? = null
@@ -1018,21 +1120,6 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                         val rect = Rect().also(node::getBoundsInScreen)
                         facts += "stale-option-node kind=$kind index=$index class=$type ownedWindow=${node.windowId == ownedWindow} ownedPackage=${node.packageName?.toString() == targetContext.packageName} visible=${node.isVisibleToUser} enabled=${node.isEnabled} checkable=${node.isCheckable} checked=${node.isChecked} children=${node.childCount} bounds=$rect"
                     } catch (_: Throwable) { factsOverflow = true }
-                }
-                // Compose reports the owner with its 48 dp minimum touch target; the role
-                // child keeps its layout bounds, centred in that target on each short axis.
-                fun touchTarget(child: Rect, owner: Rect): Boolean {
-                    val minimum = 48f * targetContext.resources.displayMetrics.density
-                    fun axis(innerStart: Int, innerEnd: Int, outerStart: Int, outerEnd: Int): Boolean {
-                        val inner = innerEnd - innerStart
-                        val outer = outerEnd - outerStart
-                        if (inner == outer) return innerStart == outerStart
-                        return inner < outer && kotlin.math.abs(outer - minimum) <= 1f &&
-                            kotlin.math.abs((innerStart - outerStart) - (outerEnd - innerEnd)) <= 1
-                    }
-                    return !child.isEmpty && owner.contains(child) &&
-                        axis(child.left, child.right, owner.left, owner.right) &&
-                        axis(child.top, child.bottom, owner.top, owner.bottom)
                 }
                 fun roleOnly(child: AccessibilityNodeInfo): Boolean =
                     child.className?.toString() == "android.widget.RadioButton" && child.isVisibleToUser &&
@@ -1179,6 +1266,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                     }
                     // BEGIN STALE_COMPOSE_ROLE admission
                     if (depth == 0 && text == "Approve once") composeStaleOptionAction(label)?.let { return it }
+                    if (depth == 0 && text == "Send answer") composeStaleButtonAction(label)?.let { return it }
                     // END STALE_COMPOSE_ROLE admission
                     candidate = checkNotNull(candidate.parent) { "Known-stale $text has no $role ancestor" }
                 }

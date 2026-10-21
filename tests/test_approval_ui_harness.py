@@ -315,8 +315,11 @@ def compose_option_memory(source, label, binding, current=lambda: True):
         assert exact in body
     padded = 'if (roleOnly(child) && touchTarget(childBounds, ownerBounds)) witnesses += child to childBounds' in body
     if padded:
+        definition = source.split('            // BEGIN STALE_COMPOSE_ROLE definition\n', 1)[1].split(
+            '            // END STALE_COMPOSE_ROLE definition', 1)[0]
         for exact in TOUCH_TARGET_SOURCE:
-            assert exact in body
+            assert exact in definition
+        assert 'Rect().also(found.second::getBoundsInScreen) == witnessBounds[found.second]' in body
     else:
         for exact in ('if (roleOnly(child) && childBounds == ownerBounds)',
                       'Rect().also(found.second::getBoundsInScreen) == found.third'):
@@ -397,7 +400,18 @@ TOUCH_TARGET_SOURCE = (
     'return inner < outer && kotlin.math.abs(outer - minimum) <= 1f &&',
     'kotlin.math.abs((innerStart - outerStart) - (outerEnd - innerEnd)) <= 1',
     'return !child.isEmpty && owner.contains(child) &&',
-    'Rect().also(found.second::getBoundsInScreen) == witnessBounds[found.second]',
+)
+
+SEND_ROLE_SOURCE = (
+    'if (depth == 0 && text == "Send answer") composeStaleButtonAction(label)?.let { return it }',
+    'child.className?.toString() == "android.widget.Button" && child.isVisibleToUser &&',
+    'if (owner.className?.toString() == "android.widget.Button") return null',
+    'if (owner.className?.toString() == "android.view.View" && owner.isVisibleToUser &&\n                            !owner.isEnabled && owner.isClickable) {',
+    'if (roleOnlyButton(child) && touchTarget(Rect().also(child::getBoundsInScreen), ownerBounds)) witnesses += child',
+    'check(witnesses.size <= 1) { "Known-stale Send role witness is ambiguous" }',
+    'check(owners.size <= 1) { "Known-stale Send owner is ambiguous" }',
+    'found.first.actionList.none { it.id == AccessibilityNodeInfo.ACTION_CLICK } &&',
+    'check(found.second.refresh() && found.second.parent == found.first && roleOnlyButton(found.second))',
 )
 
 
@@ -413,14 +427,15 @@ def touch_target(child, owner, density=2.625):
     return not empty and inside and axis(child[0], child[2], owner[0], owner[2]) and axis(child[1], child[3], owner[1], owner[3])
 
 
-def restore_touch_target_bounds(source):
-    """Reverse only the role-child touch-target admission to the exact 304b bytes; no Kotlin execution."""
-    helper = source.split('                // Compose reports the owner with its 48 dp minimum touch target; the role\n', 1)
+def restore_compose_role_children(source):
+    """Reverse only the touch-target and Send role-child admissions to the exact 304b bytes; no Kotlin execution."""
+    helper = source.split('            // Compose reports the owner with its 48 dp minimum touch target; the role\n', 1)
     assert len(helper) == 2
-    tail = helper[1].split('                fun roleOnly(child: AccessibilityNodeInfo): Boolean =\n', 1)
-    assert len(tail) == 2
-    source = helper[0] + '                fun roleOnly(child: AccessibilityNodeInfo): Boolean =\n' + tail[1]
+    tail = helper[1].split('            // Compose UI 1.8.3 emits a role-only child for a merging selectable owner with children.\n', 1)
+    assert len(tail) == 2 and 'fun composeStaleButtonAction(label: AccessibilityNodeInfo)' in tail[0]
+    source = helper[0] + '            // Compose UI 1.8.3 emits a role-only child for a merging selectable owner with children.\n' + tail[1]
     terms = (
+        ('                    if (depth == 0 && text == "Send answer") composeStaleButtonAction(label)?.let { return it }\n', ''),
         ('                    val witnessBounds = mutableMapOf<AccessibilityNodeInfo, Rect>()\n', ''),
         ('val witnesses = mutableListOf<Pair<AccessibilityNodeInfo, Rect>>()', 'val witnesses = mutableListOf<AccessibilityNodeInfo>()'),
         ('if (roleOnly(child) && touchTarget(childBounds, ownerBounds)) witnesses += child to childBounds',
@@ -817,7 +832,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
             'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
         # Baseline includes guarded preparation and passive lifecycle checkpoints; progress stripping stays exact.
-        self.assertEqual(hashlib.sha256(restore_touch_target_bounds(pattern.sub('', source)).encode()).hexdigest(), '7c2010d0dda27284e44ba3bab0167446f4f0371da36ba4e17c21a0cba539f4da')
+        self.assertEqual(hashlib.sha256(restore_compose_role_children(pattern.sub('', source)).encode()).hexdigest(), '7c2010d0dda27284e44ba3bab0167446f4f0371da36ba4e17c21a0cba539f4da')
         definition = source.split('// BEGIN APPROVAL_PROGRESS definition\n', 1)[1].split('// END APPROVAL_PROGRESS definition', 1)[0]
         self.assertIn('check(progressSequence in 0 until 32)', definition)
         self.assertIn('check(record.length <= 160)', definition)
@@ -842,7 +857,7 @@ class ApprovalHarnessTests(unittest.TestCase):
                  'confirm-retire-begin', 'confirm-retire-passed', 'disabled-send-begin', 'disabled-send-passed',
                  'primary-failure-capture-begin', 'finally-begin']
         self.assertEqual([match[2] for match in pattern.finditer(source)], names)
-        self.assertEqual(hashlib.sha256(restore_touch_target_bounds(pattern.sub('', source)).encode()).hexdigest(),
+        self.assertEqual(hashlib.sha256(restore_compose_role_children(pattern.sub('', source)).encode()).hexdigest(),
                          '383010e1e8d816cc7e98d85df737d0e939074d84ddbbbbc67bb0302ceb83e2ff')
         stages = ['RESUMED_MAIN_RETURNED', 'BODY_RESTORE_BEGIN', 'BODY_RESTORE_PASSED',
                   'CONFIRM_RETIRE_BEGIN', 'CONFIRM_RETIRE_PASSED', 'DISABLED_SEND_BEGIN', 'DISABLED_SEND_PASSED',
@@ -1220,7 +1235,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         constructor = 'private data class EarlySend(private val initialNode: AccessibilityNodeInfo,'
         self.assertEqual(projected.count(constructor), 1)
         projected = projected.replace(constructor, 'private data class EarlySend(val node: AccessibilityNodeInfo,')
-        self.assertEqual(hashlib.sha256(restore_touch_target_bounds(projected).encode()).hexdigest(),
+        self.assertEqual(hashlib.sha256(restore_compose_role_children(projected).encode()).hexdigest(),
                          'adb00c075f257a89a84aef23227de0342a0e4cd103894bda923487f00fd1d480')
         reader = lambda value: value.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
         self.assertEqual(reader(source), reader(projected))
@@ -2276,26 +2291,43 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
         f = compose_option_nodes(); f.witness.text = 'pseudo role'
         self.assertIsNone(compose_option_memory(source, f.label, {}))
         # Mutating the actual source predicate changes this controlled result: it is not a hard-coded mirror.
-        changed = source.replace('child.text.isNullOrEmpty() && ', '', 1)
+        head, tail = source.split('fun roleOnly(child: AccessibilityNodeInfo): Boolean =', 1)
+        changed = head + 'fun roleOnly(child: AccessibilityNodeInfo): Boolean =' + tail.replace('child.text.isNullOrEmpty() && ', '', 1)
         self.assertIs(compose_option_memory(changed, f.label, {}), f.owner)
         f.witness.actions = {'accessibility-focus'}; f.witness.text = ''
         self.assertIs(compose_option_memory(source, f.label, {}), f.owner)
 
     def test_two_parent_checked_removals_reverse_to_every_96fc_fixture_byte(self):
         source = self.source()
-        original = restore_stale_owner_checked(restore_touch_target_bounds(source))
+        original = restore_stale_owner_checked(restore_compose_role_children(source))
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
                          '9b35c3ca5a5a3e9839a34ba53410ab45957f83ada14f7bad30f8d81c7c6b5d53')
-        self.assertEqual(source.count('!child.isCheckable && !child.isChecked && !child.isSelected'), 1)
-        self.assertEqual(source.split('            fun staleDisabledAction(', 1)[1],
+        self.assertEqual(restore_compose_role_children(source).count('!child.isCheckable && !child.isChecked && !child.isSelected'), 1)
+        self.assertEqual(restore_compose_role_children(source).split('            fun staleDisabledAction(', 1)[1],
                          original.split('            fun staleDisabledAction(', 1)[1])
 
     def test_touch_target_reversal_restores_every_304b_byte(self):
         source = self.source()
         for exact in TOUCH_TARGET_SOURCE:
             self.assertEqual(source.count(exact), 1)
-        self.assertEqual(hashlib.sha256(restore_touch_target_bounds(source).encode()).hexdigest(),
+        self.assertEqual(hashlib.sha256(restore_compose_role_children(source).encode()).hexdigest(),
                          '217e641a736eeb45ff1faa41462c8ae4316b3231859bd59455841a4c0eba71da')
+
+    def test_send_role_child_admission_is_pinned_bounded_and_refusal_logged(self):
+        source = self.source()
+        definition = source.split('            // BEGIN STALE_COMPOSE_ROLE definition\n', 1)[1].split(
+            '            // END STALE_COMPOSE_ROLE definition', 1)[0]
+        helper = definition.split('            fun composeStaleButtonAction(label: AccessibilityNodeInfo): AccessibilityNodeInfo? {\n', 1)[1].split(
+            '            var composeOptionOwner:', 1)[0]
+        for exact in SEND_ROLE_SOURCE:
+            self.assertEqual(source.count(exact), 1, exact)
+        self.assertIn('for (depth in 0 until 16)', helper)
+        self.assertIn('check(children in 1..32)', helper)
+        self.assertIn('if (accepted == null) try {', helper)
+        self.assertIn('Log.i("ZerusApprovalUI", line.take(512))', helper)
+        self.assertIn('if (facts.size >= 48) return', helper)
+        for forbidden in ('performAction', 'injectInputEvent', 'sleep(', 'sendStatus(', 'staleOptionFailureEvidence'):
+            self.assertNotIn(forbidden, helper)
 
     def observed_touch_target_nodes(self):
         # Hosted run 39638211299 retained these exact owner, role-child and label rectangles.
@@ -2312,7 +2344,7 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
         f = self.observed_touch_target_nodes()
         self.assertIs(compose_option_memory(source, f.label, {}), f.owner)
         f = self.observed_touch_target_nodes()
-        try: result = compose_option_memory(restore_touch_target_bounds(source), f.label, {})
+        try: result = compose_option_memory(restore_compose_role_children(source), f.label, {})
         except AssertionError: result = None
         self.assertIsNone(result)
 
@@ -2412,12 +2444,12 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
 
     def test_retained_diagnostic_seams_restore_all_9a4_bytes_and_original_throwable_path(self):
         source = self.source()
-        original = restore_touch_target_bounds(strip_stale_option_evidence(source))
+        original = restore_compose_role_children(strip_stale_option_evidence(source))
         # This diagnostic projection includes only the two corrected parent predicates; the full 96fc reverse is separate.
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
                          'ec824f50ae31c873d76d9c60b9f946366ceab85ccaa5cd040f67f0c0111a732d')
         walker = lambda value: value.split('            fun staleDisabledAction(', 1)[1].split('            val choice =', 1)[0]
-        self.assertEqual(walker(source), walker(original))
+        self.assertEqual(walker(restore_compose_role_children(source)), walker(original))
         passed = next(line for line in source.splitlines() if 'Approval choices smoke passed:' in line)
         self.assertNotIn('staleOptionFailureEvidence', passed)
         failure_line = lambda value: next(line for line in value.splitlines() if 'result.putString("stream", "Approval choices smoke failed:' in line)
@@ -2476,11 +2508,11 @@ class StaleComposeRoleSourceTests(unittest.TestCase):
 
     def test_stale_open_phase_seams_restore_every_f556_byte_and_all_earlier_observers(self):
         source = self.source()
-        original = restore_touch_target_bounds(strip_stale_open_phases(source))
+        original = restore_compose_role_children(strip_stale_open_phases(source))
         # This phase projection includes only the two corrected parent predicates; the full 96fc reverse is separate.
         self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
                          '71a90f9f9776fd2b485498f0d2e40ad616efcd749d9075e91775e0c74d4bd135')
-        self.assertEqual(restore_touch_target_bounds(source).split('            // BEGIN STALE_COMPOSE_ROLE definition', 1)[1],
+        self.assertEqual(restore_compose_role_children(source).split('            // BEGIN STALE_COMPOSE_ROLE definition', 1)[1],
                          original.split('            // BEGIN STALE_COMPOSE_ROLE definition', 1)[1])
         self.assertEqual(source.split('        fun open(', 1)[0], original.split('        fun open(', 1)[0])
 
