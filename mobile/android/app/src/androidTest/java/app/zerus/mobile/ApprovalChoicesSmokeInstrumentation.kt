@@ -165,11 +165,44 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             catch (_: Throwable) { touchTrace?.observationFailed() }
         }
     }
-    private fun reveal(label: String) {
+    private fun reveal(label: String, disclosureLabel: String) {
+        var disclosureScroll: AccessibilityNodeInfo? = null
+        var disclosureWindow: Int? = null
         await("option $label") {
             if (visible(label) != null) true else {
-                checkNotNull(find(uiAutomation.rootInActiveWindow) { it.isVisibleToUser && it.isScrollable })
-                    .performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                if (disclosureScroll == null) {
+                    val anchor = checkNotNull(visible(disclosureLabel)) { "Current disclosure is not visible" }
+                    check(anchor.refresh() && exactVisible(anchor, disclosureLabel) &&
+                        anchor.packageName?.toString() == targetContext.packageName)
+                    val window = anchor.windowId
+                    check(window >= 0)
+                    var current = anchor
+                    var parents = 0
+                    while (true) {
+                        check(current.refresh() && current.windowId == window &&
+                            current.packageName?.toString() == targetContext.packageName)
+                        if (current.isScrollable) {
+                            check(current.isVisibleToUser)
+                            disclosureScroll = current
+                            disclosureWindow = window
+                            break
+                        }
+                        check(parents++ < 16) { "Disclosure scroll ancestor is unknown" }
+                        current = checkNotNull(current.parent) { "Disclosure has no scroll ancestor" }
+                    }
+                }
+                // Keep the bound inner node when its label scrolls offscreen; never rebind to the history.
+                val scroll = checkNotNull(disclosureScroll)
+                val window = checkNotNull(disclosureWindow)
+                val active = checkNotNull(uiAutomation.rootInActiveWindow)
+                check(active.refresh() && active.windowId == window &&
+                    active.packageName?.toString() == targetContext.packageName)
+                check(scroll.refresh() && scroll.windowId == window && scroll.isVisibleToUser && scroll.isScrollable &&
+                    scroll.packageName?.toString() == targetContext.packageName) { "Bound disclosure scroll is stale" }
+                val bounds = Rect().also(scroll::getBoundsInScreen)
+                check(!bounds.isEmpty && bounds.left >= 0 && bounds.top >= 0 &&
+                    bounds.right <= targetContext.resources.displayMetrics.widthPixels && bounds.bottom <= targetContext.resources.displayMetrics.heightPixels)
+                scroll.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
                 false
             }
         }
@@ -498,7 +531,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             }
             boundary("begin", "countdown_once")
             open("countdown")
-            reveal("Approve once"); tap("Approve once")
+            reveal("Approve once", "Review synthetic countdown"); tap("Approve once")
             earlyReview("countdown") {
                 phase("disabled-assert-begin:countdown")
                 try {
@@ -512,7 +545,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
 
             boundary("begin", "broader_cancel")
             open("broader-cancel", "claude_tool_approval")
-            reveal("Approve for this session"); tap("Approve for this session"); reviewed(); proveBroaderDraft(); tap("Send answer")
+            reveal("Approve for this session", "Review synthetic broader-cancel"); tap("Approve for this session"); reviewed(); proveBroaderDraft(); tap("Send answer")
             node("Confirm this option?"); node("Exact command for this session only"); check(count() == 1)
             tap("Cancel"); await("cancelled confirmation") { visible("Confirm this option?") == null }; check(count() == 1)
             cases += "broader_cancel"
@@ -526,10 +559,10 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
 
             boundary("begin", "card_replacement")
             open("replacement")
-            reveal("Approve for this session"); tap("Approve for this session"); reviewed(); proveBroaderDraft(); tap("Send answer"); node("Confirm this option?")
+            reveal("Approve for this session", "Review synthetic replacement"); tap("Approve for this session"); reviewed(); proveBroaderDraft(); tap("Send answer"); node("Confirm this option?")
             open("replacement-new")
             await("replacement drops old confirmation") { visible("Confirm this option?") == null }
-            reveal("Reject"); tap("Reject")
+            reveal("Reject", "Review synthetic replacement-new"); tap("Reject")
             proveRejectDraft()
             earlyReview("replacement") { check(!button("Send answer").isEnabled && count() == 2) }
             proveRejectDraft()
@@ -555,7 +588,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
 
             boundary("begin", "lifecycle_no_submit")
             open("background")
-            reveal("Approve for this session"); tap("Approve for this session"); reviewed()
+            reveal("Approve for this session", "Review synthetic background"); tap("Approve for this session"); reviewed()
             proveBroaderDraft()
             val lifecycleSend = captureEarlySend() // Capture the underlying card before its native modal obscures it.
             tap("Send answer"); node("Confirm this option?")
@@ -586,7 +619,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             boundary("begin", "readonly_stale_identity")
             open("readonly", answerable = false); node("Synthetic read-only approval")
             check(!button("Approve once").isEnabled && count() == 4)
-            open("stale-identity"); reveal("Approve once"); tap("Approve once"); reviewed()
+            open("stale-identity"); reveal("Approve once", "Review synthetic stale-identity"); tap("Approve once"); reviewed()
             synchronized(raw) { raw.put("run_id", "replacement-run") }
             tap("Send answer")
             await("fresh identity refusal") { main { !model.activityVerified || model.error.isNotBlank() || model.drafts.any { it.questionId == "stale-identity" && it.status == "failed" } } }
