@@ -70,7 +70,7 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
                          "fac5de42d733a6b2dbaf2fa66421c7265d3b1618d1839849c73b7d699b0835d1")
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
         self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
-                         "9161b0916629d01941d17fca8ecdda5b499685d634f0bf485de9ec009916ee75")
+                         "cc8ab4afab631d025a4e73a8923dc6fe26a7104a7018ed3c436e6519aa05b669")
 
     def test_prepared_publication_uses_the_actual_bounded_owner_before_any_atomic_install(self):
         model = (MAIN / "ZerusViewModel.kt").read_text()
