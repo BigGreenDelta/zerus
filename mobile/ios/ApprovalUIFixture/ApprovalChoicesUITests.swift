@@ -89,7 +89,7 @@ import Dispatch
         XCTAssertTrue(posted.insert(action).inserted, "No control replays")
         let receiver = ReviewAcknowledgement()
         // XCTest runs this even when continueAfterFailure=false aborts the original test method.
-        addTeardownBlock { @MainActor in receiver.close() }
+        addTeardownBlock { () async in await receiver.close() }
         let reverse = "zui.ack.\(fixtureLaunch).\(fixtureGeneration.lowercased()).\(acknowledgementNonce).\(code)"
         receiver.register(reverse)
         let name = "test.example.zerus.ui.\(fixtureLaunch).\(fixtureGeneration.lowercased()).\(action)"

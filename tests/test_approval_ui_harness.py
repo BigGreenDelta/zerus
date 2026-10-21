@@ -442,6 +442,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertLess(receiver.index("guard notify_cancel(received) == 0"), receiver.index("receivedAt ="))
         self.assertNotIn("@unchecked", receiver)
         begin = source.split("    private func beginReview(", 1)[1].split("    private func ack(", 1)[0]
+        self.assertIn("addTeardownBlock { () async in await receiver.close() }", begin)
         for earlier, later in [('addTeardownBlock', 'receiver.register(reverse)'), ('receiver.register(reverse)', 'let began ='),
                                ('let began =', 'notify_post($0)'), ('notify_post($0)', 'receiver.wait()')]:
             self.assertLess(begin.index(earlier), begin.index(later))
