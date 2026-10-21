@@ -56,6 +56,17 @@ def state(*cards, ready=False):
                 first_message_reason='' if ready else 'not ready')
 
 
+def registered_unix_launch(root):
+    owned, intent = {}, dict(root=str(root), socket=str(root / 'tmux.sock'), unix_before=None,
+                            unix_registered=True, unix_run='run')
+    for pid, role in ((10, 'server'), (20, 'supervisor'), (30, 'native')):
+        image = fixture.os.path.realpath(root / ('image-' + role))
+        owned[(pid, role)] = dict(role=role, image=image)
+        intent['unix_' + role] = dict(pid=pid, birth=role, image=image)
+    intent['unix_server']['socket'] = intent['socket']
+    return owned, intent
+
+
 class HintFixtureControls(unittest.TestCase):
     def test_macos_image_uses_kernel_path_and_preserves_birth_and_absolute_identity_guards(self):
         import posixpath
@@ -287,13 +298,14 @@ class HintFixtureControls(unittest.TestCase):
         value.end, value.row_end, value.cleaning, value.gate_end = 940., 1000., False, None
         value.startup_ends, value.completed_runs, value.attempted = {}, set(), set()
         value.real, value.phase, value.env, value.checkpoints = {'candidate': Path('/fixture/hgs')}, 'candidate', {}, []
+        value.register_unix_run = lambda record: None  # These controls isolate the public gate.
         return value
 
-    def fake_answer(self, calls):
+    def fake_answer(self, calls, name='codex/p/test'):
         def answer(argv, **options):
             calls.append((argv, options))
             payload = json.loads(options['input'])
-            receipt = dict(status='answered', name='codex/p/test', request_id=payload['request_id'],
+            receipt = dict(status='answered', name=name, request_id=payload['request_id'],
                            run_id=payload['expected_run_id'], conversation_id=payload['expected_conversation_id'],
                            question_id=payload['question_id'], question_hash=payload['expected_question_hash'],
                            answers=payload['answers'], digest=hashlib.sha256(options['input'].encode()).hexdigest(),
@@ -335,19 +347,58 @@ class HintFixtureControls(unittest.TestCase):
         self.assertEqual((calls, value.proven, value.attempted), ([], [], set()))
         self.assertEqual(value.startup_ends['run'], 120.)
 
-    def test_changed_readonly_hooks_frames_are_refused_instead_of_waited_or_answered(self):
-        for change in ('count', 'title', 'option', 'hash', 'run', 'answerable', 'transport', 'typed-choice'):
+    def test_readonly_startup_words_and_options_never_select_input_for_either_agent(self):
+        for agent in ('claude', 'codex'):
+            for change in ('count', 'title', 'option', 'unnumbered'):
+                item = readonly_hooks()
+                if change == 'count': item['questions'][0]['body'] = item['questions'][0]['body'].replace('13', '14')
+                if change == 'title': item['questions'][0]['question'] = 'Accessing workspace:'
+                if change == 'option': item['questions'][0]['options'][1]['label'] = 'Unknown native option'
+                if change == 'unnumbered': item['questions'][0]['options'] = []
+                with self.subTest(agent=agent, change=change):
+                    attempted = set()
+                    self.assertIsNone(fixture.startup_answer(state(item), dict(run_id='run', agent=agent), attempted))
+                    self.assertEqual(attempted, set())
+
+    def test_changed_readonly_identity_and_schema_are_refused(self):
+        for change in ('hash', 'run', 'answerable', 'transport', 'typed-choice', 'agent', 'conversation',
+                       'tool', 'source', 'body-bound', 'option-bound', 'main', 'question-id', 'unknown-field'):
             item = readonly_hooks()
-            if change == 'count': item['questions'][0]['body'] = item['questions'][0]['body'].replace('13', '14')
-            if change == 'title': item['questions'][0]['question'] = 'Unknown review'
-            if change == 'option': item['questions'][0]['options'][1]['label'] = 'Continue'
+            binding = dict(run_id='run', agent='codex')
             if change == 'hash': item['question_hash'] = 'c' * 64
             if change == 'run': item['run_id'] = 'other'
-            if change == 'answerable': item['can_answer'] = None
+            if change == 'answerable': item['can_answer'] = True
             if change == 'transport': item['answer_transport'] = 'codex_tui'
             if change == 'typed-choice': item['questions'][0]['multi_select'] = 0
+            if change == 'agent': binding['agent'] = 'unknown'
+            if change == 'conversation': item['conversation_id'] = 'other'
+            if change == 'tool': item['tool_call_id'] = 'answer'
+            if change == 'source': item['source'] = 'unknown'
+            if change == 'body-bound': item['questions'][0]['body'] = 'x' * 32769
+            if change == 'option-bound': item['questions'][0]['options'] *= 6
+            if change == 'main': item['agent_id'] = 'child'
+            if change == 'question-id': item['question_id'] = 'startup-choice:foreign'
+            if change == 'unknown-field': item['questions'][0]['unknown'] = {'unbounded': []}
             with self.subTest(change=change), self.assertRaises(AssertionError):
-                fixture.startup_answer(state(item), dict(run_id='run', agent='codex'), set())
+                fixture.startup_answer(state(item), binding, set())
+
+    def test_claude_generic_workspace_waits_for_exact_typed_consent_without_authorizing_a_prompt(self):
+        generic = readonly_hooks()
+        generic['questions'][0].update(question='Accessing workspace:', body='Full native disclosure', options=[])
+        typed = dict(card(), source='claude_folder_trust', question_id='claude-trust:' + 'c' * 64,
+                     questions=[dict(id='trust', options=[dict(id='trust_0', label='No, exit'),
+                                                         dict(id='trust_1', label='Yes, I trust this folder')])])
+        value, calls, now = self.gate_double([state(generic, ready=True), state(typed), state(ready=True)]), [], [0.]
+        value.AGENT = 'claude'
+        value.binding = lambda name: dict(run_id='run', agent='claude')
+        value.json_hgs = lambda *args: dict(sessions=[dict(name='claude/p/test', process_state='running')])
+        with patch.object(fixture.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(fixture.time, 'sleep', side_effect=lambda n: now.__setitem__(0, now[0] + n)), \
+                patch.object(fixture.subprocess, 'run', side_effect=self.fake_answer(calls, 'claude/p/test')):
+            value.gate('claude/p/test', 'run')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(json.loads(calls[0][1]['input'])['answers'][0]['selected_option_ids'], ['trust_1'])
+        self.assertEqual(value.startup_ends['run'], 120.)
 
     def test_existing_original_deadline_is_never_renewed(self):
         value, calls, now = self.gate_double([state()]), [], [119.9]
@@ -496,6 +547,241 @@ class HintFixtureControls(unittest.TestCase):
         value.cli_children, value.cleanup_intents, value.steps = [], [], []
         value.cleanup_verified = False
         return value
+
+    def unix_custody_double(self, root):
+        class Custody(fixture.HintContract, unittest.TestCase): pass
+        value = Custody()
+        value.root, value.socket, value.env = root, str(root / 'tmux.sock'), {}
+        value.phase, value.real = 'candidate', {'candidate': root / 'subjects/candidate/hgs'}
+        value.native_copy = root / 'bin/claude'
+        value.unix_owned, value.unix_runs, value.cleanup_intents = {}, set(), []
+        value.cli_children, value.cli_observations, value.checkpoints = [], [], []
+        value.row_end, value.remaining, value.save_cleanup = 100., lambda maximum: maximum, lambda stage: None
+        rows, events = {}, []
+        images = {10: '/fixture/tools/tmux', 20: value.real['candidate'], 30: value.native_copy}
+        value.unix_table = lambda: dict(rows)
+        value.unix_endpoint_absent = lambda: 10 not in rows
+        value.unix_image = lambda pid, birth: fixture.os.path.realpath(images[pid])
+        def query(argv):
+            events.append(argv)
+            if 'list-panes' in argv:
+                return SimpleNamespace(returncode=0 if 10 in rows else 1, stderr='',
+                    stdout=f'10\t{value.socket}\t20\n' if 10 in rows else '')
+            if 'kill-server' in argv:
+                rows.clear()
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+            raise AssertionError('unexpected query')
+        value.unix_query = query
+        return value, rows, events
+
+    def test_every_unix_launch_registers_server_before_spawn_and_new_run_before_absence_can_pass(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value, rows, events = self.unix_custody_double(Path(folder))
+            class Child:
+                returncode = 0
+                def __init__(self, *args, **kwargs):
+                    self.test_before = list(events)
+                    rows.update({10: (1, 'S', 'server birth'), 20: (10, 'S', 'supervisor birth'),
+                                 30: (20, 'S', 'native birth'), 40: (30, 'S', 'descendant birth')})
+                def poll(self): return 0
+                def communicate(self, *args, **kwargs): return '', ''
+            frozen_os = SimpleNamespace(name='posix', path=fixture.os.path)
+            with patch.object(fixture, 'os', frozen_os), \
+                    patch.object(fixture, 'test_pause', SimpleNamespace(TMUX='/fixture/tools/tmux'), create=True), \
+                    patch.object(fixture, 'private_endpoint_absent', return_value=True), \
+                    patch.object(fixture.subprocess, 'Popen', side_effect=Child):
+                value.execute([str(value.real['candidate']), 'claude'], env={}, timeout=5)
+                self.assertTrue(value.cli_children[0].test_before)
+                self.assertFalse(value.cleanup_intents[0]['unix_registered'])
+                with self.assertRaises(AssertionError):
+                    fixture.unix_absence_proof(value.unix_owned, {}, value.cleanup_intents, True)
+                value.register_unix_run(dict(run_id='run', pid=30, process_start='native birth',
+                    supervisor=dict(pid=20, start='supervisor birth')))
+                self.assertTrue(value.cleanup_intents[0]['unix_registered'])
+                self.assertEqual(value.cleanup_intents[0]['unix_server']['socket'], value.socket)
+                self.assertIn((40, 'descendant birth'), value.unix_owned)
+                value.stop_unix()
+            self.assertEqual(len([argv for argv in events if 'kill-server' in argv]), 1)
+            self.assertIn('exited', value.checkpoints[-1]['cleanup'])
+
+    def test_stale_unix_endpoint_passes_only_complete_exited_custody_and_never_sends_a_stop(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value, rows, events = self.unix_custody_double(Path(folder))
+            value.unix_owned, intent = registered_unix_launch(Path(folder))
+            value.cleanup_intents = [intent]
+            with patch.object(fixture, 'test_pause', SimpleNamespace(TMUX='/fixture/tools/tmux'), create=True), \
+                    patch.object(fixture, 'private_endpoint_absent', return_value=True):
+                value.stop_unix()
+                value.stop_private_socket()
+            self.assertFalse(any('kill-server' in argv for argv in events))
+            self.assertTrue(value.checkpoints)
+
+    def test_unix_absence_refuses_incomplete_custody_live_identity_and_descendant_or_unknown_endpoint(self):
+        owned, intent = registered_unix_launch(Path.cwd() / 'synthetic-owned')
+        for rows, intents, endpoint in (({}, [dict(unix_registered=False)], True),
+                ({10: (1, 'S', 'server')}, [intent], True),
+                ({30: (20, 'S', 'native'), 40: (30, 'S', 'child')}, [intent], True),
+                ({}, [intent], False), ({}, [intent], None), ({}, [dict(unix_registered=True)], True)):
+            with self.subTest(rows=rows, intents=intents, endpoint=endpoint), self.assertRaises(AssertionError):
+                fixture.unix_absence_proof(copy.deepcopy(owned), rows, intents, endpoint)
+        tracked = copy.deepcopy(owned)
+        fixture.observe_unix_descendants(tracked, {30: (20, 'S', 'native'), 40: (30, 'S', 'child')})
+        with self.assertRaises(AssertionError):
+            fixture.unix_absence_proof(tracked, {40: (1, 'S', 'child')}, [intent], True)
+        fixture.unix_absence_proof(tracked, {40: (1, 'S', 'different birth')}, [intent], True)
+        self.assertNotIn((99, 'foreign'), tracked)
+        for change in ('before', 'server', 'native', 'supervisor', 'socket', 'image'):
+            bad = copy.deepcopy(intent)
+            if change == 'before': del bad['unix_before']
+            if change in ('server', 'native', 'supervisor'): del bad['unix_' + change]
+            if change == 'socket': bad['unix_server']['socket'] = str(Path.cwd() / 'foreign.sock')
+            if change == 'image': bad['unix_native']['image'] = str(Path.cwd() / 'foreign-image')
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                fixture.unix_absence_proof(copy.deepcopy(owned), {}, [bad], True)
+
+    def test_unix_registration_refuses_foreign_server_path_image_birth_parent_and_identity_exhaustion(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for change in ('socket', 'image', 'birth', 'parent', 'cap'):
+                value, rows, _ = self.unix_custody_double(Path(folder))
+                rows.update({10: (1, 'S', 'server'), 20: (10, 'S', 'supervisor'), 30: (20, 'S', 'native')})
+                value.cleanup_intents = [dict(unix_registered=False, unix_server=dict(pid=10, birth='server',
+                    image=fixture.os.path.realpath('/fixture/tools/tmux'), socket=value.socket))]
+                record = dict(run_id='run', pid=30, process_start='native', supervisor=dict(pid=20, start='supervisor'))
+                if change == 'socket': value.socket = str(Path(folder) / 'foreign.sock')
+                if change == 'image': value.unix_image = lambda pid, birth: '/fixture/foreign/image'
+                if change == 'birth': record['process_start'] = 'changed'
+                if change == 'parent': rows[30] = (99, 'S', 'native')
+                if change == 'cap': value.unix_owned = {(100 + n, 'birth'): {} for n in range(2048)}
+                with patch.object(fixture, 'test_pause', SimpleNamespace(TMUX='/fixture/tools/tmux'), create=True), \
+                        self.subTest(change=change), self.assertRaises(AssertionError):
+                    value.register_unix_run(record)
+                self.assertFalse(value.cleanup_intents[0]['unix_registered'])
+
+    def test_unix_query_expiry_and_kernel_birth_change_refuse_custody(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value, _, _ = self.unix_custody_double(Path(folder))
+            value.unix_query = fixture.HintContract.unix_query.__get__(value)
+            calls = []
+            def remaining(maximum):
+                calls.append(maximum)
+                if len(calls) == 3: raise AssertionError('original end')
+                return maximum
+            value.remaining = remaining
+            with patch.object(fixture.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='', stderr='')), \
+                    self.assertRaisesRegex(AssertionError, 'original end'):
+                value.unix_query(['/bin/ps', '-p', '10', '-o', 'lstart='])
+            births = iter(('known birth', 'different birth'))
+            value.remaining = lambda maximum: maximum
+            value.unix_query = lambda argv: SimpleNamespace(returncode=0, stdout=next(births))
+            with patch.object(fixture.sys, 'platform', 'linux'), \
+                    patch.object(fixture.os, 'readlink', return_value='/fixture/owned/image'), \
+                    self.assertRaisesRegex(AssertionError, 'changed owned birth'):
+                fixture.HintContract.unix_image(value, 10, 'known birth')
+
+    def test_unregistered_unix_run_prevents_startup_consent_action(self):
+        value, actions = self.gate_double([state(card())]), []
+        def incomplete(record): raise AssertionError('UNKNOWN new run launch custody')
+        value.register_unix_run = incomplete
+        with patch.object(fixture, 'os', SimpleNamespace(name='posix')), \
+                patch.object(fixture.time, 'monotonic', return_value=0), \
+                patch.object(fixture.subprocess, 'run', side_effect=self.fake_answer(actions)), \
+                self.assertRaisesRegex(AssertionError, 'launch custody'):
+            value.gate('codex/p/test', 'run')
+        self.assertEqual((actions, value.proven, value.attempted), ([], [], set()))
+
+    def test_private_socket_connect_sends_no_bytes_and_only_two_absence_errors_are_accepted(self):
+        import errno
+        import stat
+        connected = []
+        class Endpoint:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def settimeout(self, timeout): self.timeout = timeout
+            def connect(self, path):
+                connected.append(path)
+                if self.error: raise self.error
+            def send(self, *args): raise AssertionError('no endpoint bytes may be sent')
+        endpoint = Endpoint()
+        metadata = SimpleNamespace(st_mode=stat.S_IFSOCK, st_uid=42)
+        for code in (errno.ENOENT, errno.ECONNREFUSED, errno.EACCES, errno.EINTR, errno.ETIMEDOUT, None):
+            endpoint.error = OSError(code, 'synthetic') if code is not None else None
+            with patch.object(fixture.os, 'lstat', return_value=metadata), \
+                    patch.object(fixture.os, 'geteuid', return_value=42, create=True), \
+                    patch.object(fixture.socket, 'socket', return_value=endpoint):
+                if code in (errno.ENOENT, errno.ECONNREFUSED):
+                    self.assertTrue(fixture.private_endpoint_absent('/fixture/owned/tmux.sock', lambda n: n))
+                elif code is None:
+                    self.assertFalse(fixture.private_endpoint_absent('/fixture/owned/tmux.sock', lambda n: n))
+                else:
+                    with self.assertRaises(AssertionError):
+                        fixture.private_endpoint_absent('/fixture/owned/tmux.sock', lambda n: n)
+        self.assertEqual(connected, ['/fixture/owned/tmux.sock'] * 6)
+        endpoint.error = OSError(errno.ENOENT, 'synthetic')
+        checks = []
+        def expired_after_connect(maximum):
+            checks.append(maximum)
+            if len(checks) == 4: raise AssertionError('original end')
+            return maximum
+        with patch.object(fixture.os, 'lstat', return_value=metadata), \
+                patch.object(fixture.os, 'geteuid', return_value=42, create=True), \
+                patch.object(fixture.socket, 'socket', return_value=endpoint), \
+                self.assertRaisesRegex(AssertionError, 'original end'):
+            fixture.private_endpoint_absent('/fixture/owned/tmux.sock', expired_after_connect)
+
+    def test_owned_host_waits_for_empty_sessions_and_refuses_unknown_or_expired_reads(self):
+        for views, failure in (([['session'], []], False), ([[1]] * 4, True), ([None], True), ([list(range(17))], True)):
+            now, reads = [0.], []
+            def read():
+                reads.append(now[0])
+                return views[min(len(reads) - 1, len(views) - 1)]
+            with patch.object(fixture.time, 'monotonic', side_effect=lambda: now[0]), \
+                    patch.object(fixture.time, 'sleep', side_effect=lambda n: now.__setitem__(0, now[0] + n)):
+                if failure:
+                    with self.assertRaises(AssertionError): fixture.wait_owned_sessions_empty(read, lambda n: n, .1)
+                else:
+                    fixture.wait_owned_sessions_empty(read, lambda n: n, .1)
+                    self.assertEqual(len(reads), 2)
+        reads = []
+        with patch.object(fixture.time, 'monotonic', return_value=5), self.assertRaises(AssertionError):
+            fixture.wait_owned_sessions_empty(lambda: reads.append(1) or [], lambda n: n, 5)
+        self.assertEqual(reads, [])
+        now = [0.]
+        def late_read(): now[0] = 5.; return []
+        with patch.object(fixture.time, 'monotonic', side_effect=lambda: now[0]), self.assertRaises(AssertionError):
+            fixture.wait_owned_sessions_empty(late_read, lambda n: n, 5)
+
+    def test_windows_cleanup_drains_selected_host_before_stop_and_still_requires_same_handle_exit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value, now, events, stopped = fixture.HintContract(), [0.], [], [False]
+            # Supply only unittest assertions; no inherited Windows/setup code runs.
+            for name in ('assertIn', 'assertLessEqual', 'assertEqual', 'assertLess', 'assertTrue', 'assertIsNotNone'):
+                setattr(value, name, getattr(self, name))
+            value.root, value.row_end, value.names = Path(folder), 60., []
+            value.hosts, value.pinned, value.checkpoints = {7: 123}, {}, []
+            value.remaining = lambda maximum: min(maximum, 60. - now[0])
+            value.status = lambda: dict(running=True, host=dict(pid=7))
+            value.note_cleanup_error = lambda *args, **kwargs: self.fail('cleanup must retain any error')
+            lists = [dict(panes=[dict(pane='owned')], sessions=['owned']),
+                     dict(panes=[], sessions=['draining']), dict(panes=[], sessions=[])]
+            def command(request):
+                events.append(request['op'])
+                if request['op'] == 'list': return lists.pop(0)
+                if request['op'] == 'kill': return {}
+                self.assertEqual(request['op'], 'stop_host')
+                self.assertEqual(lists, [], 'busy host must not be stopped before sessions drain')
+                stopped[0] = True
+                return {}
+            value.ok = command
+            kernel = SimpleNamespace(WaitForSingleObject=lambda handle, timeout: 0 if stopped[0] else 0x102,
+                                     TerminateProcess=lambda *args: self.fail('already-exited handle must not be killed'),
+                                     CloseHandle=lambda handle: events.append(('close', handle)))
+            host = SimpleNamespace(KERNEL32=kernel, WAIT_OBJECT_0=0)
+            with patch.dict(sys.modules, {'test_windows_host': host}), \
+                    patch.object(fixture.time, 'monotonic', side_effect=lambda: now[0]), \
+                    patch.object(fixture.time, 'sleep', side_effect=lambda n: now.__setitem__(0, now[0] + n)):
+                value.stop_host()
+            self.assertEqual(events, ['list', 'kill', 'list', 'list', 'stop_host', ('close', 123)])
+            self.assertEqual(value.hosts, {})
 
     def test_partial_launch_failure_keeps_ownership_and_attempts_independent_cleanup(self):
         import tempfile

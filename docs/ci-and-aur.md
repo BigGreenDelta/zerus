@@ -1072,6 +1072,29 @@ including upload. Each native row keeps its original 1200 seconds, including the
 60-second fixture cleanup reserve, original 120-second startup gates and unchanged
 five-second hook timeout.
 
+The Unix hint fixture records the exact private tmux server's socket, PID, birth
+and kernel image before each launch when live, then registers each new run's
+native and supervisor identities before consenting to a startup card. It retains
+observed descendants while their recorded parents are live. The ledger permits
+64 launch intents, 2,048 owned identities and 16 private panes; process snapshots
+permit 16,384 rows and query output is checked against 2 MiB after capture. A
+stale or missing socket is insufficient: a zero-byte connection to only that
+reserved Unix stream path must return ENOENT or ECONNREFUSED, all launch custody
+must be complete, and all recorded birth identities must have exited. Unknown
+connectivity, images, partial registration or exhausted bounds retain the runtime
+and fail cleanup. No discovered numeric PID is signalled. Windows first waits
+at most five seconds for the selected host's sessions to drain after pane kills,
+clamped before the original row end's last five seconds, then keeps the same
+pinned-handle exit and executable-release requirements. The 60 seconds is a row
+cleanup reserve; cleanup uses the existing absolute row end even after an early
+body failure, and these checks do not create a renewed cleanup allowance.
+
+An identity-bound, bounded read-only `startup_terminal_choice` may be observed
+until a supported typed card appears within the same original 120-second gate.
+It grants no answer, prompt or readiness proof. Unknown answerable cards still
+refuse, and a forever read-only panel times out. This does not prove that a native
+provider will expose a typed card; fresh native qualification is required.
+
 Both qualification builds pass the per-command Cargo override
 `--config profile.dev.package.sha2.opt-level=3`. The candidate hgs and observer
 share that dependency profile; the real pre-feature hgs uses it as well. Normal

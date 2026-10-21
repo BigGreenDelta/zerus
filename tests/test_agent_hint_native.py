@@ -10,6 +10,7 @@ neither proves customer receipt or crash-atomic delivery. Pipes alter fault-path
 behavior. Unknown/overflow/missing identity fails, with no retry or mark rollback.
 """
 import base64
+import errno
 import hashlib
 import itertools
 import json
@@ -18,6 +19,8 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -147,7 +150,7 @@ def startup_answer(state, binding, attempted):
         raise AssertionError('ambiguous startup consent')
     card = cards[0]
     if not isinstance(card, dict): raise AssertionError('unknown startup card')
-    if readonly_hooks_review(card, binding):
+    if readonly_startup_frame(card, binding):
         # A later public inspection must expose the supported answerable card.
         # This observation grants no answer, prompt, count or fresh deadline.
         return None
@@ -175,12 +178,13 @@ def startup_answer(state, binding, attempted):
     return key, card, dict(question_id=question, selected_option_ids=[option], text='')
 
 
-def readonly_hooks_review(card, binding):
-    """The one observed read-only frame may wait; it can never authorize input."""
+def readonly_startup_frame(card, binding):
+    """An identity-bound read-only chooser may wait, without selecting anything."""
     value = card.get('question_hash')
     questions = card.get('questions')
-    return (binding.get('agent') == 'codex' and binding.get('conversation_id') in (None, '')
+    if not (binding.get('agent') in ('claude', 'codex') and binding.get('conversation_id') in (None, '')
             and card.get('source') == 'startup_terminal_choice' and card.get('can_answer') is False
+            and isinstance(binding.get('run_id'), str) and 0 < len(binding['run_id']) <= 128
             and card.get('run_id') == binding['run_id'] and card.get('agent_id') == 'main'
             and card.get('conversation_id') in (None, '') and card.get('tool_call_id') == ''
             and card.get('answer_transport') == ''
@@ -189,13 +193,95 @@ def readonly_hooks_review(card, binding):
             and all(char in '0123456789abcdef' for char in value)
             and card.get('question_id') == 'startup-choice:' + value
             and isinstance(questions, list) and len(questions) == 1 and isinstance(questions[0], dict)
-            and questions[0].get('multi_select') is False and questions[0].get('allow_other') is False
-            and questions == [dict(id='terminal', header='Terminal',
-                question='Hooks need review',
-                body='13 hooks are new or changed.\nHooks can run outside the sandbox after you trust them.',
-                multi_select=False, allow_other=False, options=[
-                    dict(id='1', label='Review hooks'), dict(id='2', label='Trust all and continue'),
-                    dict(id='3', label="Continue without trusting (hooks won't run)")])])
+            and questions[0].get('multi_select') is False and questions[0].get('allow_other') is False):
+        return False
+    question = questions[0]
+    options = question.get('options')
+    return (set(question) == {'id', 'header', 'question', 'body', 'multi_select', 'allow_other', 'options'}
+            and question.get('id') == 'terminal' and question.get('header') == 'Terminal'
+            and isinstance(question.get('question'), str) and 0 < len(question['question']) <= 1024
+            and isinstance(question.get('body'), str) and len(question['body']) <= 32768
+            and isinstance(options, list) and len(options) <= 16
+            and all(isinstance(item, dict) and set(item) == {'id', 'label'} and isinstance(item.get('id'), str)
+                    and 0 < len(item['id']) <= 64 and isinstance(item.get('label'), str)
+                    and 0 < len(item['label']) <= 1024 for item in options))
+
+
+def observe_unix_descendants(owned, rows):
+    """Extend only already-recorded, birth-matched parentage; never signal a PID."""
+    while True:
+        children = {(pid, row[2]) for pid, row in rows.items()
+                    if (pid, row[2]) not in owned and row[0] in rows
+                    and (row[0], rows[row[0]][2]) in owned}
+        if not children: break
+        if len(owned) + len(children) > 2048:
+            raise AssertionError('UNKNOWN owned Unix identity bound')
+        owned.update({identity: dict(role='descendant') for identity in children})
+    return {identity for identity in owned if identity[0] in rows
+            and rows[identity[0]][2] == identity[1] and not rows[identity[0]][1].startswith(('Z', 'X'))}
+
+
+def unix_absence_proof(owned, rows, intents, endpoint_absent):
+    if len(intents) > 64 or len(owned) > 2048:
+        raise AssertionError('UNKNOWN Unix custody inventory bound')
+    runs = set()
+    for intent in intents:
+        if (not isinstance(intent, dict) or intent.get('unix_registered') is not True
+                or not isinstance(intent.get('unix_run'), str) or not intent['unix_run']
+                or intent['unix_run'] in runs or 'unix_before' not in intent
+                or not isinstance(intent.get('root'), str) or not os.path.isabs(intent['root'])
+                or intent.get('socket') != str(Path(intent['root']) / 'tmux.sock')):
+            raise AssertionError('UNKNOWN incomplete Unix launch custody')
+        runs.add(intent['unix_run'])
+        for role, key in (('server', 'unix_before'), ('server', 'unix_server'),
+                          ('native', 'unix_native'), ('supervisor', 'unix_supervisor')):
+            value = intent.get(key)
+            if key == 'unix_before' and value is None: continue
+            if (not isinstance(value, dict) or type(value.get('pid')) is not int or value['pid'] <= 0
+                    or not isinstance(value.get('birth'), str) or not value['birth']
+                    or not isinstance(value.get('image'), str) or not os.path.isabs(value['image'])
+                    or owned.get((value['pid'], value['birth'])) != dict(role=role, image=value['image'])
+                    or role == 'server' and value.get('socket') != intent['socket']):
+                raise AssertionError('UNKNOWN unregistered Unix launch identity')
+    if endpoint_absent is not True or observe_unix_descendants(owned, rows):
+        raise AssertionError('UNKNOWN private endpoint or incomplete Unix launch custody')
+
+
+def private_endpoint_absent(path, remaining):
+    """Connect only this reserved SOCK_STREAM endpoint; send zero bytes."""
+    remaining(1)
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise AssertionError('UNKNOWN private socket type/owner')
+    remaining(1)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as endpoint:
+        endpoint.settimeout(remaining(1))
+        try:
+            endpoint.connect(path)
+        except OSError as error:
+            remaining(1)
+            if error.errno in (errno.ENOENT, errno.ECONNREFUSED): return True
+            raise AssertionError('UNKNOWN private endpoint connectivity') from error
+    remaining(1)
+    return False
+
+
+def wait_owned_sessions_empty(read, remaining, end):
+    """Drain the selected private host within a fixed slice of its original end."""
+    while True:
+        remaining(1)
+        if time.monotonic() >= end: raise AssertionError('UNKNOWN owned sessions did not drain')
+        sessions = read()
+        remaining(1)
+        if time.monotonic() >= end: raise AssertionError('UNKNOWN owned session drain end')
+        if not isinstance(sessions, list) or len(sessions) > 16:
+            raise AssertionError('UNKNOWN owned session inventory')
+        if not sessions: return
+        time.sleep(min(.05, remaining(.05), max(0, end - time.monotonic())))
 
 
 def public_ready(state, record):
@@ -308,6 +394,7 @@ class HintContract:
         self.phase, self.attempted, self.checkpoints = 'candidate', set(), []
         self.startup_ends, self.completed_runs = {}, set()
         self.cli_children, self.cleanup_intents, self.cli_observations = [], [], []
+        self.unix_owned, self.unix_runs = {}, set()
         self.cleanup_errors, self.cleanup_errors_overflow = [], False
         self.result_dir = Path(os.environ['ZERUS_HINT_RESULTS']) / self.id()
         self.result_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -511,11 +598,23 @@ class HintContract:
     def execute(self, argv, *, env, input=None, cwd=None, timeout):
         # Namespace intent precedes spawn; direct-child custody precedes every
         # fallible communicate/return. Popen owns this child, never a PID lookup.
-        if len(argv) > 1 and argv[1] in ('claude', 'codex', 'resume', 'fork', 'session-host'):
+        launch = len(argv) > 1 and argv[1] in ('claude', 'codex', 'resume', 'fork', 'session-host')
+        intent = None
+        if os.name != 'nt' and len(argv) > 1 and (launch or argv[1] == 'pause'):
+            rows, server, _ = self.unix_live_snapshot()
+            if server is None:
+                unix_absence_proof(self.unix_owned, rows, self.cleanup_intents, True)
+        if launch:
             self.assertLess(len(self.cleanup_intents), 64, 'bounded launch intent inventory')
-            self.cleanup_intents.append(dict(argv=argv, root=str(getattr(self, 'root', '')),
-                                             socket=getattr(self, 'socket', None), phase=self.phase))
+            if os.name != 'nt':
+                self.assertTrue(all(item.get('unix_registered') is True for item in self.cleanup_intents),
+                                'UNKNOWN earlier Unix launch custody')
+            intent = dict(argv=argv, root=str(getattr(self, 'root', '')),
+                          socket=getattr(self, 'socket', None), phase=self.phase)
+            if os.name != 'nt': intent.update(unix_before=server, unix_registered=False)
+            self.cleanup_intents.append(intent)
             self.save_cleanup('owned intent before spawn')
+        timeout = min(timeout, self.remaining(timeout))
         options = dict(env=env, cwd=cwd, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
         if os.name == 'nt':
@@ -543,6 +642,11 @@ class HintContract:
                 self.last_launch = bounded_observation(observation, 4096)
             self.cli_observations = (getattr(self, 'cli_observations', []) +
                                      [bounded_observation(observation, 4096)])[-16:]
+        if intent is not None and os.name != 'nt' and child.returncode == 0:
+            _, server, _ = self.unix_live_snapshot()
+            self.assertIsNotNone(server, 'UNKNOWN new private server identity')
+            intent['unix_server'] = server
+            self.save_cleanup('private server registered; new run custody pending')
         return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
 
     def run_hgs(self, *args, timeout=60):
@@ -741,6 +845,8 @@ class HintContract:
             self.assertEqual(record['run_id'], run)
             self.assertEqual(record['agent'], self.AGENT)
             self.assertIs(state.get('tracked'), True)
+            if os.name != 'nt': self.register_unix_run(record)
+            if time.monotonic() >= end: break
             selected = startup_answer(state, record, self.attempted)
             if selected:
                 key, card, answer = selected
@@ -978,67 +1084,156 @@ class HintContract:
             # must not prevent independent stop, reap and seal attempts.
             self.cleanup_errors_overflow = True
 
+    def unix_query(self, argv):
+        self.remaining(1)
+        result = subprocess.run(argv, env=dict(self.env, LC_ALL='C', TZ='UTC'), capture_output=True,
+                                text=True, timeout=self.remaining(3))
+        self.remaining(1)
+        self.assertLessEqual(len(result.stdout.encode()) + len(result.stderr.encode()), MAX_REQUESTS,
+                             'Unix custody query bound')
+        return result
+
+    def unix_table(self):
+        result = self.unix_query(['/bin/ps', '-axo', 'pid=,ppid=,stat=,lstart='])
+        self.assertEqual(result.returncode, 0, 'UNKNOWN process snapshot')
+        rows = {}
+        for line in result.stdout.splitlines():
+            fields = line.split(None, 3)
+            self.assertTrue(len(fields) == 4 and fields[0].isdigit() and fields[1].isdigit()
+                            and fields[2] and len(fields[3].split()) == 5, 'UNKNOWN process snapshot row')
+            pid = int(fields[0])
+            self.assertNotIn(pid, rows, 'UNKNOWN duplicate process identity')
+            rows[pid] = (int(fields[1]), fields[2], ' '.join(fields[3].split()))
+            self.assertLessEqual(len(rows), 16384, 'process snapshot entry bound')
+        self.assertTrue(rows, 'UNKNOWN empty process snapshot')
+        return rows
+
+    def unix_image(self, pid, birth):
+        def check():
+            result = self.unix_query(['/bin/ps', '-p', str(pid), '-o', 'lstart='])
+            self.assertEqual(result.returncode, 0, 'UNKNOWN owned birth identity')
+            self.assertEqual(' '.join(result.stdout.split()), birth, 'UNKNOWN changed owned birth')
+        check()
+        self.remaining(1)
+        if sys.platform == 'darwin':
+            from test_kimi_native import executable
+            image = executable(pid)
+        elif sys.platform.startswith('linux'):
+            image = os.readlink('/proc/' + str(pid) + '/exe')
+        else:
+            raise AssertionError('UNKNOWN Unix kernel image adapter')
+        self.remaining(1)
+        check()
+        self.assertTrue(isinstance(image, (str, os.PathLike)) and os.path.isabs(image),
+                        'UNKNOWN owned absolute image')
+        image = os.path.realpath(image)
+        self.remaining(1)
+        return image
+
+    def unix_remember(self, pid, birth, role, expected, rows):
+        self.assertTrue(type(pid) is int and pid > 0 and isinstance(birth, str) and birth,
+                        'UNKNOWN owned Unix identity')
+        birth = ' '.join(birth.split())
+        self.assertIn(pid, rows, 'UNKNOWN missing owned process')
+        self.assertEqual(rows[pid][2], birth, 'UNKNOWN owned process birth')
+        image = self.unix_image(pid, birth)
+        self.remaining(1)
+        self.assertIn(image, {os.path.realpath(path) for path in expected}, 'UNKNOWN owned process image')
+        self.remaining(1)
+        self.assertLess(len(self.unix_owned), 2048, 'owned Unix identity bound')
+        self.unix_owned[(pid, birth)] = dict(role=role, image=image)
+        return dict(pid=pid, birth=birth, image=image)
+
+    def unix_live_snapshot(self):
+        self.remaining(1)
+        self.assertEqual(Path(self.socket), self.root / 'tmux.sock', 'UNKNOWN private socket scope')
+        self.assertTrue(Path(self.socket).is_absolute(), 'UNKNOWN relative private socket')
+        rows = self.unix_table()
+        panes = self.unix_query([test_pause.TMUX, '-S', self.socket, 'list-panes', '-a', '-F',
+                                 '#{pid}\t#{socket_path}\t#{pane_pid}'])
+        if panes.returncode == 1 and self.unix_endpoint_absent():
+            observe_unix_descendants(self.unix_owned, rows)
+            return rows, None, set()
+        self.assertEqual(panes.returncode, 0, 'UNKNOWN private socket identity')
+        self.assertFalse(self.unix_endpoint_absent(), 'UNKNOWN vanished private server endpoint')
+        lines = panes.stdout.splitlines()
+        self.assertTrue(0 < len(lines) <= 16, 'UNKNOWN private pane inventory')
+        server, pane_ids = None, set()
+        for line in lines:
+            fields = line.split('\t')
+            self.assertTrue(len(fields) == 3 and fields[0].isdigit() and fields[2].isdigit(),
+                            'UNKNOWN private pane/server identity')
+            pid, path, pane = int(fields[0]), fields[1], int(fields[2])
+            self.assertEqual(os.path.realpath(path), os.path.realpath(self.socket), 'UNKNOWN server socket scope')
+            self.remaining(1)
+            self.assertIn(pid, rows, 'UNKNOWN private server process')
+            identity = self.unix_remember(pid, rows[pid][2], 'server', [test_pause.TMUX], rows)
+            identity['socket'] = str(self.socket)
+            self.assertTrue(server is None or server == identity, 'UNKNOWN multiple private servers')
+            server = identity
+            self.assertIn(pane, rows, 'UNKNOWN private pane process')
+            self.unix_remember(pane, rows[pane][2], 'supervisor', list(self.real.values()), rows)
+            pane_ids.add(pane)
+        observe_unix_descendants(self.unix_owned, rows)
+        return rows, server, pane_ids
+
+    def unix_endpoint_absent(self):
+        return private_endpoint_absent(self.socket, self.remaining)
+
+    def register_unix_run(self, record):
+        run = record.get('run_id')
+        if run in self.unix_runs: return
+        self.assertTrue(isinstance(run, str) and run, 'UNKNOWN new run identity')
+        pending = [item for item in self.cleanup_intents if item.get('unix_registered') is not True]
+        self.assertEqual(len(pending), 1, 'UNKNOWN new run launch custody')
+        rows, server, panes = self.unix_live_snapshot()
+        self.assertIsNotNone(server, 'UNKNOWN new run private server')
+        self.assertEqual(server, pending[0].get('unix_server'), 'UNKNOWN new run server changed')
+        supervisor = record.get('supervisor') or {}
+        self.assertIn(supervisor.get('pid'), panes, 'UNKNOWN new run private pane')
+        native = self.unix_remember(record.get('pid'), record.get('process_start'), 'native',
+                                    [self.native_copy], rows)
+        parent = self.unix_remember(supervisor.get('pid'), supervisor.get('start'), 'supervisor',
+                                    list(self.real.values()), rows)
+        self.assertEqual(rows[native['pid']][0], parent['pid'], 'UNKNOWN new run supervised child')
+        observe_unix_descendants(self.unix_owned, rows)
+        pending[0].update(unix_registered=True, unix_run=run, unix_native=native, unix_supervisor=parent)
+        self.unix_runs.add(run)
+        self.save_cleanup('new run custody complete')
+
     def stop_unix(self):
         if not hasattr(self, 'socket') or not hasattr(self, 'env'):
             self.assertEqual(self.cleanup_intents, [], 'UNKNOWN partial launch namespace')
             return
-        def run(argv):
-            result = subprocess.run(argv, env=dict(self.env, LC_ALL='C', TZ='UTC'), capture_output=True, text=True,
-                                    timeout=self.remaining(3))
-            self.assertLessEqual(len(result.stdout.encode()), MAX_REQUESTS, 'cleanup process snapshot bound')
-            return result
-        def table():
-            result = run(['/bin/ps', '-axo', 'pid=,ppid=,stat=,lstart='])
-            self.assertEqual(result.returncode, 0, 'UNKNOWN process snapshot')
-            rows = {}
-            for line in result.stdout.splitlines():
-                fields = line.split(None, 3)
-                if len(fields) == 4:
-                    rows[int(fields[0])] = (int(fields[1]), fields[2], ' '.join(fields[3].split()))
-            return rows
-        current, owned = table(), {}
-        if Path(self.socket).exists():
-            panes = run([test_pause.TMUX, '-S', self.socket, 'list-panes', '-a', '-F', '#{pane_pid}'])
-            self.assertEqual(panes.returncode, 0, 'UNKNOWN private socket identity')
-            for pid in panes.stdout.split():
-                self.assertTrue(pid.isdigit() and int(pid) in current, 'UNKNOWN private pane identity')
-                owned[int(pid)] = current[int(pid)][2]
-        paths = list(itertools.islice((self.root / 'state').rglob('*.json'), 257))
-        self.assertLessEqual(len(paths), 256, 'cleanup binding bound')
-        for path in paths:
-            record = read_json(path, MAX_RECORD)
-            if not isinstance(record, dict): continue
-            supervisor = record.get('supervisor') or {}
-            for pid, birth in ((record.get('pid'), record.get('process_start')),
-                               (supervisor.get('pid'), supervisor.get('start'))):
-                if isinstance(pid, int) and isinstance(birth, str) and birth and pid in current:
-                    if current[pid][2] == ' '.join(birth.split()): owned[pid] = current[pid][2]
-        def living(rows):
-            while True:
-                children = {pid: value[2] for pid, value in rows.items()
-                            if pid not in owned and value[0] in owned and value[0] in rows
-                            and rows[value[0]][2] == owned[value[0]]}
-                if not children: break
-                owned.update(children)
-            return {pid: birth for pid, birth in owned.items()
-                    if pid in rows and rows[pid][2] == birth and not rows[pid][1].startswith(('Z', 'X'))}
-        living(current)  # Snapshot descendant ownership before the socket stop.
-        self.stop_private_socket()
-        while living(table()):
+        rows, server, _ = self.unix_live_snapshot()
+        if server is None:
+            unix_absence_proof(self.unix_owned, rows, self.cleanup_intents, True)
+        else:
+            self.stop_private_socket()
+        while observe_unix_descendants(self.unix_owned, self.unix_table()):
             self.assertLess(time.monotonic(), self.row_end - 5, 'UNKNOWN owned descendants at original end')
             time.sleep(min(.05, self.remaining(.05)))
-        self.checkpoints.append(dict(cleanup='private socket and observed birth identities exited',
-                                     owned=[dict(pid=pid, birth=birth) for pid, birth in owned.items()]))
+        unix_absence_proof(self.unix_owned, self.unix_table(), self.cleanup_intents,
+                           self.unix_endpoint_absent())
+        self.checkpoints.append(dict(cleanup='registered private server/run identities and observed descendants exited',
+            owned=[dict(pid=pid, birth=birth, **value) for (pid, birth), value in self.unix_owned.items()]))
 
     def stop_private_socket(self):
         # Also attempted independently if process discovery failed before stop;
         # never retry a previous stop or signal a process by a discovered PID.
         if getattr(self, 'socket_stop_attempted', False): return
-        if not getattr(self, 'socket', None) or not Path(self.socket).exists(): return
+        if not getattr(self, 'socket', None): return
         self.socket_stop_attempted = True
-        stopped = subprocess.run([test_pause.TMUX, '-S', self.socket, 'kill-server'], env=self.env,
-                                 capture_output=True, text=True, timeout=self.remaining(3))
-        self.assertEqual(stopped.returncode, 0, 'UNKNOWN private socket stop')
+        rows, server, _ = self.unix_live_snapshot()
+        if server is None:
+            unix_absence_proof(self.unix_owned, rows, self.cleanup_intents, True)
+            return
+        stopped = self.unix_query([test_pause.TMUX, '-S', self.socket, 'kill-server'])
+        if stopped.returncode == 1:
+            unix_absence_proof(self.unix_owned, self.unix_table(), self.cleanup_intents,
+                               self.unix_endpoint_absent())
+        else:
+            self.assertEqual(stopped.returncode, 0, 'UNKNOWN private socket stop')
 
     def stop_host(self):
         """Only the hint classes use this; no inherited renewed wait or PID kill."""
@@ -1065,6 +1260,8 @@ class HintContract:
                 panes = self.ok({'op': 'list'})['panes']
                 self.assertLessEqual(len(panes), 16, 'private host pane bound')
                 for pane in panes: self.ok({'op': 'kill', 'target': {'pane': pane['pane']}})
+                drain_end = min(self.row_end - 5, time.monotonic() + self.remaining(5))
+                wait_owned_sessions_empty(lambda: self.ok({'op': 'list'})['sessions'], self.remaining, drain_end)
                 self.ok({'op': 'stop_host'})
         except BaseException as error:
             problems.append('private stop: ' + type(error).__name__)
