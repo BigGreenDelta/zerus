@@ -110,7 +110,10 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
         self.assertIn('postStages.updateAndGet(index) { if (it < 128) it + 1 else 128 } == 128', definition)
         self.assertIn('catch (_: Throwable) { postStagesUnknown = true }', definition)
         self.assertNotIn('throw', definition)
-        for index in range(7): self.assertIn(f'postStages.get({index})', definition)
+        self.assertIn('val values = IntArray(7) { postStages.get(it) }', definition)
+        self.assertIn('postStagesUnknown || values.any { it >= 128 }', definition)
+        self.assertLess(definition.index('val values = '), definition.index('val status = '))
+        for index in range(7): self.assertIn('${values[' + str(index) + ']}', definition)
         current, unknown = 0, False
         for _ in range(140):
             current = current + 1 if current < 128 else 128

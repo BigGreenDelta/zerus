@@ -61,8 +61,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         catch (_: Throwable) { postStagesUnknown = true }
     }
     private fun postEvidence(): String = try {
-        val status = if (postStagesUnknown) "UNKNOWN" else "observed"
-        "owned-post status=$status scoped=${postStages.get(0)} inspect=${postStages.get(1)} answerEntry=${postStages.get(2)} admitted=${postStages.get(3)} recorded=${postStages.get(4)} voice=${postStages.get(5)} other=${postStages.get(6)}"
+        val values = IntArray(7) { postStages.get(it) }
+        val status = if (postStagesUnknown || values.any { it >= 128 }) "UNKNOWN" else "observed"
+        "owned-post status=$status scoped=${values[0]} inspect=${values[1]} answerEntry=${values[2]} admitted=${values[3]} recorded=${values[4]} voice=${values[5]} other=${values[6]}"
     } catch (_: Throwable) { "owned-post status=UNKNOWN" }
     private fun failureText(value: String): String = try {
         val kind = when {
