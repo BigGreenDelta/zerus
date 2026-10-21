@@ -81,7 +81,14 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         "k=$kind n=${value.length} p=${prefix.length} sha256Prefix=$digest"
     } catch (_: Throwable) { "k=UNKNOWN" }
     // END QUESTION_SEND_DIAGNOSTIC definition
-    private data class EarlySend(val node: AccessibilityNodeInfo, val window: Int, val current: () -> Boolean)
+    private data class EarlySend(val node: AccessibilityNodeInfo, val window: Int, val current: () -> Boolean) {
+        var resumeEnd: Long? = null
+            private set
+        fun begin(resumeStart: Long) {
+            check(resumeEnd == null)
+            resumeEnd = Math.addExact(resumeStart, 3_000)
+        }
+    }
     private var earlySend: EarlySend? = null
     private data class InterceptorFailure(val guard: String, val type: String, val method: String, val path: String)
     private val interceptorFailure = AtomicReference<InterceptorFailure?>(null)
@@ -163,13 +170,11 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     }
     private fun button(label: String, visibleLabel: Rect? = null): AccessibilityNodeInfo {
         val cached = earlySend?.takeIf { label == "Send answer" }
-        var current = if (cached != null) {
-            check(cached.current()) { "Early-review card identity changed" }
-            check(cached.node.refresh() && cached.node.windowId == cached.window && exactVisible(cached.node, label)) {
-                "Early-review Send node is stale"
-            }
-            cached.node // No root search or fallback for a stale scoped cache.
-        } else node(label)
+        if (cached != null) {
+            check(visibleLabel == null) { "Early-review Send cache is read-only" }
+            return cachedSendButton(cached)
+        }
+        var current = node(label)
         val labelWindow = if (visibleLabel != null) {
             check(current.refresh())
             check(exactVisible(current, label))
@@ -183,6 +188,35 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             if (labelWindow != null) check(current.windowId == labelWindow)
             if (current.isClickable || !current.isEnabled || current.parent == null) return current
             current = checkNotNull(current.parent)
+        }
+    }
+    private fun cachedSendButton(cached: EarlySend): AccessibilityNodeInfo {
+        val end = checkNotNull(cached.resumeEnd)
+        while (true) {
+            check(SystemClock.elapsedRealtime() < end) { "Early-review Send deadline expired" }
+            check(cached.current()) { "Early-review card identity changed" }
+            check(cached.node.refresh() && cached.window >= 0 && cached.node.windowId == cached.window &&
+                cached.node.packageName?.toString() == targetContext.packageName && exactVisible(cached.node, "Send answer")) {
+                "Early-review Send node is stale"
+            }
+            var current = cached.node
+            var staleAncestor = false
+            for (depth in 0 until 16) {
+                // The bound label was refreshed once above. Only a stale ancestor permits another bounded walk.
+                if (depth > 0 && !current.refresh()) { staleAncestor = true; break }
+                check(current.windowId == cached.window && current.packageName?.toString() == targetContext.packageName)
+                check(SystemClock.elapsedRealtime() < end) { "Early-review Send deadline expired" }
+                if (current.isClickable || !current.isEnabled) {
+                    check(cached.current()) { "Early-review card identity changed" }
+                    check(SystemClock.elapsedRealtime() < end) { "Early-review Send deadline expired" }
+                    return current
+                }
+                current = checkNotNull(current.parent) { "Early-review Send action is missing" }
+            }
+            check(staleAncestor) { "Early-review Send ancestry exceeds its bound" }
+            val remaining = end - SystemClock.elapsedRealtime()
+            check(remaining > 0) { "Early-review Send deadline expired" }
+            SystemClock.sleep(minOf(30L, remaining))
         }
     }
     private fun tap(label: String) {
@@ -580,6 +614,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 // The timestamp precedes resume, so a late resume or accessibility read cannot qualify as early.
                 val resumeStart = SystemClock.elapsedRealtime()
                 resumedAt = resumeStart
+                captured.begin(resumeStart)
                 phase("early-resume-begin:$name")
                 targetContext.startActivity(Intent(targetContext, MainActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
@@ -693,6 +728,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 main { phase("lifecycle-stopped:id=${System.identityHashCode(activity)}:state=${activity.lifecycle.currentState.name}:focus=${activity.hasWindowFocus()}") }
                 val resumeStart = SystemClock.elapsedRealtime()
                 lifecycleResumedAt = resumeStart
+                lifecycleSend.begin(resumeStart)
                 phase("early-resume-begin:lifecycle")
                 targetContext.startActivity(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
                 await("same Activity regained focus") { main {

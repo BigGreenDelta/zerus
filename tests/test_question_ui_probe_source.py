@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN = "mobile/android/app/src/main/java/app/zerus/mobile/"
 FIXTURE = "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
 ORIGINAL_UI = "3687bd4bb2f7243c06fc99865c08120795360b273aa8291b612794a9bfdf57bf"
-# Fixture baseline includes the explicit same-instance onStop/resume barrier; probe seams still reconstruct exactly.
-ORIGINAL_FIXTURE = "a339df48a6ee279359104acc24c6fbb42c13df99f3767b767a96940b4443b231"
+# Fixture baseline includes the same-instance lifecycle barrier and bounded cached-Send ancestry; probe seams reconstruct exactly.
+ORIGINAL_FIXTURE = "ba03f2e96d4753743b8a6edcc14bf6f282d2293b859e7a613d5a3d8fbf341e97"
 
 
 def strip_probe(source, expected):
@@ -76,7 +76,7 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
     def test_failure_classifiers_and_post_observations_leave_all_original_client_and_ui_code_exact(self):
         source = (ROOT / FIXTURE).read_text()
         self.assertEqual(hashlib.sha256(strip_send_diagnostics(source).encode()).hexdigest(),
-            "37711e3c9af5a9ed0e716b1c10b453100e690c51f29acffc2ae5f88e67fd51f0")
+            "5d5acfb9c5d6b1fca81eb454c990c7b9550e0ffd9f1922b5845c8e2cd814a818")
         model = source.split("    private fun modelEvidence(", 1)[1].split("    private fun set(", 1)[0]
         self.assertTrue(model.startswith('model: ZerusViewModel, target: Target, activity: MainActivity, offered: JSONObject?): String = main {'))
         self.assertIn('failureText(model.error)', model)

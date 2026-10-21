@@ -69,9 +69,9 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256((MAIN / "QuestionUi.kt").read_bytes()).hexdigest(),
                          "fac5de42d733a6b2dbaf2fa66421c7265d3b1618d1839849c73b7d699b0835d1")
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
-        # The fixture baseline intentionally includes the same-instance onStop/resume barrier.
+        # The fixture baseline includes the same-instance lifecycle barrier and bounded cached-Send ancestry.
         self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
-                         "9f89d6e02839d888d696e2f84de7bed450273013880ba622f28361bb889a90b5")
+                         "faa410672b1e2e431b8e1aa0c5c59a4db3d4c363400fed932062a355ca23e0b2")
 
     def test_prepared_publication_uses_the_actual_bounded_owner_before_any_atomic_install(self):
         model = (MAIN / "ZerusViewModel.kt").read_text()

@@ -68,6 +68,14 @@ Activity is still resumed. Its single Home transition therefore waits for the sa
 original ten-second wait slots and three-second early-review requirement remain unchanged. The former focus-only stop
 predicate did not prove an `onStop` transition; the retained failed run does not establish the exact OS event ordering.
 
+Each scoped Send cache arms its deadline once from the original pre-resume timestamp plus three seconds. A cached read
+refreshes the same exact visible owned label and current card, then follows at most sixteen ancestors in that window and
+package. Only an ancestor that fails `refresh()` permits another walk from that same validated label; the passive poll
+is clamped to the remaining original deadline. A stale label, changed card/window/package, missing action, read error,
+depth limit or late result refuses the read. There is no root search, anchor rebinding, input retry or extra review time;
+the returned native node must still satisfy the original disabled assertion. The retained feedback failure identifies
+the ancestor-loop refresh check, but not which iteration or node failed.
+
 Ordinary Home/resume can also initiate the production catalog refresh. The interceptor admits only GET
 `/v1/capabilities` and `/v1/computers` at the exact reserved HTTPS origin, default port, empty userinfo/query/fragment/body,
 and exact existing fixture authorization. Capabilities advertise only protocol1, `inspect`, `answer`, and no features.

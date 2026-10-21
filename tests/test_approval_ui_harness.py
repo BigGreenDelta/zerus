@@ -63,6 +63,57 @@ def android_diagnostic_memory(source):
     return evidence_line, namespace["stage"], stages
 
 
+def cached_send_memory(source, anchor, window, package, end, clock, current_card=lambda: True):
+    """Finite source-bound accessibility stand-in, never Android/Kotlin or actual native-node evidence."""
+    body = source.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
+    for exact in ('val end = checkNotNull(cached.resumeEnd)', 'check(cached.current())',
+                  'if (depth > 0 && !current.refresh()) { staleAncestor = true; break }',
+                  'current = checkNotNull(current.parent)', 'check(staleAncestor)',
+                  'val remaining = end - SystemClock.elapsedRealtime()', 'check(remaining > 0)',
+                  'SystemClock.sleep(minOf(30L, remaining))'):
+        assert exact in body
+    limit = int(re.search(r'for \(depth in 0 until (\d+)\)', body)[1])
+    assert limit == 16
+    anchor_guard = re.search(r'check\((cached.node.refresh\(\)[\s\S]*?)\) \{\n                "Early-review Send node is stale"', body)[1]
+    ancestor_guard = re.search(r'check\((current.windowId[^\n]+)\)', body)[1]
+    terminal = re.search(r'if \((current.isClickable[^\n]+)\) \{', body)[1]
+    assert re.search(r'if \(current.isClickable \|\| !current.isEnabled\) \{\s*check\(cached.current\(\)\)[^\n]+\s*check\(SystemClock.elapsedRealtime\(\) < end\)[^\n]+\s*return current', body)
+    def translated(expression, values):
+        for literal, replacement in (
+            ('cached.node.refresh()', 'refreshed'), ('cached.window', 'window'), ('cached.node.windowId', 'node_window'),
+            ('cached.node.packageName?.toString()', 'node_package'), ('targetContext.packageName', 'package'),
+            ('exactVisible(cached.node, "Send answer")', 'exact_visible'), ('current.windowId', 'node_window'),
+            ('current.packageName?.toString()', 'node_package'), ('current.isClickable', 'clickable'),
+            ('current.isEnabled', 'enabled'), ('&&', ' and '), ('||', ' or '), ('!', 'not ')):
+            expression = expression.replace(literal, replacement)
+        return finite_source_predicate(' '.join(expression.splitlines()), values)
+    walks = sleeps = 0
+    if end is None: raise AssertionError('unarmed')
+    while True:
+        assert clock.now < end
+        assert current_card()
+        refreshed = anchor.refresh()
+        assert translated(anchor_guard, dict(refreshed=refreshed, window=window, node_window=anchor.window,
+                          node_package=anchor.package, package=package, exact_visible=anchor.visible and anchor.label == 'Send answer'))
+        walks += 1
+        node, stale = anchor, False
+        for depth in range(limit):
+            if depth > 0 and not node.refresh(): stale = True; break
+            assert translated(ancestor_guard, dict(node_window=node.window, window=window, node_package=node.package, package=package))
+            assert clock.now < end
+            if translated(terminal, dict(clickable=node.clickable, enabled=node.enabled)):
+                assert current_card()
+                assert clock.now < end
+                return node, walks, sleeps
+            node = node.parent
+            assert node is not None
+        assert stale
+        remaining = end - clock.now
+        assert remaining > 0
+        clock.now += min(30, remaining)
+        sleeps += 1
+
+
 def kotlin_brace_scopes(source, offset):
     """Brace scopes for the fixed source layout guard; skip comments and quoted text, not a Kotlin compiler."""
     lexemes = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]')
@@ -575,9 +626,12 @@ class ApprovalHarnessTests(unittest.TestCase):
         source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
         button = source.split("    private fun button(", 1)[1].split("    private fun tap(", 1)[0]
         self.assertIn('earlySend?.takeIf { label == "Send answer" }', button)
+        self.assertIn('return cachedSendButton(cached)', button)
+        self.assertIn('check(visibleLabel == null)', button)
         self.assertIn('check(cached.current())', button)
-        self.assertIn('cached.node.refresh() && cached.node.windowId == cached.window && exactVisible(cached.node, label)', button)
-        self.assertIn('} else node(label)', button)
+        self.assertIn('cached.node.refresh() && cached.window >= 0 && cached.node.windowId == cached.window', button)
+        self.assertIn('exactVisible(cached.node, "Send answer")', button)
+        self.assertIn('var current = node(label)', button)
         helper = source.split("        fun captureEarlySend(", 1)[1].split("        try {\n            await(\"private model storage\")", 1)[0]
         for identity in ('model.selected?.target == target && model.activityVerified', 'card.id == id && card.hash == hash',
                          'card.run == target.run && card.conversation == target.conversation'):
@@ -585,6 +639,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertLess(helper.index('earlySend = captured'), helper.index('sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)'))
         self.assertLess(helper.index('!main { activity.hasWindowFocus() }'), helper.index('val resumeStart = SystemClock.elapsedRealtime()'))
         self.assertLess(helper.index('val resumeStart = SystemClock.elapsedRealtime()'), helper.index('targetContext.startActivity('))
+        self.assertLess(helper.index('captured.begin(resumeStart)'), helper.index('targetContext.startActivity('))
         self.assertLess(helper.index('main { activity.hasWindowFocus() }'), helper.index('checkEarly()'))
         self.assertLess(helper.index('checkEarly()'), helper.index('val elapsed = SystemClock.elapsedRealtime() - resumeStart'))
         self.assertIn('elapsed >= 0 && elapsed < 3_000', helper)
@@ -599,12 +654,74 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertLess(lifecycle.index('val lifecycleSend = captureEarlySend()'), lifecycle.index('tap("Send answer")'))
         self.assertLess(lifecycle.index('earlySend = lifecycleSend'), lifecycle.index('sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)'))
         self.assertLess(lifecycle.index('val resumeStart = SystemClock.elapsedRealtime()'), lifecycle.index('targetContext.startActivity('))
+        self.assertLess(lifecycle.index('lifecycleSend.begin(resumeStart)'), lifecycle.index('targetContext.startActivity('))
         self.assertLess(lifecycle.index('check(count() == 4 && !button("Send answer").isEnabled)'), lifecycle.index('val elapsed = '))
         self.assertIn('elapsed >= 0 && elapsed < 3_000', lifecycle)
         self.assertIn('finally {\n                earlySend = null', lifecycle)
         self.assertIn('check(count() == 4 && !button("Send answer").isEnabled)', lifecycle)
         for forbidden in ('setActivityVerified', 'setDeclaredField("activeFrameVerified"', 'setReviewDelayForTests', 'CountDownLatch'):
             self.assertNotIn(forbidden, source)
+
+    def test_android_cached_send_rewalks_only_stale_ancestors_under_one_original_end(self):
+        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        clock = SimpleNamespace(now=1_000)
+        class Node:
+            def __init__(self, *, refresh=True, parent=None, **values):
+                self.__dict__.update(window=7, package='app.zerus.mobile', visible=True, label='Send answer', clickable=False,
+                                     enabled=True, refreshes=0, reads=0, cost=0, fault=None, parent_fault=None)
+                self.__dict__.update(values)
+                self.answers = [refresh] if isinstance(refresh, bool) else list(refresh)
+                self.parents = [parent] if not isinstance(parent, list) else list(parent)
+            def refresh(self):
+                self.refreshes += 1
+                clock.now += self.cost
+                if self.fault: raise self.fault
+                return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+            @property
+            def parent(self):
+                self.reads += 1
+                if self.parent_fault: raise self.parent_fault
+                return self.parents.pop(0) if len(self.parents) > 1 else self.parents[0]
+        def read(anchor, **overrides):
+            return cached_send_memory(source, anchor, 7, 'app.zerus.mobile', overrides.pop('end', 4_000), clock, **overrides)
+        action = Node(clickable=True, enabled=False)
+        stale = Node(refresh=False)
+        anchor = Node(parent=[stale, action])
+        self.assertEqual(read(anchor), (action, 2, 1))
+        self.assertEqual(anchor.refreshes, 2)  # Once per walk; never the old second refresh in the ancestor loop.
+        self.assertFalse(action.enabled)
+        for change in ({'refresh': False}, {'window': 8}, {'package': 'foreign'}, {'visible': False},
+                       {'label': 'Other'}, {'parent': None}, {'fault': RuntimeError('read')},
+                       {'parent_fault': RuntimeError('parent-read')}):
+            clock.now = 1_000
+            with self.subTest(anchor=change), self.assertRaises((AssertionError, RuntimeError)):
+                read(Node(**change))
+        for change in ({'window': 8}, {'package': 'foreign'}, {'fault': RuntimeError('read')}):
+            clock.now = 1_000
+            with self.subTest(ancestor=change), self.assertRaises((AssertionError, RuntimeError)):
+                read(Node(parent=Node(clickable=True, **change)))
+        clock.now = 1_000
+        with self.assertRaises(AssertionError): read(Node(parent=action), current_card=lambda: False)
+        states = iter([True, False])
+        with self.assertRaises(AssertionError): read(Node(parent=action), current_card=lambda: next(states))
+        deep = action
+        for _ in range(16): deep = Node(parent=deep)
+        with self.assertRaises(AssertionError): read(deep)
+        for anchor, end in ((Node(parent=stale), 1_015), (Node(parent=Node(clickable=True, cost=3_000)), 4_000),
+                            (Node(parent=action, cost=3_000), 4_000), (Node(parent=action), 1_000),
+                            (Node(parent=action), None)):
+            clock.now = 1_000
+            with self.subTest(end=end), self.assertRaises(AssertionError): read(anchor, end=end)
+        clock.now = 1_000
+        enabled, _, _ = read(Node(parent=Node(clickable=True)))
+        with self.assertRaises(AssertionError): assert not enabled.enabled  # Preserve the actual early disabled oracle.
+        cache = source.split('    private data class EarlySend(', 1)[1].split('    private var earlySend:', 1)[0]
+        self.assertIn('private set', cache)
+        self.assertLess(cache.index('check(resumeEnd == null)'), cache.index('resumeEnd = Math.addExact(resumeStart, 3_000)'))
+        self.assertEqual(source.count('.begin(resumeStart)'), 2)
+        resolver = source.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
+        for forbidden in ('node(', 'visible(', 'uiAutomation', 'await(', 'injectInputEvent', 'performAction', 'catch (', 'phase('):
+            self.assertNotIn(forbidden, resolver)
 
     def test_android_lifecycle_stop_requires_the_same_alive_created_activity_not_modal_focus_loss(self):
         source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
