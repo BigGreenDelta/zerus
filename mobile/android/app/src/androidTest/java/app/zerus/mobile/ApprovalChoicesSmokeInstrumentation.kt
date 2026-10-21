@@ -108,7 +108,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         await(label) { matched = visible(label); matched != null }
         return checkNotNull(matched)
     }
-    private fun button(label: String): AccessibilityNodeInfo {
+    private fun button(label: String, visibleLabel: Rect? = null): AccessibilityNodeInfo {
         val cached = earlySend?.takeIf { label == "Send answer" }
         var current = if (cached != null) {
             check(cached.current()) { "Early-review card identity changed" }
@@ -117,20 +117,36 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             }
             cached.node // No root search or fallback for a stale scoped cache.
         } else node(label)
+        val labelWindow = if (visibleLabel != null) {
+            check(current.refresh())
+            check(exactVisible(current, label))
+            current.getBoundsInScreen(visibleLabel)
+            val sourceWindow = current.windowId
+            check(sourceWindow >= 0)
+            sourceWindow
+        } else null
         while (true) {
             check(current.refresh())
+            if (labelWindow != null) check(current.windowId == labelWindow)
             if (current.isClickable || !current.isEnabled || current.parent == null) return current
             current = checkNotNull(current.parent)
         }
     }
     private fun tap(label: String) {
-        val action = button(label)
+        val visibleLabel = Rect()
+        val action = button(label, visibleLabel)
         check(action.refresh())
         check(action.isEnabled && action.isClickable) { "Disabled action $label" }
         val bounds = Rect().also(action::getBoundsInScreen)
         check(!bounds.isEmpty && bounds.left >= 0 && bounds.top >= 0 &&
             bounds.right <= targetContext.resources.displayMetrics.widthPixels && bounds.bottom <= targetContext.resources.displayMetrics.heightPixels)
+        val parentBounds = Rect(bounds)
+        check(!visibleLabel.isEmpty && visibleLabel.left >= 0 && visibleLabel.top >= 0 &&
+            visibleLabel.right <= targetContext.resources.displayMetrics.widthPixels && visibleLabel.bottom <= targetContext.resources.displayMetrics.heightPixels)
+        check(bounds.intersect(visibleLabel) && !bounds.isEmpty) { "Visible label has no action interior" }
         phase("touch-node:$label:w=${action.windowId}:v=${action.isVisibleToUser}:s=${action.isSelected}:c=${action.isChecked}")
+        phase("touch-parent:$parentBounds")
+        phase("touch-label:$visibleLabel:boundWindow=${action.windowId}")
         phase("touch-geometry:$bounds:x=${bounds.exactCenterX()}:y=${bounds.exactCenterY()}")
         val down = SystemClock.uptimeMillis()
         var traceToken: Int? = null

@@ -70,6 +70,42 @@ def bound_source(source):
     return namespace['forward'], tap_limit, event_limit
 
 
+def source_bound_visible_point(label, action, label_window=9, action_window=9, screen=(1080, 2400)):
+    """Finite integer-rectangle stand-in for the exact source intersection; no Android geometry/input execution."""
+    source = FIXTURE.read_text()
+    button = source.split('    private fun button(', 1)[1].split('    private fun tap(', 1)[0]
+    assert 'visibleLabel: Rect? = null' in button
+    assert 'check(exactVisible(current, label))' in button
+    assert button.index('current.getBoundsInScreen(visibleLabel)') < button.index('while (true)')
+    assert 'check(sourceWindow >= 0)' in button
+    assert 'if (labelWindow != null) check(current.windowId == labelWindow)' in button
+    tap = source.split('    private fun tap(', 1)[1].split('    private fun reveal(', 1)[0]
+    assert 'val action = button(label, visibleLabel)' in tap
+    assert 'val parentBounds = Rect(bounds)' in tap
+    assert '''check(!visibleLabel.isEmpty && visibleLabel.left >= 0 && visibleLabel.top >= 0 &&
+            visibleLabel.right <= targetContext.resources.displayMetrics.widthPixels && visibleLabel.bottom <= targetContext.resources.displayMetrics.heightPixels)''' in tap
+    assert '''check(!bounds.isEmpty && bounds.left >= 0 && bounds.top >= 0 &&
+            bounds.right <= targetContext.resources.displayMetrics.widthPixels && bounds.bottom <= targetContext.resources.displayMetrics.heightPixels)''' in tap
+    assert 'check(bounds.intersect(visibleLabel) && !bounds.isEmpty)' in tap
+    assert tap.index('check(bounds.intersect(visibleLabel)') < tap.index('val down = SystemClock.uptimeMillis()')
+    assert 'bounds.exactCenterX(), bounds.exactCenterY(), 0)' in tap
+    if type(label_window) is not int or type(action_window) is not int or label_window < 0 or label_window != action_window:
+        raise ValueError('wrong-window')
+    if len(screen) != 2 or any(type(value) is not int or value <= 0 for value in screen):
+        raise ValueError('invalid-screen')
+    for rectangle in (label, action):
+        if len(rectangle) != 4 or any(type(value) is not int for value in rectangle):
+            raise ValueError('invalid-rectangle')
+        left, top, right, bottom = rectangle
+        if not (0 <= left < right <= screen[0] and 0 <= top < bottom <= screen[1]):
+            raise ValueError('invalid-rectangle')
+    left, top = max(label[0], action[0]), max(label[1], action[1])
+    right, bottom = min(label[2], action[2]), min(label[3], action[3])
+    if left >= right or top >= bottom:
+        raise ValueError('no-visible-interior')
+    return (left, top, right, bottom), ((left + right) / 2, (top + bottom) / 2)
+
+
 class MemoryTrace:
     """Memory-only Window/record stand-in with exact-source delegation body above; never Android OS evidence."""
     def __init__(self, source=None, state=lambda: 'fixed-state'):
@@ -185,6 +221,63 @@ def event(**changes):
 
 
 class OwnedWindowTouchObserverTests(unittest.TestCase):
+    def test_visible_point_recorded_partial_rectangles_exclude_old_ancestor_center(self):
+        # These retained rectangles were observed at different times; this is arithmetic, not historical hit proof.
+        action = (74, 1548, 1006, 1657)
+        label = (184, 1579, 308, 1594)
+        intersection, point = source_bound_visible_point(label, action)
+        self.assertEqual(intersection, label)
+        self.assertEqual(point, (246.0, 1586.5))
+        old_center = ((action[0] + action[2]) / 2, (action[1] + action[3]) / 2)
+        self.assertEqual(old_center, (540.0, 1602.5))
+        self.assertGreater(old_center[1], label[3])
+        self.assertLess(point[1], label[3])
+
+    def test_visible_point_full_and_partial_intersection(self):
+        for label, action, rectangle, point in (
+            ((20, 30, 40, 50), (0, 0, 100, 100), (20, 30, 40, 50), (30, 40)),
+            ((20, 30, 140, 80), (50, 10, 100, 90), (50, 30, 100, 80), (75, 55)),
+            ((0, 0, 100, 100), (0, 0, 100, 100), (0, 0, 100, 100), (50, 50)),
+        ):
+            with self.subTest(label=label, action=action):
+                self.assertEqual(source_bound_visible_point(label, action), (rectangle, point))
+
+    def test_visible_point_refuses_empty_nonoverlap_and_touching_edges(self):
+        for label, action in (
+            ((1, 1, 1, 2), (0, 0, 10, 10)), ((1, 1, 2, 1), (0, 0, 10, 10)),
+            ((11, 1, 12, 2), (0, 0, 10, 10)), ((10, 1, 12, 2), (0, 0, 10, 10)),
+            ((1, 10, 2, 12), (0, 0, 10, 10)), ((0, 0, 10, 10), (1, 1, 1, 2)),
+        ):
+            with self.subTest(label=label, action=action), self.assertRaises(ValueError):
+                source_bound_visible_point(label, action)
+
+    def test_visible_point_refuses_wrong_or_invalid_window_and_screen(self):
+        for label_window, action_window in ((9, 10), (-1, -1), (None, 9), (True, 1)):
+            with self.subTest(windows=(label_window, action_window)), self.assertRaises(ValueError):
+                source_bound_visible_point((1, 1, 2, 2), (0, 0, 3, 3), label_window, action_window)
+        for screen in ((0, 2400), (1080, -1), (True, 2400)):
+            with self.subTest(screen=screen), self.assertRaises(ValueError):
+                source_bound_visible_point((1, 1, 2, 2), (0, 0, 3, 3), screen=screen)
+
+    def test_visible_point_refuses_offscreen_inverted_or_unknown_rectangles(self):
+        for rectangle in ((-1, 1, 2, 2), (1, -1, 2, 2), (1, 1, 1081, 2), (1, 1, 2, 2401),
+                          (3, 1, 2, 2), (1, 3, 2, 2), (True, 1, 2, 2), (1.0, 1, 2, 2)):
+            with self.subTest(rectangle=rectangle), self.assertRaises(ValueError):
+                source_bound_visible_point(rectangle, (0, 0, 1080, 2400))
+
+    def test_visible_point_one_pixel_interior_and_null_capture_preserves_early_path(self):
+        rectangle, (x, y) = source_bound_visible_point((99, 99, 100, 100), (0, 0, 100, 100))
+        self.assertEqual((x, y), (99.5, 99.5))
+        self.assertTrue(rectangle[0] < x < rectangle[2] and rectangle[1] < y < rectangle[3])
+        source = FIXTURE.read_text()
+        button = source.split('    private fun button(', 1)[1].split('    private fun tap(', 1)[0]
+        self.assertIn('val labelWindow = if (visibleLabel != null)', button)
+        self.assertIn('} else null', button)
+        self.assertIn('check(current.refresh())\n            if (labelWindow != null)', button)
+        tap = source.split('    private fun tap(', 1)[1].split('    private fun reveal(', 1)[0]
+        self.assertIn('phase("touch-parent:$parentBounds")', tap)
+        self.assertIn('phase("touch-label:$visibleLabel:boundWindow=${action.windowId}")', tap)
+
     def test_owned_window_id_uses_public_node_and_recycles_once_outside_dispatch(self):
         source = HELPER.read_text()
         self.assertNotIn('accessibilityWindowId', source)
