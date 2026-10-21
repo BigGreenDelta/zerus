@@ -149,7 +149,7 @@ event("SessionEnd")
 
 
 def direct_signal_agent():
-    """Opt-in diagnostics for Archive's one Linux Codex signal case only.
+    """Opt-in diagnostics for Archive's three Linux direct-signal subcases only.
 
     Keep AGENT itself unchanged: all other cases still write its exact bytes.
     A failed diagnostic append must never change the fake's signal behavior.
@@ -157,10 +157,12 @@ def direct_signal_agent():
     trace = r'''
 def signal_phase(phase):
     try:
-        row = {"phase": phase, "pid": os.getpid(), "run": os.environ.get("HGS_RUN_ID", "")[:128],
+        if agent not in ("claude", "codex", "kimi"):
+            return
+        row = {"agent": agent, "phase": phase, "pid": os.getpid(), "run": os.environ.get("HGS_RUN_ID", "")[:128],
                "conversation": sid[:128], "at_ns": time.monotonic_ns()}
         data = (json.dumps(row, separators=(",", ":")) + "\n").encode()
-        fd = os.open(home / "direct-signal-agent.jsonl",
+        fd = os.open(home / ("direct-signal-agent-" + agent + ".jsonl"),
                      os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
             if os.fstat(fd).st_size <= 8192 and len(data) <= 512:
@@ -198,8 +200,10 @@ class DirectSignalTrace:
     is sampled only for the exact target and supervisor from the captured binding.
     Every read is bounded; unknown evidence stays unknown, not a readiness proof.
     """
-    def __init__(self, root):
-        self.root, self.samples = root, []
+    def __init__(self, root, agent):
+        if agent not in ("claude", "codex", "kimi"):
+            raise ValueError("unexpected direct-signal agent")
+        self.root, self.agent, self.samples = root, agent, []
 
     @staticmethod
     def process(pid, expected=None):
@@ -223,7 +227,7 @@ class DirectSignalTrace:
             masks = {}
             for line in status.decode().splitlines():
                 key, _, value = line.partition(":")
-                if key in ("SigBlk", "SigIgn", "SigCgt") and re.fullmatch(r"[0-9a-fA-F]{1,32}", value.strip()):
+                if key in ("SigBlk", "SigIgn", "SigCgt", "SigPnd", "ShdPnd") and re.fullmatch(r"[0-9a-fA-F]{1,32}", value.strip()):
                     masks[key] = value.strip()
             if identity() != before:
                 return {"unknown": "identity changed during sample"}
@@ -252,13 +256,13 @@ class DirectSignalTrace:
             # Sample the target last, immediately before returning to os.kill.
             parent = process(supervisor.get("pid"), "supervisor")
             child = process(record.get("pid"), "child")
-            sample = {"phase": phase, "at_ns": time.monotonic_ns(), "run": field(record.get("run_id")),
+            sample = {"agent": self.agent, "phase": phase, "at_ns": time.monotonic_ns(), "run": field(record.get("run_id")),
                       "conversation": field(record.get("conversation_id")), "pane": field(record.get("pane")),
                       "saved_pid": field(record.get("pid")), "saved_start": field(record.get("process_start")),
                       "saved_supervisor": {key: field(supervisor.get(key)) for key in ("pid", "start")},
                       "child": child, "supervisor": parent}
         except Exception as error:
-            sample = {"phase": phase, "unknown": type(error).__name__}
+            sample = {"agent": self.agent, "phase": phase, "unknown": type(error).__name__}
         self.samples.append(sample)
         return sample
 
@@ -267,7 +271,7 @@ class DirectSignalTrace:
         try:
             raw, trace_error = b"", None
             try:
-                with open(self.root / "direct-signal-agent.jsonl", "rb") as file:
+                with open(self.root / ("direct-signal-agent-" + self.agent + ".jsonl"), "rb") as file:
                     raw = file.read(8705)
             except Exception as error:
                 trace_error = type(error).__name__
@@ -279,7 +283,8 @@ class DirectSignalTrace:
                 try:
                     row = json.loads(line)
                     if (len(line) > 512 or not isinstance(row, dict)
-                            or set(row) != {"phase", "pid", "run", "conversation", "at_ns"}
+                            or set(row) != {"agent", "phase", "pid", "run", "conversation", "at_ns"}
+                            or row["agent"] != self.agent
                             or row["phase"] not in ("handler_enter", "SessionEnd_begin", "SessionEnd_end",
                                                      "handler_exit_143", "handler_registered",
                                                      "SessionStart_begin", "SessionStart_end")
@@ -291,7 +296,7 @@ class DirectSignalTrace:
                     phases.append(row)
                 except (ValueError, TypeError):
                     malformed += 1
-            data = {"schema": 1, "samples": self.samples, "agent_phases": phases,
+            data = {"schema": 1, "agent": self.agent, "samples": self.samples, "agent_phases": phases,
                     "agent_trace_sha256": hashlib.sha256(raw).hexdigest(),
                     "agent_trace_error": trace_error, "rows_omitted": max(0, len(lines) - 32),
                     "malformed_or_incomplete_rows": malformed, "trace_truncated": len(raw) > 8704}
@@ -2574,7 +2579,7 @@ class Archive(Harness):
     def test_pause_and_agent_signal_remain_saved(self):
         for agent in ("claude", "codex", "kimi"):
             with self.subTest(agent=agent):
-                trace = DirectSignalTrace(self.root) if agent == "codex" and sys.platform == "linux" else None
+                trace = DirectSignalTrace(self.root, agent) if sys.platform == "linux" else None
                 if trace:
                     self.script(agent, direct_signal_agent())
                 try:
