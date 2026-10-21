@@ -1,5 +1,6 @@
 #include <QtTest>
 #include <QFile>
+#include <QFileInfo>
 #include <QFileDevice>
 #include <QTemporaryDir>
 #include <QTextStream>
@@ -9,6 +10,8 @@
 #include <QSettings>
 #include <QThread>
 #include <QPointer>
+#include <QProcess>
+#include <QTimer>
 #include <QUuid>
 #include <atomic>
 #include <memory>
@@ -74,6 +77,10 @@ private slots:
     void rejectsGarbageProjects();
     void messagesUseStdinAndIdentityReceipts();
     void messageFailuresAreExplicitAndNeverRetried();
+#ifdef Q_OS_WIN
+    void writeStartupFailuresAreReportedAfterRequest_data();
+    void writeStartupFailuresAreReportedAfterRequest();
+#endif
     void questionAnswersUsePinnedIdentityAndStdin();
     void submittedQuestionReceiptsRequireOptionalCodexAndExactIdentity();
     void questionAnswerFailures_data();
@@ -1258,6 +1265,72 @@ print('{}')
     unexecutable.requestSendMessage({}, "codex/p", "hello", {}, "run");
     QTRY_COMPARE(blockedFailed.size(), 1); QVERIFY(!blockedFailed[0][4].toBool());
 }
+
+#ifdef Q_OS_WIN
+void TestHgsClient::writeStartupFailuresAreReportedAfterRequest_data()
+{
+    QTest::addColumn<QString>("operation");
+    for (const char *name : {"message", "queue", "settings"}) QTest::newRow(name) << QString(name);
+}
+
+void TestHgsClient::writeStartupFailuresAreReportedAfterRequest()
+{
+    QFETCH(QString, operation);
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QString program = directory.filePath("invalid-image.exe");
+    QFile executable(program); QVERIFY(executable.open(QIODevice::WriteOnly));
+    const QByteArray malformed("This is not a PE image.\n");
+    QCOMPARE(executable.write(malformed), qint64(malformed.size())); executable.close();
+    QVERIFY(QFileInfo(program).isFile()); QVERIFY(QFileInfo(program).isExecutable());
+
+    HgsClient client(program);
+    QSignalSpy failed(&client, &HgsClient::messageFailed), sent(&client, &HgsClient::messageSent);
+    QSignalSpy queued(&client, &HgsClient::queueSendFinished), settings(&client, &HgsClient::settingsFinished);
+    bool returned = false, beforeRegistration = false;
+    quint64 registered = 0;
+    connect(&client, &HgsClient::messageFailed, &client,
+        [&](quint64 request, const QString &, const QString &, const QString &, bool) {
+            beforeRegistration |= !returned || request != registered;
+        });
+    const auto finished = [&](quint64 request, bool, const QJsonObject &, const QString &) {
+        beforeRegistration |= !returned || request != registered;
+    };
+    connect(&client, &HgsClient::queueSendFinished, &client, finished);
+    connect(&client, &HgsClient::settingsFinished, &client, finished);
+    if (operation == "message")
+        registered = client.requestSendMessage({}, "codex/project", "Keep this message", {}, "run", "conversation");
+    else if (operation == "queue")
+        registered = client.requestQueueSendNow({}, "codex/project", "run", "conversation", "q-private");
+    else registered = client.requestSettings({}, "codex/project", "gpt-6.1-sol", "xhigh", "run", "conversation");
+    returned = true;
+    // The file passed HgsClient's path/executable checks but Windows rejected
+    // its format. This exercises the real QProcess start failure, not reject().
+    const auto *process = client.findChild<QProcess *>(); QVERIFY(process);
+    QCOMPARE(process->error(), QProcess::FailedToStart);
+    QCOMPARE(process->state(), QProcess::NotRunning);
+    QCOMPARE(process->processId(), qint64(0));
+    QVERIFY(failed.isEmpty()); QVERIFY(queued.isEmpty()); QVERIFY(settings.isEmpty());
+    auto &result = operation == "message" ? failed : operation == "queue" ? queued : settings;
+    QTRY_COMPARE(result.size(), 1);
+    QVERIFY(!beforeRegistration); QCOMPARE(sent.size(), 0);
+    QCOMPARE(result[0][0].toULongLong(), registered);
+    if (operation == "message") {
+        QCOMPARE(result[0][1].toString(), QString());
+        QCOMPARE(result[0][2].toString(), QString("codex/project"));
+        QVERIFY(result[0][3].toString().startsWith("Cannot start hgs: "));
+        QVERIFY(!result[0][4].toBool());
+    } else {
+        QVERIFY(!result[0][1].toBool()); QVERIFY(result[0][2].toJsonObject().isEmpty());
+        QVERIFY(!result[0][3].toString().isEmpty());
+    }
+    bool nextTurn = false;
+    QTimer::singleShot(0, &client, [&] { nextTurn = true; });
+    QTRY_VERIFY(nextTurn); QCOMPARE(result.size(), 1);
+    QCOMPARE(failed.size(), operation == "message" ? 1 : 0);
+    QCOMPARE(queued.size(), operation == "queue" ? 1 : 0);
+    QCOMPARE(settings.size(), operation == "settings" ? 1 : 0);
+}
+#endif
 
 void TestHgsClient::forkCommandsPinSourceIdentity()
 {

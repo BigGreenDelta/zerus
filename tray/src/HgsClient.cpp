@@ -1706,7 +1706,11 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
         if (*reported) return;
         *reported = true;
         m_messagesInFlight.remove(key);
-        emit messageFailed(request, host, name, detail, uncertain);
+        // A failed start can be reported inside start(), before the caller has
+        // registered this request. Keep the claim synchronous, the result queued.
+        QTimer::singleShot(0, this, [this, request, host, name, detail, uncertain] {
+            emit messageFailed(request, host, name, detail, uncertain);
+        });
     };
     connect(process, &QProcess::started, process, [process, payload, fail]() {
         // The request and file bytes never appear in argv, a shell command, or a
@@ -1904,7 +1908,8 @@ quint64 HgsClient::requestQueueSendNow(const QString &host, const QString &name,
     auto *timer = new QTimer(process); timer->setSingleShot(true);
     auto reported = std::make_shared<bool>(false);
     const auto fail = [this, request, reported](const QString &error) {
-        if (*reported) return; *reported = true; emit queueSendFinished(request, false, {}, error);
+        if (*reported) return; *reported = true;
+        QTimer::singleShot(0, this, [this, request, error] { emit queueSendFinished(request, false, {}, error); });
     };
     connect(process, &QProcess::started, process, [process, payload, fail] {
         if (process->write(payload) != payload.size()) { fail(tr("Queue action failed. Check Terminal before retrying.")); process->kill(); }
@@ -1996,7 +2001,8 @@ quint64 HgsClient::requestSettings(const QString &host, const QString &name, con
     auto *timer = new QTimer(process); timer->setSingleShot(true);
     auto reported = std::make_shared<bool>(false);
     const auto fail = [this, request, reported](const QString &error) {
-        if (*reported) return; *reported = true; emit settingsFinished(request, false, {}, error);
+        if (*reported) return; *reported = true;
+        QTimer::singleShot(0, this, [this, request, error] { emit settingsFinished(request, false, {}, error); });
     };
     connect(process, &QProcess::started, process, [process, payload, fail, transferFailed] {
         if (process->write(payload) != payload.size()) { fail(transferFailed); process->kill(); }
