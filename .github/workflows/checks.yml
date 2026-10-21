@@ -474,6 +474,16 @@ jobs:
       - name: Unit tests and release lint
         working-directory: mobile/android
         run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true
+      - name: Retain approval publication and binding unit results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-approval-unit-results
+          path: |
+            mobile/android/app/build/test-results/testDebugUnitTest/TEST-app.zerus.mobile.InspectionPublicationTest.xml
+            mobile/android/app/build/test-results/testDebugUnitTest/TEST-app.zerus.mobile.QuestionSendConfirmationTest.xml
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
       # Third-party notices must list exactly what the published Firebase release
       # build resolves, with the notices inside its resolved artifacts.
       - name: Android library notices match the release classpath
