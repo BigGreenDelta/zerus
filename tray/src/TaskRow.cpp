@@ -11,6 +11,7 @@
 #include <QPainter>
 #include <QTextLayout>
 #include <QTimer>
+#include <QToolTip>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -155,7 +156,9 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
             button->setFixedSize(26, 26); button->setIconSize(QSize(15, 15)); button->setAutoRaise(true); button->setCursor(Qt::ArrowCursor);
             connect(button, &QToolButton::clicked, this, [this, action, button] {
                 const QString why = button->property("blockedReason").toString();
-                if (why.isEmpty()) emit actionRequested(action); else emit actionBlocked(why);
+                if (why.isEmpty()) return emit actionRequested(action);
+                // A blocked action says why beside it, as a blocked message send does.
+                QToolTip::showText(button->mapToGlobal(QPoint(0, button->height())), why.toHtmlEscaped(), button, {}, 5000);
             });
             button->installEventFilter(this);
             m_actions->layout()->addWidget(button); m_buttons.insert(int(action), button);

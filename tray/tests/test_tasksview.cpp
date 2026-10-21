@@ -8,6 +8,7 @@
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QToolTip>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -147,12 +148,13 @@ void TestTasksView::sendNowNamesWhyASessionCannotTakeIt() {
     QCOMPARE(blocked(2), QString("The agent is not running. Resume it before sending."));
     QCOMPARE(action(row(view, 2), "sendNow")->toolTip(), blocked(2));
     QCOMPARE(blocked(4), QString());
-    // A click on a blocked Send now says why and sends nothing, as a tap does on Android.
+    // A click on a blocked Send now says why beside it, as a blocked message send does, and sends nothing.
     QSignalSpy notices(&view, &TasksView::notice);
     action(row(view, 2), "sendNow")->click();
-    QTRY_COMPARE(notices.size(), 1);
-    QCOMPARE(notices[0][0].toString(), QString("The agent is not running. Resume it before sending."));
+    QTRY_VERIFY(QToolTip::isVisible());
+    QCOMPARE(QToolTip::text(), QString("The agent is not running. Resume it before sending."));
     QTest::qWait(100);
+    QCOMPARE(notices.size(), 0);
     const auto calls = FakeTasksCli::calls(dir.path());
     QVERIFY(std::none_of(calls.cbegin(), calls.cend(), [](const QStringList &call) { return call.contains("uuid-2") && call.contains("send"); }));
     // A session on another computer takes it there; hgs runs the send on that computer.
