@@ -11,12 +11,23 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{self, Command, ExitStatus, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 const CAPTURE: usize = 64 * 1024;
 const CALLS: usize = 256;
+const STAGES: [&str; 5] = [
+    "01-before-spawn",
+    "02-child-started",
+    "03-stdin-progress",
+    "04-child-exited",
+    "05-streams-drained",
+];
 
 fn bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     let mut data = Vec::new();
@@ -60,7 +71,26 @@ fn record(path: &Path, value: &Value) -> io::Result<()> {
     file.sync_all()
 }
 
-#[derive(Default)]
+fn stage(folder: &Path, name: &str, value: &Value) -> io::Result<()> {
+    if !STAGES.contains(&name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unknown observer stage",
+        ));
+    }
+    let value = json!({"stage":name,"data":value,
+        "observed_unix_ns":SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|v|v.as_nanos().to_string())});
+    if serde_json::to_vec(&value)?.len() > 2 * CAPTURE + 8192 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "observer stage bound",
+        ));
+    }
+    // Five fixed create_new files only: no per-chunk journal or replacement.
+    record(&folder.join(format!("{name}.json")), &value)
+}
+
+#[derive(Default, Clone)]
 struct Stream {
     captured: Vec<u8>,
     bytes: u64,
@@ -78,9 +108,18 @@ impl Stream {
 }
 
 fn pump(mut input: impl Read, mut output: impl Write) -> Stream {
+    pump_progress(&mut input, &mut output, |_, _| {})
+}
+
+fn pump_progress(
+    mut input: impl Read,
+    mut output: impl Write,
+    first: impl FnOnce(&Stream, bool),
+) -> Stream {
     let mut result = Stream::default();
     let mut bytes = [0; 8192];
     let mut writable = true;
+    let mut first = Some(first);
     loop {
         let count = match input.read(&mut bytes) {
             Ok(0) => break,
@@ -115,6 +154,12 @@ fn pump(mut input: impl Read, mut output: impl Write) -> Stream {
                 }
             }
         }
+        if let Some(first) = first.take() {
+            first(&result, false);
+        }
+    }
+    if let Some(first) = first.take() {
+        first(&result, !result.error);
     }
     if output.flush().is_err() {
         result.error = true;
@@ -257,6 +302,12 @@ fn run() -> io::Result<ExitStatus> {
         "name":env::var("HGS_SESSION").ok(),
         "started_unix_ns":SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|v|v.as_nanos().to_string())
     })).is_err() { recording_error = true; }
+    let context = json!({"phase":config["phase"],"source":config["source"],
+        "subject":subject,"verified_sha256_before_spawn":config["sha256"],
+        "observer_pid":process::id()});
+    if stage(&folder, STAGES[0], &context).is_err() {
+        recording_error = true;
+    }
     let mut child = Command::new(&subject)
         .args(arguments)
         .stdin(Stdio::piped())
@@ -264,6 +315,10 @@ fn run() -> io::Result<ExitStatus> {
         .stderr(Stdio::piped())
         .spawn()?;
     let child_identity = identity(&child);
+    let child_stage = json!({"context":context,"child":child_identity});
+    if stage(&folder, STAGES[1], &child_stage).is_err() {
+        recording_error = true;
+    }
     let input = child
         .stdin
         .take()
@@ -276,10 +331,34 @@ fn run() -> io::Result<ExitStatus> {
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("observer stderr"))?;
-    let input = thread::spawn(move || pump(io::stdin().lock(), input));
+    let progress_error = Arc::new(AtomicBool::new(false));
+    let input_error = Arc::clone(&progress_error);
+    let input_folder = folder.clone();
+    let input_stage = child_stage.clone();
+    let input = thread::spawn(move || {
+        pump_progress(io::stdin().lock(), input, |snapshot, eof| {
+            // Snapshot only bytes already captured/attempted once. A prefix is not
+            // complete stdin, child receipt, or an accepted SessionStart record.
+            let value = json!({"child_stage":input_stage,"input_eof":eof,
+            "stdin_prefix":snapshot.clone().observation()});
+            if stage(&input_folder, STAGES[2], &value).is_err() {
+                input_error.store(true, Ordering::Relaxed);
+            }
+        })
+    });
     let output = thread::spawn(move || pump(output, io::stdout().lock()));
     let error = thread::spawn(move || pump(error, io::stderr().lock()));
     let status = child.wait()?;
+    if stage(
+        &folder,
+        STAGES[3],
+        &json!({"child_stage":child_stage,
+        "exit_code":status.code(),"signal":signal_of(&status)}),
+    )
+    .is_err()
+    {
+        recording_error = true;
+    }
     let input = input
         .join()
         .map_err(|_| io::Error::other("observer stdin thread"))?
@@ -293,6 +372,18 @@ fn run() -> io::Result<ExitStatus> {
         .map_err(|_| io::Error::other("observer stderr thread"))?
         .observation();
     let after = hash(&subject).ok();
+    if stage(
+        &folder,
+        STAGES[4],
+        &json!({"child_stage":child_stage,
+        "stdin":stream_summary(&input),"stdout":stream_summary(&output),
+        "stderr":stream_summary(&error),"subject_sha256_after":after}),
+    )
+    .is_err()
+    {
+        recording_error = true;
+    }
+    recording_error |= progress_error.load(Ordering::Relaxed);
     // Missing/incomplete evidence fails the case, never changes the child's
     // exit status, retries the hook, or rolls back its suppression metadata.
     let _ = record(
@@ -304,6 +395,11 @@ fn run() -> io::Result<ExitStatus> {
         }),
     );
     Ok(status)
+}
+
+fn stream_summary(value: &Value) -> Value {
+    json!({"bytes":value["bytes"],"forwarded":value["forwarded"],"error":value["error"],
+        "overflow":value["overflow"],"sha256":value["sha256"]})
 }
 
 fn signal_of(status: &ExitStatus) -> Option<i32> {
@@ -393,5 +489,92 @@ mod tests {
         assert_eq!(first, b"stdout");
         assert_eq!(second, b"stderr");
         assert_ne!(out["sha256"], err["sha256"]);
+    }
+
+    #[test]
+    fn fixed_stage_receipts_never_replace_or_exceed_five() {
+        let folder = tempfile::tempdir().unwrap();
+        for name in STAGES {
+            stage(folder.path(), name, &json!({"original_end":0})).unwrap();
+            let path = folder.path().join(format!("{name}.json"));
+            let before = fs::read(&path).unwrap();
+            assert!(stage(folder.path(), name, &json!({"changed":true})).is_err());
+            assert_eq!(fs::read(&path).unwrap(), before);
+            let receipt: Value = serde_json::from_slice(&before).unwrap();
+            assert_eq!(receipt["data"]["original_end"], 0);
+            assert!(receipt.get("deadline").is_none());
+            assert!(receipt.get("timeout").is_none());
+        }
+        assert!(stage(folder.path(), "06-retry", &Value::Null).is_err());
+        assert_eq!(fs::read_dir(folder.path()).unwrap().count(), 5);
+    }
+
+    #[test]
+    fn progress_is_once_after_first_short_writes_without_truncating_or_reordering() {
+        struct Short(Vec<u8>);
+        impl Write for Short {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let count = bytes.len().min(3);
+                self.0.extend_from_slice(&bytes[..count]);
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let source = vec![0xa5; CAPTURE + 8193];
+        let mut output = Short(Vec::new());
+        let mut snapshots = Vec::new();
+        let result = pump_progress(&source[..], &mut output, |snapshot, eof| {
+            snapshots.push((snapshot.clone().observation(), eof));
+        });
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].0["bytes"], 8192);
+        assert_eq!(snapshots[0].0["forwarded"], 8192);
+        assert!(!snapshots[0].1);
+        assert_eq!(output.0, source);
+        assert_eq!(result.bytes, source.len() as u64);
+        assert_eq!(result.forwarded, result.bytes);
+        assert!(!result.error);
+    }
+
+    #[test]
+    fn failed_diagnostic_is_unknown_and_never_retries_or_changes_forwarding() {
+        let folder = tempfile::tempdir().unwrap();
+        stage(folder.path(), STAGES[2], &Value::Null).unwrap();
+        let mut output = Vec::new();
+        let recording_error = AtomicBool::new(false);
+        let observed = pump_progress(&b"\0one\r\ntwo\xff"[..], &mut output, |snapshot, eof| {
+            assert!(!eof);
+            if stage(folder.path(), STAGES[2], &snapshot.clone().observation()).is_err() {
+                recording_error.store(true, Ordering::Relaxed);
+            }
+        });
+        assert!(recording_error.load(Ordering::Relaxed));
+        assert_eq!(output, b"\0one\r\ntwo\xff");
+        assert_eq!(observed.bytes, observed.forwarded);
+        assert!(!observed.error);
+        assert_eq!(fs::read_dir(folder.path()).unwrap().count(), 1);
+        let original: Value = serde_json::from_slice(
+            &fs::read(folder.path().join(format!("{}.json", STAGES[2]))).unwrap(),
+        )
+        .unwrap();
+        assert!(original["data"].is_null());
+    }
+
+    #[test]
+    fn empty_input_progress_and_capture_bounds_do_not_create_extra_receipts() {
+        let mut output = Vec::new();
+        let mut snapshots = Vec::new();
+        let observed = pump_progress(&b""[..], &mut output, |snapshot, eof| {
+            snapshots.push((snapshot.clone().observation(), eof));
+        });
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].1);
+        assert_eq!(observed.bytes, 0);
+        assert_eq!(observed.forwarded, 0);
+        let folder = tempfile::tempdir().unwrap();
+        assert!(stage(folder.path(), STAGES[0], &json!("x".repeat(3 * CAPTURE))).is_err());
+        assert_eq!(fs::read_dir(folder.path()).unwrap().count(), 0);
     }
 }

@@ -969,6 +969,17 @@ marks, model counts and transcripts alone cannot prove that, particularly with
 Claude's identical-context deduplication. This is no OS/network-isolation claim,
 native execution grant, shipped feature or release-dependency waiver.
 
+Each call may add five fixed, exclusive stage files: before spawn, child identity,
+first stdin write progress, child exit and drained streams. A stdin prefix is
+bounded captured data and may be incomplete; these diagnostics never substitute
+for complete `begin.json`/`result.json`, forwarding or cleanup proof. Their file
+writes and syncs add observer timing overhead under the same five-second hook
+limit. A missing result or recording failure remains UNKNOWN and fails the case.
+Private Codex profiles set `sandbox_mode="danger-full-access"` and
+`approval_policy="never"` for the keyless fixture, as the ordinary Windows native
+suite does. Hook and folder trust still require their exact public hgs cards and
+answers; the fixture never answers a Terminal-only sandbox setup card.
+
 The finite allocation is six pin/OS rows: Claude 2.1.296 on Linux x86_64,
 macOS arm64 and Windows x86_64; retained Codex 0.160.1 on Linux x86_64, and
 Codex 0.162.0 on Linux x86_64 and Windows x86_64. A disposable Linux job needs

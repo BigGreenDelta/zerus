@@ -2145,7 +2145,9 @@ class Recipes(Harness):
         tmux_command = shlex.split(output.strip())
         self.assertEqual(tmux_command[:3], ["tmux", "new-session", "-d"])
         runner = shlex.split(tmux_command[-1])
-        self.assertEqual(runner[2], 'exec "$0" --run "$@"')
+        expected = ('exec env HGS_AGENT_HINT=1 HGS_AGENT_HINT_OFF= "$0" --run "$@"'
+                    if agent in ('claude', 'codex') else 'exec "$0" --run "$@"')
+        self.assertEqual(runner[2], expected)
         self.assertEqual(runner[4], "0")
         return runner[5:], record["conversation_id"]
 

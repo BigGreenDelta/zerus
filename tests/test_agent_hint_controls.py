@@ -45,6 +45,50 @@ def state(*cards, ready=False):
 
 
 class HintFixtureControls(unittest.TestCase):
+    def test_claude_folder_trust_selects_exact_positive_label_and_rejects_refusal_or_changed_labels(self):
+        item = dict(card(), source='claude_folder_trust', question_id='claude-trust:' + 'c' * 64,
+                    questions=[dict(id='trust', options=[dict(id='trust_0', label='No, exit'),
+                                                        dict(id='trust_1', label='Yes, I trust this folder')])])
+        selected = fixture.startup_answer(state(item), dict(run_id='run'), set())
+        self.assertEqual(selected[2], dict(question_id='trust', selected_option_ids=['trust_1'], text=''))
+        for change in ('positive-label', 'refusal-label', 'refusal-id', 'swapped-options'):
+            changed = copy.deepcopy(item)
+            options = changed['questions'][0]['options']
+            if change == 'positive-label': options[1]['label'] = 'No, exit'
+            if change == 'refusal-label': options[0]['label'] = 'Yes, I trust this folder'
+            if change == 'refusal-id': options[1]['id'] = 'trust_0'
+            if change == 'swapped-options': options.reverse()
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                fixture.startup_answer(state(changed), dict(run_id='run'), set())
+        self.assertEqual(fixture.startup_answer(state(card()), dict(run_id='run'), set())[2]
+                         ['selected_option_ids'], ['trust'])
+        codex = dict(item, source='codex_folder_trust', question_id='codex-trust:' + 'c' * 64,
+                     questions=[dict(id='trust', options=[dict(id='trust_0', label='Trust and continue'),
+                                                         dict(id='trust_1', label='Quit')])])
+        self.assertEqual(fixture.startup_answer(state(codex), dict(run_id='run'), set())[2]
+                         ['selected_option_ids'], ['trust_0'])
+
+    def test_private_codex_config_sets_fixture_tool_mode_without_trusting_hooks_or_projects(self):
+        import tomllib
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            home, agent_home = root / 'owned', root / 'codex-config'
+            home.mkdir(); agent_home.mkdir()
+            value = SimpleNamespace(AGENT='codex', env=dict(HOME=str(home)), agent_home=agent_home,
+                                    api_url='http://127.0.0.1:12345')
+            fixture.HintContract.configure(value)
+            text = (agent_home / 'config.toml').read_text()
+            config = tomllib.loads(text)
+            self.assertEqual(config['sandbox_mode'], 'danger-full-access')
+            self.assertEqual(config['approval_policy'], 'never')
+            self.assertLess(text.index('sandbox_mode='), text.index('[features]'))
+            self.assertEqual(value.env['HOME'], str(home))
+            self.assertEqual(value.env['CODEX_HOME'], str(agent_home))
+            self.assertNotIn('projects', config)
+            self.assertNotIn('hooks', config)
+            self.assertFalse((home / '.codex').exists())
+            self.assertNotIn('bypass-hook-trust', text)
+
     def test_windows_loader_discovers_exact_four_actual_class_methods_without_unix_imports(self):
         # Compile the real fixture module against frozen platform/fixture
         # modules. No Windows API, inherited setup, transport or native runs.

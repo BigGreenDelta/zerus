@@ -147,7 +147,7 @@ def startup_answer(state, binding, attempted):
         raise AssertionError('ambiguous startup consent')
     card = cards[0]
     if not isinstance(card, dict): raise AssertionError('unknown startup card')
-    choices = {'claude_folder_trust': ('claude-trust:', 'trust', 'trust_0'),
+    choices = {'claude_folder_trust': ('claude-trust:', 'trust', 'trust_1'),
                'codex_folder_trust': ('codex-trust:', 'trust', 'trust_0'),
                'codex_hooks_trust': ('codex-hooks-trust:', 'hooks_trust', 'trust'),
                'claude_resume': ('claude-resume:', 'resume', 'resume')}
@@ -164,6 +164,10 @@ def startup_answer(state, binding, attempted):
             or items[0].get('id') != question
             or option not in {item.get('id') for item in items[0].get('options') or []}):
         raise AssertionError('changed or already attempted startup consent')
+    if card['source'] == 'claude_folder_trust' and items[0].get('options') != [
+            dict(id='trust_0', label='No, exit'),
+            dict(id='trust_1', label='Yes, I trust this folder')]:
+        raise AssertionError('changed Claude trust choices; no answer authorized')
     return key, card, dict(question_id=question, selected_option_ids=[option], text='')
 
 
@@ -395,6 +399,7 @@ class HintContract:
             self.env['CODEX_HOME'] = str(self.agent_home)
             (self.agent_home / 'config.toml').write_text('\n'.join([
                 'model="gpt-6.1-sol"', 'model_provider="fixture"', 'check_for_update_on_startup=false',
+                'sandbox_mode="danger-full-access"', 'approval_policy="never"',
                 '[features]', 'plugins=false', '[model_providers.fixture]', 'name="Fixture"',
                 'base_url=' + json.dumps(self.api_url + '/v1'), 'env_key="OPENAI_API_KEY"',
                 'wire_api="responses"', 'request_max_retries=0', 'stream_max_retries=0', '']))
