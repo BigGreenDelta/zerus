@@ -519,7 +519,7 @@ mod tests {
     use super::*;
 
     fn policy(text: &str, overrides: &[(&str, &str)]) -> std::result::Result<HintPolicy, ()> {
-        hint_policy(text, "/home/fixture", |key| {
+        hint_policy(text, "/home/example", |key| {
             Ok(overrides
                 .iter()
                 .find(|(name, _)| *name == key)
@@ -591,7 +591,7 @@ mod tests {
             assert!(policy(text, &[]).is_err(), "{text}");
         }
         assert!(policy("", &[("HGS_AGENT_HINT", "maybe")]).is_err());
-        assert!(hint_policy("", "/home/fixture", |_| Err(())).is_err());
+        assert!(hint_policy("", "/home/example", |_| Err(())).is_err());
         assert_eq!(
             hint_policy_environment(Err(())),
             ["HGS_AGENT_HINT=0", "HGS_AGENT_HINT_OFF="]
@@ -602,7 +602,7 @@ mod tests {
         let absent = tempfile::tempdir().unwrap();
         // A directory in place of the file is an optional-policy read failure.
         fs::create_dir(absent.path().join("config")).unwrap();
-        assert!(read_hint_policy(absent.path(), "/home/fixture").is_err());
+        assert!(read_hint_policy(absent.path(), "/home/example").is_err());
     }
 
     #[test]
@@ -618,7 +618,7 @@ mod tests {
             assert!(hint_key_without_assignment(line));
             assert!(policy(line, &[]).is_err());
             let text = format!("HGS_SELF=fixture\n{line}\nHGS_TAB=0\n");
-            let full = configuration_values(&text, directory, "/home/fixture").unwrap();
+            let full = configuration_values(&text, directory, "/home/example").unwrap();
             assert_eq!(full["HGS_SELF"], "fixture");
             assert_eq!(full["HGS_TAB"], "0");
         }
@@ -630,7 +630,7 @@ mod tests {
         ] {
             assert!(!hint_key_without_assignment(line));
             let text = format!("HGS_SELF=fixture\n{line}\n");
-            let error = configuration_values(&text, directory, "/home/fixture").unwrap_err();
+            let error = configuration_values(&text, directory, "/home/example").unwrap_err();
             assert_eq!(
                 error.message,
                 format!(
@@ -640,7 +640,7 @@ mod tests {
             );
         }
         let text = "HGS_SELF=fixture\nHGS_PEERS=$(must-not-execute)\n";
-        assert!(configuration_values(text, directory, "/home/fixture")
+        assert!(configuration_values(text, directory, "/home/example")
             .unwrap_err()
             .message
             .contains("shell command substitution is not supported"));
@@ -654,7 +654,7 @@ mod tests {
             );
             assert!(text.as_bytes().contains(&0));
             let full =
-                configuration_values(&text, Path::new("/fixture/hgs"), "/home/fixture").unwrap();
+                configuration_values(&text, Path::new("/fixture/hgs"), "/home/example").unwrap();
             assert_eq!(full["HGS_SELF"], "fixture");
             assert_eq!(full["HGS_PEERS"], "peer-a peer-b");
             assert_eq!(full["HGS_TAB"], "0");
