@@ -1078,7 +1078,10 @@ native and supervisor identities before consenting to a startup card. It retains
 observed descendants while their recorded parents are live. The ledger permits
 64 launch intents, 2,048 owned identities and 16 private panes; process snapshots
 permit 16,384 rows and query output is checked against 2 MiB after capture. A
-stale or missing socket is insufficient: a zero-byte connection to only that
+printable delimiter frames server, socket and pane fields: tmux may render TAB
+control bytes as underscores. Owned socket paths containing that delimiter or
+non-printable characters refuse before the query; malformed rows never qualify.
+A stale or missing socket is insufficient: a zero-byte connection to only that
 reserved Unix stream path must return ENOENT or ECONNREFUSED, all launch custody
 must be complete, and all recorded birth identities must have exited. Unknown
 connectivity, images, partial registration or exhausted bounds retain the runtime

@@ -565,14 +565,40 @@ class HintFixtureControls(unittest.TestCase):
         def query(argv):
             events.append(argv)
             if 'list-panes' in argv:
+                rendered = (argv[-1].replace('#{pid}', '10').replace('#{socket_path}', value.socket)
+                            .replace('#{pane_pid}', '20').replace('\t', '_'))
                 return SimpleNamespace(returncode=0 if 10 in rows else 1, stderr='',
-                    stdout=f'10\t{value.socket}\t20\n' if 10 in rows else '')
+                    stdout=rendered + '\n' if 10 in rows else '')
             if 'kill-server' in argv:
                 rows.clear()
                 return SimpleNamespace(returncode=0, stdout='', stderr='')
             raise AssertionError('unexpected query')
         value.unix_query = query
         return value, rows, events
+
+    def test_unix_server_row_uses_printable_framing_and_refuses_ambiguous_owned_paths(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value, rows, events = self.unix_custody_double(Path(folder))
+            rows.update({10: (1, 'S', 'server birth'), 20: (10, 'S', 'supervisor birth')})
+            with patch.object(fixture.test_pause, 'TMUX', '/fixture/tools/tmux'):
+                _, server, panes = value.unix_live_snapshot()
+                self.assertEqual(server['pid'], 10)
+                self.assertEqual(panes, {20})
+                self.assertEqual(events[-1][-1], '#{pid}|#{socket_path}|#{pane_pid}')
+                # The retained local tmux observation replaces control bytes by
+                # underscores. The previous TAB format cannot yield three fields.
+                old = f'10\t{value.socket}\t20'.replace('\t', '_')
+                with patch.object(value, 'unix_query', return_value=SimpleNamespace(
+                        returncode=0, stdout=old + '\n', stderr='')):
+                    with self.assertRaisesRegex(AssertionError, 'private pane/server identity'):
+                        value.unix_live_snapshot()
+                for suffix in ('ambiguous|path', 'control\npath'):
+                    value.root = Path(folder) / suffix
+                    value.socket = str(value.root / 'tmux.sock')
+                    before = len(events)
+                    with self.assertRaisesRegex(AssertionError, 'cannot be framed'):
+                        value.unix_live_snapshot()
+                    self.assertEqual(len(events), before)
 
     def test_every_unix_launch_registers_server_before_spawn_and_new_run_before_absence_can_pass(self):
         with tempfile.TemporaryDirectory() as folder:

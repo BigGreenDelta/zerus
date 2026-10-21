@@ -1148,9 +1148,11 @@ class HintContract:
         self.remaining(1)
         self.assertEqual(Path(self.socket), self.root / 'tmux.sock', 'UNKNOWN private socket scope')
         self.assertTrue(Path(self.socket).is_absolute(), 'UNKNOWN relative private socket')
+        self.assertTrue(all(character.isprintable() and character != '|' for character in self.socket),
+                        'UNKNOWN private socket cannot be framed unambiguously')
         rows = self.unix_table()
         panes = self.unix_query([test_pause.TMUX, '-S', self.socket, 'list-panes', '-a', '-F',
-                                 '#{pid}\t#{socket_path}\t#{pane_pid}'])
+                                 '#{pid}|#{socket_path}|#{pane_pid}'])
         if panes.returncode == 1 and self.unix_endpoint_absent():
             observe_unix_descendants(self.unix_owned, rows)
             return rows, None, set()
@@ -1160,7 +1162,7 @@ class HintContract:
         self.assertTrue(0 < len(lines) <= 16, 'UNKNOWN private pane inventory')
         server, pane_ids = None, set()
         for line in lines:
-            fields = line.split('\t')
+            fields = line.split('|')
             self.assertTrue(len(fields) == 3 and fields[0].isdigit() and fields[2].isdigit(),
                             'UNKNOWN private pane/server identity')
             pid, path, pane = int(fields[0]), fields[1], int(fields[2])
