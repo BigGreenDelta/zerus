@@ -20,9 +20,14 @@ const CALLS: usize = 256;
 
 fn bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     let mut data = Vec::new();
-    fs::File::open(path)?.take((limit + 1) as u64).read_to_end(&mut data)?;
+    fs::File::open(path)?
+        .take((limit + 1) as u64)
+        .read_to_end(&mut data)?;
     if data.len() > limit {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "observer input bound"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "observer input bound",
+        ));
     }
     Ok(data)
 }
@@ -33,7 +38,9 @@ fn hash(path: &Path) -> io::Result<String> {
     let mut bytes = [0; 8192];
     loop {
         let count = file.read(&mut bytes)?;
-        if count == 0 { break; }
+        if count == 0 {
+            break;
+        }
         digest.update(&bytes[..count]);
     }
     Ok(format!("{:x}", digest.finalize()))
@@ -79,7 +86,10 @@ fn pump(mut input: impl Read, mut output: impl Write) -> Stream {
             Ok(0) => break,
             Ok(count) => count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => { result.error = true; break; }
+            Err(_) => {
+                result.error = true;
+                break;
+            }
         };
         result.bytes += count as u64;
         result.digest.update(&bytes[..count]);
@@ -90,14 +100,25 @@ fn pump(mut input: impl Read, mut output: impl Write) -> Stream {
         let mut offset = 0;
         while writable && offset < count {
             match output.write(&bytes[offset..count]) {
-                Ok(0) => { writable = false; result.error = true; }
-                Ok(written) => { offset += written; result.forwarded += written as u64; }
+                Ok(0) => {
+                    writable = false;
+                    result.error = true;
+                }
+                Ok(written) => {
+                    offset += written;
+                    result.forwarded += written as u64;
+                }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => { writable = false; result.error = true; }
+                Err(_) => {
+                    writable = false;
+                    result.error = true;
+                }
             }
         }
     }
-    if output.flush().is_err() { result.error = true; }
+    if output.flush().is_err() {
+        result.error = true;
+    }
     result
 }
 
@@ -118,29 +139,44 @@ fn identity(child: &process::Child) -> Option<Value> {
     // hook still waits for stdin, which is forwarded only after this snapshot.
     let output = Command::new("/bin/ps")
         .args(["-ww", "-p", &child.id().to_string(), "-o", "lstart=,comm="])
-        .env("LC_ALL", "C").env("TZ", "UTC").output().ok()?;
-    if !output.status.success() || output.stdout.len() > 1024 { return None; }
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() > 1024 {
+        return None;
+    }
     let text = std::str::from_utf8(&output.stdout).ok()?.trim();
     let fields: Vec<_> = text.split_whitespace().collect();
-    if fields.len() < 6 { return None; }
+    if fields.len() < 6 {
+        return None;
+    }
     Some(json!({"pid":child.id(),"birth":fields[..5].join(" "),"image":fields[5..].join(" ")}))
 }
 
 #[cfg(windows)]
 fn identity(child: &process::Child) -> Option<Value> {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::{Foundation::FILETIME, System::Threading::{GetProcessTimes, QueryFullProcessImageNameW}};
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetProcessTimes, QueryFullProcessImageNameW},
+    };
     let handle = child.as_raw_handle();
-    let [mut created, mut exited, mut kernel, mut user]: [FILETIME; 4] = unsafe { std::mem::zeroed() };
+    let [mut created, mut exited, mut kernel, mut user]: [FILETIME; 4] =
+        unsafe { std::mem::zeroed() };
     let mut image = [0u16; 32768];
     let mut size = image.len() as u32;
     let result = unsafe {
         GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0
             && QueryFullProcessImageNameW(handle, 0, image.as_mut_ptr(), &mut size) != 0
     };
-    if !result { return None; }
+    if !result {
+        return None;
+    }
     let birth = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
-    Some(json!({"pid":child.id(),"birth":birth.to_string(),"image":String::from_utf16(&image[..size as usize]).ok()?}))
+    Some(
+        json!({"pid":child.id(),"birth":birth.to_string(),"image":String::from_utf16(&image[..size as usize]).ok()?}),
+    )
 }
 
 fn exit_like(status: ExitStatus) -> ! {
@@ -150,7 +186,10 @@ fn exit_like(status: ExitStatus) -> ! {
         if let Some(signal) = status.signal() {
             // Reproduce the child's termination on this observer only. Never
             // signal a numeric child PID or any other process.
-            unsafe { libc::signal(signal, libc::SIG_DFL); libc::raise(signal); }
+            unsafe {
+                libc::signal(signal, libc::SIG_DFL);
+                libc::raise(signal);
+            }
             process::exit(128 + signal);
         }
     }
@@ -160,15 +199,31 @@ fn exit_like(status: ExitStatus) -> ! {
 fn run() -> io::Result<ExitStatus> {
     let executable = env::current_exe()?;
     let config: Value = serde_json::from_slice(&bounded(
-        &executable.parent().ok_or_else(|| io::Error::other("observer folder"))?.join("observer.json"), 8192)?)?;
-    let subject = PathBuf::from(config["subject"].as_str().ok_or_else(|| io::Error::other("observer subject"))?);
-    let records = PathBuf::from(config["records"].as_str().ok_or_else(|| io::Error::other("observer records"))?);
+        &executable
+            .parent()
+            .ok_or_else(|| io::Error::other("observer folder"))?
+            .join("observer.json"),
+        8192,
+    )?)?;
+    let subject = PathBuf::from(
+        config["subject"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("observer subject"))?,
+    );
+    let records = PathBuf::from(
+        config["records"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("observer records"))?,
+    );
     let arguments: Vec<_> = env::args_os().skip(1).collect();
     let strings: Vec<_> = arguments.iter().map(|v| v.to_str()).collect();
     let hook = strings == [Some("__state"), Some("hook")];
     let channel = strings == [Some("__state"), Some("answer-channel")];
-    if !subject.is_absolute() || !records.is_absolute() || (!hook && !channel)
-        || hash(&subject)? != config["sha256"].as_str().unwrap_or("") {
+    if !subject.is_absolute()
+        || !records.is_absolute()
+        || (!hook && !channel)
+        || hash(&subject)? != config["sha256"].as_str().unwrap_or("")
+    {
         return Err(io::Error::other("observer input identity"));
     }
     if channel {
@@ -181,14 +236,19 @@ fn run() -> io::Result<ExitStatus> {
     let mut entries = fs::read_dir(&records)?;
     if entries.by_ref().take(CALLS + 1).count() >= CALLS {
         recording_error = true;
-        let _ = record(&records.join("overflow.json"), &json!({"unknown":"call bound"}));
+        let _ = record(
+            &records.join("overflow.json"),
+            &json!({"unknown":"call bound"}),
+        );
     } else if fs::create_dir(&folder).is_err() {
         recording_error = true;
     }
     #[cfg(unix)]
     if !recording_error {
         use std::os::unix::fs::PermissionsExt;
-        if fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).is_err() { recording_error = true; }
+        if fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).is_err() {
+            recording_error = true;
+        }
     }
     if record(&folder.join("begin.json"), &json!({
         "observer_pid":process::id(),"phase":config["phase"],"source":config["source"],
@@ -197,27 +257,52 @@ fn run() -> io::Result<ExitStatus> {
         "name":env::var("HGS_SESSION").ok(),
         "started_unix_ns":SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|v|v.as_nanos().to_string())
     })).is_err() { recording_error = true; }
-    let mut child = Command::new(&subject).args(arguments).stdin(Stdio::piped())
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut child = Command::new(&subject)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
     let child_identity = identity(&child);
-    let input = child.stdin.take().ok_or_else(|| io::Error::other("observer stdin"))?;
-    let output = child.stdout.take().ok_or_else(|| io::Error::other("observer stdout"))?;
-    let error = child.stderr.take().ok_or_else(|| io::Error::other("observer stderr"))?;
+    let input = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("observer stdin"))?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("observer stdout"))?;
+    let error = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("observer stderr"))?;
     let input = thread::spawn(move || pump(io::stdin().lock(), input));
     let output = thread::spawn(move || pump(output, io::stdout().lock()));
     let error = thread::spawn(move || pump(error, io::stderr().lock()));
     let status = child.wait()?;
-    let input = input.join().map_err(|_| io::Error::other("observer stdin thread"))?.observation();
-    let output = output.join().map_err(|_| io::Error::other("observer stdout thread"))?.observation();
-    let error = error.join().map_err(|_| io::Error::other("observer stderr thread"))?.observation();
+    let input = input
+        .join()
+        .map_err(|_| io::Error::other("observer stdin thread"))?
+        .observation();
+    let output = output
+        .join()
+        .map_err(|_| io::Error::other("observer stdout thread"))?
+        .observation();
+    let error = error
+        .join()
+        .map_err(|_| io::Error::other("observer stderr thread"))?
+        .observation();
     let after = hash(&subject).ok();
     // Missing/incomplete evidence fails the case, never changes the child's
     // exit status, retries the hook, or rolls back its suppression metadata.
-    let _ = record(&folder.join("result.json"), &json!({
-        "child":child_identity,"exit_code":status.code(),
-        "signal":signal_of(&status),"stdin":input,"stdout":output,"stderr":error,
-        "subject_sha256_after":after,"recording_error":recording_error
-    }));
+    let _ = record(
+        &folder.join("result.json"),
+        &json!({
+            "child":child_identity,"exit_code":status.code(),
+            "signal":signal_of(&status),"stdin":input,"stdout":output,"stderr":error,
+            "subject_sha256_after":after,"recording_error":recording_error
+        }),
+    );
     Ok(status)
 }
 
@@ -228,13 +313,19 @@ fn signal_of(status: &ExitStatus) -> Option<i32> {
         status.signal()
     }
     #[cfg(not(unix))]
-    { let _ = status; None }
+    {
+        let _ = status;
+        None
+    }
 }
 
 fn main() {
     match run() {
         Ok(status) => exit_like(status),
-        Err(_) => { eprintln!("fixture hook observer: unknown observation"); process::exit(125); }
+        Err(_) => {
+            eprintln!("fixture hook observer: unknown observation");
+            process::exit(125);
+        }
     }
 }
 
@@ -264,7 +355,9 @@ mod tests {
                 self.0.extend_from_slice(&bytes[..count]);
                 Ok(count)
             }
-            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
         }
         let mut forwarded = Short(Vec::new());
         let observed = pump(&b"\0one\r\ntwo\xff"[..], &mut forwarded);
@@ -277,8 +370,12 @@ mod tests {
     fn failed_forwarding_is_unknown_while_child_output_is_drained() {
         struct Broken;
         impl Write for Broken {
-            fn write(&mut self, _: &[u8]) -> io::Result<usize> { Err(io::ErrorKind::BrokenPipe.into()) }
-            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
         }
         let observed = pump(&b"actual child output"[..], Broken);
         assert!(observed.error);
