@@ -67,11 +67,11 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
 
     def test_question_ui_and_entire_physical_fixture_match_the_reviewed_baselines(self):
         self.assertEqual(hashlib.sha256((MAIN / "QuestionUi.kt").read_bytes()).hexdigest(),
-                         "fac5de42d733a6b2dbaf2fa66421c7265d3b1618d1839849c73b7d699b0835d1")
+                         "841c0d5b2df250497b0f54ef8854574ca386e83cb735dc1a0873096d719e22a2")
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
-        # The fixture baseline includes the same-instance lifecycle barrier and bounded cached-Send ancestry.
+        # The fixture baseline includes owned production-review clock binding and unchanged physical case oracles.
         self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
-                         "faa410672b1e2e431b8e1aa0c5c59a4db3d4c363400fed932062a355ca23e0b2")
+                         "786b1e7f9bf4108d1c4aa5e07d4fb8ae063ed63e4eb577b744f0a7b7b9f6f112")
 
     def test_prepared_publication_uses_the_actual_bounded_owner_before_any_atomic_install(self):
         model = (MAIN / "ZerusViewModel.kt").read_text()

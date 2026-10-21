@@ -17,7 +17,8 @@ internal object QuestionUiProbe {
         val available: Boolean, val editing: Boolean, val pending: Boolean, val complete: Boolean,
         val disclosure: Boolean, val foreground: Boolean, val focused: Boolean, val next: Boolean,
         val advance: Boolean, val choices: Boolean, val open: Boolean, val dialog: Boolean,
-        val visible: Boolean, val obscured: Boolean, val answerable: Boolean, val supported: Boolean) : Detail
+        val visible: Boolean, val obscured: Boolean, val answerable: Boolean, val supported: Boolean,
+        val reviewStartedAt: Long? = null) : Detail
     data class Requested(val open: Boolean, val sameCard: Boolean, val option: String) : Detail
     data class Showing(val open: Boolean, val eligible: Boolean, val showing: Boolean,
         val sameCard: Boolean, val option: String) : Detail
@@ -29,11 +30,13 @@ internal object QuestionUiProbe {
     data class Record(val stage: Stage, val uptimeMs: Long, val card: String, val questionObject: Int,
         val selection: String, val detail: Detail)
     data class Report(val closed: Boolean, val fault: Fault, val records: List<Record>)
+    data class ContentSnapshot(val generation: Int, val record: Record)
 
     /** Contains only immutable scalar records; no model, question, option map or action reference is retained. */
     class Session internal constructor() {
         private val records = ArrayDeque<Record>(MAX_RECORDS)
         private var content: Record? = null
+        private var contentGeneration = 0
         private var showing: Record? = null
         private var availability: Record? = null
         private var closed = false
@@ -50,11 +53,26 @@ internal object QuestionUiProbe {
                 record.stage == Stage.AVAILABILITY_COMMIT && same(availability, record)) return
             if (records.size == MAX_RECORDS) { fault = Fault.OVERFLOW; return }
             records.addLast(record)
-            if (record.stage == Stage.CONTENT_COMMIT) content = record
+            if (record.stage == Stage.CONTENT_COMMIT) { content = record; contentGeneration++ }
             if (record.stage == Stage.SHOWING_COMMIT) showing = record
             if (record.stage == Stage.AVAILABILITY_COMMIT) availability = record
         }
         @Synchronized internal fun failed() { fault = Fault.OBSERVATION }
+        @Synchronized internal fun contentSnapshot(): ContentSnapshot {
+            check(healthy())
+            return ContentSnapshot(contentGeneration, checkNotNull(content))
+        }
+        @Synchronized internal fun firstReviewSnapshot(afterGeneration: Int): ContentSnapshot? {
+            check(healthy() && afterGeneration in 0..contentGeneration)
+            var generation = 0
+            for (record in records) if (record.stage == Stage.CONTENT_COMMIT) {
+                generation++
+                val detail = record.detail as Committed
+                if (generation > afterGeneration && detail.eligible && detail.reviewStartedAt != null)
+                    return ContentSnapshot(generation, record)
+            }
+            return null
+        }
         @Synchronized internal fun close(): Report {
             check(!closed)
             closed = true
@@ -73,6 +91,16 @@ internal object QuestionUiProbe {
         val report = owned.close()
         session = null
         return report
+    }
+    /** Read immutable evidence from the currently owned DEBUG session; never affects a UI gate. */
+    @Synchronized fun contentSnapshot(owned: Session, question: Question, afterGeneration: Int? = null): ContentSnapshot? {
+        check(BuildConfig.DEBUG && session === owned)
+        val snapshot = if (afterGeneration == null) owned.contentSnapshot() else owned.firstReviewSnapshot(afterGeneration)
+        if (snapshot == null) return null
+        check(snapshot.record.card == fingerprint(listOf(question.id, question.hash, question.run, question.conversation)) &&
+            snapshot.record.questionObject == System.identityHashCode(question))
+        check(snapshot.record.detail is Committed)
+        return snapshot
     }
 
     private fun fingerprint(parts: List<String>): String {

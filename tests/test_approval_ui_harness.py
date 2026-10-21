@@ -114,6 +114,48 @@ def cached_send_memory(source, anchor, window, package, end, clock, current_card
         sleeps += 1
 
 
+def review_clock_memory(source, observation, clock, current_card=lambda: True):
+    """Finite source-bound scalar stand-in; no production timer, Kotlin or Android clock is executed."""
+    cache = source.split('    private data class EarlySend(', 1)[1].split('    private var earlySend:', 1)[0]
+    for exact in ('check(this.resumeStart == null && resumeEnd == null)',
+                  'check(resumeStart >= 0 && resumeStart <= SystemClock.elapsedRealtime() && currentCard())',
+                  'beforeGeneration = checkNotNull(observation(null)).generation', 'this.resumeStart = resumeStart',
+                  'check(reviewStart == null && resumeEnd == null && currentCard())',
+                  'val snapshot = observation(checkNotNull(beforeGeneration)) ?: return false',
+                  'val start = checkNotNull(detail.reviewStartedAt)',
+                  'check(snapshot.generation > checkNotNull(beforeGeneration) && detail.eligible)',
+                  'check(checkNotNull(resumeStart) <= start && start <= now)',
+                  'val end = Math.addExact(start, 3_000)', 'check(now < end)',
+                  'reviewStart = start', 'boundGeneration = snapshot.generation', 'resumeEnd = end',
+                  'SystemClock.elapsedRealtime() >= start && snapshot.generation >= checkNotNull(boundGeneration) &&',
+                  'detail.eligible && detail.reviewStartedAt == start'):
+        assert exact in cache
+    state = dict(resume=None, generation=None, start=None, bound=None, end=None)
+    def begin(resume):
+        assert state['resume'] is None and state['end'] is None
+        assert 0 <= resume <= clock.now and current_card()
+        state['generation'] = observation(None).generation
+        state['resume'] = resume
+    def bind():
+        assert state['start'] is None and state['end'] is None and current_card()
+        record = observation(state['generation'])
+        if record is None: return False
+        start, now = record.start, clock.now
+        assert start is not None
+        assert state['generation'] is not None and record.generation > state['generation'] and record.eligible
+        assert state['resume'] is not None and state['resume'] <= start <= now
+        end = start + 3000
+        assert end <= 2**63 - 1 and now < end
+        state.update(start=start, bound=record.generation, end=end)
+        return True
+    def current():
+        if not current_card(): return False
+        if state['start'] is None: return True
+        record = observation(None)
+        return clock.now >= state['start'] and record.generation >= state['bound'] and record.eligible and record.start == state['start']
+    return SimpleNamespace(begin=begin, bind=bind, current=current, state=state)
+
+
 def kotlin_brace_scopes(source, offset):
     """Brace scopes for the fixed source layout guard; skip comments and quoted text, not a Kotlin compiler."""
     lexemes = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]')
@@ -641,7 +683,8 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertLess(helper.index('val resumeStart = SystemClock.elapsedRealtime()'), helper.index('targetContext.startActivity('))
         self.assertLess(helper.index('captured.begin(resumeStart)'), helper.index('targetContext.startActivity('))
         self.assertLess(helper.index('main { activity.hasWindowFocus() }'), helper.index('checkEarly()'))
-        self.assertLess(helper.index('checkEarly()'), helper.index('val elapsed = SystemClock.elapsedRealtime() - resumeStart'))
+        self.assertLess(helper.index('captured.bindReview()'), helper.index('checkEarly()'))
+        self.assertLess(helper.index('checkEarly()'), helper.index('val elapsed = captured.elapsed()'))
         self.assertIn('elapsed >= 0 && elapsed < 3_000', helper)
         self.assertIn('finally {\n                earlySend = null', helper)
         self.assertEqual(re.findall(r'earlyReview\("([a-z]+)"\)', source), ['countdown', 'replacement', 'feedback'])
@@ -655,6 +698,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertLess(lifecycle.index('earlySend = lifecycleSend'), lifecycle.index('sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)'))
         self.assertLess(lifecycle.index('val resumeStart = SystemClock.elapsedRealtime()'), lifecycle.index('targetContext.startActivity('))
         self.assertLess(lifecycle.index('lifecycleSend.begin(resumeStart)'), lifecycle.index('targetContext.startActivity('))
+        self.assertLess(lifecycle.index('lifecycleSend.bindReview()'), lifecycle.index('check(count() == 4 && !button("Send answer").isEnabled)'))
         self.assertLess(lifecycle.index('check(count() == 4 && !button("Send answer").isEnabled)'), lifecycle.index('val elapsed = '))
         self.assertIn('elapsed >= 0 && elapsed < 3_000', lifecycle)
         self.assertIn('finally {\n                earlySend = null', lifecycle)
@@ -717,17 +761,79 @@ class ApprovalHarnessTests(unittest.TestCase):
         with self.assertRaises(AssertionError): assert not enabled.enabled  # Preserve the actual early disabled oracle.
         cache = source.split('    private data class EarlySend(', 1)[1].split('    private var earlySend:', 1)[0]
         self.assertIn('private set', cache)
-        self.assertLess(cache.index('check(resumeEnd == null)'), cache.index('resumeEnd = Math.addExact(resumeStart, 3_000)'))
+        self.assertLess(cache.index('check(this.resumeStart == null && resumeEnd == null)'), cache.index('this.resumeStart = resumeStart'))
+        self.assertLess(cache.index('check(reviewStart == null && resumeEnd == null'), cache.index('resumeEnd = end'))
         self.assertEqual(source.count('.begin(resumeStart)'), 2)
         resolver = source.split('    private fun cachedSendButton(', 1)[1].split('    private fun tap(', 1)[0]
         for forbidden in ('node(', 'visible(', 'uiAutomation', 'await(', 'injectInputEvent', 'performAction', 'catch (', 'phase('):
             self.assertNotIn(forbidden, resolver)
 
+    def test_android_early_clock_binds_once_to_the_current_owned_production_start(self):
+        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        clock = SimpleNamespace(now=1000)
+        snapshot = SimpleNamespace(generation=1, start=500, eligible=True)
+        alive = True
+        ready = True
+        def observe(after):
+            assert alive  # Closed/faulted/foreign/missing/current-card mismatch is a hard failure, never a fallback.
+            if after is not None and not ready: return None
+            return snapshot
+        def fresh():
+            clock.now = 1000
+            snapshot.generation, snapshot.start, snapshot.eligible = 1, 500, True
+            return review_clock_memory(source, observe, clock)
+        bound = fresh(); bound.begin(1000)
+        clock.now = 4214  # The previous fixture expired at 4000 despite production only just becoming eligible.
+        snapshot.generation, snapshot.start = 2, 4100
+        self.assertTrue(bound.bind())
+        self.assertEqual(bound.state['end'], 7100)
+        self.assertTrue(bound.current())
+        clock.now = 4099
+        self.assertFalse(bound.current())
+        clock.now = 4214
+        with self.assertRaises(AssertionError): bound.begin(4214)
+        with self.assertRaises(AssertionError): bound.bind()
+        for change in ({'generation': 1}, {'start': 4101}, {'eligible': False}):
+            old = vars(snapshot).copy()
+            snapshot.__dict__.update(change)
+            with self.subTest(current=change): self.assertFalse(bound.current())
+            snapshot.__dict__.update(old)
+        for change in ({'generation': 1}, {'start': None}, {'start': 999}, {'start': 2001}, {'eligible': False}):
+            candidate = fresh(); candidate.begin(1000); clock.now = 2000
+            snapshot.generation, snapshot.start, snapshot.eligible = 2, 1500, True
+            snapshot.__dict__.update(change)
+            with self.subTest(bind=change), self.assertRaises(AssertionError): candidate.bind()
+            self.assertIsNone(candidate.state['end'])
+        for now in (4500, 4501):
+            candidate = fresh(); candidate.begin(1000)
+            snapshot.generation, snapshot.start = 2, 1500
+            clock.now = now
+            with self.subTest(expired=now), self.assertRaises(AssertionError): candidate.bind()
+        candidate = fresh(); candidate.begin(1000)
+        alive = False
+        with self.assertRaises(AssertionError): candidate.bind()
+        alive = True
+        candidate = fresh(); candidate.begin(1000)
+        ready = False
+        self.assertFalse(candidate.bind())
+        self.assertIsNone(candidate.state['end'])
+        ready = True
+        for resume in (-1, 1001):
+            with self.subTest(resume=resume), self.assertRaises(AssertionError): fresh().begin(resume)
+        unknown = review_clock_memory(source, observe, clock, current_card=lambda: False)
+        with self.assertRaises(AssertionError): unknown.begin(1000)
+        observation = source.split('            val observation = { afterGeneration: Int? -> main {', 1)[1].split('            return EarlySend(', 1)[0]
+        self.assertIn('check(current())', observation)
+        self.assertIn('QuestionUiProbe.contentSnapshot(checkNotNull(actionProbeSession), checkNotNull(model.conversationQuestions.singleOrNull()), afterGeneration)', observation)
+        self.assertEqual(source.count('.bindReview()'), 2)
+        self.assertNotIn('await(', source.split('        fun bindReview():', 1)[1].split('        fun current()', 1)[0])
+        self.assertIn('await("same Activity regained focus for $name") { main { activity.hasWindowFocus() } && captured.bindReview() }', source)
+
     def test_android_lifecycle_stop_requires_the_same_alive_created_activity_not_modal_focus_loss(self):
         source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
         body = source.split('boundary("begin", "lifecycle_no_submit")', 1)[1].split('boundary("complete", "lifecycle_no_submit")', 1)[0]
         stop = body.split('await("Activity stopped") { main {\n', 1)[1].split('                } }', 1)[0]
-        resume = body.split('await("same Activity regained focus") { main {\n', 1)[1].split('                } }', 1)[0]
+        resume = body.split('await("same Activity regained focus") { main {\n', 1)[1].split('                } && lifecycleSend.bindReview() }', 1)[0]
         def admitted(fragment, values):
             lines = [line.strip() for line in fragment.splitlines() if line.strip()]
             self.assertEqual(len(lines), 2)

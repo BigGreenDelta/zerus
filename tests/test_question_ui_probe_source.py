@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN = "mobile/android/app/src/main/java/app/zerus/mobile/"
 FIXTURE = "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
 ORIGINAL_UI = "3687bd4bb2f7243c06fc99865c08120795360b273aa8291b612794a9bfdf57bf"
-# Fixture baseline includes the same-instance lifecycle barrier and bounded cached-Send ancestry; probe seams reconstruct exactly.
-ORIGINAL_FIXTURE = "ba03f2e96d4753743b8a6edcc14bf6f282d2293b859e7a613d5a3d8fbf341e97"
+# Fixture baseline includes owned production-review clock binding and the same physical case oracles; probe seams reconstruct exactly.
+ORIGINAL_FIXTURE = "2859fcdc7dc6d835bc0a8f6af474042592861be23bbab8ea13ff3241ccd5de57"
 
 
 def strip_probe(source, expected):
@@ -76,7 +76,7 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
     def test_failure_classifiers_and_post_observations_leave_all_original_client_and_ui_code_exact(self):
         source = (ROOT / FIXTURE).read_text()
         self.assertEqual(hashlib.sha256(strip_send_diagnostics(source).encode()).hexdigest(),
-            "5d5acfb9c5d6b1fca81eb454c990c7b9550e0ffd9f1922b5845c8e2cd814a818")
+            "9d18553767547ddd4bcc01f2179f290ebbff15c8c1946772c3a3c8e47ed1b49a")
         model = source.split("    private fun modelEvidence(", 1)[1].split("    private fun set(", 1)[0]
         self.assertTrue(model.startswith('model: ZerusViewModel, target: Target, activity: MainActivity, offered: JSONObject?): String = main {'))
         self.assertIn('failureText(model.error)', model)
@@ -211,6 +211,34 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
         # The diagnostic has no delegate/model/action callback, raw text field or IO/network facility.
         for forbidden in ("submitAnswer(", ".request(", ".send(", "ZerusViewModel", "Context", "java.io", "okhttp", "question.prompts", "choice.label", "choice.description", "() -> Unit"):
             self.assertNotIn(forbidden, probe)
+
+    def test_owned_content_snapshot_exposes_only_the_stable_production_review_start(self):
+        ui = (ROOT / MAIN / "QuestionUi.kt").read_text()
+        committed = ui.split("// BEGIN QUESTION_UI_PROBE committed\n", 1)[1].split("// END QUESTION_UI_PROBE committed", 1)[0]
+        self.assertIn("review.startedAt)", committed)
+        self.assertNotIn("reviewNow", committed)
+        self.assertTrue(original_ui(ui))
+        probe = (ROOT / MAIN / "QuestionUiProbe.kt").read_text()
+        getter = probe.split("    @Synchronized fun contentSnapshot(owned:", 1)[1].split("    private fun fingerprint(", 1)[0]
+        self.assertLess(getter.index("check(BuildConfig.DEBUG && session === owned)"), getter.index("owned.contentSnapshot()"))
+        self.assertIn("owned.firstReviewSnapshot(afterGeneration)", getter)
+        self.assertIn("if (snapshot == null) return null", getter)
+        self.assertIn("snapshot.record.card == fingerprint(listOf(question.id, question.hash, question.run, question.conversation))", getter)
+        self.assertIn("snapshot.record.questionObject == System.identityHashCode(question)", getter)
+        self.assertIn("check(snapshot.record.detail is Committed)", getter)
+        session = probe.split("    class Session internal constructor()", 1)[1].split("    @Volatile", 1)[0]
+        snapshot = session.split("internal fun contentSnapshot():", 1)[1].split("@Synchronized internal fun firstReviewSnapshot", 1)[0]
+        self.assertLess(snapshot.index("check(healthy())"), snapshot.index("checkNotNull(content)"))
+        self.assertIn("if (record.stage == Stage.CONTENT_COMMIT) { content = record; contentGeneration++ }", session)
+        self.assertLess(session.index("same(content, record)"), session.index("contentGeneration++"))
+        for forbidden in ("SystemClock", "record.", "append(", "remember", "launch(", "delay("):
+            self.assertNotIn(forbidden, snapshot)
+        first = session.split("internal fun firstReviewSnapshot(", 1)[1].split("@Synchronized internal fun close", 1)[0]
+        self.assertIn("check(healthy() && afterGeneration in 0..contentGeneration)", first)
+        self.assertIn("for (record in records)", first)
+        self.assertIn("generation > afterGeneration && detail.eligible && detail.reviewStartedAt != null", first)
+        self.assertIn("return ContentSnapshot(generation, record)", first)
+        self.assertNotIn("last", first)
 
     def test_fixture_closes_owned_session_and_keeps_original_exception_and_result_schema(self):
         source = (ROOT / FIXTURE).read_text()

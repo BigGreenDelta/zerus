@@ -196,7 +196,8 @@ import org.json.JSONObject
         val committed = QuestionUiProbe.Committed(reviewEligible, remaining, reviewed, primaryEnabled,
             available, editing, submitPending, complete, disclosureInWindow, foreground, window.isWindowFocused,
             step.nextPage != null, step.canAdvance, choices, broader.open, inDialog, visible,
-            LocalConversationObscuration.current?.obscured == true, question.canAnswer, approvalSupported || permission || choices)
+            LocalConversationObscuration.current?.obscured == true, question.canAnswer, approvalSupported || permission || choices,
+            review.startedAt)
         SideEffect { QuestionUiProbe.committed(question, committedOptions, committed) }
     }
     // END QUESTION_UI_PROBE committed

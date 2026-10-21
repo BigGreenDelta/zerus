@@ -369,8 +369,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("        working-directory: mobile/android\n"
                       "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true\n", listed[gradle])
         self.assertIn("-PzerusFirebase=true", signed)
-        # Retain the two actual JVM suites on success as well as failure, using
-        # only explicit files staged outside all cache paths. Missing either
+        # Retain the three actual JVM suites on success as well as failure, using
+        # only explicit files staged outside all cache paths. Missing any
         # suite must fail collection rather than silently yielding partial proof.
         collect = names.index("Collect approval publication and binding unit results")
         retain = names.index("Retain approval publication and binding unit results")
@@ -378,7 +378,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertLess(collect, retain)
         for step in (listed[collect], listed[retain]):
             self.assertIn("        if: always()\n", step)
-        result_names = ("InspectionPublicationTest", "QuestionSendConfirmationTest")
+        result_names = ("InspectionPublicationTest", "QuestionSendConfirmationTest", "QuestionReviewProbeTest")
         self.assertEqual(re.findall(r"^          cp (.+)$", listed[collect], re.M), [
             f"mobile/android/app/build/test-results/testDebugUnitTest/TEST-app.zerus.mobile.{name}.xml "
             "artifacts/android-approval-unit-results/" for name in result_names])

@@ -31,6 +31,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     private var staleSendEvidence = "stale-send status=UNKNOWN reason=not-completed"
     // BEGIN QUESTION_UI_PROBE fixture-report
     private var actionProbeReport: QuestionUiProbe.Report? = null
+    private var actionProbeSession: QuestionUiProbe.Session? = null
     private fun actionProbeEvidence(): String = try {
         val report = checkNotNull(actionProbeReport)
         check(report.records.size <= QuestionUiProbe.MAX_RECORDS)
@@ -42,6 +43,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     } catch (_: Throwable) { "compose-action status=UNKNOWN reason=result-unavailable" }
     private fun smoke(store: PrivateStore) {
         val owned = QuestionUiProbe.install()
+        actionProbeSession = owned
         var primary: Throwable? = null
         try { smokeBody(store) }
         catch (error: Throwable) { primary = error; throw error }
@@ -50,7 +52,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             catch (cleanup: Throwable) {
                 val original = primary
                 if (original == null) throw cleanup else if (cleanup !== original) original.addSuppressed(cleanup)
-            }
+            } finally { actionProbeSession = null }
         }
     }
     // END QUESTION_UI_PROBE fixture-report
@@ -81,13 +83,44 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         "k=$kind n=${value.length} p=${prefix.length} sha256Prefix=$digest"
     } catch (_: Throwable) { "k=UNKNOWN" }
     // END QUESTION_SEND_DIAGNOSTIC definition
-    private data class EarlySend(val node: AccessibilityNodeInfo, val window: Int, val current: () -> Boolean) {
+    private data class EarlySend(val node: AccessibilityNodeInfo, val window: Int, val currentCard: () -> Boolean,
+        val observation: (Int?) -> QuestionUiProbe.ContentSnapshot?) {
+        private var resumeStart: Long? = null
+        private var beforeGeneration: Int? = null
+        private var reviewStart: Long? = null
+        private var boundGeneration: Int? = null
         var resumeEnd: Long? = null
             private set
         fun begin(resumeStart: Long) {
-            check(resumeEnd == null)
-            resumeEnd = Math.addExact(resumeStart, 3_000)
+            check(this.resumeStart == null && resumeEnd == null)
+            check(resumeStart >= 0 && resumeStart <= SystemClock.elapsedRealtime() && currentCard())
+            beforeGeneration = checkNotNull(observation(null)).generation
+            this.resumeStart = resumeStart
         }
+        fun bindReview(): Boolean {
+            check(reviewStart == null && resumeEnd == null && currentCard())
+            val snapshot = observation(checkNotNull(beforeGeneration)) ?: return false
+            val detail = snapshot.record.detail as QuestionUiProbe.Committed
+            val start = checkNotNull(detail.reviewStartedAt)
+            val now = SystemClock.elapsedRealtime()
+            check(snapshot.generation > checkNotNull(beforeGeneration) && detail.eligible)
+            check(checkNotNull(resumeStart) <= start && start <= now)
+            val end = Math.addExact(start, 3_000)
+            check(now < end) { "Fixture missed the real early-review window" }
+            reviewStart = start
+            boundGeneration = snapshot.generation
+            resumeEnd = end
+            return true
+        }
+        fun current(): Boolean {
+            if (!currentCard()) return false
+            val start = reviewStart ?: return true
+            val snapshot = checkNotNull(observation(null))
+            val detail = snapshot.record.detail as QuestionUiProbe.Committed
+            return SystemClock.elapsedRealtime() >= start && snapshot.generation >= checkNotNull(boundGeneration) &&
+                detail.eligible && detail.reviewStartedAt == start
+        }
+        fun elapsed() = SystemClock.elapsedRealtime() - checkNotNull(reviewStart)
     }
     private var earlySend: EarlySend? = null
     private data class InterceptorFailure(val guard: String, val type: String, val method: String, val path: String)
@@ -600,7 +633,11 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             check(earlySend == null && current())
             val send = node("Send answer")
             check(send.refresh() && exactVisible(send, "Send answer"))
-            return EarlySend(send, send.windowId, current)
+            val observation = { afterGeneration: Int? -> main {
+                check(current())
+                QuestionUiProbe.contentSnapshot(checkNotNull(actionProbeSession), checkNotNull(model.conversationQuestions.singleOrNull()), afterGeneration)
+            } }
+            return EarlySend(send, send.windowId, current, observation)
         }
         fun earlyReview(name: String, checkEarly: () -> Unit) {
             val captured = captureEarlySend()
@@ -611,17 +648,17 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)
                 await("owned Activity lost focus before $name") { !main { activity.hasWindowFocus() } }
                 // Home/foreground uses the same actual Activity and production eligibility path as the lifecycle case.
-                // The timestamp precedes resume, so a late resume or accessibility read cannot qualify as early.
+                // Resume is only a lower bound: the real three-second clock starts in production's eligibility effect.
                 val resumeStart = SystemClock.elapsedRealtime()
                 resumedAt = resumeStart
                 captured.begin(resumeStart)
                 phase("early-resume-begin:$name")
                 targetContext.startActivity(Intent(targetContext, MainActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
-                await("same Activity regained focus for $name") { main { activity.hasWindowFocus() } }
+                await("same Activity regained focus for $name") { main { activity.hasWindowFocus() } && captured.bindReview() }
                 check(captured.current()) { "Early-review card identity changed after resume" }
                 checkEarly()
-                val elapsed = SystemClock.elapsedRealtime() - resumeStart
+                val elapsed = captured.elapsed()
                 check(elapsed >= 0 && elapsed < 3_000) { "Fixture missed the real early-review window: $name elapsedMs=$elapsed" }
             } finally {
                 earlySend = null
@@ -734,7 +771,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 await("same Activity regained focus") { main {
                     check(lifecycleActivity === activity && !activity.isFinishing && !activity.isDestroyed)
                     activity.lifecycle.currentState == androidx.lifecycle.Lifecycle.State.RESUMED && activity.hasWindowFocus()
-                } }
+                } && lifecycleSend.bindReview() }
                 main { phase("lifecycle-resumed:id=${System.identityHashCode(activity)}:state=${activity.lifecycle.currentState.name}:focus=${activity.hasWindowFocus()}") }
                 // Preserve legitimate inner scrolling: bind the same native card, not a now-offscreen top label.
                 await("same current card body restored") {
@@ -744,7 +781,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 }
                 await("background retires confirmation") { visible("Confirm this option?") == null }
                 check(count() == 4 && !button("Send answer").isEnabled)
-                val elapsed = SystemClock.elapsedRealtime() - resumeStart
+                val elapsed = lifecycleSend.elapsed()
                 check(elapsed >= 0 && elapsed < 3_000) { "Fixture missed the real early-review window: lifecycle elapsedMs=$elapsed" }
             } finally {
                 earlySend = null
