@@ -79,4 +79,119 @@ class QuestionReviewProbeTest {
         session.close()
         assertThrows(IllegalStateException::class.java) { session.firstReviewSnapshot(2) }
     }
+
+    private fun questionRecord(question: Question, detail: QuestionUiProbe.Committed): QuestionUiProbe.Record {
+        val hash = java.security.MessageDigest.getInstance("SHA-256")
+        for (part in listOf(question.id, question.hash, question.run, question.conversation)) {
+            val bytes = part.toByteArray(Charsets.UTF_8)
+            hash.update(byteArrayOf((bytes.size ushr 8).toByte(), bytes.size.toByte())); hash.update(bytes)
+        }
+        return record(QuestionUiProbe.Stage.CONTENT_COMMIT).copy(
+            card = hash.digest().joinToString("") { "%02x".format(it) },
+            questionObject = System.identityHashCode(question), detail = detail)
+    }
+
+    @Test fun forwardReviewResetRemainsInsideTheFirstImmutableWindow() {
+        val question = Question("card", "hash", emptyList(), true, false, false, "input")
+        val owned = QuestionUiProbe.install()
+        try {
+            val first = questionRecord(question, committed(1000))
+            owned.append(first)
+            val bound = checkNotNull(QuestionUiProbe.contentSnapshot(owned, question, 0))
+            assertTrue(QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 1000, 4000))
+            owned.append(first.copy(detail = committed(1000).copy(eligible = false)))
+            assertFalse(QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 2000, 4000))
+            owned.append(first.copy(detail = committed(null)))
+            assertFalse(QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 2100, 4000))
+            owned.append(first.copy(detail = committed(2200)))
+            val latest = checkNotNull(QuestionUiProbe.contentSnapshot(owned, question))
+            // The original fixture's exact-start comparison rejects this controlled forward reset.
+            assertFalse((latest.record.detail as QuestionUiProbe.Committed).reviewStartedAt ==
+                (bound.record.detail as QuestionUiProbe.Committed).reviewStartedAt)
+            assertTrue(QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 2300, 4000))
+            assertEquals(bound, owned.firstReviewSnapshot(0))
+            assertEquals(1000L, (bound.record.detail as QuestionUiProbe.Committed).reviewStartedAt)
+            assertTrue(QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 3999, 4000))
+            assertFalse(QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 4000, 4000))
+            assertFalse(QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 4001, 5200))
+        } finally { QuestionUiProbe.close(owned) }
+    }
+
+    @Test fun earlyReviewRefusesUnknownBackwardFutureExpiredAndOverflowingClocks() {
+        data class Case(val first: Long?, val current: Long?, val now: Long, val end: Long,
+            val eligible: Boolean = true)
+        val cases = listOf(
+            Case(null, 1000, 2300, 4000),
+            Case(1000, null, 2300, 4000), Case(1000, 999, 2300, 4000),
+            Case(1000, 2301, 2300, 4000), Case(1000, 1000, 999, 4000),
+            Case(1000, 2200, 4000, 4000), Case(1000, 2200, 4001, 4000),
+            Case(1000, 2200, 2300, 5200), Case(1000, 2200, 2300, 3999),
+            Case(1000, 2200, 2300, 4000, false), Case(-1, 0, 1, 2999),
+            Case(Long.MAX_VALUE - 1000, Long.MAX_VALUE - 500, Long.MAX_VALUE, Long.MAX_VALUE))
+        for (case in cases) {
+            val question = Question("card", "hash", emptyList(), true, false, false, "input")
+            val owned = QuestionUiProbe.install()
+            try {
+                val first = questionRecord(question, committed(case.first))
+                owned.append(first)
+                val bound = owned.contentSnapshot()
+                owned.append(first.copy(detail = committed(case.current).copy(eligible = case.eligible)))
+                assertFalse(case.toString(), QuestionUiProbe.earlyReviewCurrent(owned, question, bound, case.now, case.end))
+            } finally { QuestionUiProbe.close(owned) }
+        }
+    }
+
+    @Test fun earlyReviewRefusesChangedIdentitySelectionGenerationAndUnrecordedBinding() {
+        val question = Question("card", "hash", emptyList(), true, false, false, "input")
+        val owned = QuestionUiProbe.install()
+        try {
+            val first = questionRecord(question, committed(1000))
+            owned.append(first)
+            val bound = owned.contentSnapshot()
+            for (changed in listOf(bound.copy(generation = 0), bound.copy(generation = 2),
+                bound.copy(record = first.copy(card = "other")),
+                bound.copy(record = first.copy(questionObject = first.questionObject + 1)),
+                bound.copy(record = first.copy(selection = "other")),
+                bound.copy(record = first.copy(detail = committed(900))),
+                bound.copy(record = first.copy(detail = committed(1000).copy(eligible = false))),
+                bound.copy(record = first.copy(stage = QuestionUiProbe.Stage.ENTRY)))) {
+                assertFalse(QuestionUiProbe.earlyReviewCurrent(owned, question, changed, 2000, 4000))
+            }
+            owned.append(first.copy(selection = "other", detail = committed(1500)))
+            assertFalse(QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 2000, 4000))
+            for (changed in listOf(first.copy(card = "other"),
+                first.copy(questionObject = first.questionObject + 1))) {
+                owned.append(changed)
+                assertThrows(IllegalStateException::class.java) {
+                    QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 2000, 4000)
+                }
+            }
+        } finally { QuestionUiProbe.close(owned) }
+    }
+
+    @Test fun earlyReviewRequiresTheActiveHealthyOwnerAndExactQuestionObject() {
+        val question = Question("card", "hash", emptyList(), true, false, false, "input")
+        val owned = QuestionUiProbe.install()
+        val bound: QuestionUiProbe.ContentSnapshot
+        try {
+            owned.append(questionRecord(question, committed(1000)))
+            bound = owned.contentSnapshot()
+            assertTrue(QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 2000, 4000))
+            assertThrows(IllegalStateException::class.java) {
+                QuestionUiProbe.earlyReviewCurrent(QuestionUiProbe.Session(), question, bound, 2000, 4000)
+            }
+            for (changed in listOf(question.copy(), question.copy(hash = "other"))) {
+                assertThrows(IllegalStateException::class.java) {
+                    QuestionUiProbe.earlyReviewCurrent(owned, changed, bound, 2000, 4000)
+                }
+            }
+            owned.failed()
+            assertThrows(IllegalStateException::class.java) {
+                QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 2000, 4000)
+            }
+        } finally { QuestionUiProbe.close(owned) }
+        assertThrows(IllegalStateException::class.java) {
+            QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 2000, 4000)
+        }
+    }
 }

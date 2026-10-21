@@ -103,6 +103,23 @@ internal object QuestionUiProbe {
         return snapshot
     }
 
+    /** Negative-input evidence only: a forward reset cannot renew the first bound review window. */
+    @Synchronized fun earlyReviewCurrent(owned: Session, question: Question, bound: ContentSnapshot,
+        elapsedNow: Long, originalEnd: Long): Boolean {
+        val latest = checkNotNull(contentSnapshot(owned, question))
+        if (bound.generation <= 0 || latest.generation < bound.generation ||
+            owned.firstReviewSnapshot(bound.generation - 1) != bound) return false
+        val first = bound.record.detail as? Committed ?: return false
+        val current = latest.record.detail as? Committed ?: return false
+        val start = first.reviewStartedAt ?: return false
+        val currentStart = current.reviewStartedAt ?: return false
+        return bound.record.stage == Stage.CONTENT_COMMIT && latest.record.stage == Stage.CONTENT_COMMIT &&
+            bound.record.card == latest.record.card && bound.record.questionObject == latest.record.questionObject &&
+            bound.record.selection == latest.record.selection && first.eligible && current.eligible &&
+            start >= 0 && start <= Long.MAX_VALUE - 3_000 && originalEnd == start + 3_000 &&
+            elapsedNow >= start && elapsedNow < originalEnd && currentStart >= start && currentStart <= elapsedNow
+    }
+
     private fun fingerprint(parts: List<String>): String {
         check(parts.size <= 40 && parts.all { it.length <= 256 })
         val hash = MessageDigest.getInstance("SHA-256")

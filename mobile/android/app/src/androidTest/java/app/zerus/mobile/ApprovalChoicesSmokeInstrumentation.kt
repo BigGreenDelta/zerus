@@ -84,11 +84,13 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     } catch (_: Throwable) { "k=UNKNOWN" }
     // END QUESTION_SEND_DIAGNOSTIC definition
     private data class EarlySend(val node: AccessibilityNodeInfo, val window: Int, val currentCard: () -> Boolean,
-        val observation: (Int?) -> QuestionUiProbe.ContentSnapshot?) {
+        val observation: (Int?) -> QuestionUiProbe.ContentSnapshot?,
+        val currentReview: (QuestionUiProbe.ContentSnapshot, Long, Long) -> Boolean) {
         private var resumeStart: Long? = null
         private var beforeGeneration: Int? = null
         private var reviewStart: Long? = null
         private var boundGeneration: Int? = null
+        private var boundSnapshot: QuestionUiProbe.ContentSnapshot? = null
         var resumeEnd: Long? = null
             private set
         fun begin(resumeStart: Long) {
@@ -109,16 +111,16 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             check(now < end) { "Fixture missed the real early-review window" }
             reviewStart = start
             boundGeneration = snapshot.generation
+            boundSnapshot = snapshot
             resumeEnd = end
             return true
         }
         fun current(): Boolean {
             if (!currentCard()) return false
-            val start = reviewStart ?: return true
-            val snapshot = checkNotNull(observation(null))
-            val detail = snapshot.record.detail as QuestionUiProbe.Committed
-            return SystemClock.elapsedRealtime() >= start && snapshot.generation >= checkNotNull(boundGeneration) &&
-                detail.eligible && detail.reviewStartedAt == start
+            if (reviewStart == null) return true
+            val bound = checkNotNull(boundSnapshot)
+            return bound.generation == checkNotNull(boundGeneration) &&
+                currentReview(bound, SystemClock.elapsedRealtime(), checkNotNull(resumeEnd))
         }
         fun elapsed() = SystemClock.elapsedRealtime() - checkNotNull(reviewStart)
     }
@@ -673,7 +675,12 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 check(currentCard())
                 QuestionUiProbe.contentSnapshot(checkNotNull(actionProbeSession), checkNotNull(model.conversationQuestions.singleOrNull()), afterGeneration)
             } }
-            return EarlySend(send, send.windowId, current, observation)
+            val currentReview = { bound: QuestionUiProbe.ContentSnapshot, now: Long, end: Long -> main {
+                check(currentCard())
+                QuestionUiProbe.earlyReviewCurrent(checkNotNull(actionProbeSession),
+                    checkNotNull(model.conversationQuestions.singleOrNull()), bound, now, end)
+            } }
+            return EarlySend(send, send.windowId, current, observation, currentReview)
         }
         fun earlyReview(name: String, checkEarly: () -> Unit) {
             val captured = captureEarlySend()

@@ -182,3 +182,12 @@ Offline helper controls run with `python3 -I -B tests/test_android_project_ui.py
 Passing those controls or compiling the APK does not establish an actual UI
 pass: the raw instrumentation result and cleanup outcome from this hosted job
 are required separately.
+
+The approval fixture binds its early negative check to the first observed
+eligible production review start after resume. A later focus reset may move
+the current start forward only inside that original three-second window;
+it never renews the fixture deadline. The DEBUG observer requires the same
+healthy owned session, question object, card and selection, and rejects missing,
+backward, future or expired starts. Positive Send still waits for the current
+production review. The three retained JVM suites contain 33 methods (8 publication,
+18 binding and 7 review-observer controls); all 29 previous methods remain.

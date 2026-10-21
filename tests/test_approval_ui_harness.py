@@ -139,9 +139,17 @@ def review_clock_memory(source, observation, clock, current_card=lambda: True):
                   'check(checkNotNull(resumeStart) <= start && start <= now)',
                   'val end = Math.addExact(start, 3_000)', 'check(now < end)',
                   'reviewStart = start', 'boundGeneration = snapshot.generation', 'resumeEnd = end',
-                  'SystemClock.elapsedRealtime() >= start && snapshot.generation >= checkNotNull(boundGeneration) &&',
-                  'detail.eligible && detail.reviewStartedAt == start'):
+                  'boundSnapshot = snapshot', 'bound.generation == checkNotNull(boundGeneration) &&',
+                  'currentReview(bound, SystemClock.elapsedRealtime(), checkNotNull(resumeEnd))'):
         assert exact in cache
+    probe = (ROOT / 'mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt').read_text()
+    helper = probe.split('    @Synchronized fun earlyReviewCurrent(', 1)[1].split('    private fun fingerprint(', 1)[0]
+    for exact in ('checkNotNull(contentSnapshot(owned, question))',
+                  'owned.firstReviewSnapshot(bound.generation - 1) != bound',
+                  'bound.record.selection == latest.record.selection && first.eligible && current.eligible &&',
+                  'start >= 0 && start <= Long.MAX_VALUE - 3_000 && originalEnd == start + 3_000 &&',
+                  'elapsedNow >= start && elapsedNow < originalEnd && currentStart >= start && currentStart <= elapsedNow'):
+        assert exact in helper
     state = dict(resume=None, generation=None, start=None, bound=None, end=None)
     def begin(resume):
         assert state['resume'] is None and state['end'] is None
@@ -164,12 +172,12 @@ def review_clock_memory(source, observation, clock, current_card=lambda: True):
         if not current_card(): return False
         if state['start'] is None: return True
         record = observation(None)
-        return clock.now >= state['start'] and record.generation >= state['bound'] and record.eligible and record.start == state['start']
+        return state['start'] <= clock.now < state['end'] and record.generation >= state['bound'] and record.eligible and record.start is not None and state['start'] <= record.start <= clock.now
     return SimpleNamespace(begin=begin, bind=bind, current=current, state=state)
 
 
 def early_probe_main_depths(source):
-    """Bounded source call graph of the three fixed local callables; never Android/main-thread execution."""
+    """Bounded source call graph of the four fixed local callables; never Android/main-thread execution."""
     capture = source.split('        fun captureEarlySend(): EarlySend {', 1)[1].split('        fun earlyReview(', 1)[0]
     predicate = re.search(r'            fun currentCard\(\): Boolean \{([\s\S]*?)\n            }', capture)[1]
     # The only callable in this scalar on-main predicate is the original bounded model-list observation.
@@ -177,19 +185,21 @@ def early_probe_main_depths(source):
     assert 'return model.selected?.target == target && model.activityVerified && card != null && card.id == id && card.hash == hash &&' in predicate
     assert 'card.run == target.run && card.conversation == target.conversation' in predicate
     current = capture.split('            val current = ', 1)[1].split('            check(earlySend == null', 1)[0].strip()
-    observation = capture.split('            val observation = ', 1)[1].split('            return EarlySend(', 1)[0].strip()
+    observation = capture.split('            val observation = ', 1)[1].split('            val currentReview = ', 1)[0].strip()
+    current_review = capture.split('            val currentReview = ', 1)[1].split('            return EarlySend(', 1)[0].strip()
     current = re.fullmatch(r'\{\s*main\s*\{([\s\S]*)}\s*}', current)[1]
     observation = re.fullmatch(r'\{\s*afterGeneration: Int\?\s*->\s*main\s*\{([\s\S]*)}\s*}', observation)[1]
+    current_review = re.fullmatch(r'\{\s*bound: QuestionUiProbe.ContentSnapshot, now: Long, end: Long\s*->\s*main\s*\{([\s\S]*)}\s*}', current_review)[1]
     assert re.fullmatch(r'\s*currentCard\(\)\s*', current)
-    bodies = dict(currentCard=predicate, current=current, observation=observation)
-    roots = dict(currentCard=0, current=1, observation=1)
+    bodies = dict(currentCard=predicate, current=current, observation=observation, currentReview=current_review)
+    roots = dict(currentCard=0, current=1, observation=1, currentReview=1)
     def depth(name, path=()):
         assert name not in path and len(path) < 3
         assert not re.search(r'\b(main|runOnMainSync)\s*(?:\(|\{)', bodies[name])
-        calls = re.findall(r'\b(currentCard|current|observation)\s*\(', bodies[name])
+        calls = re.findall(r'\b(currentCard|current|observation|currentReview)\s*\(', bodies[name])
         return roots[name] + max([depth(call, path + (name,)) for call in calls] or [0])
     result = {name: depth(name) for name in bodies}
-    assert result == dict(currentCard=0, current=1, observation=1)
+    assert result == dict(currentCard=0, current=1, observation=1, currentReview=1)
     return result
 
 
@@ -895,7 +905,15 @@ class ApprovalHarnessTests(unittest.TestCase):
         clock.now = 4214
         with self.assertRaises(AssertionError): bound.begin(4214)
         with self.assertRaises(AssertionError): bound.bind()
-        for change in ({'generation': 1}, {'start': 4101}, {'eligible': False}):
+        snapshot.start = 4101
+        self.assertTrue(bound.current())  # A forward reset cannot extend the immutable first window.
+        self.assertEqual(bound.state['end'], 7100)
+        for now in (7100, 7101):
+            clock.now = now
+            self.assertFalse(bound.current())
+        clock.now = 4214
+        snapshot.start = 4100
+        for change in ({'generation': 1}, {'start': 4099}, {'start': 4215}, {'start': None}, {'eligible': False}):
             old = vars(snapshot).copy()
             snapshot.__dict__.update(change)
             with self.subTest(current=change): self.assertFalse(bound.current())
@@ -933,7 +951,7 @@ class ApprovalHarnessTests(unittest.TestCase):
 
     def test_android_owned_probe_snapshot_never_reenters_the_main_thread_helper(self):
         source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
-        self.assertEqual(early_probe_main_depths(source), dict(currentCard=0, current=1, observation=1))
+        self.assertEqual(early_probe_main_depths(source), dict(currentCard=0, current=1, observation=1, currentReview=1))
         old_nested = source.replace('                check(currentCard())\n', '                check(current())\n', 1)
         self.assertNotEqual(old_nested, source)
         with self.assertRaises(AssertionError): early_probe_main_depths(old_nested)
