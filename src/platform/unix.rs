@@ -795,11 +795,225 @@ pub fn request_exit(pid: u32) -> io::Result<()> {
         .ok()
         .filter(|pid| *pid > 0)
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    let observation = std::panic::catch_unwind(|| pause_signal_observer::before(pid as u32))
+        .ok()
+        .flatten();
+    let result = unsafe { libc::kill(pid, libc::SIGTERM) };
+    // Capture errno before any diagnostic output. A successful kill has no errno.
+    let error = if result != 0 {
+        Some(io::Error::last_os_error())
+    } else {
+        None
+    };
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    {
+        let errno = error.as_ref().and_then(io::Error::raw_os_error);
+        let _ = std::panic::catch_unwind(|| pause_signal_observer::after(observation, result, errno));
     }
-    Ok(())
+    match error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
+
+// BEGIN private Mac fixture observer. No observer IO precedes the original kill.
+#[cfg(all(debug_assertions, target_os = "macos"))]
+mod pause_signal_observer {
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::json;
+    use std::os::fd::FromRawFd;
+
+    const FLAG: &str = "HGS_TEST_MAC_PAUSE_OBSERVER";
+    const ROOT: &str = "HGS_TEST_MAC_PAUSE_ROOT";
+    const MAX_ROW: usize = 768;
+
+    #[derive(Clone, Copy)]
+    pub(super) struct Before {
+        pid: u32,
+        sender: u32,
+        at: Option<u64>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Context {
+        version: u8,
+        nonce: String,
+        target_pid: u32,
+        root_dev: u64,
+        root_ino: u64,
+        run: String,
+        conversation: String,
+        pane: String,
+        saved_start: String,
+    }
+
+    fn clock() -> Option<u64> {
+        let mut value: libc::timespec = unsafe { std::mem::zeroed() };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) } != 0
+            || value.tv_sec < 0
+            || !(0..1_000_000_000).contains(&value.tv_nsec)
+        {
+            return None;
+        }
+        (value.tv_sec as u64)
+            .checked_mul(1_000_000_000)?
+            .checked_add(value.tv_nsec as u64)
+    }
+
+    pub(super) fn before(pid: u32) -> Option<Before> {
+        // Environment lookup and a clock/PID scalar only: no file/proc read,
+        // output, callback, new thread or admission decision before the kill.
+        (env::var_os(FLAG).as_deref() == Some(std::ffi::OsStr::new("1"))).then(|| Before {
+            pid,
+            sender: std::process::id(),
+            at: clock(),
+        })
+    }
+
+    fn private(metadata: &fs::Metadata, mode: u32, file: bool) -> bool {
+        metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o7777 == mode
+            && if file {
+                metadata.is_file() && metadata.nlink() == 1
+            } else {
+                metadata.is_dir()
+            }
+    }
+
+    fn open_at(root: &fs::File, name: &'static [u8], flags: i32) -> io::Result<fs::File> {
+        let fd = unsafe {
+            libc::openat(
+                root.as_raw_fd(),
+                name.as_ptr().cast(),
+                flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { fs::File::from_raw_fd(fd) })
+    }
+
+    fn hex(value: &str, length: usize) -> bool {
+        value.len() == length
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    fn observe(
+        before: Before,
+        result: i32,
+        errno: Option<i32>,
+        returned_at: Option<u64>,
+    ) -> io::Result<()> {
+        let path = env::var_os(ROOT)
+            .map(PathBuf::from)
+            .ok_or(io::ErrorKind::NotFound)?;
+        if path.as_os_str().len() > 4096
+            || !path.is_absolute()
+            || fs::canonicalize(&path)? != path
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_DIRECTORY,
+            )
+            .open(path)?;
+        let root = directory.metadata()?;
+        if !private(&root, 0o700, false) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let mut input = open_at(&directory, b"manifest.json\0", libc::O_RDONLY)?;
+        let initial = input.metadata()?;
+        if !private(&initial, 0o600, true) || initial.len() > 1024 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut input).take(1025).read_to_end(&mut bytes)?;
+        let final_metadata = input.metadata()?;
+        if bytes.len() > 1024
+            || initial.len() != bytes.len() as u64
+            || initial.dev() != final_metadata.dev()
+            || initial.ino() != final_metadata.ino()
+            || initial.len() != final_metadata.len()
+            || !private(&final_metadata, 0o600, true)
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let context: Context =
+            serde_json::from_slice(&bytes).map_err(|_| io::ErrorKind::InvalidData)?;
+        if context.version != 1
+            || context.target_pid != before.pid
+            || before.pid == 0
+            || context.root_dev != root.dev()
+            || context.root_ino != root.ino()
+            || !hex(&context.nonce, 32)
+            || [
+                &context.run,
+                &context.conversation,
+                &context.pane,
+                &context.saved_start,
+            ]
+            .iter()
+            .any(|value| !hex(value, 64))
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // These are post-kill observations, never an atomic delivery receipt.
+        let sender_birth = process_identity(before.sender).map(|p| p.birth);
+        let target_birth = process_identity(before.pid).map(|p| p.birth);
+        let mut output = Vec::new();
+        for (sequence, phase, at, rc, code) in [
+            (1, "kill_before", before.at, None, None),
+            (2, "kill_return_or_errno", returned_at, Some(result), errno),
+        ] {
+            let row = json!({"v":1,"role":"sender","seq":sequence,"phase":phase,
+                "nonce":context.nonce,"pid":before.sender,"target":before.pid,
+                "clock":"CLOCK_MONOTONIC","at":at,"run":context.run,"conversation":context.conversation,
+                "pane":context.pane,"saved_start":context.saved_start,"birth_before":"unknown",
+                "sender_birth_after":sender_birth,"target_birth_after":target_birth,"rc":rc,"errno":code});
+            let mut row = serde_json::to_vec(&row).map_err(|_| io::ErrorKind::InvalidData)?;
+            row.push(b'\n');
+            if row.len() > MAX_ROW {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            output.extend(row);
+        }
+        let mut file = open_at(
+            &directory,
+            b"sender.jsonl\0",
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )?;
+        if !private(&file.metadata()?, 0o600, true) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        // A short write remains visibly partial; never retry even telemetry IO.
+        if file.write(&output)? != output.len() {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn after(before: Option<Before>, result: i32, errno: Option<i32>) {
+        if let Some(before) = before {
+            let returned_at = clock();
+            let _ = observe(
+                before,
+                result,
+                if result == 0 { None } else { errno },
+                returned_at,
+            );
+        }
+    }
+}
+// END private Mac fixture observer.
 
 static SHUTDOWN_CHILD: AtomicI32 = AtomicI32::new(0);
 static SHUTDOWN_SIGNAL: AtomicI32 = AtomicI32::new(0);
