@@ -525,7 +525,8 @@ class ApprovalHarnessTests(unittest.TestCase):
         pattern = re.compile(r'^([ ]*)// BEGIN APPROVAL_PROGRESS ([a-z-]+)\n[\s\S]*?^\1// END APPROVAL_PROGRESS \2\n', re.M)
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
             'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
-        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), '35155cce8a3b63447b28efad8c8c5bff555e6aa6780d8c0f89a285c92daebbca')
+        # Baseline includes the reviewed first-window forward-reset observer; progress stripping stays exact.
+        self.assertEqual(hashlib.sha256(pattern.sub('', source).encode()).hexdigest(), 'fc061a66f8c3e7ef2a1760a90143639d5800023215c3d43fa20cadc56321074e')
         definition = source.split('// BEGIN APPROVAL_PROGRESS definition\n', 1)[1].split('// END APPROVAL_PROGRESS definition', 1)[0]
         self.assertIn('check(progressSequence in 0 until 32)', definition)
         self.assertIn('check(record.length <= 160)', definition)
