@@ -86,10 +86,16 @@ The six Windows desktop write-startup regressions run in the ordinary Qt suites.
 For their one-time causal qualification, include the hidden marker
 `<!-- zerus-write-startup-causal-v1 -->` in the initial PR body, or add the PR label
 `windows-write-startup-causal` before a source push. The existing Windows job then
-builds only `test_hgsclient` in a private source copy with only the three queued
-starts restored to inline startup. It requires each row's exact pre-admission
+builds `test_hgsclient` and `test_sessionswindow` in one private source copy with
+only the three queued starts restored to inline startup (variant A). It requires each row's exact pre-admission
 `UnknownError` assertion to fail after proving real `FailedToStart`, `NotRunning`
-and PID zero. The failure wrappers, timers and every other postimage stay fixed.
+and PID zero. It then additionally restores the three inline failure emissions
+(variant B), incrementally rebuilds only `test_sessionswindow`, and requires the
+three exact original pending-state assertions to fail. Every source variant is
+separately pinned and mapped; all other postimages and timers stay fixed. Variant
+A alone is not expected to break the consumer rows. Both arms share the original
+480-second whole/60-second cleanup budget and max2 build parallelism; exhaustion
+stops without renewing a deadline or repeating an arm.
 This source-bound opt-in is skipped on
 main and on unmarked, unlabeled PRs; it changes no tested candidate or package
 input. The marker selects a keyless test only and grants no deployment authority.

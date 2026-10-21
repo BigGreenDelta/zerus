@@ -23,18 +23,21 @@ def fixed_document():
     return root
 
 
-def red_document(row, condition=None):
+def red_document(row, condition=None, consumer=False):
     root = ET.Element("testsuite", tests="3", failures="1", errors="0", skipped="0")
-    ET.SubElement(root, "testcase", classname="TestHgsClient", name="initTestCase")
-    body = ET.SubElement(root, "testcase", classname="TestHgsClient", name=f"{gate.METHOD}({row})")
-    message = f"'{condition or gate.CONDITIONS[row]}' returned FALSE. ()"
+    classname = "TestSessionsWindow" if consumer else "TestHgsClient"
+    ET.SubElement(root, "testcase", classname=classname, name="initTestCase")
+    body = ET.SubElement(root, "testcase", classname=classname, name=row if consumer else f"{gate.METHOD}({row})")
+    expected = gate.CONSUMER_ASSERTIONS[row][0] if consumer else gate.CONDITIONS[row]
+    message = f"'{condition or expected}' returned FALSE. ()"
     ET.SubElement(body, "failure", type="fail", message=message)
-    ET.SubElement(root, "testcase", classname="TestHgsClient", name="cleanupTestCase")
+    ET.SubElement(root, "testcase", classname=classname, name="cleanupTestCase")
     return root, message
 
 
-def raw(row, message, path=Path("fixture/test_hgsclient.cpp"), line=123):
-    return f"FAIL!  : TestHgsClient::{gate.METHOD}({row}) {message}\n   Loc: [{path}({line})]\n".encode()
+def raw(row, message, path=Path("fixture/test_hgsclient.cpp"), line=123, consumer=False):
+    identity = "TestSessionsWindow::" + row if consumer else f"TestHgsClient::{gate.METHOD}({row})"
+    return f"FAIL!  : {identity} {message}\n   Loc: [{path}({line})]\n".encode()
 
 
 class Qualification(unittest.TestCase):
@@ -63,6 +66,28 @@ class Qualification(unittest.TestCase):
                 root, message = red_document(row)
                 answer = gate.check_red(ET.tostring(root), raw(row, message), row, 1, Path("fixture/test_hgsclient.cpp"), 123)
                 self.assertEqual((answer["row"], answer["failures"], answer["errors"], answer["skips"]), (row, 1, 0, 0))
+
+    def test_consumer_pending_assertions_and_source_lines_are_distinct(self):
+        memory = b"// unrelated\n" + b"\n".join(
+            ("void TestSessionsWindow::" + name + "()\n{\n").encode() + marker + b"\n}\n"
+            for name, (_, marker) in gate.CONSUMER_ASSERTIONS.items())
+        path = Path("fixture/test_sessionswindow.cpp")
+        with patch.dict(gate.PINS, {gate.CONSUMER_TEST: gate.sha(memory)}):
+            lines = gate.consumer_assertion_lines(memory)
+            for name in gate.CONSUMER_ASSERTIONS:
+                with self.subTest(method=name):
+                    root, message = red_document(name, consumer=True)
+                    log = raw(name, message, path, lines[name], consumer=True)
+                    answer = gate.check_red(ET.tostring(root), log, name, 1, path, lines[name], consumer=True)
+                    self.assertEqual((answer["family"], answer["row"]), ("consumer", name))
+                    with self.assertRaises(RuntimeError):
+                        gate.check_red(ET.tostring(root), log, name, 1, path, lines[name] + 1, consumer=True)
+                    wrong, message = red_document(name, "process", consumer=True)
+                    with self.assertRaises(RuntimeError):
+                        gate.check_red(ET.tostring(wrong), raw(name, message, path, lines[name], consumer=True),
+                                       name, 1, path, lines[name], consumer=True)
+            with self.assertRaises(RuntimeError):
+                gate.consumer_assertion_lines(memory + b"changed")
 
     def test_precondition_failure_never_qualifies_as_red(self):
         for condition in ("process", "QFileInfo(program).isExecutable()", "process->state() == QProcess::NotRunning"):
@@ -159,6 +184,22 @@ class Qualification(unittest.TestCase):
             duplicated = current + admission
             with patch.dict(gate.PINS, {gate.CLIENT: gate.sha(duplicated)}), self.assertRaises(RuntimeError):
                 gate.reverse_start_admission(duplicated)
+        failures = (b"        // A failed start can be reported inside start(), before the caller has\n"
+                    b"        // registered this request. Keep the claim synchronous, the result queued.\n"
+                    b"        QTimer::singleShot(0, this, [this, request, host, name, detail, uncertain] {\n"
+                    b"            emit messageFailed(request, host, name, detail, uncertain);\n"
+                    b"        });")
+        expected = b"        emit messageFailed(request, host, name, detail, uncertain);"
+        for name in ("queueSendFinished", "settingsFinished"):
+            failures += ("\n        if (*reported) return; *reported = true;\n"
+                         "        QTimer::singleShot(0, this, [this, request, error] { emit " + name + "(request, false, {}, error); });").encode()
+            expected += ("\n        if (*reported) return; *reported = true; emit " + name + "(request, false, {}, error);").encode()
+        with patch.object(gate, "BASELINE_CLIENT", gate.sha(failures)), patch.object(gate, "CONSUMER_BASELINE_CLIENT", gate.sha(expected)):
+            self.assertEqual(gate.reverse_failure_delivery(failures), expected)
+            with self.assertRaises(RuntimeError):
+                gate.reverse_failure_delivery(failures + b"not variant A")
+            with patch.object(gate, "CONSUMER_BASELINE_CLIENT", "0" * 64), self.assertRaises(RuntimeError):
+                gate.reverse_failure_delivery(failures)
 
     def test_complete_baseline_mismatch_refuses(self):
         with self.assertRaises(RuntimeError):

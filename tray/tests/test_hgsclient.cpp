@@ -1394,7 +1394,7 @@ void TestHgsClient::writeStartupFailuresAreReportedAfterRequest()
     QCOMPARE(process->state(), QProcess::NotRunning);
     QCOMPARE(process->processId(), qint64(0));
     const auto *timer = process->findChild<QTimer *>(); QVERIFY(timer); QVERIFY(timer->isActive());
-    connect(process, &QProcess::errorOccurred, &client, [&](QProcess::ProcessError error) {
+    connect(process, &QProcess::errorOccurred, &client, [&, process](QProcess::ProcessError error) {
         // Copy while the real QProcess is alive; deleteLater may run before
         // the result wait ends. No numeric Win32 error is inferred from Qt.
         errorAtFailure = error; stateAtFailure = process->state(); pidAtFailure = process->processId();

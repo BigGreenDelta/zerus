@@ -2,8 +2,9 @@
 """One opt-in Windows source-bound RED for desktop request registration.
 
 The ordinary Qt suites must first pass all six new fixed regressions. This gate
-then restores only three inline starts in a private git-archive copy and builds
-only test_hgsclient. It never changes the candidate, normal build or package
+then restores three inline starts for the direct rows and additionally restores
+three inline failure emissions for the consumer rows in a private source copy.
+It never changes the candidate, normal build or package
 inputs. The exact-source pins deliberately belong to the opt-in qualification,
 not to ordinary main/PR testing. No command, executable or address mode is exposed.
 """
@@ -27,12 +28,22 @@ CLIENT = "tray/src/HgsClient.cpp"
 TEST = "tray/tests/test_hgsclient.cpp"
 PINS = {
     CLIENT: "a75d609a45e6d865235e556cbf79e0c10231601997b9d2081f1d1383b5829477",
-    TEST: "a5ff0f5fffb17e498ed3995b81f3154c0de0ee609dbd1e23d07384ea7d38be8e",
+    TEST: "69e67e052d74ea2559915eef398826869609215abfea13a678282be44b11e48f",
     "tray/tests/test_sessionswindow.cpp": "03df316f82c02c9552710a670c4cb3232875149117e2fee4cb054551cbc895bd",
 }
 BASELINE_CLIENT = "d9fb7f0695048bfc98d90c21a3f00a0448404a9a4fba648f1bdb65d3b4ffc060"
+CONSUMER_BASELINE_CLIENT = "f8e8ad3a21c427d2df24cffe649a8612d859d852f16f1f4edf3bcba9fc35df28"
+CONSUMER_TEST = "tray/tests/test_sessionswindow.cpp"
 METHOD = "writeStartupFailuresAreReportedAfterRequest"
 CONDITIONS = {row: "process->error() == QProcess::UnknownError" for row in ("message", "queue", "settings")}
+CONSUMER_ASSERTIONS = {
+    "messageStartupFailureRestoresThePendingDraft": ("!composer->isSending(key)",
+        b"    QTRY_VERIFY(!composer->isSending(key));"),
+    "queueStartupFailureReleasesThePendingAction": ("send->isEnabled()",
+        b'    QTRY_VERIFY(send->isEnabled()); QCOMPARE(send->text(), QString("Send now"));'),
+    "settingsStartupFailureReleasesThePendingChange": ("settings->isEnabled()",
+        b'    QTRY_VERIFY(settings->isEnabled()); QVERIFY(!settings->toolTip().contains("Updating model settings"));'),
+}
 FIXED = {
     ("TestHgsClient", f"{METHOD}({row})") for row in CONDITIONS
 } | {
@@ -130,35 +141,82 @@ def assertion_line(test_source):
     return lines.index(marker) + 1
 
 
-def check_red(document, raw_log, row, code, expected_source, line):
-    """Only pre-admission failure after real QProcess prerequisites is a RED."""
+def reverse_failure_delivery(data):
+    """Consumer variant B starts from the exact inline-start-only variant A."""
+    if sha(data) != BASELINE_CLIENT:
+        raise RuntimeError("Consumer RED requires the exact inline-start variant first")
+    replacements = [(
+        b"        // A failed start can be reported inside start(), before the caller has\n"
+        b"        // registered this request. Keep the claim synchronous, the result queued.\n"
+        b"        QTimer::singleShot(0, this, [this, request, host, name, detail, uncertain] {\n"
+        b"            emit messageFailed(request, host, name, detail, uncertain);\n"
+        b"        });",
+        b"        emit messageFailed(request, host, name, detail, uncertain);",
+    )]
+    for name in ("queueSendFinished", "settingsFinished"):
+        replacements.append((
+            ("        if (*reported) return; *reported = true;\n"
+             "        QTimer::singleShot(0, this, [this, request, error] { emit " + name + "(request, false, {}, error); });").encode(),
+            ("        if (*reported) return; *reported = true; emit " + name + "(request, false, {}, error);").encode(),
+        ))
+    for current, inline in replacements:
+        if data.count(current) != 1:
+            raise RuntimeError("The three additional inline-failure replacements are not unique")
+        data = data.replace(current, inline, 1)
+    if sha(data) != CONSUMER_BASELINE_CLIENT:
+        raise RuntimeError("The complete consumer variant differs from its reviewed postimage")
+    return data
+
+
+def consumer_assertion_lines(test_source):
+    if sha(test_source) != PINS[CONSUMER_TEST]:
+        raise RuntimeError("The unchanged consumer regression source differs")
+    result = {}
+    for method, (_, marker) in CONSUMER_ASSERTIONS.items():
+        header = ("void TestSessionsWindow::" + method + "()\n").encode()
+        if test_source.count(header) != 1:
+            raise RuntimeError("The consumer method identity is not unique")
+        offset = test_source.index(header)
+        end = test_source.find(b"\nvoid TestSessionsWindow::", offset + len(header))
+        body = test_source[offset:end if end >= 0 else len(test_source)]
+        if body.splitlines().count(marker) != 1:
+            raise RuntimeError("The original consumer assertion is not unique in its method")
+        result[method] = len(test_source[:offset].splitlines()) + body.splitlines().index(marker) + 1
+    return result
+
+
+def check_red(document, raw_log, row, code, expected_source, line, consumer=False):
+    """Only the exact source-bound registration assertion can qualify as RED."""
     root = ET.fromstring(document)
     cases = list(root.iter("testcase"))
-    wanted = ["initTestCase", f"{METHOD}({row})", "cleanupTestCase"]
+    name = row if consumer else f"{METHOD}({row})"
+    classname = "TestSessionsWindow" if consumer else "TestHgsClient"
+    condition = CONSUMER_ASSERTIONS[row][0] if consumer else CONDITIONS[row]
+    wanted = ["initTestCase", name, "cleanupTestCase"]
     if code != 1 or [case.get("name") for case in cases] != wanted:
         raise RuntimeError("Old row exit or inventory is not the causal assertion RED")
     if any(root.get(key) != value for key, value in
            {"tests": "3", "failures": "1", "errors": "0", "skipped": "0"}.items()):
         raise RuntimeError("Setup/error/skip/unknown accounting cannot qualify as RED")
-    if any(case.get("classname") != "TestHgsClient" for case in cases):
+    if any(case.get("classname") != classname for case in cases):
         raise RuntimeError("Old row class differs")
     failures = [(case, item) for case in cases for item in case.findall("failure")]
     if len(failures) != 1 or failures[0][0] is not cases[1]:
         raise RuntimeError("Only the named body assertion may fail")
     if any(case.find(tag) is not None for case in cases for tag in ("error", "skipped")):
         raise RuntimeError("An error or skip is not a behavioral RED")
-    message = f"'{CONDITIONS[row]}' returned FALSE. ()"
+    message = f"'{condition}' returned FALSE. ()"
     if failures[0][1].get("type") != "fail" or failures[0][1].get("message") != message:
         raise RuntimeError("Wrong assertion: the real startup prerequisites must pass first")
     text = raw_log.decode("utf-8", "replace")
-    expected = f"TestHgsClient::{METHOD}({row}) {message}"
+    expected = f"{classname}::{name} {message}"
     if text.count("FAIL!  : ") != 1 or expected not in text:
         raise RuntimeError("Raw pre-admission assertion provenance is missing")
-    locations = re.findall(r"Loc: \[(.+test_hgsclient\.cpp)\((\d+)\)\]", text)
+    locations = re.findall(r"Loc: \[(.+" + re.escape(expected_source.name) + r")\((\d+)\)\]", text)
     normalized = [(os.path.normcase(os.path.normpath(path)), int(number)) for path, number in locations]
     if normalized != [(os.path.normcase(os.path.normpath(str(expected_source))), line)]:
         raise RuntimeError("Raw failure is not at the bound pre-admission assertion")
-    return {"row": row, "condition": CONDITIONS[row], "source_line": line,
+    return {"row": row, "family": "consumer" if consumer else "direct", "condition": condition, "source_line": line,
             "actual_exit": code, "failures": 1, "errors": 0, "skips": 0}
 
 
@@ -449,8 +507,8 @@ def main(argv=None):
         raise RuntimeError("Windows/source/original deadline admission refused")
     evidence = ROOT / "artifacts/test-results/windows-write-startup-causal"
     evidence.mkdir(exist_ok=False)
-    result = {"status": "STOP", "source": args.source, "original_end": args.end, "commands": [], "rows": [],
-              "variant": "three-inline-starts-only", "malformed_image_timeout_cause": "UNKNOWN",
+    result = {"status": "STOP", "source": args.source, "original_end": args.end, "commands": [], "rows": [], "consumer_rows": [],
+              "variants": ["A:three-inline-starts-only", "B:A-plus-three-inline-failures"], "malformed_image_timeout_cause": "UNKNOWN",
               "historical_pvfa14_pvfa15_causes": "UNKNOWN", "resources_retained": True}
     kernel = None
     protected = None
@@ -481,6 +539,7 @@ def main(argv=None):
             if sha(read_bytes(ROOT / name, args.end - CLEANUP)) != expected:
                 raise RuntimeError("This opt-in gate is not bound to the reviewed source postimages")
         line = assertion_line(read_bytes(ROOT / TEST, args.end - CLEANUP))
+        consumer_lines = consumer_assertion_lines(read_bytes(ROOT / CONSUMER_TEST, args.end - CLEANUP))
         private = Path(tempfile.mkdtemp(prefix="dw-", dir=os.environ["RUNNER_TEMP"]))
         environment = private_environment(private, os.environ)
         if environment.get("VSCMD_ARG_TGT_ARCH") != "x64":
@@ -548,7 +607,7 @@ def main(argv=None):
                 "-DCMAKE_AUTOGEN_PARALLEL=1", "-DCMAKE_C_COMPILER_LAUNCHER=", "-DCMAKE_CXX_COMPILER_LAUNCHER=",
                 "-DCMAKE_PREFIX_PATH=" + environment["QT_ROOT_DIR"], "-DPython3_EXECUTABLE=" + sys.executable,
                 "-DFETCHCONTENT_FULLY_DISCONNECTED=ON", "-DFETCHCONTENT_UPDATES_DISCONNECTED=ON"], 60)
-        checked("build", [tools["cmake"], "--build", str(build), "--target", "test_hgsclient", "--parallel", "2"], 300)
+        checked("build", [tools["cmake"], "--build", str(build), "--target", "test_hgsclient", "test_sessionswindow", "--parallel", "2"], 300)
         executable = build / "tests/test_hgsclient.exe"
         result["old_binary"] = file_map([("test_hgsclient", executable)], args.end - CLEANUP)
         for row in CONDITIONS:
@@ -556,6 +615,23 @@ def main(argv=None):
             code = run("old-" + row, [str(executable), METHOD + ":" + row, "-o", str(xml) + ",junitxml", "-o", "-,txt"], 20)
             result["rows"].append(check_red(read_bytes(xml, args.end - CLEANUP, 4 * 1024 * 1024),
                 read_bytes(evidence / ("old-" + row + ".log"), args.end - CLEANUP, LOG_CAP), row, code, source / TEST, line))
+        # Variant B is separate: queued actual start alone would still let the
+        # consumer register before even an inline failure signal.
+        (source / CLIENT).write_bytes(reverse_failure_delivery(read_bytes(source / CLIENT, args.end - CLEANUP)))
+        old_expected[CLIENT] = {"bytes": (source / CLIENT).stat().st_size, "sha256": CONSUMER_BASELINE_CLIENT}
+        if file_map([(name, source / name) for name in exported], args.end - CLEANUP) != old_expected:
+            raise RuntimeError("Consumer variant differs outside its six explicit reversals")
+        (evidence / "consumer-source.json").write_text(json.dumps(old_expected, indent=2) + "\n")
+        checked("build-consumer", [tools["cmake"], "--build", str(build), "--target", "test_sessionswindow", "--parallel", "2"], 60)
+        executable = build / "tests/test_sessionswindow.exe"
+        result["consumer_binary"] = file_map([("test_sessionswindow", executable)], args.end - CLEANUP)
+        for method in CONSUMER_ASSERTIONS:
+            label = "consumer-" + method
+            xml = evidence / (label + ".xml")
+            code = run(label, [str(executable), method, "-o", str(xml) + ",junitxml", "-o", "-,txt"], 20)
+            result["consumer_rows"].append(check_red(read_bytes(xml, args.end - CLEANUP, 4 * 1024 * 1024),
+                read_bytes(evidence / (label + ".log"), args.end - CLEANUP, LOG_CAP), method, code,
+                source / CONSUMER_TEST, consumer_lines[method], consumer=True))
         if checked("head-after", [tools["git"], "rev-parse", "HEAD"]).decode().strip() != args.source:
             raise RuntimeError("The candidate commit changed during the old-source gate")
         if checked("status-after", [tools["git"], "status", "--porcelain"]):
