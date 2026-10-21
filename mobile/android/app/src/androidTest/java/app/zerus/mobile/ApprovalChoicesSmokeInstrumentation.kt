@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicReference
 class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     private val cases = mutableListOf<String>()
     private val phases = ArrayDeque<String>()
+    private var failureEvidence = "owned-window-evidence UNKNOWN not captured"
     private data class EarlySend(val node: AccessibilityNodeInfo, val window: Int, val current: () -> Boolean)
     private var earlySend: EarlySend? = null
     private data class InterceptorFailure(val guard: String, val type: String, val method: String, val path: String)
@@ -60,8 +61,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             result.putString("stream", "Approval choices smoke passed: ${cases.joinToString(",")}; synthetic receipts only.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
-            screenshot("failure")
-            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n${windowEvidence()}\n")
+            result.putString("stream", "Approval choices smoke failed: ${error.stackTraceToString()}\n${phases.joinToString("\n")}\n$failureEvidence\n")
             finish(Activity.RESULT_CANCELED, result)
         }
     }
@@ -119,10 +119,13 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     }
     private fun tap(label: String) {
         val action = button(label)
+        check(action.refresh())
         check(action.isEnabled && action.isClickable) { "Disabled action $label" }
         val bounds = Rect().also(action::getBoundsInScreen)
         check(!bounds.isEmpty && bounds.left >= 0 && bounds.top >= 0 &&
             bounds.right <= targetContext.resources.displayMetrics.widthPixels && bounds.bottom <= targetContext.resources.displayMetrics.heightPixels)
+        phase("touch-node:$label:w=${action.windowId}:v=${action.isVisibleToUser}:s=${action.isSelected}:c=${action.isChecked}")
+        phase("touch-geometry:$bounds:x=${bounds.exactCenterX()}:y=${bounds.exactCenterY()}")
         val down = SystemClock.uptimeMillis()
         phase("touch-down:$label")
         for (type in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
@@ -266,6 +269,31 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
         val activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
         val model = main { activity.javaClass.getDeclaredMethod("getModel").apply { isAccessible = true }.invoke(activity) as ZerusViewModel }
         fun count() = synchronized(calls) { calls.size }
+        fun receiptApplied(number: Int) {
+            val payload = synchronized(calls) {
+                check(calls.size == number)
+                JSONObject(calls[number - 1].toString())
+            }
+            val requestId = payload.getString("request_id")
+            val questionId = payload.getString("question_id")
+            val questionHash = payload.getString("expected_question_hash")
+            val answers = payload.getJSONArray("answers").toString()
+            check(requestId.isNotBlank() && questionId.isNotBlank() && questionHash.isNotBlank() &&
+                payload.string("expected_run_id") == target.run && payload.string("expected_conversation_id") == target.conversation)
+            await("exact receipt applied $number") {
+                main {
+                    val question = model.conversationQuestions.singleOrNull()
+                    val draft = model.drafts.singleOrNull { it.target == target && it.questionId == questionId && it.questionHash == questionHash }
+                    val applied = model.selected?.target == target && question?.id == questionId && question?.hash == questionHash &&
+                        question?.run == target.run && question?.conversation == target.conversation && draft != null &&
+                        draft.target == target && draft.questionId == questionId && draft.questionHash == questionHash &&
+                        draft.requestId == requestId && draft.answers == answers && draft.status == "submitted" && !model.answerInFlight(draft) &&
+                        model.pendingQuestionSend == null && model.activityVerified && !model.detailBusy && expected.get() == null
+                    applied
+                }
+            }
+            phase("receipt-applied:$number:$questionId")
+        }
         fun open(name: String, source: String = "kimi_tool_approval", answerable: Boolean = true) {
             phase("open-begin:$name")
             val q = JSONObject().put("question_id", name).put("question_hash", "hash-$name").put("run_id", target.run)
@@ -348,6 +376,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 phase("early-end:$name:${resumedAt?.let { SystemClock.elapsedRealtime() - it }}")
             }
         }
+        var primaryFailure: Throwable? = null
         try {
             await("private model storage") { main { model.storageReady } }
             main {
@@ -367,6 +396,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 } finally { phase("disabled-assert-end:countdown") }
             }
             reviewed(); expect("1"); tap("Send answer"); await("once receipt") { count() == 1 }
+            receiptApplied(1)
             cases += "countdown_once"
             boundary("complete", "countdown_once")
 
@@ -379,17 +409,20 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             boundary("complete", "broader_cancel")
             boundary("begin", "broader_confirm")
             reviewed(); proveBroaderDraft(); tap("Send answer"); node("Confirm this option?"); expect("2"); tap("Confirm")
-            await("broader receipt") { count() == 2 }; cases += "broader_confirm"
+            await("broader receipt") { count() == 2 }
+            receiptApplied(2)
+            cases += "broader_confirm"
             boundary("complete", "broader_confirm")
 
             boundary("begin", "card_replacement")
             open("replacement")
-            reveal("Approve for this session"); tap("Approve for this session"); reviewed(); tap("Send answer"); node("Confirm this option?")
+            reveal("Approve for this session"); tap("Approve for this session"); reviewed(); proveBroaderDraft(); tap("Send answer"); node("Confirm this option?")
             open("replacement-new")
             await("replacement drops old confirmation") { visible("Confirm this option?") == null }
             reveal("Reject"); tap("Reject")
             earlyReview("replacement") { check(!button("Send answer").isEnabled && count() == 2) }
             reviewed(); expect("3"); tap("Send answer"); await("new card reject receipt") { count() == 3 }
+            receiptApplied(3)
             cases += "card_replacement"
             boundary("complete", "card_replacement")
 
@@ -404,12 +437,14 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             }
             reviewed(); expect(text = "Use a safer command"); sendKeyDownUpSync(KeyEvent.KEYCODE_ENTER)
             await("one feedback receipt") { count() == 4 }; check(expected.get() == null)
+            receiptApplied(4)
             cases += "feedback_keyboard"
             boundary("complete", "feedback_keyboard")
 
             boundary("begin", "lifecycle_no_submit")
             open("background")
             reveal("Approve for this session"); tap("Approve for this session"); reviewed()
+            proveBroaderDraft()
             val lifecycleSend = captureEarlySend() // Capture the underlying card before its native modal obscures it.
             tap("Send answer"); node("Confirm this option?")
             // Real Activity/window lifecycle, not an injected foreground Boolean.
@@ -449,7 +484,19 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             check(main { model.draft(target).text == "Keep unrelated composer" })
             check(synchronized(calls) { calls.map { it.string("request_id") }.distinct().size == 4 })
             screenshot("complete")
-        } finally { main { model.back(); activity.finish() } }
+        } catch (error: Throwable) {
+            primaryFailure = error
+            // Observe the still-owned Activity before the unchanged back/finish cleanup.
+            try { failureEvidence = windowEvidence() } catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }
+            try { screenshot("failure") } catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }
+            throw error
+        } finally {
+            try { main { model.back(); activity.finish() } }
+            catch (cleanup: Throwable) {
+                val original = primaryFailure
+                if (original == null) throw cleanup else if (cleanup !== original) original.addSuppressed(cleanup)
+            }
+        }
     }
     companion object {
         val CASES = listOf("countdown_once", "broader_cancel", "broader_confirm", "card_replacement", "feedback_keyboard", "lifecycle_no_submit", "readonly_stale_identity")

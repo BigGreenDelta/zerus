@@ -196,3 +196,14 @@ name/runtime to the recorded creation. An unknown shutdown, changed identity or 
 gate, with evidence retained; never use `shutdown all`, broad process kills or numeric-PID fallbacks. This gate makes no
 all-descendant, native-keychain, production-model, provider, operator-device or installed-delivery claim. Xcode's shared
 SwiftPM cache behavior on the disposable VM is not a hermeticity claim.
+
+The Android fixture distinguishes its interceptor observing an answer request from production applying that receipt.
+After each of the four existing request-count waits, it requires the current exact target/card/run/conversation,
+the recorded request ID and full answers in a submitted draft, no answer flight or pending consent, and an idle verified
+detail read before advancing. This reads ordinary production state; it neither acknowledges nor fabricates a receipt.
+The intentionally unsent old replacement card has no such receipt gate. Every broader Send also proves its saved option2
+and empty-feedback draft before the existing real touch. Refreshed touch window/state/bounds/centre records are bounded
+diagnostics, not proof that a touch activated a control. Failure window evidence and the existing screenshot capture run
+before the Activity's back/finish cleanup; diagnostic or cleanup errors cannot replace the original throwable. The driver
+does not retrieve a PNG or add any host operation. These fixture admission/diagnostic corrections do not establish the
+cause of the earlier missing-modal failure or a product defect; all seven cases, original actions and budgets remain.

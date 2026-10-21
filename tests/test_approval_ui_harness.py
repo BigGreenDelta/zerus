@@ -426,7 +426,97 @@ class ApprovalHarnessTests(unittest.TestCase):
         for forbidden in ("performAction(", "injectInputEvent(", "request.body", "Authorization"):
             self.assertNotIn(forbidden, diagnostics)
         failure = source.split('            result.putString("stream", "Approval choices smoke failed:', 1)[1].split("finish(Activity.RESULT_CANCELED", 1)[0]
-        self.assertLess(failure.index("error.stackTraceToString()"), failure.index("windowEvidence()"))
+        self.assertLess(failure.index("error.stackTraceToString()"), failure.index("$failureEvidence"))
+
+    def test_android_receipt_applied_source_predicate_requires_every_exact_settled_identity(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        helper = source.split("        fun receiptApplied(number: Int)", 1)[1].split("        fun open(", 1)[0]
+        condition = helper.split("                    val applied =", 1)[1].split("\n                    applied", 1)[0]
+        fields = {
+            "!model.answerInFlight(draft)": "not in_flight", "!model.detailBusy": "not detail_busy",
+            "model.selected?.target": "selected_target", "question?.id": "current_id", "question?.hash": "current_hash",
+            "question?.run": "current_run", "question?.conversation": "current_conversation", "draft != null": "draft_present",
+            "draft.target": "draft_target", "draft.questionId": "draft_id", "draft.questionHash": "draft_hash",
+            "draft.requestId": "draft_request", "draft.answers": "draft_answers", "draft.status": "draft_status",
+            "model.pendingQuestionSend": "pending_consent", "model.activityVerified": "verified", "expected.get()": "expected_answer",
+            "target.run": "target_run", "target.conversation": "target_conversation",
+        }
+        for old, new in fields.items():
+            condition = condition.replace(old, new)
+        condition = " ".join(condition.replace("&&", "and").replace("null", "None").split())
+        full_answers = '[{"question_id":"approval","selected_option_ids":["2"],"text":""}]'
+        valid = dict(target="target", selected_target="target", questionId="card", current_id="card", questionHash="hash", current_hash="hash",
+                     target_run="run", current_run="run", target_conversation="conversation", current_conversation="conversation", draft_present=True,
+                     draft_target="target", draft_id="card", draft_hash="hash", requestId="request", draft_request="request", answers=full_answers,
+                     draft_answers=full_answers, draft_status="submitted", in_flight=False, pending_consent=None, verified=True, detail_busy=False, expected_answer=None)
+        self.assertTrue(finite_source_predicate(condition, valid))
+        departures = dict(selected_target="other", current_id="older-card", current_hash="older-hash", current_run="older-run",
+                          current_conversation="older-conversation", draft_present=False, draft_target="other", draft_id="older-card",
+                          draft_hash="older-hash", draft_request="older-request", draft_answers='[{"selected_option_ids":["1"]}]',
+                          draft_status="submitting", in_flight=True, pending_consent="pending", verified=False, detail_busy=True, expected_answer="unconsumed")
+        for field, value in departures.items():
+            with self.subTest(field=field):
+                self.assertFalse(finite_source_predicate(condition, {**valid, field: value}))
+        for answer in ('[]', full_answers.replace('"2"', '"1"'), full_answers.replace('"text":""', '"text":"other"'),
+                       full_answers.replace('"approval"', '"other"')):
+            with self.subTest(answers=answer):
+                self.assertFalse(finite_source_predicate(condition, {**valid, "draft_answers": answer}))
+
+    def test_android_receipt_gates_follow_original_counts_without_writes_or_unsent_card_admission(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        helper = source.split("        fun receiptApplied(number: Int)", 1)[1].split("        fun open(", 1)[0]
+        for required in ('synchronized(calls)', 'check(calls.size == number)', 'JSONObject(calls[number - 1].toString())',
+                         'payload.getString("request_id")', 'payload.getString("question_id")', 'payload.getString("expected_question_hash")',
+                         'payload.getJSONArray("answers").toString()', 'requestId.isNotBlank() && questionId.isNotBlank() && questionHash.isNotBlank()',
+                         'payload.string("expected_run_id") == target.run', 'payload.string("expected_conversation_id") == target.conversation',
+                         'model.drafts.singleOrNull { it.target == target && it.questionId == questionId && it.questionHash == questionHash }'):
+            self.assertIn(required, helper)
+        for forbidden in ('model.draft(', 'model.edit(', 'model.send(', 'set(model', 'expected.set(', 'model.refreshActivity(', 'store.'):
+            self.assertNotIn(forbidden, helper)
+        self.assertEqual(re.findall(r'^            receiptApplied\((\d)\)$', source, re.M), list("1234"))
+        for number, description in enumerate(("once receipt", "broader receipt", "new card reject receipt", "one feedback receipt"), 1):
+            wait = source.index('await("' + description + '") { count() == ' + str(number) + ' }')
+            gate = source.index('            receiptApplied(' + str(number) + ')')
+            self.assertLess(wait, gate)
+            self.assertNotIn('open("', source[wait:gate])
+        unsent = source.split('            open("replacement")', 1)[1].split('            reviewed(); expect("3")', 1)[0]
+        self.assertNotIn('receiptApplied(', unsent)
+        self.assertIn('reviewed(); proveBroaderDraft(); tap("Send answer"); node("Confirm this option?")', unsent)
+        lifecycle = source.split('            open("background")', 1)[1].split('            boundary("begin", "readonly_stale_identity")', 1)[0]
+        self.assertLess(lifecycle.index('proveBroaderDraft()'), lifecycle.index('val lifecycleSend = captureEarlySend()'))
+        self.assertEqual(source.count('proveBroaderDraft()'), 5)  # Definition plus the four actual broader Send paths.
+
+    def test_android_failure_is_captured_before_teardown_and_primary_survives_diagnostic_or_cleanup_error(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        outer = source.split('    override fun onStart()', 1)[1].split('    private fun <T> main(', 1)[0]
+        self.assertNotIn('windowEvidence()', outer)
+        self.assertNotIn('screenshot("failure")', outer)
+        tail = source.split('        var primaryFailure: Throwable? = null', 1)[1]
+        failure, cleanup = tail.rsplit('        } catch (error: Throwable) {', 1)[1].split('        } finally {', 1)
+        for earlier, later in [('primaryFailure = error', 'failureEvidence = windowEvidence()'),
+                               ('failureEvidence = windowEvidence()', 'screenshot("failure")'), ('screenshot("failure")', 'throw error')]:
+            self.assertLess(failure.index(earlier), failure.index(later))
+        self.assertEqual(failure.count('catch (diagnostic: Throwable) { if (diagnostic !== error) error.addSuppressed(diagnostic) }'), 2)
+        self.assertNotIn('model.back()', failure)
+        self.assertNotIn('activity.finish()', failure)
+        self.assertIn('try { main { model.back(); activity.finish() } }', cleanup)
+        self.assertIn('val original = primaryFailure', cleanup)
+        self.assertIn('if (original == null) throw cleanup else if (cleanup !== original) original.addSuppressed(cleanup)', cleanup)
+
+    def test_android_tap_diagnostics_refresh_and_bind_existing_one_physical_touch_without_new_actions(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        tap = source.split('    private fun tap(label: String)', 1)[1].split('    private fun reveal(', 1)[0]
+        self.assertLess(tap.index('check(action.refresh())'), tap.index('check(action.isEnabled && action.isClickable)'))
+        for required in ('action.windowId', 'action.isVisibleToUser', 'action.isSelected', 'action.isChecked',
+                         'phase("touch-geometry:$bounds:x=${bounds.exactCenterX()}:y=${bounds.exactCenterY()}")'):
+            self.assertIn(required, tap)
+        self.assertLess(tap.index('phase("touch-node:'), tap.index('val down = SystemClock.uptimeMillis()'))
+        self.assertLess(tap.index('phase("touch-geometry:'), tap.index('val down = SystemClock.uptimeMillis()'))
+        self.assertEqual(tap.count('uiAutomation.injectInputEvent(event, true)'), 1)
+        self.assertIn('for (type in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP))', tap)
+        self.assertIn('bounds.exactCenterX(), bounds.exactCenterY(), 0)', tap)
+        for forbidden in ('performAction(', 'ACTION_CLICK', 'tap(', 'while ', 'Thread.sleep('):
+            self.assertNotIn(forbidden, tap)
 
     def test_ios_reverse_ack_source_token_guard_nonce_order_and_teardown_refuse_unknown(self):
         source = (ROOT / "mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift").read_text()
