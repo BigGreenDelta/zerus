@@ -231,3 +231,12 @@ nodes per root, and at most4 listed windows. These records cannot qualify a case
 missing selection from unavailable review evidence without overriding the production timer or inferring a cause from a
 disabled Send alone. Current-window/focus admission, additional disclosure scrolling and every host operation remain
 unchanged; the observed replacement failure remains unproven until actual bounded evidence identifies its cause.
+
+The Android scroll hint now occupies a measured sibling row outside the weighted disclosure/option box, rather than
+overlaying it. Its Surface, colors, label, padding and conditional visibility remain; while shown, its measured height
+and the existing 6dp column spacing reduce the inline or expanded disclosure viewport. When hidden, no row is reserved.
+Review visibility, scroll state/padding, choices, feedback, footer and confirmation policies are unchanged. Material3
+Surface blocks touches behind its bounds, including its non-clickable form; the declared 2025.06.01 BOM maps to 1.3.2.
+The 1f0466cd attempt proved missing Reject selection near the hint text, but did not retain the old Surface background
+rectangle. Historical exact-pixel attribution remains an inference; unchanged physical fixture/native acceptance is
+still required. SDK-free brace-scope controls prove the sibling relationship, not Compose measurement or touch behavior.

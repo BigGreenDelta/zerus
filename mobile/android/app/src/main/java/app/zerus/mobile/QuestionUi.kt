@@ -247,10 +247,11 @@ import org.json.JSONObject
                     }
                 }
             }
-            if (bodyScroll.canScrollForward) Surface(color = Color(0xFF2B2923), modifier = Modifier.align(Alignment.BottomCenter)) {
+            }
+            // Reserve a sibling row: Surface also blocks touches behind its bounds.
+            if (bodyScroll.canScrollForward) Surface(color = Color(0xFF2B2923), modifier = Modifier.align(Alignment.CenterHorizontally)) {
                 Text("Scroll for options ↓", Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                     color = Color(0xFFFFCB7D), style = MaterialTheme.typography.labelSmall)
-            }
             }
             otherPrompts.forEachIndexed { index,(prompt,field) ->
                 var focused by remember(target.key,question.id,question.hash,prompt.id) { mutableStateOf(false) }

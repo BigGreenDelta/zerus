@@ -62,6 +62,47 @@ def android_diagnostic_memory(source):
     return evidence_line, namespace["stage"], stages
 
 
+def kotlin_brace_scopes(source, offset):
+    """Brace scopes for the fixed source layout guard; skip comments and quoted text, not a Kotlin compiler."""
+    lexemes = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]')
+    stack = []
+    for match in lexemes.finditer(source, 0, offset):
+        if match[0] == '{':
+            stack.append(match.start())
+        elif match[0] == '}':
+            if not stack:
+                raise ValueError('unbalanced-layout-source')
+            stack.pop()
+    return tuple(stack)
+
+
+def question_scroll_hint_findings(source):
+    """The hint must reserve an ordinary Column sibling, outside the weighted disclosure and beside the footer."""
+    hint = 'if (bodyScroll.canScrollForward) Surface('
+    column = 'Column(Modifier.then(if(inDialog) Modifier.fillMaxSize() else Modifier.heightIn(max = contentLimit))'
+    box = 'Box(Modifier.fillMaxWidth().weight(1f, fill = inDialog).then(disclosureVisibility))'
+    footer = 'otherPrompts.forEachIndexed { index,(prompt,field) ->'
+    if any(source.count(marker) != 1 for marker in (hint, column, box, footer)):
+        return ['missing-or-ambiguous-question-layout']
+    hint_at, column_at, box_at, footer_at = (source.index(marker) for marker in (hint, column, box, footer))
+    hint_scope = kotlin_brace_scopes(source, hint_at)
+    column_open = source.index('{', column_at)
+    box_open = source.index('{', box_at)
+    findings = []
+    if not hint_scope or hint_scope[-1] != column_open:
+        findings.append('hint-must-reserve-direct-column-space')
+    if box_open in hint_scope:
+        findings.append('hint-overlaps-weighted-disclosure')
+    if hint_scope != kotlin_brace_scopes(source, footer_at):
+        findings.append('hint-and-footer-must-be-siblings')
+    header = source[hint_at:source.index('{', hint_at)]
+    if 'Modifier.align(Alignment.CenterHorizontally)' not in header:
+        findings.append('hint-must-use-column-alignment')
+    if any(modifier in header for modifier in ('.offset(', '.zIndex(', '.height(', '.size(', '.weight(', '.graphicsLayer(')):
+        findings.append('hint-must-retain-measured-sibling-size')
+    return findings
+
+
 class ApprovalHarnessTests(unittest.TestCase):
     def setUp(self):
         self.ui = module("android_approval_ui", "scripts/ci/android-project-ui.py")
@@ -887,6 +928,32 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('XCTAssertEqual(answer, "fixture-hash-0|[', late)
         self.assertNotIn('typeText("Use a safer command', feedback)
         self.assertNotIn('sleep(', feedback)
+
+
+class QuestionLayoutSourceTests(unittest.TestCase):
+    def test_question_scroll_hint_reserves_space_outside_weighted_disclosure(self):
+        source = (ROOT / 'mobile/android/app/src/main/java/app/zerus/mobile/QuestionUi.kt').read_text()
+        self.assertEqual(question_scroll_hint_findings(source), [])
+
+    def test_layout_scope_guard_ignores_comments_and_quoted_braces(self):
+        source = 'Column { // }\n Text("}{"); val character = \'}\'; /* } { */ val raw = """ } { """\n Box { Text("inside") }\n}'
+        outer = source.index('{')
+        self.assertEqual(kotlin_brace_scopes(source, source.index('Box')), (outer,))
+        self.assertEqual(kotlin_brace_scopes(source, source.index('Text("inside")')), (outer, source.index('{', source.index('Box'))))
+
+    def test_layout_scope_guard_refuses_overlay_nested_and_zero_height_hints(self):
+        column = 'Column(Modifier.then(if(inDialog) Modifier.fillMaxSize() else Modifier.heightIn(max = contentLimit))) {'
+        box = 'Box(Modifier.fillMaxWidth().weight(1f, fill = inDialog).then(disclosureVisibility)) {'
+        hint = 'if (bodyScroll.canScrollForward) Surface(modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("Scroll for options ↓") }'
+        footer = 'otherPrompts.forEachIndexed { index,(prompt,field) -> Text("footer") }'
+        reserved = column + box + 'Text("options") }' + hint + footer + '}'
+        self.assertEqual(question_scroll_hint_findings(reserved), [])
+        overlay = column + box + 'Text("options") ' + hint + '}' + footer + '}'
+        self.assertIn('hint-overlaps-weighted-disclosure', question_scroll_hint_findings(overlay))
+        nested = column + box + 'Column { Text("options") ' + hint + '}}' + footer + '}'
+        self.assertIn('hint-must-reserve-direct-column-space', question_scroll_hint_findings(nested))
+        zero = reserved.replace('Alignment.CenterHorizontally)', 'Alignment.CenterHorizontally).height(0.dp)')
+        self.assertIn('hint-must-retain-measured-sibling-size', question_scroll_hint_findings(zero))
 
 
 if __name__ == "__main__":
