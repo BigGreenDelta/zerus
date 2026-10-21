@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Keyless released Codex, Claude Code and OpenCode contracts and read-only upstream capability reports."""
 import argparse
+import contextlib
 import base64
 import datetime
 import difflib
@@ -560,6 +561,13 @@ def qualify(agent, package, work, results, hgs, hint_inputs=None, package_cache=
                     raise ValueError('Hint contract did not complete its exact four methods without skips')
             if status or marker is None:
                 raise ValueError('Native contract failed at ' + case)
+            if hint_inputs is not None:
+                cleanup = [json.loads((directory / 'hook-output' / name / 'cleanup.json').read_text()) for name in suites]
+                if any(record.get('verified') is not True for record in cleanup):
+                    raise ValueError('Hint owned cleanup is UNKNOWN; runtime namespaces retained')
+                row['owned_cleanup_verified'] = True
+        if hint_inputs is not None and time.monotonic() >= hint_end:
+            raise TimeoutError('Original hint row expired during result collection')
         row['status'] = 'passed'
     except Exception as error:
         row['error'] = str(error)
@@ -668,7 +676,9 @@ def main():
             except Exception as error:
                 report['errors'].append(spec['name'] + ' canary discovery: ' + str(error))
     # A scanner or a leftover process may still hold a file there on Windows.
-    with tempfile.TemporaryDirectory(prefix='zerus-native-compat-', ignore_cleanup_errors=True) as temporary:
+    work_context = (tempfile.TemporaryDirectory(prefix='zerus-native-compat-', ignore_cleanup_errors=True)
+                    if hint_inputs is None else contextlib.nullcontext(tempfile.mkdtemp(prefix='zerus-hint-compat-')))
+    with work_context as temporary:
         for agent in agents:
             for package in packages[agent]:
                 if hint_inputs is None:
@@ -676,10 +686,15 @@ def main():
                 else:
                     row = qualify(agent, package, Path(temporary), results, args.hgs.resolve(), hint_inputs,
                                   args.native_package_cache.resolve())
+                    row['work_root'] = temporary
                 report['contracts'].append(row)
                 if hint_inputs is not None and row['status'] != 'passed':
                     write_report(report, results)
                     return 1  # First failed pin stops; never replay or run later pins.
+        if hint_inputs is not None:
+            # No finalizer removes failed or unknown hint work. All case cleanup
+            # records were checked before removing this successful cache root.
+            shutil.rmtree(temporary)
     for agent in agents:
         rows = {row['version']: row for row in report['contracts'] if row['agent'] == agent}
         current = rows.get(next((package['version'] for package in reversed(manifest[agent])

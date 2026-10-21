@@ -633,6 +633,30 @@ class AgentCompatibility(unittest.TestCase):
             self.assertEqual(calls[0]['timeout'], 5)
             self.assertEqual(calls[0]['env']['ZERUS_NATIVE_DIAGNOSTIC_DEADLINE'], '105')
 
+    def test_hint_failed_or_timed_out_selection_retains_outer_work_without_finalizer(self):
+        for timeout in (False, True):
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                work = root / 'retained-work'
+                work.mkdir()
+                argv = ['compat', '--contract', 'agent-hint', '--agent', 'claude', '--hgs', str(root / 'hgs'),
+                        '--hgs-source', 'a' * 40, '--pre-feature-hgs', str(root / 'old-hgs'),
+                        '--hook-observer', str(root / 'observer'), '--observer-source', 'b' * 40,
+                        '--native-package-cache', str(root / 'cache'), '--results', str(root / 'results')]
+                failed = dict(agent='claude', version='2.1.296', target='linux-x64', status='failed')
+                with patch.object(compat.sys, 'argv', argv), patch.object(compat, 'host_target', return_value='linux-x64'), \
+                        patch.object(compat, 'hint_input', return_value={}), \
+                        patch.object(compat.tempfile, 'mkdtemp', return_value=str(work)), \
+                        patch.object(compat.tempfile, 'TemporaryDirectory', side_effect=AssertionError('no hint GC finalizer')), \
+                        patch.object(compat, 'qualify', side_effect=TimeoutError('original end') if timeout else None,
+                                     return_value=failed) as qualify, patch.object(compat, 'write_report'):
+                    if timeout:
+                        with self.assertRaises(TimeoutError): compat.main()
+                    else:
+                        self.assertEqual(compat.main(), 1)
+                    self.assertEqual(qualify.call_count, 1)
+                self.assertTrue(work.is_dir(), 'UNKNOWN runtime/cache namespace must remain')
+
     def test_canary_has_no_publication_credentials_or_write_access(self):
         workflow = (ROOT / '.github/workflows/agent-upstream.yml').read_text()
         self.assertIn('contents: read', workflow)

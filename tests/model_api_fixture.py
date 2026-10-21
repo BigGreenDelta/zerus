@@ -284,6 +284,28 @@ class Server(ThreadingHTTPServer):
         self.log = Path(root) / "requests.jsonl"
         self.hint = hint
         self.sentinels = sentinels
+        self.hint_threads = set()
+
+    def process_request(self, request, client_address):
+        if self.hint is None:
+            return super().process_request(request, client_address)
+        # The hint case must prove all its handlers quiescent before deleting
+        # files. Reserve the thread in this server's custody before start.
+        worker = threading.Thread(target=self.process_hint_request, args=(request, client_address), daemon=True)
+        with self.lock:
+            self.hint_threads.add(worker)
+        worker.start()
+
+    def process_hint_request(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self.lock:
+                self.hint_threads.discard(threading.current_thread())
+
+    def hint_handlers(self):
+        with self.lock:
+            return list(self.hint_threads)
 
     def server_bind(self):
         # HTTPServer would name itself with socket.getfqdn, a reverse lookup that can

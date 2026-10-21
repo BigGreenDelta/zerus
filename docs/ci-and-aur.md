@@ -935,6 +935,22 @@ The native five-second hook timeout is unchanged. No prompt or count precedes th
 actual public gate and native-process proof. Pre-feature migration launches and
 pauses through the old CLI, then resumes through the candidate; Windows records a
 resident old host separately from the newly installed candidate stable CLI.
+Admission requires typed `tracked: true`, an explicit question list, and the
+selected first/resume gate exactly `true` with its reason exactly empty. A known
+already-bound steady conversation uses its exact run/conversation and idle
+activity; its normal false first-message field has no first-message reason.
+
+Hint cases own cleanup before partial setup or launch can return. Their process
+queries, private socket/endpoint stops, pinned-handle reaping, model shutdown and
+post-stop image/observer checks share the same original row end. The ordinary
+fixtures' cleanup defaults are not used or changed. Hint Windows profiles and the
+outer hint scratch root have no automatic TemporaryDirectory deletion. Unknown
+identity, a failed/expired cleanup or a parent timeout retains the namespaces and
+fails qualification. Forced native stops use only a verified private socket or
+pinned owned handles; no numeric-PID fallback is added. A parent timeout is not
+proof of descendant exit. Files are removed only after every cleanup check has
+verified within the original end. This bounds the fixture's waits, not arbitrary
+host filesystem or logging stalls.
 
 The fixture intentionally seeds an observed retained owned hook entry at a
 separate private executable named `hgs` or `hgs.exe`. It leaves the real stable

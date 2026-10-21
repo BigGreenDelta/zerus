@@ -31,13 +31,13 @@ def invocation(output=b''):
 
 def card():
     return dict(source='codex_hooks_trust', question_id='codex-hooks-trust:' + 'c' * 64,
-                question_hash='c' * 64, can_answer=True,
+                question_hash='c' * 64, can_answer=True, run_id='run',
                 questions=[dict(id='hooks_trust', options=[dict(id='trust')])])
 
 
 def state(*cards, ready=False):
     return dict(run_id='run', tracked=True, pending_questions=list(cards), first_message_can_send=ready,
-                first_message_reason=None if ready else 'not ready')
+                first_message_reason='' if ready else 'not ready')
 
 
 class HintFixtureControls(unittest.TestCase):
@@ -116,6 +116,8 @@ class HintFixtureControls(unittest.TestCase):
             def json_hgs(self, *args, **kwargs):
                 return dict(sessions=[dict(name='codex/p/test', process_state='running')])
             def native_identity(self, name): self.proven.append(name)
+            def execute(self, argv, **options):
+                return fixture.subprocess.run(argv, text=True, capture_output=True, **options)
         value = Gate()
         value.views, value.index, value.proven = views, 0, []
         value.end, value.row_end, value.cleaning, value.gate_end = 940., 1000., False, None
@@ -186,6 +188,136 @@ class HintFixtureControls(unittest.TestCase):
                     AWS_SECRET_ACCESS_KEY='untrusted', HGS_SESSION='foreign', CODEX_HOME='/foreign',
                     CLAUDE_CONFIG_DIR='/foreign', OPENAI_ORG_ID='foreign', GITHUB_TOKEN='untrusted'))
         self.assertEqual(own, dict(PATH='/fixture/bin', HOME='/fixture/home'))
+
+    def test_unknown_null_and_truthy_public_forms_never_admit_a_message(self):
+        record = dict(run_id='run')
+        for key, values in (('tracked', (None, False, 0, 1, 'true')),
+                            ('first_message_can_send', (None, False, 0, 1, 'true')),
+                            ('first_message_reason', (None, False, 0, 'unknown')),
+                            ('pending_questions', (None, False, 0, {}, ''))):
+            for value in values:
+                view = state(ready=True)
+                view[key] = value
+                with self.subTest(key=key, value=value): self.assertFalse(fixture.public_ready(view, record))
+        for key in ('tracked', 'pending_questions', 'first_message_can_send', 'first_message_reason'):
+            view = state(ready=True)
+            del view[key]
+            self.assertFalse(fixture.public_ready(view, record))
+        for value in (None, False, 0, 1, 'true'):
+            view = dict(state(ready=True), resume_message_can_send=value, resume_message_reason='')
+            self.assertFalse(fixture.public_ready(view, record))
+        for value in (None, False, 0, 'unknown'):
+            view = dict(state(ready=True), resume_message_can_send=True, resume_message_reason=value)
+            self.assertFalse(fixture.public_ready(view, record))
+
+    def test_bound_steady_fallback_requires_exact_conversation_and_idle(self):
+        record = dict(run_id='run', conversation_id='conversation')
+        view = dict(state(), conversation_id='conversation', activity='idle')
+        del view['first_message_reason']  # Legitimate hgs bound-summary shape.
+        self.assertTrue(fixture.public_ready(view, record))
+        for key, value in (('conversation_id', None), ('conversation_id', 'foreign'), ('activity', None)):
+            self.assertFalse(fixture.public_ready(dict(view, **{key: value}), record))
+
+    def test_unknown_cards_and_truthy_answerability_never_select_an_answer(self):
+        for value in (None, False, {}, ''):
+            view = dict(state(), pending_questions=value)
+            with self.assertRaises(AssertionError): fixture.startup_answer(view, dict(run_id='run'), set())
+        for key, values in (('tracked', (None, False, 0, 1, 'true')),):
+            for value in values:
+                view = dict(state(card()), **{key: value})
+                with self.assertRaises(AssertionError): fixture.startup_answer(view, dict(run_id='run'), set())
+        for key, values in (('can_answer', (None, False, 0, 1, 'true')), ('run_id', (None, 'foreign'))):
+            for value in values:
+                item = dict(card(), **{key: value})
+                with self.assertRaises(AssertionError): fixture.startup_answer(state(item), dict(run_id='run'), set())
+
+    def cleanup_double(self, root, evidence):
+        class Cleanup(fixture.HintContract, unittest.TestCase):
+            def stop_unix(self): self.steps.append('socket-discovery-reap')
+            def stop_private_socket(self): self.steps.append('independent-socket-stop')
+            def stop_host(self): self.steps.append('owned-host-handles')
+            def close_model(self): self.steps.append('model')
+            def final_observer_check(self): self.steps.append('observer')
+        value = Cleanup()
+        value.root, value.result_dir, value.row_end = root, evidence, 100.
+        value.cli_children, value.cleanup_intents, value.steps = [], [], []
+        value.cleanup_verified = False
+        return value
+
+    def test_partial_launch_failure_keeps_ownership_and_attempts_independent_cleanup(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            root, evidence = Path(folder) / 'runtime', Path(folder) / 'evidence'
+            root.mkdir(); evidence.mkdir()
+            value = self.cleanup_double(root, evidence)
+            value.cleanup_intents = [dict(argv=['/fixture/hgs', 'claude'], root=str(root), phase='candidate')]
+            def unknown():
+                value.steps.append('failed-discovery')
+                raise AssertionError('UNKNOWN launch before binding')
+            value.stop_unix = value.stop_host = unknown
+            with patch.object(fixture.time, 'monotonic', return_value=0), self.assertRaises(AssertionError):
+                value.cleanup_owned()
+            self.assertTrue(root.exists())
+            self.assertIn('model', value.steps)
+            self.assertIn('observer', value.steps)
+            self.assertFalse(json.loads((evidence / 'cleanup.json').read_text())['verified'])
+
+    def test_original_cleanup_end_expires_without_stop_or_runtime_deletion(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            root, evidence = Path(folder) / 'runtime', Path(folder) / 'evidence'
+            root.mkdir(); evidence.mkdir()
+            value = self.cleanup_double(root, evidence)
+            with patch.object(fixture.time, 'monotonic', return_value=100), self.assertRaises(AssertionError):
+                value.cleanup_owned()
+            self.assertEqual(value.steps, [])
+            self.assertTrue(root.exists())
+            self.assertEqual(value.row_end, 100)
+
+    def test_missing_foreign_and_expired_handles_never_force_stop(self):
+        stopped = []
+        def stop(handle, code): stopped.append((handle, code)); return 1
+        for handle, image in ((None, '/fixture/home/hgs.exe'), (123, '/fixture/foreign/hgs.exe')):
+            with self.assertRaises(AssertionError):
+                fixture.stop_pinned_handle(handle, lambda: image, '/fixture/home', lambda *args: 0x102,
+                                           stop, lambda limit: limit)
+        def expired(limit): raise AssertionError('original end')
+        with self.assertRaises(AssertionError):
+            fixture.stop_pinned_handle(123, lambda: '/fixture/home/hgs.exe', '/fixture/home',
+                                       lambda *args: 0x102, stop, expired)
+        self.assertEqual(stopped, [])
+
+    def test_hanging_model_close_join_is_clamped_to_original_end(self):
+        joined = []
+        closer = SimpleNamespace(start=lambda: None, join=lambda seconds: joined.append(seconds), is_alive=lambda: True)
+        value = self.gate_double([])
+        value.cleaning, value.row_end = True, 10
+        value.model = SimpleNamespace(shutdown=lambda: None, server_close=lambda: None)
+        value.model_thread = SimpleNamespace(is_alive=lambda: True)
+        with patch.object(fixture.time, 'monotonic', return_value=9), \
+                patch.object(fixture.threading, 'Thread', return_value=closer), self.assertRaises(AssertionError):
+            fixture.HintContract.close_model(value)
+        self.assertEqual(joined, [1])
+
+    def test_verified_cleanup_deletes_only_after_post_stop_checks(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            root, evidence = Path(folder) / 'runtime', Path(folder) / 'evidence'
+            root.mkdir(); evidence.mkdir()
+            value = self.cleanup_double(root, evidence)
+            value.native_copy = Path('/fixture/native')
+            def images(stage):
+                self.assertTrue(root.is_dir())
+                self.assertEqual(stage, 'after owned stop')
+                value.steps.append('post-stop-images')
+            def observer():
+                self.assertTrue(root.is_dir())
+                value.steps.append('complete-observer')
+            value.keep_evidence, value.final_observer_check = images, observer
+            with patch.object(fixture.time, 'monotonic', return_value=0): value.cleanup_owned()
+            self.assertTrue(value.cleanup_verified)
+            self.assertFalse(root.exists())
+            self.assertEqual(value.steps[-3:], ['model', 'post-stop-images', 'complete-observer'])
 
 
 if __name__ == '__main__':

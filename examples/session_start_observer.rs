@@ -117,7 +117,7 @@ fn identity(child: &process::Child) -> Option<Value> {
     // A read-only process query, not a native-agent capability probe. The real
     // hook still waits for stdin, which is forwarded only after this snapshot.
     let output = Command::new("/bin/ps")
-        .args(["-p", &child.id().to_string(), "-o", "lstart=,comm="])
+        .args(["-ww", "-p", &child.id().to_string(), "-o", "lstart=,comm="])
         .env("LC_ALL", "C").env("TZ", "UTC").output().ok()?;
     if !output.status.success() || output.stdout.len() > 1024 { return None; }
     let text = std::str::from_utf8(&output.stdout).ok()?.trim();

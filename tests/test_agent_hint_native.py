@@ -20,6 +20,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -62,10 +63,12 @@ def read_json(path, maximum):
     return json.loads(raw)
 
 
-def sha256(path):
+def sha256(path, end=None):
     value = hashlib.sha256()
     with Path(path).open('rb') as file:
         for block in iter(lambda: file.read(1024 * 1024), b''):
+            if end is not None and time.monotonic() >= end:
+                raise AssertionError('original end expired hashing owned image')
             value.update(block)
     return value.hexdigest()
 
@@ -114,21 +117,26 @@ def hint_output(raw):
 
 def startup_answer(state, binding, attempted):
     """Known native cards only; pure selection, no input action or gate override."""
-    if state.get('pending_questions_error') or state.get('run_id') != binding['run_id']:
+    if (state.get('pending_questions_error') or state.get('run_id') != binding['run_id']
+            or state.get('tracked') is not True or not isinstance(state.get('pending_questions'), list)):
         raise AssertionError('unknown startup identity')
-    cards = state.get('pending_questions') or []
+    cards = state['pending_questions']
     if not cards:
         return None
     if len(cards) != 1:
         raise AssertionError('ambiguous startup consent')
     card = cards[0]
+    if not isinstance(card, dict): raise AssertionError('unknown startup card')
     choices = {'claude_folder_trust': ('claude-trust:', 'trust', 'trust_0'),
                'codex_folder_trust': ('codex-trust:', 'trust', 'trust_0'),
                'codex_hooks_trust': ('codex-hooks-trust:', 'hooks_trust', 'trust'),
                'claude_resume': ('claude-resume:', 'resume', 'resume')}
     choice = choices.get(card.get('source'))
-    if not choice or not card.get('can_answer') or not card.get('question_hash'):
+    if (not choice or card.get('can_answer') is not True or card.get('run_id') != binding['run_id']
+            or not isinstance(card.get('question_hash'), str) or len(card['question_hash']) != 64):
         raise AssertionError('unrecognized startup consent')
+    if any(value not in '0123456789abcdef' for value in card['question_hash']):
+        raise AssertionError('unknown startup hash')
     prefix, question, option = choice
     items = card.get('questions') or []
     key = (binding['run_id'], card['question_id'], card['question_hash'])
@@ -137,6 +145,22 @@ def startup_answer(state, binding, attempted):
             or option not in {item.get('id') for item in items[0].get('options') or []}):
         raise AssertionError('changed or already attempted startup consent')
     return key, card, dict(question_id=question, selected_option_ids=[option], text='')
+
+
+def public_ready(state, record):
+    """Typed public admission; unknown/null/truthy values never grant a send."""
+    if (state.get('tracked') is not True or state.get('pending_questions') != []
+            or not isinstance(state.get('pending_questions'), list) or state.get('pending_questions_error')
+            or state.get('run_id') != record['run_id']):
+        return False
+    if 'resume_message_can_send' in state:
+        return state['resume_message_can_send'] is True and state.get('resume_message_reason') == ''
+    if not record.get('conversation_id'):
+        return state.get('first_message_can_send') is True and state.get('first_message_reason') == ''
+    # A confirmed bound conversation deliberately has first_message_can_send
+    # false and no first_message_reason. Its exact identity/idle state applies.
+    return (isinstance(record['conversation_id'], str) and bool(record['conversation_id'])
+            and state.get('conversation_id') == record['conversation_id'] and state.get('activity') == 'idle')
 
 
 def checked_receipt(receipt, payload, serialized, name):
@@ -150,6 +174,19 @@ def checked_receipt(receipt, payload, serialized, name):
         value = receipt.get(field)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise AssertionError('startup receipt has unknown acknowledgement time')
+
+
+def stop_pinned_handle(handle, image, root, wait, terminate, remaining):
+    """Finite handle-only decision; callbacks allow pure refusal/deadline controls."""
+    if not handle: raise AssertionError('UNKNOWN missing pinned handle')
+    state = wait(handle, 0)
+    if state == 0: return
+    if state != 0x102: raise AssertionError('UNKNOWN pinned handle state')
+    root, actual = (os.path.normcase(os.path.realpath(value)) for value in (root, image()))
+    if os.path.commonpath([root, actual]) != root: raise AssertionError('foreign image: no forced stop')
+    remaining(1)
+    if not terminate(handle, 1): raise AssertionError('UNKNOWN owned forced stop')
+    if wait(handle, int(remaining(5) * 1000)) != 0: raise AssertionError('UNKNOWN owned reap at original end')
 
 
 class HintContract:
@@ -168,9 +205,15 @@ class HintContract:
         self.end, self.gate_end, self.cleaning = self.row_end - 60, None, False
         self.phase, self.attempted, self.checkpoints = 'candidate', set(), []
         self.startup_ends, self.completed_runs = {}, set()
-        # Runs last, after the existing transport's owned cleanup. Observations
-        # live in the fresh result namespace, not a runtime that cleanup deletes.
-        self.addCleanup(self.final_observer_check)
+        self.cli_children, self.cleanup_intents = [], []
+        self.result_dir = Path(os.environ['ZERUS_HINT_RESULTS']) / self.id()
+        self.result_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+        self.observations = self.result_dir / 'calls'
+        self.observations.mkdir(mode=0o700)
+        self.cleanup_verified = False
+        # Before inherited setup or any launch can fail. This contract never
+        # calls the ordinary fixtures' renewed teardown waits or GC deletion.
+        self.addCleanup(self.cleanup_owned)
         super().setUp()
         self.native_input = Path(os.environ['HGS_' + self.AGENT.upper() + '_TEST_BIN'])
         self.native_sha256 = sha256(self.native_input)
@@ -221,27 +264,19 @@ class HintContract:
         self.observer.mkdir(mode=0o700)
         self.observer_exe = self.observer / ('hgs' + suffix)
         shutil.copy2(self.inputs['observer']['path'], self.observer_exe)
-        self.result_dir = Path(os.environ['ZERUS_HINT_RESULTS']) / self.id()
-        self.result_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
-        self.observations = self.result_dir / 'calls'
-        self.observations.mkdir(mode=0o700)
         self.settings_path = self.agent_home / ('settings.json' if self.AGENT == 'claude' else 'hooks.json')
         self.set_phase('candidate')
         self.install_observer_entry()
 
     def tearDown(self):
         self.cleaning, self.gate_end = True, None
-        try:
-            self.keep_evidence()
-        finally:
-            super().tearDown()
+        self.keep_evidence('before stop')
 
     def start_api(self):
         self.model = api.Server(self.api_root, str(self.project), hint=HINT,
                                 sentinels=(PROJECT_SENTINEL, APPEND_SENTINEL, SYSTEM_SENTINEL, DEVELOPER_SENTINEL))
         self.model_thread = threading.Thread(target=self.model.serve_forever, daemon=True)
         self.model_thread.start()
-        self.addCleanup(self.close_model)
         return self.model.server_address[1]
 
     def place_agent(self):
@@ -250,10 +285,27 @@ class HintContract:
         shutil.copy2(self.BINARY, self.bin / (self.AGENT + '.exe'))
 
     def close_model(self):
-        self.model.shutdown()
-        self.model.server_close()
-        self.model_thread.join(5)
-        self.assertFalse(self.model_thread.is_alive(), 'owned loopback fixture did not exit')
+        if not hasattr(self, 'model'):
+            return
+        problems = []
+        def close():
+            try:
+                if getattr(self, 'model_thread', None) and self.model_thread.is_alive():
+                    self.model.shutdown()
+                self.model.server_close()
+                for handler in self.model.hint_handlers():
+                    handler.join(max(0, self.row_end - time.monotonic()))
+                if any(handler.is_alive() for handler in self.model.hint_handlers()):
+                    raise AssertionError('UNKNOWN owned model handlers')
+            except BaseException as error:
+                problems.append(type(error).__name__)
+        closer = threading.Thread(target=close, daemon=True)
+        closer.start()
+        closer.join(self.remaining(5))
+        self.assertFalse(closer.is_alive() or problems, 'UNKNOWN owned model shutdown; retain runtime')
+        if getattr(self, 'model_thread', None):
+            self.model_thread.join(self.remaining(1))
+            self.assertFalse(self.model_thread.is_alive(), 'UNKNOWN owned model thread; retain runtime')
 
     def configure(self):
         """Dummy loopback account/onboarding only; no project or hook trust values."""
@@ -286,12 +338,45 @@ class HintContract:
         env = dict(self.env)
         if os.name != 'nt':
             env['HGS_EXECUTABLE'] = str(executable)
-        result = subprocess.run([str(executable), *args], env=env, cwd=cwd or self.project,
-                                input=input, stdin=None if input is not None else subprocess.DEVNULL,
-                                capture_output=True, text=True, encoding='utf-8', timeout=self.remaining(60))
+        result = self.execute([str(executable), *args], env=env, cwd=cwd or self.project,
+                              input=input, timeout=self.remaining(5 if self.cleaning else 60))
         if rc is not None:
             self.assertEqual(result.returncode, rc, result.stdout + result.stderr)
         return result
+
+    def execute(self, argv, *, env, input=None, cwd=None, timeout):
+        # Namespace intent precedes spawn; direct-child custody precedes every
+        # fallible communicate/return. Popen owns this child, never a PID lookup.
+        if len(argv) > 1 and argv[1] in ('claude', 'codex', 'resume', 'fork', 'session-host'):
+            self.assertLess(len(self.cleanup_intents), 64, 'bounded launch intent inventory')
+            self.cleanup_intents.append(dict(argv=argv, root=str(getattr(self, 'root', '')),
+                                             socket=getattr(self, 'socket', None), phase=self.phase))
+            self.save_cleanup('owned intent before spawn')
+        options = dict(env=env, cwd=cwd, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
+        if os.name == 'nt':
+            import test_windows_host as host
+            options['creationflags'] = host.HIDDEN
+        child = subprocess.Popen(argv, **options)
+        self.cli_children = [known for known in self.cli_children if known.poll() is None]
+        self.cli_children.append(child)
+        try:
+            stdout, stderr = child.communicate(input, timeout=timeout)
+        except BaseException:
+            # An unreaped direct child retains its identity (a Windows process
+            # handle, or this parent's unreaped POSIX child). No foreign lookup.
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=max(.001, min(5, self.row_end - time.monotonic())))
+            raise
+        return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
+
+    def run_hgs(self, *args, timeout=60):
+        # HostCase helpers use this case's real phase CLI and original end.
+        return self.hgs('__host', *args, rc=None)
+
+    def record(self, name):
+        return self.binding(name)
 
     def json_hgs(self, *args, payload=None):
         return json.loads(self.hgs(*args, input=None if payload is None else json.dumps(payload)).stdout)
@@ -430,7 +515,7 @@ class HintContract:
                 host.KERNEL32.CloseHandle(handle)
             self.pin_session(name)  # Retain native/supervisor handles while live.
         else:
-            out = subprocess.check_output(['/bin/ps', '-p', str(pid), '-o', 'lstart=,comm='],
+            out = subprocess.check_output(['/bin/ps', '-ww', '-p', str(pid), '-o', 'lstart=,comm='],
                                           env=dict(self.env, LC_ALL='C', TZ='UTC'), text=True,
                                           timeout=self.remaining(10)).strip().split(None, 5)
             self.assertEqual(' '.join(out[:5]), ' '.join(record['process_start'].split()))
@@ -448,12 +533,10 @@ class HintContract:
                 state, record = self.inspected(name), self.binding(name)
                 self.assertEqual(record['run_id'], run)
                 self.assertEqual(state.get('run_id'), run)
-                self.assertTrue(state.get('tracked'))
+                self.assertIs(state.get('tracked'), True)
                 self.assertFalse(state.get('pending_questions_error'))
                 self.assertEqual(state.get('pending_questions'), [])
-                ready = (state.get('resume_message_can_send') if 'resume_message_can_send' in state else
-                         state.get('first_message_can_send') if not record.get('conversation_id') else
-                         state.get('activity') == 'idle')
+                ready = public_ready(state, record)
                 if ready: self.native_identity(name)
                 return ready
             return self.wait(steady, 'public steady conversation gate')
@@ -469,7 +552,7 @@ class HintContract:
             state, record = self.inspected(name), self.binding(name)
             self.assertEqual(record['run_id'], run)
             self.assertEqual(record['agent'], self.AGENT)
-            self.assertTrue(state.get('tracked'))
+            self.assertIs(state.get('tracked'), True)
             selected = startup_answer(state, record, self.attempted)
             if selected:
                 key, card, answer = selected
@@ -484,8 +567,8 @@ class HintContract:
                 executable = self.real[self.phase]
                 env = dict(self.env)
                 if os.name != 'nt': env['HGS_EXECUTABLE'] = str(executable)
-                result = subprocess.run([str(executable), 'answer', name, '--json'], env=env,
-                                        input=serialized, text=True, capture_output=True, timeout=remaining)
+                result = self.execute([str(executable), 'answer', name, '--json'], env=env,
+                                      input=serialized, timeout=remaining)
                 self.assertLess(time.monotonic(), end, 'startup answer exceeded original gate')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 receipt = json.loads(result.stdout)
@@ -494,12 +577,8 @@ class HintContract:
                 continue
             self.assertFalse(state.get('pending_questions_error'))
             live = next((r for r in self.json_hgs('ls', '--local', '--json')['sessions'] if r['name'] == name), {})
-            public = (state.get('resume_message_can_send') if 'resume_message_can_send' in state else
-                      state.get('first_message_can_send') if not record.get('conversation_id') else
-                      state.get('tracked') and state.get('activity') == 'idle')
+            public = public_ready(state, record)
             if public and live.get('process_state') == 'running':
-                reason = state.get('resume_message_reason') if 'resume_message_can_send' in state else state.get('first_message_reason')
-                self.assertFalse(reason)
                 if conversation is not None:
                     self.assertEqual(record.get('expected_id') or record.get('conversation_id'), conversation)
                 self.native_identity(name)
@@ -511,9 +590,10 @@ class HintContract:
     def launch_hint(self, tag, extra=()):
         project = str(self.project) if os.name == 'nt' else 'p'
         name = f'{self.AGENT}/{"project" if os.name == "nt" else "p"}/{tag}'
+        self.names.append(name)
         self.hgs(self.AGENT, project, '--new', '-n', tag, '-d', '--account', 'native-' + self.AGENT,
                  *(['--', *extra] if extra else []))
-        self.names.append(name)
+        if os.name == 'nt': self.status()
         record = self.wait(lambda: self.maybe_binding(name), 'real launch binding')
         self.gate(name, record['run_id'])
         self.assert_registration()
@@ -549,6 +629,7 @@ class HintContract:
     def resume_hint(self, name):
         before = self.binding(name)
         self.hgs('resume', name, '-d')
+        if os.name == 'nt': self.status()
         record = self.wait(lambda: (r if (r := self.binding(name))['run_id'] != before['run_id'] else None), 'new resume run')
         self.gate(name, record['run_id'], before['conversation_id'])
         return record
@@ -587,10 +668,11 @@ class HintContract:
         self.names[self.names.index(name)] = renamed
         self.turn(renamed, 'Hint fixture after rename.')
         parent = self.binding(renamed)
-        self.hgs('fork', renamed, '-n', 'forked', '-d', '--expected-run-id', parent['run_id'],
-                 '--expected-conversation-id', parent['conversation_id'])
         fork = renamed.rsplit('/', 1)[0] + '/forked'
         self.names.append(fork)
+        self.hgs('fork', renamed, '-n', 'forked', '-d', '--expected-run-id', parent['run_id'],
+                 '--expected-conversation-id', parent['conversation_id'])
+        if os.name == 'nt': self.status()
         record = self.wait(lambda: self.maybe_binding(fork), 'real fork binding')
         self.assertEqual(record['fork_parent_id'], parent['conversation_id'])
         self.gate(fork, record['run_id'])
@@ -681,12 +763,168 @@ class HintContract:
             self.pause_hint(name)
         if os.name != 'nt': self.assertTrue((self.root / 'launcher-sentinel').is_file())
 
-    def keep_evidence(self):
+    def save_cleanup(self, stage, problems=()):
+        document = dict(stage=stage, verified=self.cleanup_verified, original_end=self.row_end,
+                        runtime=str(getattr(self, 'root', '')), project_root=str(getattr(self, 'project_parent', '') or ''),
+                        intents=self.cleanup_intents, problems=list(problems))
+        encoded = json.dumps(document, indent=2).encode()
+        self.assertLessEqual(len(encoded), MAX_RECORD, 'cleanup evidence bound')
+        temporary = self.result_dir / 'cleanup.tmp'
+        temporary.write_bytes(encoded)
+        os.replace(temporary, self.result_dir / 'cleanup.json')
+
+    def stop_unix(self):
+        if not hasattr(self, 'socket') or not hasattr(self, 'env'):
+            self.assertEqual(self.cleanup_intents, [], 'UNKNOWN partial launch namespace')
+            return
+        def run(argv):
+            result = subprocess.run(argv, env=dict(self.env, LC_ALL='C', TZ='UTC'), capture_output=True, text=True,
+                                    timeout=self.remaining(3))
+            self.assertLessEqual(len(result.stdout.encode()), MAX_REQUESTS, 'cleanup process snapshot bound')
+            return result
+        def table():
+            result = run(['/bin/ps', '-axo', 'pid=,ppid=,stat=,lstart='])
+            self.assertEqual(result.returncode, 0, 'UNKNOWN process snapshot')
+            rows = {}
+            for line in result.stdout.splitlines():
+                fields = line.split(None, 3)
+                if len(fields) == 4:
+                    rows[int(fields[0])] = (int(fields[1]), fields[2], ' '.join(fields[3].split()))
+            return rows
+        current, owned = table(), {}
+        if Path(self.socket).exists():
+            panes = run([test_pause.TMUX, '-S', self.socket, 'list-panes', '-a', '-F', '#{pane_pid}'])
+            self.assertEqual(panes.returncode, 0, 'UNKNOWN private socket identity')
+            for pid in panes.stdout.split():
+                self.assertTrue(pid.isdigit() and int(pid) in current, 'UNKNOWN private pane identity')
+                owned[int(pid)] = current[int(pid)][2]
+        paths = list(itertools.islice((self.root / 'state').rglob('*.json'), 257))
+        self.assertLessEqual(len(paths), 256, 'cleanup binding bound')
+        for path in paths:
+            record = read_json(path, MAX_RECORD)
+            if not isinstance(record, dict): continue
+            supervisor = record.get('supervisor') or {}
+            for pid, birth in ((record.get('pid'), record.get('process_start')),
+                               (supervisor.get('pid'), supervisor.get('start'))):
+                if isinstance(pid, int) and isinstance(birth, str) and birth and pid in current:
+                    if current[pid][2] == ' '.join(birth.split()): owned[pid] = current[pid][2]
+        def living(rows):
+            while True:
+                children = {pid: value[2] for pid, value in rows.items()
+                            if pid not in owned and value[0] in owned and value[0] in rows
+                            and rows[value[0]][2] == owned[value[0]]}
+                if not children: break
+                owned.update(children)
+            return {pid: birth for pid, birth in owned.items()
+                    if pid in rows and rows[pid][2] == birth and not rows[pid][1].startswith(('Z', 'X'))}
+        living(current)  # Snapshot descendant ownership before the socket stop.
+        self.stop_private_socket()
+        while living(table()):
+            self.assertLess(time.monotonic(), self.row_end - 5, 'UNKNOWN owned descendants at original end')
+            time.sleep(min(.05, self.remaining(.05)))
+        self.checkpoints.append(dict(cleanup='private socket and observed birth identities exited',
+                                     owned=[dict(pid=pid, birth=birth) for pid, birth in owned.items()]))
+
+    def stop_private_socket(self):
+        # Also attempted independently if process discovery failed before stop;
+        # never retry a previous stop or signal a process by a discovered PID.
+        if getattr(self, 'socket_stop_attempted', False): return
+        if not getattr(self, 'socket', None) or not Path(self.socket).exists(): return
+        self.socket_stop_attempted = True
+        stopped = subprocess.run([test_pause.TMUX, '-S', self.socket, 'kill-server'], env=self.env,
+                                 capture_output=True, text=True, timeout=self.remaining(3))
+        self.assertEqual(stopped.returncode, 0, 'UNKNOWN private socket stop')
+
+    def stop_host(self):
+        """Only the hint classes use this; no inherited renewed wait or PID kill."""
+        import test_windows_host as host
+        from test_windows_host_conpty import image_of
+        problems = []
+        try:
+            status = self.status()  # Private endpoint also covers failed launches.
+            if status.get('running') is True:
+                self.assertIn(status['host']['pid'], self.hosts, 'UNKNOWN live host handle')
+            for name in self.names:
+                record = self.maybe_binding(name)
+                if record:
+                    self.pin_session(name)
+                    if not record.get('paused') and not record.get('session_end'):
+                        self.assertIn((record.get('pid'), record.get('process_start')), self.pinned,
+                                      'UNKNOWN live native handle')
+            if any(host.KERNEL32.WaitForSingleObject(handle, 0) != host.WAIT_OBJECT_0
+                   for handle in self.hosts.values()):
+                panes = self.ok({'op': 'list'})['panes']
+                self.assertLessEqual(len(panes), 16, 'private host pane bound')
+                for pane in panes: self.ok({'op': 'kill', 'target': {'pane': pane['pane']}})
+                self.ok({'op': 'stop_host'})
+        except BaseException as error:
+            problems.append('private stop: ' + type(error).__name__)
+        # Host job is no-breakaway and kill-on-close. Pinned handles, not a PID
+        # search, are the only forced-stop authority. Missing proof stays unknown.
+        handles = [(pid, handle) for pid, handle in self.hosts.items()]
+        handles += [(pid, handle) for (pid, _), handle in self.pinned.items()]
+        for pid, handle in handles:
+            try:
+                stop_pinned_handle(handle, lambda: image_of(pid), self.root,
+                                   host.KERNEL32.WaitForSingleObject, host.KERNEL32.TerminateProcess, self.remaining)
+            except BaseException as error:
+                problems.append('owned handle: ' + type(error).__name__)
+            finally:
+                host.KERNEL32.CloseHandle(handle)
+        self.hosts.clear()
+        self.pinned.clear()
+        files = list(itertools.islice(self.root.rglob('*'), 4097))
+        self.assertLessEqual(len(files), 4096, 'owned file-release inventory bound')
+        for path in files:
+            self.remaining(1)
+            if path.suffix.lower() in ('.exe', '.dll'):
+                from test_windows_native_agents import in_use
+                if in_use(path): problems.append('owned executable still held')
+        self.assertEqual(problems, [], 'UNKNOWN Windows owned cleanup; retain runtime')
+        self.checkpoints.append(dict(cleanup='pinned owned handles exited; files released'))
+
+    def cleanup_owned(self):
+        self.cleaning, self.gate_end = True, None
+        problems = []
+        # Independent stop/reap/check attempts share ONE end, even after a
+        # prior failure. No TemporaryDirectory finalizer can erase unknown work.
+        operations = ([self.stop_host] if os.name == 'nt' else [self.stop_unix, self.stop_private_socket])
+        def direct_children():
+            for child in self.cli_children:
+                if child.poll() is None:
+                    self.remaining(1)
+                    child.kill()  # Only this unreaped direct child's custody.
+                child.wait(timeout=self.remaining(3))
+        operations += [direct_children, self.close_model]
+        if hasattr(self, 'native_copy'):
+            operations.append(lambda: self.keep_evidence('after owned stop'))
+        operations.append(self.final_observer_check)
+        for operation in operations:
+            try:
+                self.remaining(1)
+                operation()
+            except BaseException as error:
+                problems.append(type(error).__name__ + ': ' + str(error)[:400])
+        self.cleanup_verified = not problems and time.monotonic() < self.row_end
+        self.save_cleanup('verified before deletion' if self.cleanup_verified else 'UNKNOWN: runtime retained', problems)
+        if self.cleanup_verified:
+            try:
+                self.remaining(1)
+                if getattr(self, 'project_parent', None): shutil.rmtree(self.project_parent)
+                if hasattr(self, 'root'): shutil.rmtree(self.root)
+                self.remaining(1)
+            except BaseException as error:
+                self.cleanup_verified = False
+                problems.append('runtime removal: ' + type(error).__name__)
+                self.save_cleanup('UNKNOWN: runtime removal incomplete', problems)
+        self.assertTrue(self.cleanup_verified, 'UNKNOWN owned cleanup; retained namespaces: ' + str(getattr(self, 'root', '')))
+
+    def keep_evidence(self, stage):
         destination = self.result_dir
-        self.assertEqual(sha256(self.native_input), self.native_sha256)
-        self.assertEqual(sha256(self.native_copy), self.native_sha256)
+        self.assertEqual(sha256(self.native_input, self.row_end), self.native_sha256)
+        self.assertEqual(sha256(self.native_copy, self.row_end), self.native_sha256)
         self.checkpoints.append(dict(native_input_sha256=self.native_sha256,
-                                     private_native_sha256=sha256(self.native_copy), stage='before owned cleanup'))
+                                     private_native_sha256=self.native_sha256, stage=stage))
         for name, path in (('settings.json', self.settings_path), ('requests.jsonl', self.api_root / 'requests.jsonl')):
             if path.exists(): shutil.copy2(path, destination / name)
         (destination / 'checkpoints.json').write_text(json.dumps(self.checkpoints, indent=2))
@@ -712,11 +950,27 @@ if os.name == 'nt':
     import test_windows_native_agents as windows
     import test_windows_host as host
 
-    class NativeWindowsClaudeHint(HintContract, windows.NativeAgent, host.HostCase):
+    class HintHostCase(host.HostCase):
+        """Same private HostCase setup, without its automatic GC/runtime deletion."""
+        def setUp(self):
+            if not host.HGS.is_file(): raise AssertionError('sealed hgs input is missing')
+            self.root = Path(tempfile.mkdtemp(prefix='hgs-hint-host-'))
+            self.state, self.home, self.work = (self.root / name for name in ('state', self.PROFILE, 'work'))
+            for path in (self.state, self.home, self.work): path.mkdir()
+            self.env = {key: value for key, value in os.environ.items()
+                        if not key.upper().startswith(('HGS_', 'FAKE_AGENT_', 'TMUX', 'XDG_'))}
+            self.env.update(HGS_STATE_DIR=str(self.state), USERPROFILE=str(self.home), HOME=str(self.home),
+                            HGS_HOST_IMAGE=str(host.HGS), HGS_HOST_ALLOW_UNSTAGED='1')
+            self.unique = f'hgs-hint-host-{os.getpid()}-{time.monotonic_ns()}'
+            self.launches, self.hosts = 0, {}
+
+    @unittest.skipUnless(INPUTS in os.environ, 'select the reviewed agent-hint contract')
+    class NativeWindowsClaudeHint(HintContract, windows.NativeAgent, HintHostCase):
         AGENT, BINARY, COMPOSER = 'claude', os.environ.get('HGS_CLAUDE_TEST_BIN'), '❯'
         CONPTY = windows.CONPTY
 
-    class NativeWindowsCodexHint(HintContract, windows.NativeAgent, host.HostCase):
+    @unittest.skipUnless(INPUTS in os.environ, 'select the reviewed agent-hint contract')
+    class NativeWindowsCodexHint(HintContract, windows.NativeAgent, HintHostCase):
         AGENT, BINARY, COMPOSER = 'codex', os.environ.get('HGS_CODEX_TEST_BIN'), '›'
         CONPTY = windows.CONPTY
 
