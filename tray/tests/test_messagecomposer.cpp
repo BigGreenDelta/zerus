@@ -195,6 +195,8 @@ private slots:
     void restartKeepsIsolationRenamesAndAttachmentRemoval();
     void restoredDraftPresenceNeedsNoConversationOrAttachmentRead();
     void backgroundDraftLoadAndRenamePreserveVisibleSession();
+    void backgroundDraftLoadRefusesIncompleteRetainedAttachments_data();
+    void backgroundDraftLoadRefusesIncompleteRetainedAttachments();
     void deliveryPersistence_data();
     void deliveryPersistence();
     void storageFailureKeepsDraftAndBlocksDispatch();
@@ -687,6 +689,49 @@ void TestMessageComposer::backgroundDraftLoadAndRenamePreserveVisibleSession()
     QCOMPARE(moved.attachments.first().mime, original.attachments.first().mime); QCOMPARE(moved.attachments.first().data, original.attachments.first().data);
     QVERIFY(store.load(oldKey).text.isEmpty()); QVERIFY(store.load(oldKey).attachments.isEmpty());
     QVERIFY(!composer.hasDraft(oldKey)); QVERIFY(composer.hasDraft(newKey));
+}
+
+void TestMessageComposer::backgroundDraftLoadRefusesIncompleteRetainedAttachments_data()
+{
+    QTest::addColumn<bool>("missing");
+    QTest::newRow("missing-attachment") << true;
+    QTest::newRow("corrupt-attachment") << false;
+}
+
+void TestMessageComposer::backgroundDraftLoadRefusesIncompleteRetainedAttachments()
+{
+    QFETCH(bool, missing);
+    const QString oldKey = "arch\nincomplete\narchive", newKey = "arch\nincomplete", currentKey = "mac\nunchanged";
+    ComposerDraftStore store; ComposerDraft archived;
+    archived.text = "Keep the incomplete source recoverable"; archived.anchor = 2; archived.position = 8;
+    archived.attachments = {{"good.txt", "text/plain", "retained good bytes", {}}, {"damaged.txt", "text/plain", "original damaged bytes", {}}};
+    QVERIFY(store.save(oldKey, archived));
+    const auto root = ComposerDraftStore::directory();
+    const auto sourcePath = root + '/' + QString::fromLatin1(QCryptographicHash::hash(oldKey.toUtf8(), QCryptographicHash::Sha256).toHex());
+    const auto destinationPath = root + '/' + QString::fromLatin1(QCryptographicHash::hash(newKey.toUtf8(), QCryptographicHash::Sha256).toHex());
+    const auto damagedPath = sourcePath + '/' + QString::fromLatin1(QCryptographicHash::hash(archived.attachments.last().data, QCryptographicHash::Sha256).toHex()) + ".bin";
+    if (missing) QVERIFY(QFile::remove(damagedPath));
+    else { QFile damaged(damagedPath); QVERIFY(damaged.open(QIODevice::WriteOnly | QIODevice::Truncate)); QCOMPARE(damaged.write("corrupt retained bytes"), qint64(22)); damaged.close(); }
+    QMap<QString, QByteArray> before;
+    const auto sourceNames = QDir(sourcePath).entryList(QDir::Files);
+    for (const auto &name : sourceNames) { QFile file(sourcePath + '/' + name); QVERIFY(file.open(QIODevice::ReadOnly)); before.insert(name, file.readAll()); }
+    const auto incomplete = store.load(oldKey);
+    QVERIFY(!incomplete.storageError.isEmpty()); QCOMPARE(incomplete.attachments.size(), 1);
+    MessageComposer composer; setSessionReady(composer, currentKey); composer.setAvailability(true);
+    composer.editor()->setPlainText("Current editor survives");
+    auto cursor = composer.editor()->textCursor(); cursor.setPosition(2); cursor.setPosition(9, QTextCursor::KeepAnchor); composer.editor()->setTextCursor(cursor);
+    composer.ensureDraftLoaded(oldKey); QTRY_VERIFY(!composer.isDraftLoading(oldKey));
+    composer.renameDraft(oldKey, newKey);
+    ComposerDraftStore::flushWrites();
+    QCOMPARE(composer.sessionKey(), currentKey); QCOMPARE(composer.editor()->toPlainText(), QString("Current editor survives"));
+    QCOMPARE(composer.editor()->textCursor().anchor(), 2); QCOMPARE(composer.editor()->textCursor().position(), 9);
+    QVERIFY(composer.hasDraft(oldKey)); QVERIFY(!composer.hasDraft(newKey)); QVERIFY(!composer.isDraftLoading(newKey));
+    QVERIFY(!QFileInfo::exists(destinationPath));
+    QCOMPARE(QDir(sourcePath).entryList(QDir::Files), sourceNames);
+    for (auto it = before.cbegin(); it != before.cend(); ++it) { QFile file(sourcePath + '/' + it.key()); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), it.value()); }
+    const auto retained = store.load(oldKey);
+    QCOMPARE(retained.text, archived.text); QCOMPARE(retained.attachments.first().data, archived.attachments.first().data);
+    QVERIFY(!retained.storageError.isEmpty());
 }
 
 void TestMessageComposer::restoredDraftPresenceNeedsNoConversationOrAttachmentRead()

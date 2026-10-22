@@ -620,7 +620,7 @@ void MessageComposer::deliveryFinished(const QString &key, bool ok, const QStrin
 
 void MessageComposer::renameDraft(const QString &oldKey, const QString &newKey)
 {
-    if (oldKey == newKey || !m_drafts.contains(oldKey) || isSending(oldKey) || isWaitingToSend(oldKey)
+    if (oldKey == newKey || !m_drafts.contains(oldKey) || !m_drafts.value(oldKey).storageError.isEmpty() || isSending(oldKey) || isWaitingToSend(oldKey)
         || isDraftLoading(oldKey) || isSending(newKey) || isWaitingToSend(newKey) || m_renamingKeys.contains(newKey)) return;
     const auto destination = m_drafts.value(newKey);
     if (m_drafts.contains(newKey) && (!destination.text.isEmpty() || !destination.attachments.isEmpty() || !destination.storageError.isEmpty())) {
