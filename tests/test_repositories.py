@@ -15,6 +15,12 @@ REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "hgs")).resolve()
 
 
+def image_proof(executable):
+    stat = executable.stat()
+    seconds, nanos = divmod(stat.st_mtime_ns, 1_000_000_000)
+    return f"{stat.st_dev & ((1 << 64) - 1)}:{stat.st_ino}:{seconds}:{nanos}"
+
+
 class Repositories(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="zerus-repository-")
@@ -233,7 +239,7 @@ class Repositories(unittest.TestCase):
                            "    time.sleep(2)\n"
                            "    (root / 'escaped-deadline').touch()\n"
                            "    sys.exit(0)\n")
-        process = subprocess.Popen([str(HGS), "__state", "repository-git-worker", "1", "clone"],
+        process = subprocess.Popen([str(HGS), "__state", "repository-git-worker", "1", image_proof(HGS), "clone"],
                                    cwd=self.root, env=self.env, stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.addCleanup(process.wait)
@@ -248,6 +254,43 @@ class Repositories(unittest.TestCase):
         self.assertIn("timed out", result["Err"])
         time.sleep(1.2)
         self.assertFalse((self.root / "escaped-deadline").exists())
+
+    @unittest.skipIf(os.name == "nt", "Unix worker image admission across executable replacement")
+    def test_worker_rejects_executable_replaced_after_parent_check(self):
+        candidate = self.root / "worker-executable"
+        replacement = self.root / "replacement"
+        shutil.copy2(HGS, candidate)
+        shutil.copy2(HGS, replacement)
+        expected = image_proof(candidate)  # The proof admitted before pathname replacement.
+        os.replace(replacement, candidate)
+        self.assertNotEqual(expected, image_proof(candidate))
+        self.synthetic_git("(root / 'git-called').touch()\n")
+
+        def worker(proof):
+            process = subprocess.Popen([str(candidate), "__state", "repository-git-worker", "5", proof, "--version"],
+                                       cwd=self.root, env=self.env, stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                # Keep the lifeline open until this worker exits, for both controls.
+                process.wait(timeout=10)
+                return process.returncode, process.stdout.read(), process.stderr.read()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                process.stdin.close()
+                process.stdout.close()
+                process.stderr.close()
+
+        code, out, error = worker(expected)
+        self.assertEqual(code, 1, (out, error))
+        self.assertIn(b"image", error)
+        self.assertFalse((self.root / "git-called").exists(), "Replaced executable started Git")
+        # Causal positive control: that same actual image works with a current proof.
+        code, out, error = worker(image_proof(candidate))
+        self.assertEqual(code, 0, error)
+        self.assertTrue((self.root / "git-called").exists())
+        self.assertIn(b"git version", bytes(json.loads(out)["Ok"]))
 
     def test_missing_parent_and_dry_run_never_clone(self):
         self.operation("clone", parent=self.root / "missing", token=str(uuid.uuid4()), rc=1)
