@@ -933,6 +933,7 @@ jobs:
           HGS_TEST_FAKE_SSH=$(cygpath -w "$PWD/target/debug/examples/fake_ssh.exe")
           export HGS_TEST_BIN HGS_TEST_FAKE_SSH
           python -m unittest discover -s tests -p test_windows_client.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-client.log
+          python -m unittest discover -s tests -p test_repositories.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-repositories.log
       # Microsoft's ConPTY pair (spec D6) from the NuGet package pinned in
       # packaging/windows/conpty.json: the package's SHA-256 is checked before it
       # is opened, then each of the two files'. Nothing from it runs here; the
