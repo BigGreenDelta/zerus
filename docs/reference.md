@@ -1938,6 +1938,26 @@ the original result without repeating Git; different fields are refused.
 Remote acquisition requires the exact selected CLI's `repository-clone-v1`
 capability. Older peers continue to support ordinary folder selection.
 
+The native operation pins the parent and new destination through Git and checks
+their identities before accepting the result. Unix Git starts in the held
+destination directory, so replacing its pathname cannot redirect checkout writes.
+An unpredictable private staging folder is pinned before atomic publication of
+the destination name; its fallback `staging_path` is reserved in the receipt before
+creation. A failed publication can leave that staging folder for inspection.
+Windows creates and holds the new directory atomically and retains its ancestors
+without write/delete sharing; a conflicting handle or reparse point fails closed.
+Zerus never removes a replaced or partially populated directory.
+
+On Unix, a separate native worker owns Git's deadline and watches a wrapper-owned
+pipe. Ending the GUI/SSH wrapper closes that pipe and cancels the worker's own Git
+process group, including its descendants. The original receipt remains
+unconfirmed after abrupt wrapper termination; status and duplicate requests never
+restart the clone. Windows retains the existing kill-on-close job containment.
+The complete encoded receipt is limited to 16 KiB; large Git errors are truncated
+within that envelope, and status and duplicate requests return the same saved
+result. Local paths, including Windows drive, UNC and device paths, are refused.
+A single-letter SSH alias must use an explicit address such as `ssh://c/repo`.
+
 ### Worktrees and ordinary folders
 
 Session cards show a checkout line of the form `folder / branch`, such as

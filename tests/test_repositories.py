@@ -2,8 +2,12 @@
 import json
 import os
 from pathlib import Path
+import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 import uuid
 
@@ -49,6 +53,16 @@ class Repositories(unittest.TestCase):
         if token is not None:
             args += ["--request-id", token]
         return self.hgs(*args, rc=rc)
+
+    def synthetic_git(self, body):
+        """Override only hgs's private, prepended Git, leaving fixture Git real."""
+        real_git = shutil.which("git")
+        executable = self.root / ".local" / "bin" / "git"
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_text(f"#!{sys.executable}\nimport os, pathlib, subprocess, sys, time\n"
+                              f"real_git = {real_git!r}\nroot = pathlib.Path({str(self.root)!r})\n"
+                              + body + "\nos.execv(real_git, [real_git, *sys.argv[1:]])\n")
+        executable.chmod(0o700)
 
     def test_check_has_no_destination_or_receipt_effect(self):
         receipt = self.operation("check")
@@ -120,13 +134,120 @@ class Repositories(unittest.TestCase):
         self.assertFalse((self.root / "another").exists())
 
     def test_invalid_urls_names_and_request_ids_have_no_checkout_effect(self):
-        for url in ("ext::bad", "--upload-pack=bad", "file:///tmp/repo", "https://token@example.invalid/repo"):
+        for url in ("ext::bad", "--upload-pack=bad", "file:///tmp/repo", "https://token@example.invalid/repo",
+                    "C:/source", "C:relative", r"C:\source", r"\\server\share\repo",
+                    r"\\?\C:\repo", r"\\.\C:\repo", "//server/share/repo", "./repo", "../repo"):
             self.operation("clone", url=url, token=str(uuid.uuid4()), rc=1)
         for name in ("..", "/tmp/repo", "a/b", "a\\b", "bad\nname", "trailing."):
             self.operation("clone", name=name, token=str(uuid.uuid4()), rc=1)
         for token in ("bad", str(uuid.uuid4()).upper(), "00000000-0000-0000-0000-000000000000"):
             self.operation("clone", token=token, rc=1)
         self.assertFalse((self.root / "checkout").exists())
+
+    @unittest.skipIf(os.name == "nt", "Unix synthetic executable")
+    def test_large_escaped_error_keeps_status_and_duplicate_readable(self):
+        self.synthetic_git("if 'clone' in sys.argv:\n"
+                           "    os.write(2, (b'\\x01\\\\\\\"' * 20000))\n"
+                           "    sys.exit(1)\n")
+        token = str(uuid.uuid4())
+        receipt = self.operation("clone", token=token)
+        self.assertEqual(receipt["status"], "failed")
+        journal = self.root / "state" / "hgs" / "sessions" / "repository-clones" / (token + ".json")
+        self.assertLessEqual(journal.stat().st_size, 16384)
+        self.assertTrue(receipt["detail"].endswith(" [truncated]"))
+        self.assertEqual(self.hgs("repository", "status", "--request-id", token, "--json"), receipt)
+        self.assertEqual(self.operation("clone", token=token), receipt)
+
+    @unittest.skipIf(os.name == "nt", "Unix directory replacement; Windows denies rename while pinned")
+    def test_destination_replacement_never_receives_git_writes(self):
+        for kind in ("directory", "symlink"):
+            with self.subTest(kind=kind):
+                name = "checkout-" + kind
+                foreign = self.root / ("foreign-" + kind)
+                foreign.mkdir()
+                sentinel = self.root / ("foreign-sentinel-" + kind)
+                sentinel.write_text("retained")
+                self.synthetic_git("if 'clone' in sys.argv:\n"
+                                   f"    target = root / {name!r}\n"
+                                   f"    target.rename(root / {'owned-' + kind!r})\n"
+                                   + ("    target.mkdir()\n" if kind == "directory" else
+                                      f"    target.symlink_to(root / {'foreign-' + kind!r}, target_is_directory=True)\n"))
+                receipt = self.operation("clone", name=name, token=str(uuid.uuid4()))
+                self.assertEqual(receipt["status"], "failed")
+                self.assertFalse((self.root / name / ".git").exists(), "Git wrote into a replacement")
+                self.assertEqual(list(foreign.iterdir()), [])
+                self.assertEqual(sentinel.read_text(), "retained")
+                self.assertEqual((self.root / ("owned-" + kind) / "content").read_text(), "preserved\n")
+
+    @unittest.skipIf(os.name == "nt", "Unix directory replacement; Windows denies rename while pinned")
+    def test_parent_replacement_retains_owned_checkout_and_foreign_tree(self):
+        parent = self.root / "parent"
+        parent.mkdir()
+        self.synthetic_git("if 'clone' in sys.argv:\n"
+                           "    (root / 'parent').rename(root / 'owned-parent')\n"
+                           "    (root / 'parent').mkdir()\n"
+                           "    (root / 'parent' / 'foreign').write_text('retained')\n")
+        receipt = self.operation("clone", parent=parent, token=str(uuid.uuid4()))
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual([p.name for p in parent.iterdir()], ["foreign"])
+        self.assertEqual((parent / "foreign").read_text(), "retained")
+        self.assertEqual((self.root / "owned-parent" / "checkout" / "content").read_text(), "preserved\n")
+
+    @unittest.skipIf(os.name == "nt", "Unix wrapper SIGKILL / lifeline regression")
+    def test_wrapper_shutdown_cancels_only_owned_git_group(self):
+        self.synthetic_git("if 'clone' in sys.argv:\n"
+                           "    subprocess.Popen([sys.executable, '-c', \"import pathlib,time; time.sleep(2); pathlib.Path(\" + repr(str(root / 'escaped-grandchild')) + \").touch()\"])\n"
+                           "    (root / 'started').write_text(str(os.getpid()))\n"
+                           "    time.sleep(2)\n"
+                           "    (root / 'escaped-git').touch()\n"
+                           "    sys.exit(0)\n")
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                     env=self.env, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(unrelated.wait)
+        self.addCleanup(unrelated.terminate)
+        token = str(uuid.uuid4())
+        process = subprocess.Popen([str(HGS), "repository", "clone", "--url", self.url,
+                                    "--parent", str(self.root), "--name", "checkout",
+                                    "--request-id", token, "--json"], env=self.env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(process.wait)
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+        end = time.monotonic() + 10
+        while not (self.root / "started").exists() and time.monotonic() < end:
+            time.sleep(0.01)
+        self.assertTrue((self.root / "started").exists())
+        process.send_signal(signal.SIGKILL)
+        process.communicate(timeout=5)
+        time.sleep(2.2)  # Self-expiring counterexample children, no global process cleanup.
+        self.assertFalse((self.root / "escaped-git").exists(), "Git outlived its wrapper/deadline owner")
+        self.assertFalse((self.root / "escaped-grandchild").exists(), "Git descendant escaped cleanup")
+        self.assertIsNone(unrelated.poll(), "Cleanup affected an unrelated process")
+        receipt = self.hgs("repository", "status", "--request-id", token, "--json")
+        self.assertEqual(receipt["status"], "unconfirmed")
+        self.assertEqual(self.operation("clone", token=token), receipt)
+
+    @unittest.skipIf(os.name == "nt", "Unix worker's independent deadline")
+    def test_worker_deadline_stops_git_without_wrapper_cancellation(self):
+        self.synthetic_git("if 'clone' in sys.argv:\n"
+                           "    time.sleep(2)\n"
+                           "    (root / 'escaped-deadline').touch()\n"
+                           "    sys.exit(0)\n")
+        process = subprocess.Popen([str(HGS), "__state", "repository-git-worker", "1", "clone"],
+                                   cwd=self.root, env=self.env, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(process.wait)
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+        # Keep the lifeline open: expiry, rather than parent EOF, must cancel Git.
+        process.wait(timeout=5)
+        self.assertEqual(process.returncode, 0, process.stderr.read())
+        result = json.loads(process.stdout.read())
+        process.stdin.close()
+        process.stdout.close()
+        process.stderr.close()
+        self.assertIn("timed out", result["Err"])
+        time.sleep(1.2)
+        self.assertFalse((self.root / "escaped-deadline").exists())
 
     def test_missing_parent_and_dry_run_never_clone(self):
         self.operation("clone", parent=self.root / "missing", token=str(uuid.uuid4()), rc=1)

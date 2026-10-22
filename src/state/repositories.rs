@@ -5,10 +5,29 @@ use sha2::{Digest, Sha256};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+mod directory;
+#[cfg(unix)]
+mod worker;
+#[cfg(unix)]
+pub(super) fn git_worker(args: &[String]) -> Result<i32> {
+    worker::dispatch(args)
+}
+
+const MAX_RECEIPT_BYTES: u64 = 16_384;
+
 const USAGE: &str = "usage: hgs repository check|clone --url URL --parent PATH --name NAME [--request-id UUID] --json; hgs repository status --request-id UUID --json";
 
 fn valid_url(url: &str) -> bool {
-    if url.is_empty()
+    // A single drive letter is ambiguous with SCP and Git for Windows treats
+    // it as local. Such SSH aliases must use an explicit ssh:// URL.
+    let drive = url
+        .as_bytes()
+        .get(0..2)
+        .is_some_and(|b| b[0].is_ascii_alphabetic() && b[1] == b':');
+    if drive
+        || url.contains('\\')
+        || url.starts_with("//")
+        || url.is_empty()
         || url.len() > 4096
         || url.chars().any(|c| c.is_control() || c.is_whitespace())
     {
@@ -82,10 +101,27 @@ fn validate(url: &str, parent: &str, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn git(parent: &Path, args: &[&str], seconds: u64) -> Result<Vec<u8>> {
+fn git(directory: &directory::Directory, args: &[&str], seconds: u64) -> Result<Vec<u8>> {
+    directory.verify()?;
+    #[cfg(unix)]
+    let result = worker::run(directory, args, seconds);
+    #[cfg(windows)]
+    let result = run_git(Some(directory), args, seconds, &|| false);
+    directory.verify()?;
+    result
+}
+
+fn run_git(
+    directory: Option<&directory::Directory>,
+    args: &[&str],
+    seconds: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u8>> {
     let mut cmd = Command::new("git");
-    cmd.current_dir(parent)
-        .args(["--no-pager", "-c", "core.fsmonitor=false"])
+    if let Some(directory) = directory {
+        directory.anchor(&mut cmd)?;
+    }
+    cmd.args(["--no-pager", "-c", "core.fsmonitor=false"])
         .args(args)
         .env("LC_ALL", "C");
     for key in [
@@ -104,7 +140,7 @@ fn git(parent: &Path, args: &[&str], seconds: u64) -> Result<Vec<u8>> {
         &mut cmd,
         [65536, 65536],
         Instant::now() + Duration::from_secs(seconds),
-        &|| false,
+        cancelled,
     )
     .map_err(|e| match e {
         crate::platform::RunError::Spawn(e) => format!("Cannot start Git: {e}"),
@@ -136,10 +172,58 @@ fn read_receipt(id: &str) -> Result<Value> {
     let p = receipt_path(id);
     let meta =
         std::fs::symlink_metadata(&p).map_err(|e| format!("Clone receipt unavailable: {e}"))?;
-    if !meta.is_file() || meta.len() > 16384 {
+    if !meta.is_file() || meta.len() > MAX_RECEIPT_BYTES {
         return Err("Invalid clone receipt".into());
     }
     serde_json::from_slice(&std::fs::read(p).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
+fn bounded_receipt(value: &Value) -> Result<Value> {
+    let mut value = value.clone();
+    if value.to_string().len() > MAX_RECEIPT_BYTES as usize {
+        if let Some(detail) = value
+            .get("detail")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            value["detail"] = json!("");
+            let base = value.to_string().len();
+            let available = (MAX_RECEIPT_BYTES as usize)
+                .checked_sub(base)
+                .ok_or("Clone receipt fields exceed the encoded size limit")?;
+            let suffix = " [truncated]";
+            let budget = available.saturating_sub(suffix.len());
+            let mut bounded = String::new();
+            let mut used = 0;
+            for c in detail.chars() {
+                let size = serde_json::to_string(&c.to_string()).unwrap().len() - 2;
+                if used + size > budget {
+                    break;
+                }
+                used += size;
+                bounded.push(c);
+            }
+            if bounded.len() != detail.len() && available >= suffix.len() {
+                bounded.push_str(suffix);
+            }
+            value["detail"] = json!(bounded);
+        }
+    }
+    let limit = if value["status"] == "unconfirmed" {
+        MAX_RECEIPT_BYTES - 64
+    } else {
+        MAX_RECEIPT_BYTES
+    };
+    if value.to_string().len() as u64 > limit {
+        return Err("Clone receipt fields exceed the encoded size limit".into());
+    }
+    Ok(value)
+}
+
+fn write_receipt(id: &str, value: &Value) -> Result<Value> {
+    let value = bounded_receipt(value)?;
+    atomic(&receipt_path(id), &value.to_string())?;
+    Ok(value)
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
@@ -216,15 +300,16 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     let canonical = validate(url, parent, name)?;
     let destination = canonical.join(name);
+    let parent_directory = directory::Directory::open(&canonical)?;
     if std::fs::symlink_metadata(&destination).is_ok() {
         return Err(
             "Destination already exists. Choose another name or use the existing folder".into(),
         );
     }
     if action == "check" {
-        git(&canonical, &["--version"], 5)?;
+        git(&parent_directory, &["--version"], 5)?;
         git(
-            &canonical,
+            &parent_directory,
             &["ls-remote", "--symref", "--", url, "HEAD"],
             20,
         )?;
@@ -236,22 +321,26 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     let mut receipt = json!({"status":"unconfirmed","request_id":id,"fingerprint":fingerprint,
         "parent":canonical,"path":destination,"name":name});
-    atomic(&receipt_path(id), &receipt.to_string())?;
+    // The fallback location is durable before even a staging directory exists.
+    let staging = format!(".zerus-clone-{}", uuid::Uuid::new_v4());
+    #[cfg(unix)]
+    {
+        receipt["staging_path"] = json!(canonical.join(&staging));
+    }
+    write_receipt(id, &receipt)?;
     let result: Result<()> = (|| {
-        // Reserve this exact previously absent destination atomically. Git may
-        // clean up its own failed transfer; Zerus never removes user files.
-        std::fs::create_dir(&destination).map_err(|e| format!("Cannot create destination: {e}"))?;
-        git(&canonical, &["clone", "--quiet", "--", url, name], 600)?;
-        let actual = crate::platform::canonical(&destination).map_err(|e| e.to_string())?;
-        if actual != destination {
-            return Err("Clone destination changed; inspect the folder".into());
-        }
-        let top = git(&destination, &["rev-parse", "--show-toplevel"], 5)?;
+        let owned = parent_directory.create(name, &staging)?;
+        git(&owned, &["clone", "--quiet", "--", url, "."], 600)?;
+        parent_directory.verify()?;
+        owned.verify()?;
+        let top = git(&owned, &["rev-parse", "--show-toplevel"], 5)?;
         let top = crate::platform::canonical(String::from_utf8_lossy(&top).trim())
             .map_err(|e| e.to_string())?;
         if top != destination {
             return Err("Git did not confirm the requested checkout".into());
         }
+        parent_directory.verify()?;
+        owned.verify()?;
         Ok(())
     })();
     match result {
@@ -261,7 +350,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             receipt["detail"] = json!(error);
         }
     }
-    atomic(&receipt_path(id), &receipt.to_string())?;
+    let receipt = write_receipt(id, &receipt)?;
     println!("{receipt}");
     Ok(0)
 }
@@ -277,6 +366,7 @@ mod tests {
             "ssh://git@example.test/team/repo.git",
             "ssh://example.test:2222/repo.git",
             "work:repo",
+            "ssh://c/repo",
         ] {
             assert!(valid_url(url), "{url}");
         }
@@ -286,6 +376,15 @@ mod tests {
             "ext::bad",
             "/local/repo",
             "file:///repo",
+            "C:/source",
+            "C:source",
+            r"C:\source",
+            r"\\server\share\repo",
+            r"\\?\C:\repo",
+            r"\\.\C:\repo",
+            "//server/share/repo",
+            "./repo",
+            "../repo",
             "https://token@example.test/repo",
             "ssh://user:pass@example.test/repo",
             "https://example.test/repo?token=x",
@@ -293,5 +392,22 @@ mod tests {
         ] {
             assert!(!valid_url(url), "{url}");
         }
+    }
+    #[test]
+    fn receipt_limit_includes_escaped_detail_and_fields() {
+        for name in ["x".repeat(100), "x".repeat(16_200)] {
+            let receipt =
+                json!({"status":"failed", "name":name, "detail":"\u{1}\\\"☃".repeat(10_000)});
+            let bounded = bounded_receipt(&receipt).unwrap();
+            assert!(bounded.to_string().len() <= MAX_RECEIPT_BYTES as usize);
+            assert!(bounded["detail"]
+                .as_str()
+                .unwrap()
+                .ends_with(" [truncated]"));
+            assert_eq!(bounded_receipt(&bounded).unwrap(), bounded);
+        }
+        assert!(
+            bounded_receipt(&json!({"status":"unconfirmed","name":"x".repeat(16_384)})).is_err()
+        );
     }
 }
