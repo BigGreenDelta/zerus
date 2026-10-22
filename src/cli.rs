@@ -178,6 +178,12 @@ fn local_sessions() -> Result<()> {
     }
 }
 
+// Repository preparation owns only its checkout and receipt. Like the existing
+// configuration/control commands, it does not require or enable a session host.
+fn needs_local_sessions(command: &str) -> bool {
+    !matches!(command, "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository")
+}
+
 /// Fails unless this process may run what the processes of a session run:
 /// `--run`, the session's supervisor, and `__state`, which its tracking hooks
 /// call. That is wherever local sessions run, and on Windows also inside a
@@ -560,7 +566,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
     // Commands that only read or change this machine's configuration, or reach
     // remote machines, also run on a build without local sessions.
-    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks") {
+    if needs_local_sessions(command) {
         local_sessions()?;
     }
     // Only Unix has arms for these below; elsewhere they would reach the launch arm.
@@ -2252,6 +2258,23 @@ fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_preparation_does_not_admit_session_commands_on_control_consoles() {
+        for command in ["ls", "machine", "presence", "swarm", "project", "account",
+            "speech", "analytics", "graph", "wait", "mobile", "hooks", "repository"] {
+            assert!(!needs_local_sessions(command), "{command}");
+        }
+        for command in ["a", "kill", "send", "send-now", "inspect", "history",
+            "history-projection", "processes", "terminal", "session-action", "interrupt",
+            "clear-context", "compact-context", "answer", "effort", "settings", "recovery",
+            "read", "notifications", "voice", "schedules", "attachment", "file-read",
+            "claude", "codex", "kimi", "sh", "resume", "pause", "fork", "reference",
+            "archive", "terminate", "dirs", "worktrees", "git-status", "__state", "__host",
+            "repository-git-worker", "Repository", "repository-extra", ""] {
+            assert!(needs_local_sessions(command), "{command}");
+        }
+    }
 
     #[test]
     fn shared_notifications_advertises_its_exact_standalone_marker_on_every_platform() {
