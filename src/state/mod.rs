@@ -80,6 +80,7 @@ mod conversation_history;
 mod usage;
 mod workspace;
 mod git_status;
+mod repositories;
 mod worktrees;
 mod worktree_cleanup;
 mod worktree_inspection;
@@ -644,6 +645,7 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
 pub fn dispatch(args: &[String]) -> Result<i32> {
     // Coordination metadata never starts or controls a native session host.
     if args.first().map(String::as_str)==Some("wait") { return waits::dispatch(&args[1..]); }
+    if args.first().map(String::as_str)==Some("repository") { return repositories::dispatch(&args[1..]); }
     session_operations()?;
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());

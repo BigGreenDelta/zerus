@@ -179,7 +179,7 @@ add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp s
     src/AnalyticsSettings.cpp
     src/MachineFilter.cpp src/ProjectFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
     src/ComposerToolbar.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
-    src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
+    src/CloneRepositoryDialog.cpp src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
     src/ProcessView.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp
     src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp src/PhonePairing.cpp
     src/OpenCodeModels.cpp src/OpenCodeModelPicker.cpp
