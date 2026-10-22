@@ -129,8 +129,9 @@ private val Amber = Color(0xFFFFCB7D)
     LaunchedEffect(accounts) { account = LaunchPresentation.defaultAccount(accounts,account) }
     LaunchedEffect(projects) {
         if(projects.none { it.id == projectId }) {
-            val preferred = model.selectedProject?.key?.takeIf { it.connectionId == machine.connectionId && it.swarmId == catalog?.string("swarm_id") }?.id
-                ?: catalog?.string("default_project")
+            val scoped = model.selectedProject?.key?.takeIf { it.connectionId == machine.connectionId && it.swarmId == catalog?.string("swarm_id") }?.id
+            val preferred = scoped ?: catalog?.string("default_project")
+            if(scoped!=null) projectExplicit = true
             projectId = projects.find { it.id == preferred }?.id ?: projects.firstOrNull()?.id.orEmpty()
             folder = browsedFolder
         }

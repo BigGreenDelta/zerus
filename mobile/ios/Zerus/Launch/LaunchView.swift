@@ -367,8 +367,9 @@ struct LaunchForm: View {
         .onChange(of: effortOptions.map(\.value)) { if !selectedEffort.isEmpty && !effortOptions.contains(where: { $0.value == selectedEffort }) { selectedEffort = "" } }
         .onChange(of: projects.map(\.id), initial: true) {
             guard !projects.contains(where: { $0.id == projectId }) else { return }
-            let scoped = app.sessionProjectScope?.key
-            let preferred = scoped.flatMap { $0.connectionId == machine.connectionId && $0.swarmId == catalog?.string("swarm_id") ? $0.id : nil } ?? catalog?.string("default_project")
+            let scoped = (app.sessionProjectScope?.key).flatMap { $0.connectionId == machine.connectionId && $0.swarmId == catalog?.string("swarm_id") ? $0.id : nil }
+            let preferred = scoped ?? catalog?.string("default_project")
+            if scoped != nil { projectExplicit = true }
             projectId = projects.first { $0.id == preferred }?.id ?? projects.first?.id ?? ""
             folder = browsedFolder
         }
