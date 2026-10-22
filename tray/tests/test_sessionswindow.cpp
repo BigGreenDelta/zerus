@@ -7707,7 +7707,11 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
     QCOMPARE(list->count(), 1);
     if (scopeChange == "bulk-disk-only") {
         window.showSession({}, other.name); archiveFilter->click();
-        QCOMPARE(list->count(), 1); list->item(0)->setSelected(true);
+        machines->setSelection({"@local"});
+        QCOMPARE(list->count(), 1); list->clearSelection();
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::ControlModifier, list->visualItemRect(list->item(0)).center());
+        QTRY_COMPARE(list->selectedItems().size(), 1);
+        QCOMPARE(list->selectedItems().first()->data(Qt::UserRole).toString(), oldKey);
         QVERIFY(composer->sessionKey() != oldKey);
     } else {
         list->setCurrentRow(0);
@@ -7721,13 +7725,18 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
     const auto history = activity->plainText(); QVERIFY(!history.isEmpty());
     QSignalSpy terminal(&window, &SessionsWindow::sessionActivated);
     auto *restore = window.findChild<QPushButton *>("restoreSessionAction");
-    QVERIFY(restore && restore->isEnabled());
+    QVERIFY(restore);
     if (scopeChange == "bulk" || scopeChange == "bulk-disk-only") {
         auto *resume = window.findChild<QAction *>("selectionplay"); QVERIFY(resume && resume->isEnabled()); resume->trigger();
-    } else restore->click();
+    } else { QVERIFY(restore->isEnabled()); restore->click(); }
     QTRY_COMPARE(writes.size(), 1);
     QCOMPARE(writes[0][0].toString(), "restore " + archived.name); QVERIFY(writes[0][1].toBool());
-    if (navigateAway) window.showSession({}, other.name);
+    if (navigateAway) {
+        window.showSession({}, other.name);
+        // showSession is an explicit global navigation action; reapply the
+        // user's machine scope before the later Restore result arrives.
+        machines->setSelection({"@local"});
+    }
     if (scopeChange == "filter") {
         for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "paused") button->click();
     } else if (scopeChange == "search") {
