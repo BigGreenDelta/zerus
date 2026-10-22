@@ -41,7 +41,7 @@ pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
         if target.starts_with('-') || target.chars().any(char::is_whitespace) {
             return Err(Error::new(1, "Invalid SSH target"));
         }
-        let command = format!("~/.local/bin/hgs __dsh-ui-url {}", platform::quote(name));
+        let command = format!("~/.local/bin/hgs __dsh-ui-url {}", platform::remote_quote(name));
         let out = platform::ssh()
             .args(crate::machines::ssh_options(config, target))
             .args([
