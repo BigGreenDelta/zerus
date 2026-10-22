@@ -15,7 +15,7 @@ try {
   const state = await call('account/getState');
   if (state.status === 'signed-out') result.status = 'signed_out';
   else {
-    const client = {version: '0.2.0-rc.2', locale: 'en', timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60};
+    const client = {version: '0.2.1-rc.2', locale: 'en', timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60};
     const [profile, balance] = await Promise.allSettled([call('account/getProfile', {client}), call('account/getBalance', {client})]);
     const clean = v => typeof v === 'string' ? v.replace(/[\x00-\x1f\x7f]/g, '').slice(0,256) : '';
     if (profile.value?.status === 'ready') result.identity = {name: clean(profile.value.value.name), email: clean(profile.value.value.contact), auth_method: 'DeepSeek account'};

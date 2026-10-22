@@ -1,4 +1,4 @@
-// HGS adapter for the official @deepseek-ai/dsh 0.2.0-rc.2 host.
+// HGS adapter for the official @deepseek-ai/dsh 0.2.1-rc.2 host.
 // Loaded through its supported Cordis --patch extension mechanism. No fork of
 // the engine, credential copying, HTTP authentication bypass or PTY injection.
 import net from 'node:net';
@@ -217,10 +217,10 @@ export function apply(ctx, config) {
     } finally { abort.abort(); await stream.return(); }
   }
   // Native authorization reports a child without its own descriptor as corrupt.
-  // A one-shot child records it in its first step, after its parent catalogs
-  // it and after that step's durability checkpoint, so a new child looks the
-  // same until then, and one cancelled before that step stays so when stored.
-  // Such a child has no public history.
+  // The engine now records it when it creates a child. A one-shot child stored
+  // by 0.2.0-rc.2 recorded it in its first step, after its parent cataloged it
+  // and after that step's durability checkpoint; one cancelled before that step
+  // stays without it. Such a child has no public history.
   async function childHistory(address) {
     try { return await childPage(address); } catch (error) {
       if (error?.code !== 'subagent/catalog-diagnostic') throw error;
@@ -400,7 +400,7 @@ export function apply(ctx, config) {
     if (closing) throw new Error('Native host is stopping');
     const p = request.params ?? {};
     switch (request.method) {
-      case 'ping': return { protocol: 1, version: '0.2.0-rc.2', generation, accountPermissions: true, sessionActions: true,
+      case 'ping': return { protocol: 1, version: '0.2.1-rc.2', generation, accountPermissions: true, sessionActions: true,
         nativeOperations: ['fork', 'history-search', 'schedules'], schedule: Boolean(scheduleService()) };
       case 'list': {
         const list = await api.list({}, new AbortController().signal);

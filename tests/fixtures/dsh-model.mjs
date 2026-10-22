@@ -53,7 +53,7 @@ class Adapter extends LlmAdapter {
     // One child per prompt: a continuable child's completion reaches the
     // parent as a later message of its own, after the call's tool result.
     if (text.includes('SUBAGENT') && !options.messages.slice(options.messages.indexOf(prompt) + 1).some(m => m.role === 'tool')) {
-      const args=JSON.stringify({description:'Native child fixture',prompt:'Child result fixture'+(text.match(/ (?:HOLD|DISPOSING|UNSTARTED|CORRUPT|UNRECORDED)_CHILD_\w+/)?.[0]??''),run_in_background:text.includes('CONTINUABLE')});
+      const args=JSON.stringify({description:'Native child fixture',prompt:'Child result fixture'+(text.match(/ (?:HOLD|DISPOSING|CORRUPT|UNRECORDED)_CHILD_\w+/)?.[0]??'')});
       yield {type:'block-start',index:0,blockType:'tool-call'};
       yield {type:'tool-call-delta',index:0,id:'child-call',name:'subagent',argumentsDelta:args};
       yield {type:'block-end',index:0,block:{type:'tool-call',id:'child-call',name:'subagent',arguments:args}};
@@ -114,33 +114,28 @@ export function apply(ctx,config) {
     if(goal?.phase==='active')ctx.goals.pause(agent,{id:goal.id,revision:goal.revision});
     return next();
   });
-  // Keep a marked child in its first pre-step, before it records its subagent
-  // descriptor, until its cancellation arrives: the child then ends that turn
-  // without a step. A marker file reports when the child is waiting.
-  ctx.on('agent/pre-step',async(request,next)=>{
-    const {agent,signal}=request;
-    const hold=agent?.session.header.origin==='subagent'&&JSON.stringify(request.messages??[]).match(/UNSTARTED_CHILD_\w+/)?.[0];
-    if(hold&&config?.holds&&signal){
-      writeFileSync(join(config.holds,hold+'.waiting'),'');
-      await new Promise(resolve=>{
-        const done=()=>{clearTimeout(timer);resolve();},timer=setTimeout(done,15000);
-        if(signal.aborted)done();else signal.addEventListener('abort',done,{once:true});
-      });
-      signal.throwIfAborted();
-    }
-    return next();
-  });
-  // Damage (CORRUPT) or drop (UNRECORDED) a marked child's subagent descriptor
-  // as it is recorded, as damaged storage would; the child's steps still run.
+  // Damage (CORRUPT) or drop (UNRECORDED) the subagent descriptor of the child
+  // a marked parent turn creates, as damaged storage would; the child's steps
+  // still run. The engine records a descriptor when it creates the child, so
+  // the parent's step arms the session class's append for that one record.
+  const damages=new Map();
   ctx.on('agent/pre-step',(request,next)=>{
     const session=request.agent?.session;
-    const damage=session?.header.origin==='subagent'&&JSON.stringify(request.messages??[]).match(/(CORRUPT|UNRECORDED)_CHILD_\w+/)?.[1];
-    if(damage&&!Object.hasOwn(session,'append')){
-      const append=session.append;
-      session.append=function(type,data,...opts){
-        if(type!=='subagent/descriptor')return append.call(this,type,data,...opts);
-        if(damage==='CORRUPT')return append.call(this,type,{...data,provider:null},...opts);
-      };
+    const damage=session&&session.header.origin!=='subagent'&&JSON.stringify(request.messages??[]).match(/(CORRUPT|UNRECORDED)_CHILD_\w+/)?.[1];
+    if(damage){
+      damages.set(session.id,damage);
+      const prototype=Object.getPrototypeOf(session);
+      if(!Object.hasOwn(prototype,'hgsTestAppend')){
+        const append=prototype.append;
+        Object.defineProperty(prototype,'hgsTestAppend',{value:append});
+        prototype.append=function(type,data,...opts){
+          const parent=type==='subagent/descriptor'&&this.header?.origin==='subagent'?this.header.parentSession:undefined;
+          const armed=parent&&damages.get(parent);
+          if(!armed)return append.call(this,type,data,...opts);
+          damages.delete(parent);
+          if(armed==='CORRUPT')return append.call(this,type,{...data,provider:null},...opts);
+        };
+      }
     }
     return next();
   });

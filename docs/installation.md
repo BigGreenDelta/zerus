@@ -522,10 +522,10 @@ npm config set prefix "$HOME/.local"
 
 Keep an existing working npm prefix if you already manage native agents there.
 The current official DeepSeek Harness adapter is pinned to
-`@deepseek-ai/dsh@0.2.0-rc.2`:
+`@deepseek-ai/dsh@0.2.1-rc.2`:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.0-rc.2
+npm install -g @deepseek-ai/dsh@0.2.1-rc.2
 hgs account login native-dsh
 ```
 

@@ -15,7 +15,7 @@ use std::{
 };
 
 #[cfg(unix)]
-const VERSION: &str = "0.2.0-rc.2";
+const VERSION: &str = "0.2.1-rc.2";
 #[cfg(unix)]
 const BRIDGE: &str = include_str!("../dsh/bridge.mjs");
 fn bindings() -> PathBuf {
