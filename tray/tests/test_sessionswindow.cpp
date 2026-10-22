@@ -224,6 +224,8 @@ private slots:
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
     void archiveRestoreKeepsDraftAndConversation_data();
     void archiveRestoreKeepsDraftAndConversation();
+    void archiveRestoresKeepIndependentDraftHandoffs();
+    void restoredRunRequiresMatchingInspectionBeforeNativeControls();
     void openCodeNativeTerminalIsExplicitAndKeepsDraft();
     void savedDraftsGoToTheirSession_data();
     void savedDraftsGoToTheirSession();
@@ -7648,10 +7650,14 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation_data()
     QTest::addColumn<bool>("navigateAway");
     QTest::addColumn<bool>("sameConversation");
     QTest::addColumn<bool>("destinationDraft");
-    QTest::newRow("same-conversation") << false << true << false;
-    QTest::newRow("newer-user-selection") << true << true << false;
-    QTest::newRow("different-conversation") << false << false << false;
-    QTest::newRow("existing-live-draft") << false << true << true;
+    QTest::addColumn<QString>("scopeChange");
+    QTest::newRow("same-conversation") << false << true << false << QString();
+    QTest::newRow("newer-user-selection") << true << true << false << QString();
+    QTest::newRow("different-conversation") << false << false << false << QString();
+    QTest::newRow("existing-live-draft") << false << true << true << QString();
+    QTest::newRow("filter-before-live-row") << false << true << false << QString("filter");
+    QTest::newRow("search-before-live-row") << false << true << false << QString("search");
+    QTest::newRow("preserved-archive-search") << false << true << false << QString("preserved-search");
 }
 
 void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
@@ -7659,9 +7665,11 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
     QFETCH(bool, navigateAway);
     QFETCH(bool, sameConversation);
     QFETCH(bool, destinationDraft);
+    QFETCH(QString, scopeChange);
     auto state = fleet(); auto local = state.local();
     auto archived = local.sessions[0];
-    archived.name = "codex/hgs/restore-draft"; archived.tag = "restore-draft";
+    // Data rows share the isolated store, so each needs independent disk keys.
+    archived.name = "codex/hgs/restore-draft-" + QString::fromLatin1(QTest::currentDataTag()); archived.tag = "restore-draft";
     archived.state = "archived"; archived.archiveId = "draft-archive";
     archived.runId = "archived-run"; archived.conversationId = "conversation-one";
     auto other = local.sessions[1];
@@ -7685,6 +7693,8 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
     QPushButton *archiveFilter = nullptr;
     for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") archiveFilter = button;
     QVERIFY(archiveFilter); archiveFilter->click();
+    auto *search = window.findChild<QLineEdit *>("search"); QVERIFY(search);
+    if (scopeChange == "preserved-search") search->setText("restore-draft");
     QCOMPARE(list->count(), 1); list->setCurrentRow(0);
     QTRY_COMPARE(composer->sessionKey(), oldKey);
     QTRY_VERIFY(!composer->isDraftLoading(oldKey));
@@ -7699,11 +7709,30 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
     QTRY_COMPARE(writes.size(), 1);
     QCOMPARE(writes[0][0].toString(), "restore " + archived.name); QVERIFY(writes[0][1].toBool());
     if (navigateAway) window.showSession({}, other.name);
+    if (scopeChange == "filter") {
+        for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "paused") button->click();
+    } else if (scopeChange == "search") {
+        search->setFocus(); QTest::keyClicks(search, "restore-draft");
+    }
     auto restored = archived; restored.state = "running"; restored.archiveId.clear(); restored.runId = "resumed-run";
     if (!sameConversation) restored.conversationId = "different-conversation";
     local.sessions = {restored, other}; state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(machines->selection(), QSet<QString>{"@local"});
     QCOMPARE(terminal.size(), 0); QCOMPARE(writes.size(), 1);
+    if (scopeChange == "filter" || scopeChange == "search") {
+        QTRY_COMPARE(store.load(liveKey).text, draft.text);
+        QVERIFY(store.load(oldKey).text.isEmpty());
+        if (scopeChange == "filter") {
+            for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "paused") QVERIFY(button->isChecked());
+        } else QCOMPARE(search->text(), QString("restore-draft"));
+        // The user's scope change canceled follow-navigation, not the handoff.
+        QVERIFY(composer->sessionKey() != liveKey);
+        return;
+    }
+    if (scopeChange == "preserved-search") {
+        QCOMPARE(search->text(), QString("restore-draft"));
+        auto *results = window.findChild<SessionSearch *>(); QVERIFY(results && results->active());
+    }
     if (!sameConversation) {
         QVERIFY(composer->sessionKey() != liveKey);
         QCOMPARE(store.load(oldKey).text, draft.text);
@@ -7731,6 +7760,101 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
             QVERIFY(activity->plainText().contains(history));
         }
     }
+}
+
+void TestSessionsWindow::archiveRestoresKeepIndependentDraftHandoffs()
+{
+    auto state = fleet(); auto local = state.local();
+    auto first = local.sessions[0], second = first;
+    first.name = "codex/hgs/restore-independent-a"; second.name = "codex/hgs/restore-independent-b";
+    first.state = second.state = "archived";
+    first.archiveId = "independent-a"; second.archiveId = "independent-b";
+    first.conversationId = "conversation-a"; second.conversationId = "conversation-b";
+    local.sessions = {first, second}; state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    ComposerDraftStore store; ComposerDraft a, b; a.text = "First independent draft"; b.text = "Second independent draft";
+    const QString oldA = '\n' + first.name + '\n' + first.archiveId, oldB = '\n' + second.name + '\n' + second.archiveId;
+    QVERIFY(store.save(oldA, a)); QVERIFY(store.save(oldB, b));
+    QFile source(script()); QVERIFY(source.open(QIODevice::ReadOnly));
+    const QString fixture = m_dir->filePath("independent-restores");
+    const QByteArray inspect = "elif c=='inspect':\n s=a[1].rsplit('-',1)[-1];print(json.dumps({'tracked':True,'conversation_id':'conversation-'+s,'events':[],'cursor':0}))\n";
+    QVERIFY(FakeCli::install(fixture, source.readAll().replace("if False:pass\n", "if False:pass\n" + inspect)));
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(state); window.show();
+    auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *restore = window.findChild<QPushButton *>("restoreSessionAction");
+    auto *list = window.findChild<QListWidget *>("sessionList");
+    QVERIFY(client && composer && restore && list); QSignalSpy writes(client, &HgsClient::writeDone);
+    auto selectArchive = [&](const QString &key) {
+        for (int row = 0; row < list->count(); ++row) if (list->item(row)->data(Qt::UserRole).toString() == key) { list->setCurrentRow(row); return true; }
+        return false;
+    };
+    for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
+    QVERIFY(selectArchive(oldA)); QTRY_COMPARE(composer->sessionKey(), oldA); QTRY_VERIFY(!composer->isDraftLoading(oldA));
+    restore->click(); QTRY_COMPARE(writes.size(), 1); QVERIFY(writes[0][1].toBool());
+    for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
+    QVERIFY(selectArchive(oldB)); QTRY_COMPARE(composer->sessionKey(), oldB); QTRY_VERIFY(!composer->isDraftLoading(oldB));
+    restore->click(); QTRY_COMPARE(writes.size(), 2); QVERIFY(writes[1][1].toBool());
+    first.state = second.state = "running"; first.archiveId.clear(); second.archiveId.clear();
+    first.runId = "new-a"; second.runId = "new-b";
+    local.sessions = {first, second}; state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QTRY_COMPARE(store.load('\n' + first.name).text, a.text);
+    QTRY_COMPARE(store.load('\n' + second.name).text, b.text);
+    QVERIFY(store.load(oldA).text.isEmpty()); QVERIFY(store.load(oldB).text.isEmpty());
+    QTRY_COMPARE(composer->sessionKey(), '\n' + second.name);
+    QCOMPARE(writes.size(), 2);
+}
+
+void TestSessionsWindow::restoredRunRequiresMatchingInspectionBeforeNativeControls()
+{
+    auto state = fleet(); auto local = state.local(); auto session = local.sessions[0];
+    session.name = "codex/hgs/restore-held-inspection"; session.state = "archived";
+    session.archiveId = "held-archive"; session.runId = "old-run"; session.conversationId = "held-conversation";
+    local.sessions = {session}; state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    const QJsonObject old{{"tracked",true},{"conversation_id",session.conversationId},{"run_id",session.runId},
+        {"state","archived"},{"phase","working"},{"activity","working"},{"process_state","running"},
+        {"runtime_state","live"},{"interrupt_supported",true},{"terminal_supported",true},{"events",QJsonArray{}},{"cursor",0}};
+    QFile source(script()); QVERIFY(source.open(QIODevice::ReadOnly)); const QString fixture = m_dir->filePath("restore-held-inspection");
+    const QByteArray inspect = "elif c=='inspect':sys.stdout.write(open(__file__+'.answer').read())\n";
+    QVERIFY(FakeCli::install(fixture, source.readAll().replace("if False:pass\n", "if False:pass\n" + inspect)));
+    auto answer = [&](const QJsonObject &data) {
+        QSaveFile file(fixture + ".answer"); if (!file.open(QIODevice::WriteOnly)) return false;
+        const auto bytes = QJsonDocument(data).toJson(QJsonDocument::Compact);
+        return file.write(bytes) == bytes.size() && file.commit();
+    };
+    QVERIFY(answer(old));
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(state); window.show();
+    auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *restore = window.findChild<QPushButton *>("restoreSessionAction"); auto *terminal = window.findChild<TerminalView *>();
+    auto *open = window.findChild<QAction *>("openSessionAction"); auto *stop = composer ? composer->findChild<QPushButton *>("interruptAgent") : nullptr;
+    auto *connect = terminal ? terminal->findChild<QPushButton *>("terminalConnect") : nullptr;
+    QVERIFY(client && composer && restore && terminal && open && stop && connect);
+    QSignalSpy writes(client, &HgsClient::writeDone), ready(client, &HgsClient::inspectionReady), opened(&window, &SessionsWindow::sessionActivated);
+    for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") button->click();
+    auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(list); QCOMPARE(list->count(), 1); list->setCurrentRow(0);
+    QTRY_COMPARE(composer->sessionKey(), '\n' + session.name + '\n' + session.archiveId);
+    QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
+    restore->click(); QTRY_COMPARE(writes.size(), 1); QVERIFY(writes[0][1].toBool());
+    const auto archiveId = session.archiveId;
+    session.state = "running"; session.archiveId.clear(); session.runId = "restored-run";
+    local.sessions = {session}; state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    const QString key = '\n' + session.name; QTRY_COMPARE(composer->sessionKey(), key);
+    // The exact current inspection is held at the fixture source; old-run
+    // replies still arrive and must not unlock controls or replace the view.
+    QTRY_VERIFY(std::any_of(ready.cbegin(),ready.cend(),[&](const QList<QVariant> &row) { return row[1].toString()==session.name && row[3].toString().isEmpty(); }));
+    QVERIFY(!stop->isEnabled()); QVERIFY(!open->isEnabled()); QVERIFY(!connect->isEnabled());
+    terminal->connectSession(); QVERIFY(!terminal->isConnected());
+    composer->interruptRequested(key); QCOMPARE(opened.size(), 0); QCOMPARE(writes.size(), 1);
+    client->inspectionReady({}, session.name, old, archiveId);
+    client->inspectionReady({}, session.name, old, {});
+    QVERIFY(!open->isEnabled()); QVERIFY(!stop->isEnabled());
+    auto current = old; current["state"] = "running"; current["run_id"] = session.runId;
+    auto unavailable = current; unavailable["inspection_unavailable"] = true;
+    client->inspectionReady({}, session.name, unavailable, {}); QVERIFY(!open->isEnabled());
+    QVERIFY(answer(current)); settleSelectedInspection(composer, client, {}, session.name, current);
+    QTRY_VERIFY(open->isEnabled()); QVERIFY(stop->isEnabled()); QVERIFY(connect->isEnabled());
+    // Ordinary later inspection errors must not remove a verified Terminal.
+    client->inspectionFailed({}, session.name, "Synthetic temporary inspection failure", {});
+    QVERIFY(open->isEnabled()); QVERIFY(connect->isEnabled());
+    QCOMPARE(opened.size(), 0); QCOMPARE(writes.size(), 1);
 }
 
 void TestSessionsWindow::savedSessionsCanMoveToArchive()

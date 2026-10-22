@@ -469,6 +469,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             }
             closeSubagent();
         m_selectedKey = key; m_details = {}; m_events = {}; m_cursor = 0; m_inspectError.clear(); m_childrenHtml.clear();
+        if (!m_restoredInspections.contains(key)) m_restoredInspections.clear();
             m_activityView->setSessionKey(key); m_composer->setSessionKey(key);
             m_terminal->setSession(m_client.executable(), host, name);
             m_detailTabs->setCurrentIndex(0); inspect(); renderDetails();
@@ -1177,7 +1178,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(m_composer,&MessageComposer::interruptRequested,this,[this](const QString &key) {
         const auto *entry=selected();
-        if(!entry||key!=m_selectedKey||m_interruptRequest||m_details.value("interrupt_supported")!=true)return;
+        if(!entry||key!=m_selectedKey||m_interruptRequest||m_details.value("interrupt_supported")!=true||awaitingRestoredInspection(*entry))return;
         cancelCompactContinuation(m_selectedKey, tr("Interrupted. Your draft was kept without sending."));
         if (m_startSend.key == m_selectedKey) cancelStartContinuation(tr("Interrupted. Your draft was kept without sending."));
         m_interruptKey=key;
@@ -1698,14 +1699,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); m_pages->setCurrentIndex(0); m_projectsNav->setChecked(false);
         }
         if (!ok && !m_forkKey.isEmpty()) { m_forkKey.clear(); m_forkGroup.clear(); m_forkBefore.clear(); }
-        if (!m_restoreKey.isEmpty()) {
-            if (operation == QStringLiteral("restore %1").arg(m_restoreKey.section('\n', 1, 1))) {
-                m_restoreSucceeded = ok;
-                // Only the list filter changes. Keep machine/project/search
-                // scope and a conversation the user selected in the meantime.
-                if (ok && m_restoreSource && m_selectedKey == m_restoreSource->key && m_filter == "archived") m_filter = "all";
-                if (!ok) { m_restoreKey.clear(); m_restoreSource.reset(); }
+        if (auto restore = m_restores.find(m_restoreWriteKey); restore != m_restores.end()
+            && operation == QStringLiteral("restore %1").arg(restore->source.session.name)) {
+            restore->succeeded = ok;
+            // Only the list filter changes. Keep machine/project/search
+            // scope and a conversation the user selected in the meantime.
+            if (ok && m_restoreKey == m_restoreWriteKey && m_selectedKey == restore->source.key && m_filter == "archived") {
+                m_filter = "all";
+                m_searchResults->setQuery(m_search->text());
+                m_listStack->setCurrentIndex(m_searchResults->active() ? 1 : 0);
             }
+            if (!ok) { if (m_restoreKey == m_restoreWriteKey) m_restoreKey.clear(); m_restores.erase(restore); }
+            m_restoreWriteKey.clear();
         }
         showNotice(ok ? (renamed ? tr("Session renamed. Refreshing…") : tr("Session updated. Refreshing…")) : detail, !ok);
         emit refreshRequested(); rebuild(); inspect();
@@ -2713,8 +2718,14 @@ const SessionsWindow::Entry *SessionsWindow::selected() const
     for (const auto &entry : m_entries) if (entry.key == m_selectedKey) return &entry;
     // Archive and live catalog reads finish independently. Keep the opened
     // archived view while its exact restore is awaiting the live row/draft.
-    if (!m_restoreKey.isEmpty() && m_restoreSource && m_restoreSource->key == m_selectedKey) return &*m_restoreSource;
+    for (auto restore = m_restores.cbegin(); restore != m_restores.cend(); ++restore)
+        if (restore->source.key == m_selectedKey) return &restore->source;
     return nullptr;
+}
+
+bool SessionsWindow::awaitingRestoredInspection(const Entry &entry) const
+{
+    return m_restoredInspections.contains(entry.key);
 }
 
 bool SessionsWindow::archiveNameOccupied(const Entry &archive) const
@@ -2897,6 +2908,11 @@ void SessionsWindow::rebuild()
         return a.key < b.key;
     });
     for (auto &entry : m_entries) entry.identity = m_organization.observe(entry.machine, entry.session.name, entry.session.runId, entry.session.archiveId);
+    for (auto pending = m_restoredInspections.begin(); pending != m_restoredInspections.end(); ++pending) {
+        const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&pending](const Entry &entry) { return entry.key == pending.key(); });
+        if (current != m_entries.cend() && !current->session.runId.isEmpty() && !current->session.conversationId.isEmpty())
+            pending.value() = {current->session.runId, current->session.conversationId};
+    }
     bool rowPreferencesChanged = false;
     for (const auto &entry : m_entries) rowPreferencesChanged |= m_sessionRowPreferences.observe(entry.host, entry.session);
     if (rowPreferencesChanged) saveSessionRowPreferences();
@@ -2904,7 +2920,7 @@ void SessionsWindow::rebuild()
     saveOrganization();
     // Entries, attention and the organization above stay current for other pages.
     // A hidden Sessions list and its details render once, when the page is shown.
-    if (m_pages->currentIndex() != 0 && m_forkKey.isEmpty() && m_restoreKey.isEmpty() && m_renameKey.isEmpty()) {
+    if (m_pages->currentIndex() != 0 && m_forkKey.isEmpty() && m_restores.isEmpty() && m_renameKey.isEmpty()) {
         m_sessionsNav->setChecked(false); m_machinesNav->setChecked(m_pages->currentIndex() == 2);
         m_sessionsStale = true; m_rebuilding = false; return;
     }
@@ -2921,38 +2937,59 @@ void SessionsWindow::rebuild()
             break;
         }
     }
-    if (!m_pending && m_restoreSucceeded && !m_restoreKey.isEmpty()) {
-        for (const auto &entry : m_entries) if (entry.key == m_restoreKey && entry.session.state == "running") {
-            if (m_restoreSource && !m_restoreConversation.isEmpty() && entry.session.conversationId == m_restoreConversation) {
-                const auto oldKey = m_restoreSource->key;
-                // Loading finishes via draftChanged, which schedules rebuild.
-                // Never move an empty placeholder over the retained draft.
-                if (m_composer->isDraftLoading(oldKey)) break;
-                m_composer->renameDraft(oldKey, entry.key);
-                if (m_localMessages.contains(oldKey)) m_localMessages.insert(entry.key, m_localMessages.take(oldKey));
-                if (m_selectedKey == oldKey) {
-                    m_activityView->continueSession(oldKey, entry.key);
-                    m_selectedKey = entry.key; requestedSelection = entry.key;
-                    m_composer->setSessionKey(entry.key);
-                    // Keep the visible history, but no old-run controls are
-                    // enabled before a fresh inspection of the resumed run.
-                    m_inspectError = tr("Session restored. Refreshing its current state…");
-                    m_cursor = 0; m_inspectionAge.invalidate(); m_processPollAge.invalidate();
-                    const auto key = entry.key;
-                    QTimer::singleShot(0, this, [this, key] { if (m_selectedKey == key) inspect(); });
-                }
-            } else if (m_restoreSource && m_selectedKey == m_restoreSource->key) {
-                // Missing/different native identity is not a draft migration.
-                // The archived draft remains recoverable in Saved drafts.
-                if (entry.session.conversationId.isEmpty()) requestedSelection = entry.key;
-                else {
-                    requestedSelection.clear();
-                    showNotice(tr("The restored conversation could not be verified. Your archived draft remains in Saved drafts."), true);
-                }
-            }
-            m_restoreKey.clear(); m_restoreSource.reset(); m_restoreConversation.clear(); m_restoreSucceeded = false;
-            break;
+    for (auto restore = m_restores.begin(); restore != m_restores.end();) {
+        if (!restore->succeeded) { ++restore; continue; }
+        const auto live = std::find_if(m_entries.cbegin(), m_entries.cend(), [&restore](const Entry &entry) {
+            return entry.key == restore.key() && entry.session.state == "running";
+        });
+        if (live == m_entries.cend() || m_composer->isDraftLoading(restore->source.key)) { ++restore; continue; }
+        const auto &entry = *live;
+        const auto oldKey = restore->source.key;
+        const bool follow = m_restoreKey == restore.key() && m_selectedKey == oldKey;
+        // Only a continued visible document retains stale run details. Normal
+        // navigation clears them; keep at most this one inspection guard.
+        if (follow || m_selectedKey == entry.key) {
+            m_restoredInspections.clear();
+            m_restoredInspections.insert(entry.key, {entry.session.runId, entry.session.conversationId});
         }
+        if (!restore->conversation.isEmpty() && entry.session.conversationId == restore->conversation) {
+            if (!follow && m_selectedKey == oldKey) {
+                // A canceled follow must not be revived by renameDraft's
+                // asynchronous editor continuation, even if archive paging
+                // still retains the old row. No newer selection is changed.
+                m_selectedKey.clear(); requestedSelection.clear();
+                m_details = {}; m_events = {}; m_cursor = 0; m_inspectError.clear(); m_childrenHtml.clear();
+                m_activityView->setSessionKey({}); m_composer->setSessionKey({});
+            }
+            // Loading finishes via draftChanged, which schedules rebuild.
+            // Never move an empty placeholder over the retained draft.
+            m_composer->renameDraft(oldKey, entry.key);
+            // Existing current-run local rows are authoritative; retain the
+            // archived overlay rather than replacing or growing that cache.
+            if (m_localMessages.contains(oldKey) && m_localMessages.value(entry.key).isEmpty())
+                m_localMessages.insert(entry.key, m_localMessages.take(oldKey));
+            if (follow) {
+                m_activityView->continueSession(oldKey, entry.key);
+                m_selectedKey = entry.key; requestedSelection = entry.key;
+                m_composer->setSessionKey(entry.key);
+                // Keep the visible history, but no old-run controls are
+                // enabled before a fresh inspection of the resumed run.
+                m_inspectError = tr("Session restored. Refreshing its current state…");
+                m_cursor = 0; m_inspectionAge.invalidate(); m_processPollAge.invalidate();
+                const auto key = entry.key;
+                QTimer::singleShot(0, this, [this, key] { if (m_selectedKey == key) inspect(); });
+            }
+        } else if (follow) {
+            // Missing/different native identity is not a draft migration.
+            // The archived draft remains recoverable in Saved drafts.
+            if (entry.session.conversationId.isEmpty()) requestedSelection = entry.key;
+            else {
+                requestedSelection.clear();
+                showNotice(tr("The restored conversation could not be verified. Your archived draft remains in Saved drafts."), true);
+            }
+        }
+        if (m_restoreKey == restore.key()) m_restoreKey.clear();
+        restore = m_restores.erase(restore);
     }
     if (!m_pending && !m_renameKey.isEmpty()) {
         for (const auto &entry : m_entries) if (entry.key == m_renameKey) {
@@ -3285,6 +3322,8 @@ void SessionsWindow::selectSession()
         pushSelectionChanged(key);
         m_readCandidate.clear(); m_readSelectionKey.clear();
         m_selectedKey = key; m_details = {}; m_events = {}; m_cursor = 0; m_inspectError.clear();
+        if (!m_restoredInspections.contains(key)) m_restoredInspections.clear();
+        if (m_restoredInspections.contains(key)) m_inspectError = tr("Session restored. Refreshing its current state…");
         rememberRecentSession(key);
         m_processPollAge.invalidate();m_inspectionAge.invalidate();
         m_childrenHtml.clear(); m_activityView->setSessionKey(key); m_composer->setSessionKey(key);
@@ -3411,6 +3450,19 @@ void SessionsWindow::finishSendEvidence(const QString &key)
 void SessionsWindow::acceptInspection(const QString &host, const QString &name, const QJsonObject &reply, const QString &archiveId)
 {
     auto data = reply;
+    const QString restoredKey = host + '\n' + name;
+    if (archiveId.isEmpty() && m_restoredInspections.contains(restoredKey)) {
+        const auto expected = m_restoredInspections.value(restoredKey);
+        const auto current = std::find_if(m_entries.cbegin(), m_entries.cend(), [&restoredKey](const Entry &entry) { return entry.key == restoredKey; });
+        // A late old-run reply or an unavailable/cached inspection cannot unlock
+        // controls. A newer incarnation must also prove its own current IDs.
+        if (current == m_entries.cend() || expected.first.isEmpty() || expected.second.isEmpty()
+            || current->session.runId != expected.first || current->session.conversationId != expected.second
+            || data.value("run_id").toString() != expected.first
+            || data.value("conversation_id").toString() != expected.second
+            || data.value("inspection_unavailable").toBool()) return;
+        m_restoredInspections.remove(restoredKey);
+    }
     if (archiveId.isEmpty()) {
         for (const auto &entry : m_entries)
             if (entry.host == host && entry.session.name == name && entry.session.archiveId.isEmpty())
@@ -3499,6 +3551,8 @@ void SessionsWindow::renderDetails()
     updateSessionLoading();
     m_compactCancel->setVisible(m_compacts.contains(m_selectedKey) || (m_startSend.key == m_selectedKey && !m_startSend.key.isEmpty()));
     const auto *entry = selected(); m_detailStack->setCurrentIndex(entry ? 1 : 0);
+    if (entry && awaitingRestoredInspection(*entry) && m_inspectError.isEmpty())
+        m_inspectError = tr("Session restored. Refreshing its current state…");
     const auto recoveryDetails=entry && entry->session.state != "archived"
         && m_details.value("provider_status_at").toDouble() >= entry->session.providerStatusAt ? m_details : QJsonObject();
     const auto recoveryState=recoveryDetails.value("recovery").toObject().value("state").toString();
@@ -3522,7 +3576,7 @@ void SessionsWindow::renderDetails()
     m_cacheStatus->setData(entry?m_details:QJsonObject(),recorded);
     const auto cacheWarning=entry?CacheStatus::warning(m_details):QString();m_cacheWarning->setText(cacheWarning);m_cacheWarning->setVisible(!cacheWarning.isEmpty());
     m_cacheDetail->setText(CacheStatus::details(m_details,recorded));m_cacheClear->setVisible(!cacheWarning.isEmpty());
-    m_cacheClear->setEnabled(entry && entry->online && !m_clearRequest && m_details.value("clear_context_supported").toBool());
+    m_cacheClear->setEnabled(entry && entry->online && !awaitingRestoredInspection(*entry) && !m_clearRequest && m_details.value("clear_context_supported").toBool());
     // An offline host's last inspection no longer explains the action.
     const bool reported=entry && entry->online;
     explainContextAction(m_cacheClear,reported?contextActionReason(m_details,"clear"):QString());
@@ -3612,11 +3666,12 @@ void SessionsWindow::renderDetails()
     }
     m_model->setAccessibleName(modelText); m_model->setVisible(!modelText.isEmpty());
     const bool archived = s.state == "archived";
-    m_forkAction->setEnabled(!terminating && entry->online && !m_pending && m_forkKey.isEmpty() && !m_settingsRequest && !m_composer->isSending(m_selectedKey)
+    m_forkAction->setEnabled(!terminating && entry->online && !awaitingRestoredInspection(*entry) && !m_pending && m_forkKey.isEmpty() && !m_settingsRequest && !m_composer->isSending(m_selectedKey)
         && m_details.value("fork_supported").toBool());
     m_forkAction->setToolTip(m_details.value("fork_reason").toString(tr("Create an independent conversation with the same context and working folder")));
     const bool answering = std::any_of(m_pendingAnswers.cbegin(), m_pendingAnswers.cend(), [this](const PendingAnswer &p) { return p.key == m_selectedKey; });
-    const bool updating = terminating || m_pending || m_settingsRequest || !m_renameKey.isEmpty() || m_composer->isSending(m_selectedKey) || answering;
+    const bool restoredPending = awaitingRestoredInspection(*entry);
+    const bool updating = terminating || m_pending || m_settingsRequest || !m_renameKey.isEmpty() || m_composer->isSending(m_selectedKey) || answering || restoredPending;
     const bool occupied = archived && archiveNameOccupied(*entry);
     const bool terminalAvailable=NativeSessionCapabilities::terminal(s,m_details);
     m_openAction->setVisible(!archived && (s.cmd=="dsh"||terminalAvailable));
@@ -3723,11 +3778,11 @@ void SessionsWindow::renderDetails()
     const auto suggestion = m_details.value("prompt_suggestion").toObject();
     m_composer->setSuggestion(m_selectedKey, phase == "idle" && entry->online && s.state == "running" ? suggestion.value("text").toString() : QString(),
         suggestion.value("at").toDouble());
-    m_composer->setInterruptAvailability(working,entry->online&&m_details.value("interrupt_supported").toBool()&&!m_interruptRequest,
+    m_composer->setInterruptAvailability(working,entry->online&&m_details.value("interrupt_supported").toBool()&&!m_interruptRequest&&!restoredPending,
         m_interruptRequest?tr("Interrupt is being sent…"):!entry->online?tr("Machine is offline"):
         !m_details.value("interrupt_supported").toBool()?tr("Interrupt is unavailable. Open Terminal to stop this turn."):QString());
     const QString settingsProblem = modelSettingsBlockReason(*entry);
-    m_composer->setSettingsTerminalAvailable(s.cmd == "claude" && entry->online && s.state == "running");
+    m_composer->setSettingsTerminalAvailable(s.cmd == "claude" && entry->online && s.state == "running" && !restoredPending);
     m_composer->setOpenCodeContext(OpenCodeModels::catalogSupported(m_details), m_details.value("model_options_truncated").toBool(), entry->online, entry->machine,
         entry->host, m_details.value("cwd").toString(entry->session.cwd));
     m_composer->setModelSettings(m_details.value("settings_model").toString(s.model), s.effort, m_details.value("model_options").toArray(), settingsProblem.isEmpty(),
@@ -3738,7 +3793,7 @@ void SessionsWindow::renderDetails()
     renderQuestion(*entry);
     updateSessionFeedback();
     m_terminal->setSession(m_client.executable(), entry->host, s.name, m_details.value("run_id").toString(), entry->machine);
-    m_nativeUi->setSession(entry->host, s.cmd == "dsh" ? s.name : QString(), m_details.value("run_id").toString(s.runId), entry->machine, s.cmd == "dsh" && entry->online && !archived);
+    m_nativeUi->setSession(entry->host, s.cmd == "dsh" ? s.name : QString(), m_details.value("run_id").toString(s.runId), entry->machine, s.cmd == "dsh" && entry->online && !archived && !restoredPending);
     const bool terminalTab = terminalAvailable && m_subagentId.isEmpty();
     // Loads the optional plugin on the first DeepSeek session, not at startup.
     const bool nativeTab = s.cmd == "dsh" && m_subagentId.isEmpty() && NativeBrowserPlugin::factory();
@@ -3746,8 +3801,9 @@ void SessionsWindow::renderDetails()
     if (m_detailTabs->isTabVisible(2) != nativeTab) m_detailTabs->setTabVisible(2, nativeTab);
     if (!terminalTab && m_detailTabs->currentIndex() == 1) m_detailTabs->setCurrentIndex(0);
     if (!nativeTab && m_detailTabs->currentIndex() == 2) m_detailTabs->setCurrentIndex(0);
-    m_terminal->setAvailable(entry->online && s.state == "running" && terminalAvailable,
+    m_terminal->setAvailable(entry->online && s.state == "running" && terminalAvailable && !restoredPending,
         !entry->online ? tr("Machine unavailable. Reconnect when it is online.") :
+        restoredPending ? tr("Refresh the restored session before opening Terminal.") :
         !terminalAvailable ? NativeSessionCapabilities::terminalReason(s,m_details) : tr("Resume this session before opening its terminal."));
     // A compact roster keeps many agents visible at once. A finished child
     // turn is Ready, never proof that its overall task or process has ended.
@@ -5170,6 +5226,9 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
     }
     if (!selectSessionEntry(original)) return;
     const auto *entry = selected(); if (!entry) return;
+    if (awaitingRestoredInspection(*entry) && action != SessionMenuAction::OpenProcesses) {
+        showNotice(tr("Refresh the restored session before using its native controls."), true); return;
+    }
     if (action == SessionMenuAction::Fork || action == SessionMenuAction::Clear) {
         const auto *source = m_sessionMenu->findChild<QAction *>(action == SessionMenuAction::Fork ? "contextForkSession" : "contextClearSession");
         const auto data = source ? source->property("details").toJsonObject() : QJsonObject();
@@ -5223,6 +5282,7 @@ void SessionsWindow::jumpToLatestActivity(QListWidgetItem *item)
 
 void SessionsWindow::showNativeUi(const Entry &entry)
 {
+    if (awaitingRestoredInspection(entry)) return;
     if (NativeBrowserPlugin::factory()) { m_detailTabs->setCurrentWidget(m_nativeUi); return; }
     if (entry.online) m_client.openNativeUi(entry.host, entry.session.name);
 }
@@ -5236,7 +5296,7 @@ void SessionsWindow::copySessionIdentity()
 
 void SessionsWindow::openSession()
 {
-    const auto *e = selected(); if (!e || !e->online || !m_openAction->isEnabled() || e->session.state == "archived") return;
+    const auto *e = selected(); if (!e || !e->online || !m_openAction->isEnabled() || e->session.state == "archived" || awaitingRestoredInspection(*e)) return;
     if (e->session.cmd == "dsh") { m_client.openNativeUi(e->host,e->session.name); return; }
     // `hgs a` resumes a saved session; a copied command starts nothing.
     if (!m_clipboard && e->session.state != "running") {
@@ -5263,12 +5323,15 @@ void SessionsWindow::changeSession()
         if (!confirmLocalStart(*e)) return;
         e = selected(); if (!e->online || m_pending || !m_changeAction->isEnabled()) return;
     }
+    const QString restoreKey = e->host + '\n' + e->session.name;
+    if (e->session.state == "archived" && (!m_restoreWriteKey.isEmpty() || m_restores.contains(restoreKey)
+        || m_restores.size() + m_restoredInspections.size() >= 64)) {
+        showNotice(tr("Finish or refresh the earlier restores before restoring another session."), true); return;
+    }
     m_pending = true; m_restoreKey.clear();
     if (e->session.state == "archived") {
-        m_restoreKey = e->host + '\n' + e->session.name;
-        m_restoreSource = *e;
-        m_restoreConversation = m_details.value("conversation_id").toString(e->session.conversationId);
-        m_restoreSucceeded = false;
+        m_restoreKey = restoreKey; m_restoreWriteKey = restoreKey;
+        m_restores.insert(restoreKey, {*e, m_details.value("conversation_id").toString(e->session.conversationId), false});
         m_client.restoreArchive(e->host, e->session.name, e->session.archiveId);
     } else if (e->session.state == "running") m_client.pauseSession(e->host, e->session.name);
     else m_client.resumeSession(e->host, e->session.name);

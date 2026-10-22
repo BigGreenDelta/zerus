@@ -287,6 +287,7 @@ private:
     void openSessionFolder();
     void openLocalFolder(const QString &directory);
     const Entry *selected() const;
+    bool awaitingRestoredInspection(const Entry &entry) const;
     bool isTerminating(const Entry &entry) const;
     void reconcileTerminations();
     bool archiveNameOccupied(const Entry &archive) const;
@@ -362,9 +363,12 @@ private:
     QSet<QString> m_terminationFinished;
     QString m_terminationCommand;
     QString m_restoreKey, m_renameKey, m_forkKey, m_forkGroup, m_forkBefore;
-    std::optional<Entry> m_restoreSource;
-    QString m_restoreConversation;
-    bool m_restoreSucceeded = false;
+    struct PendingRestore { Entry source; QString conversation; bool succeeded = false; };
+    // Durable draft handoffs outlive list navigation. Only m_restoreKey follows
+    // the user's selected conversation, and only one legacy write is in flight.
+    QMap<QString, PendingRestore> m_restores;
+    QString m_restoreWriteKey;
+    QMap<QString, QPair<QString, QString>> m_restoredInspections;
     bool m_renameArchived = false;
     QString m_selectedKey, m_filter = "all";
     bool m_initialSelectionPending = true;
