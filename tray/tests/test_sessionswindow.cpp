@@ -7692,7 +7692,7 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
     auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
     auto *list = window.findChild<QListWidget *>("sessionList");
     auto *composer = window.findChild<MessageComposer *>("messageComposer");
-    auto *activity = window.findChild<ActivityView *>();
+    auto *activity = window.findChild<ActivityView *>("mainActivity");
     auto *machines = window.findChild<MachineFilter *>("machineFilterChips");
     QVERIFY(client && list && composer && activity && machines);
     machines->setSelection({"@local"});
