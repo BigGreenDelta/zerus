@@ -3,7 +3,7 @@
  * Licensed under the Apache License, Version 2.0 (see assets/licenses/mux-pod.txt).
  * Adapted from MuxPod lib/screens/terminal/widgets/ansi_text_view.dart, commit
  * c33d0fdeb66ca7bbdf4745203578088961982c13.
- * Modified for Zerus: Compose snapshot renderer, frozen selection, explicit buffered input,
+ * Modified for Zerus: Compose snapshot renderer, frozen selection, cursor following, explicit buffered input,
  * adaptive outbound relay reads, fixed keys, no SSH credentials or input replay.
  */
 package app.zerus.mobile
@@ -11,6 +11,7 @@ package app.zerus.mobile
 import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
@@ -50,8 +51,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 private val TerminalBackground = Color(0xFF101517)
 private val TerminalForeground = Color(0xFFD4D4D4)
@@ -168,7 +171,7 @@ private val TerminalForeground = Color(0xFFD4D4D4)
     }
 }
 
-@Composable private fun TerminalScreenView(screen: TerminalScreen,raw: JSONObject?,fontSize: Float,selecting: Boolean) {
+@Composable internal fun TerminalScreenView(screen: TerminalScreen,raw: JSONObject?,fontSize: Float,selecting: Boolean) {
     val vertical = rememberScrollState()
     val horizontal = rememberScrollState()
     val density = LocalDensity.current
@@ -194,6 +197,33 @@ private val TerminalForeground = Color(0xFFD4D4D4)
     val x = cursor?.optInt("x",-1) ?: -1
     val y = cursor?.optInt("y",-1) ?: -1
     val size = with(density) { (cols * cellWidth).toDp() to (rows * lineHeight).toDp() }
+    // Following starts on open, stops when the user scrolls away and never moves a selection.
+    var following by remember { mutableStateOf(true) }
+    var dragged by remember { mutableStateOf(false) }
+    val measured = vertical.maxValue != Int.MAX_VALUE && horizontal.maxValue != Int.MAX_VALUE
+    val followedY = TerminalFollow.vertical(TerminalFollow.row(y,rows),lineHeight,vertical.viewportSize.toFloat(),vertical.maxValue.toFloat())
+    val followedX = TerminalFollow.horizontal(x,cols,cellWidth,horizontal.viewportSize.toFloat(),horizontal.maxValue.toFloat())
+    val followed by rememberUpdatedState(Offset(followedX,followedY))
+    val cell by rememberUpdatedState(Size(cellWidth,lineHeight))
+    LaunchedEffect(followedY,followedX,following,selecting,measured) {
+        if(following && !selecting && measured) {
+            vertical.scrollTo(followedY.roundToInt())
+            horizontal.scrollTo(followedX.roundToInt())
+        }
+    }
+    LaunchedEffect(vertical,horizontal) {
+        merge(vertical.interactionSource.interactions,horizontal.interactionSource.interactions).collect {
+            if(it is DragInteraction.Start) { dragged = true;following = false }
+        }
+    }
+    LaunchedEffect(vertical,horizontal) {
+        snapshotFlow { vertical.isScrollInProgress || horizontal.isScrollInProgress }.collect { moving ->
+            if(!moving && dragged) {
+                dragged = false
+                following = TerminalFollow.atFollowed(vertical.value.toFloat(),horizontal.value.toFloat(),followed.y,followed.x,cell.height,cell.width)
+            }
+        }
+    }
     @Composable fun CapturedText() {
         Text(annotated,style = style,softWrap = false,modifier = Modifier.widthIn(min = size.first).heightIn(min = size.second).drawWithContent {
             drawContent()
@@ -202,9 +232,16 @@ private val TerminalForeground = Color(0xFFD4D4D4)
                 Offset(x * cellWidth,y * lineHeight),Size(cellWidth,lineHeight),style = Stroke(1.dp.toPx()))
         })
     }
-    Box(Modifier.fillMaxSize().horizontalScroll(horizontal)) {
-        Box(Modifier.verticalScroll(vertical)) {
-            if(selecting) SelectionContainer { CapturedText() } else CapturedText()
+    Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().horizontalScroll(horizontal)) {
+            Box(Modifier.verticalScroll(vertical)) {
+                if(selecting) SelectionContainer { CapturedText() } else CapturedText()
+            }
+        }
+        if(!following && !selecting) FilledTonalButton(onClick = { following = true },Modifier.align(Alignment.BottomEnd).padding(8.dp)) {
+            Icon(Icons.Default.VerticalAlignBottom,null)
+            Spacer(Modifier.width(6.dp))
+            Text("Follow cursor")
         }
     }
 }

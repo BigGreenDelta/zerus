@@ -650,6 +650,12 @@ selection/expansion, and capture-scoped calls to the Android haptic API. The emu
 verifies dispatch and timing; physical vibration still depends on the device and
 its settings.
 
+`TerminalFollowSmokeInstrumentation` uses the same build, install and fresh-data
+steps. It renders synthetic 60-row Terminal snapshots and checks, through the
+scrollers' accessibility actions, that opening follows the bottom cursor row, a
+higher cursor and back, that a user scroll pauses following across snapshots,
+that **Follow cursor** resumes it and that a selection never moves.
+
 `QuestionLayoutSmokeInstrumentation` uses the same build, install and fresh-data
 steps. It opens synthetic history with a pending question, measures the inline
 card from a screenshot and checks the card limit, the whole answer field, the
