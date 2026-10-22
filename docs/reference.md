@@ -284,9 +284,10 @@ a launcher keeps the entry, as does a wrapper script that starts another Claude 
 without itself changing: delete the entry from its `settings.json` by hand there.
 `PreModelSwitch` is never registered.
 
-Claude Code 2.1.304 and later can offer once, after a reply, to make auto mode the
-default permission mode when the user settings name another default. The offer
-stays in Terminal until answered there; Zerus does not change that setting.
+Claude Code can offer once, at startup or under a finished reply, to make auto
+mode the default permission mode when the user settings name another default.
+Activity shows the offer with both native choices; Zerus never answers or hides
+it, and only the choice made in Activity or Terminal changes that setting.
 
 Claude Code reports its context window only to a status line command. For a tracked
 Unix start of the `claude` CLI that reports 2.1.296 or later (the version read as
@@ -1437,9 +1438,12 @@ unreviewed update command, a panel for another folder or unrelated output above
 it, appears read-only with its visible text and **Open Terminal**. Zerus never
 answers it, and messages wait until it is answered in Terminal.
 
-Claude's auto-mode prompt accepts absolute workspace paths and native `~/…`
-abbreviations that match the verified launch directory. It remains answerable
-after the initial conversation is bound, until a turn starts.
+Before the first turn, Claude's auto-mode prompt accepts absolute workspace paths
+and native `~/…` abbreviations that match the verified launch directory, also
+after the initial conversation is bound. Under a finished or stopped reply, the
+bound conversation and that turn identify it instead. The offer must be the
+complete panel at the bottom of Terminal: panel text quoted in the conversation is
+never answered, and messages wait until the offer is answered.
 Claude's **Resume this conversation?** chooser also appears in Activity when a
 long conversation has gone cold, including between turns in a resident session.
 The card preserves the inactivity, context size and five-hour usage warning.
