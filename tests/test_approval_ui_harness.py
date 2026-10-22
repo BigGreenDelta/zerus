@@ -848,7 +848,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('stdout=stdout, stderr=stderr,', run)
         self.assertNotIn('PIPE', run)
         self.assertNotIn('except', run)
-        self.assertIn('[*device, "am", "instrument", "-w", "-r", "app.zerus.mobile.test/" + RUNNER], 90)', runner)
+        self.assertIn('[*device, "am", "instrument", "-w", "-r", "app.zerus.mobile.test/" + RUNNER], 240)', runner)
 
     def test_lifecycle_read_checkpoints_are_bounded_passive_and_preserve_every_original_read(self):
         source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
@@ -1053,7 +1053,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('"primary_failure": primary_failure, "diagnostics": diagnostics', source)
         self.assertIn('end = time.monotonic() + 1200', source)
         self.assertIn('remaining = min(cap, end - time.monotonic() - 20)', source)
-        self.assertIn('"app.zerus.mobile.test/" + RUNNER], 90)', source)
+        self.assertIn('"app.zerus.mobile.test/" + RUNNER], 240)', source)
         with self.assertRaises(AssertionError):
             self.ui.instrumentation_result("INSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: 0\n")
         fixture = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
