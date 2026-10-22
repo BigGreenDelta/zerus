@@ -3,7 +3,7 @@
  * Licensed under the Apache License, Version 2.0 (see assets/licenses/mux-pod.txt).
  * Adapted from MuxPod lib/services/terminal/ansi_parser.dart, commit
  * c33d0fdeb66ca7bbdf4745203578088961982c13.
- * Modified for Zerus: Kotlin model, bounded parsing, control suppression and cursor mapping.
+ * Modified for Zerus: Kotlin model, bounded parsing, control suppression, OSC 8 link ranges and cursor mapping.
  */
 package app.zerus.mobile
 
@@ -11,18 +11,22 @@ data class TerminalStyle(val foreground: Int? = null, val background: Int? = nul
     val bold: Boolean = false, val dim: Boolean = false, val italic: Boolean = false,
     val underline: Boolean = false, val strike: Boolean = false, val inverse: Boolean = false)
 data class TerminalSpan(val start: Int, val end: Int, val style: TerminalStyle)
-data class TerminalScreen(val text: String, val spans: List<TerminalSpan>, val truncated: Boolean)
-private data class TerminalLine(val text: String, val spans: List<TerminalSpan>, val endStyle: TerminalStyle)
+/** An OSC 8 hyperlink range of [TerminalScreen.text]; its target opens only after confirmation. */
+data class TerminalLink(val start: Int, val end: Int, val uri: String)
+data class TerminalScreen(val text: String, val spans: List<TerminalSpan>, val truncated: Boolean, val links: List<TerminalLink> = emptyList())
+private data class TerminalLine(val text: String, val spans: List<TerminalSpan>, val endStyle: TerminalStyle,
+    val links: List<TerminalLink>, val endLink: String?)
+private data class TerminalLineKey(val style: TerminalStyle, val link: String?, val raw: String)
 
 /** Parses captured text, not a terminal emulator. Escape sequences never execute actions. */
 class TerminalAnsi {
-    private var previous = emptyMap<Pair<TerminalStyle,String>,TerminalLine>()
+    private var previous = emptyMap<TerminalLineKey,TerminalLine>()
 
     fun parse(input: String): TerminalScreen {
         val bounded = input.take(128 * 1024)
         val clean = StringBuilder()
         var i = 0
-        // Keep only bounded SGR; remove OSC (including hyperlinks/title/clipboard), DCS and CSI controls.
+        // Keep only bounded SGR and OSC 8 link markers; remove other OSC (title/clipboard), DCS and CSI controls.
         while (i < bounded.length) {
             val c = bounded[i++]
             if (c == '\u001b' || c in listOf('\u009b','\u009d','\u0090','\u009e','\u009f')) {
@@ -41,48 +45,75 @@ class TerminalAnsi {
                         }
                     }
                     ']', 'P', '^', '_' -> {
+                        val start = i
+                        var end = -1
                         while (i < bounded.length) {
-                            if (bounded[i] == '\u0007' || bounded[i] == '\u009c') { i++; break }
-                            if (bounded[i] == '\u001b' && bounded.getOrNull(i + 1) == '\\') { i += 2; break }
+                            if (bounded[i] == '\u0007' || bounded[i] == '\u009c') { end = i; i++; break }
+                            if (bounded[i] == '\u001b' && bounded.getOrNull(i + 1) == '\\') { end = i; i += 2; break }
                             i++
                         }
+                        if (control == ']' && end >= 0) hyperlink(bounded.substring(start,end))?.let { clean.append("\u001b]").append(it).append('\u0007') }
                     }
                     '(', ')' -> if (i < bounded.length) i++ // Character set designation.
                     else -> Unit
                 }
             } else if (c == '\n' || c == '\t' || c >= ' ' && c !in '\u007f'..'\u009f') clean.append(c)
         }
-        val next = linkedMapOf<Pair<TerminalStyle,String>,TerminalLine>()
+        val next = linkedMapOf<TerminalLineKey,TerminalLine>()
         val text = StringBuilder()
         val spans = mutableListOf<TerminalSpan>()
+        val links = mutableListOf<TerminalLink>()
         var style = TerminalStyle()
+        var link: String? = null
         var truncated = input.length > bounded.length
         val lines = clean.toString().split('\n')
         for ((index, raw) in lines.take(1000).withIndex()) {
-            val key = style to raw
-            val line = next[key] ?: previous[key] ?: line(raw,style)
+            val key = TerminalLineKey(style,link,raw)
+            val line = next[key] ?: previous[key] ?: line(raw,style,link)
             next[key] = line
             if (index > 0) text.append('\n')
             val offset = text.length
             text.append(line.text)
             if (spans.size + line.spans.size > 8192) { truncated = true; break }
             spans += line.spans.map { it.copy(start = it.start + offset,end = it.end + offset) }
+            // Text past the link bound stays visible; it is just not a link.
+            if (links.size + line.links.size <= MAX_LINKS) links += line.links.map { it.copy(start = it.start + offset,end = it.end + offset) }
             style = line.endStyle
+            link = line.endLink
         }
         previous = next
-        return TerminalScreen(text.toString(),spans,truncated || lines.size > 1000)
+        return TerminalScreen(text.toString(),spans,truncated || lines.size > 1000,links)
     }
 
-    private fun line(raw: String, initial: TerminalStyle): TerminalLine {
+    /** The OSC 8 target, or an empty string that ends a link; null for other OSC commands. */
+    private fun hyperlink(body: String): String? {
+        if (!body.startsWith("8;")) return null
+        val separator = body.indexOf(';',2)
+        if (separator < 0) return ""
+        val uri = body.substring(separator + 1)
+        // OSC 8 targets are URI bytes 32-126; a space or anything longer ends the link instead.
+        return uri.takeIf { it.length <= MAX_LINK_LENGTH && it.all { c -> c in '!'..'~' } }.orEmpty()
+    }
+
+    private fun line(raw: String, initial: TerminalStyle, initialLink: String?): TerminalLine {
         var style = initial
+        var link = initialLink
         val text = StringBuilder()
         val spans = mutableListOf<TerminalSpan>()
+        val links = mutableListOf<TerminalLink>()
         var start = 0
+        var linkStart = 0
         var i = 0
         var column = 0
         fun flush() { if(text.length > start) spans += TerminalSpan(start,text.length,style); start = text.length }
+        fun close() { link?.let { if(text.length > linkStart) links += TerminalLink(linkStart,text.length,it) }; linkStart = text.length }
         while (i < raw.length) {
-            if(raw[i] == '\u001b') {
+            if(raw[i] == '\u001b' && raw.getOrNull(i + 1) == ']') {
+                close()
+                val end = raw.indexOf('\u0007',i + 2)
+                link = raw.substring(i + 2,end).ifEmpty { null }
+                i = end + 1
+            } else if(raw[i] == '\u001b') {
                 flush()
                 val end = raw.indexOf('m',i + 2)
                 style = sgr(raw.substring(i + 2,end),style)
@@ -96,7 +127,8 @@ class TerminalAnsi {
             }
         }
         flush()
-        return TerminalLine(text.toString(),spans,style)
+        close()
+        return TerminalLine(text.toString(),spans,style,links,link)
     }
 
     private fun sgr(body: String, initial: TerminalStyle): TerminalStyle {
@@ -141,6 +173,8 @@ class TerminalAnsi {
     }
 
     companion object {
+        const val MAX_LINKS = 1024
+        const val MAX_LINK_LENGTH = 2048
         private val basic = listOf(0xFF000000,0xFFCD3131,0xFF0DBC79,0xFFE5E510,0xFF2472C8,0xFFBC3FBC,0xFF11A8CD,0xFFE5E5E5,
             0xFF666666,0xFFF14C4C,0xFF23D18B,0xFFF5F543,0xFF3B8EEA,0xFFD670D6,0xFF29B8DB,0xFFFFFFFF).map { it.toInt() }
         private fun argb(r: Int,g: Int,b: Int) = (0xff shl 24) or (r shl 16) or (g shl 8) or b

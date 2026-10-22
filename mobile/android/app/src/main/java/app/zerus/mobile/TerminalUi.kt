@@ -3,12 +3,17 @@
  * Licensed under the Apache License, Version 2.0 (see assets/licenses/mux-pod.txt).
  * Adapted from MuxPod lib/screens/terminal/widgets/ansi_text_view.dart, commit
  * c33d0fdeb66ca7bbdf4745203578088961982c13.
- * Modified for Zerus: Compose snapshot renderer, frozen selection, cursor following, explicit buffered input,
+ * Modified for Zerus: Compose snapshot renderer, frozen selection, cursor following, confirmed OSC 8 links,
+ * explicit buffered input,
  * adaptive outbound relay reads, fixed keys, no SSH credentials or input replay.
  */
 package app.zerus.mobile
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import android.os.SystemClock
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.DragInteraction
@@ -33,6 +38,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.*
@@ -80,6 +87,7 @@ private val TerminalForeground = Color(0xFFD4D4D4)
         var fontSize by remember(target) { mutableFloatStateOf(13f) }
         var dangerousKey by remember(target) { mutableStateOf<Pair<String,String>?>(null) }
         var reviewInput by remember(target) { mutableStateOf<SessionAction?>(null) }
+        var link by remember(target) { mutableStateOf<TerminalLinkChoice?>(null) }
         var now by remember(target) { mutableLongStateOf(SystemClock.elapsedRealtime()) }
         val current = model.terminalState?.takeIf { it.string("name") == target.session && it.string("run_id") == target.run && it.string("conversation_id") == target.conversation }
         val displayed = if(selecting) frozen else current
@@ -131,7 +139,9 @@ private val TerminalForeground = Color(0xFFD4D4D4)
                 if(screen?.truncated == true || displayed?.optBoolean("truncated") == true) Text("Captured screen is truncated.",Modifier.padding(horizontal = 16.dp),style = MaterialTheme.typography.labelSmall)
                 Box(Modifier.weight(1f).fillMaxWidth().padding(8.dp)) {
                     if(screen == null) Text("Loading captured screen…",color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    else TerminalScreenView(screen,displayed,fontSize,selecting)
+                    else TerminalScreenView(screen,displayed,fontSize,selecting) { chosen ->
+                        link = TerminalLinkChoice(TerminalLinkTarget.of(chosen.uri),screen.text.substring(chosen.start,chosen.end).take(200))
+                    }
                 }
                 recent.firstOrNull()?.let { action ->
                     Text(when(action.status) {
@@ -160,6 +170,11 @@ private val TerminalForeground = Color(0xFFD4D4D4)
                 SelectionContainer { Text(arguments?.string("text","key").orEmpty(),modifier = Modifier.heightIn(max = 180.dp).verticalScroll(rememberScrollState())) }
             } },confirmButton = { TextButton(onClick = { model.reviewSessionAction(action);reviewInput = null }) { Text("Mark reviewed") } },
             dismissButton = { TextButton(onClick = { reviewInput = null }) { Text("Cancel") } }) }
+        val computer = model.machines.find { it.id == target.computerId && it.connectionId == target.connectionId }?.name ?: target.computerId
+        link?.let { choice -> TerminalLinkDialog(choice,computer,onDismiss = { link = null }) { reference ->
+            link = null
+            model.computerFiles.show(target,reference,computer)
+        } }
         dangerousKey?.let { (key,binding) -> ZerusAlertDialog(onDismissRequest = { dangerousKey = null },
             title = { Text(if(key == "C-c") "Send Ctrl+C?" else "Send Ctrl+D?") },
             text = { Text("Send $key to ${session.title} on ${model.machines.find { it.id == target.computerId && it.connectionId == target.connectionId }?.name ?: target.computerId}? This may interrupt or close the native program.") },
@@ -171,7 +186,44 @@ private val TerminalForeground = Color(0xFFD4D4D4)
     }
 }
 
-@Composable internal fun TerminalScreenView(screen: TerminalScreen,raw: JSONObject?,fontSize: Float,selecting: Boolean) {
+/** Shows a link's whole target before anything opens; its visible text may say something else. */
+@Composable internal fun TerminalLinkDialog(choice: TerminalLinkChoice,computer: String,onDismiss: () -> Unit,onFile: (ComputerFileReference) -> Unit) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val target = choice.target
+    ZerusAlertDialog(onDismissRequest = onDismiss,title = { Text(when(target) {
+        is TerminalLinkTarget.Web -> "Open link?"
+        is TerminalLinkTarget.File -> "Read file from $computer?"
+        is TerminalLinkTarget.Other -> "Terminal link"
+    }) },text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Shown as: ${choice.label}",style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectionContainer { Text(target.uri,fontFamily = FontFamily.Monospace,modifier = Modifier.heightIn(max = 160.dp).verticalScroll(rememberScrollState())) }
+        Text(when(target) {
+            is TerminalLinkTarget.Web -> "Opens in your browser."
+            is TerminalLinkTarget.File -> "Zerus reads ${target.reference.path} on $computer, the computer of this session." +
+                (if(target.host.isNotEmpty() && !target.host.equals("localhost",true)) " The link names host ${target.host}." else "")
+            is TerminalLinkTarget.Other -> "Zerus opens only web and file links. You can copy this one."
+        },style = MaterialTheme.typography.bodySmall)
+    } },confirmButton = { when(target) {
+        is TerminalLinkTarget.Web -> TextButton(onClick = {
+            onDismiss()
+            try {
+                context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(target.uri)).addCategory(Intent.CATEGORY_BROWSABLE).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch(_: ActivityNotFoundException) {
+                Toast.makeText(context,"No browser could open this link.",Toast.LENGTH_SHORT).show()
+            } catch(_: SecurityException) {
+                Toast.makeText(context,"This link could not be opened.",Toast.LENGTH_SHORT).show()
+            }
+        }) { Text("Open in browser") }
+        is TerminalLinkTarget.File -> TextButton(onClick = { onFile(target.reference) }) { Text("Read on $computer") }
+        is TerminalLinkTarget.Other -> TextButton(onClick = onDismiss) { Text("Close") }
+    } },dismissButton = { Row {
+        TextButton(onClick = { clipboard.setText(AnnotatedString(target.uri));onDismiss() }) { Text("Copy link") }
+        if(target !is TerminalLinkTarget.Other) TextButton(onClick = onDismiss) { Text("Cancel") }
+    } })
+}
+
+@Composable internal fun TerminalScreenView(screen: TerminalScreen,raw: JSONObject?,fontSize: Float,selecting: Boolean,onLink: (TerminalLink) -> Unit = {}) {
     val vertical = rememberScrollState()
     val horizontal = rememberScrollState()
     val density = LocalDensity.current
@@ -180,7 +232,8 @@ private val TerminalForeground = Color(0xFFD4D4D4)
         color = TerminalForeground,platformStyle = PlatformTextStyle(includeFontPadding = false)) }
     val cellWidth = remember(style) { measurer.measure("M",style).size.width.toFloat() }
     val lineHeight = with(density) { (fontSize * 1.3f).sp.toPx() }
-    val annotated = remember(screen) { buildAnnotatedString {
+    val linkTapped by rememberUpdatedState(onLink)
+    val annotated = remember(screen,selecting) { buildAnnotatedString {
         append(screen.text)
         screen.spans.forEach { span ->
             val s = span.style
@@ -189,6 +242,12 @@ private val TerminalForeground = Color(0xFFD4D4D4)
             addStyle(SpanStyle(color = if(s.dim) foreground.copy(alpha = .5f) else foreground,background = background,
                 fontWeight = if(s.bold) FontWeight.Bold else FontWeight.Normal,fontStyle = if(s.italic) FontStyle.Italic else FontStyle.Normal,
                 textDecoration = TextDecoration.combine(buildList { if(s.underline) add(TextDecoration.Underline);if(s.strike) add(TextDecoration.LineThrough) })),span.start,span.end)
+        }
+        // OSC 8 links stay plain underlined text while selecting; otherwise a tap asks first.
+        val underline = SpanStyle(textDecoration = TextDecoration.Underline)
+        screen.links.forEach { link ->
+            if(selecting) addStyle(underline,link.start,link.end)
+            else addLink(LinkAnnotation.Clickable(link.uri,TextLinkStyles(underline)) { linkTapped(link) },link.start,link.end)
         }
     } }
     val cols = raw?.optInt("cols")?.coerceIn(1,1000) ?: 1
