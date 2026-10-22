@@ -546,7 +546,7 @@ jobs:
           persist-credentials: false
       - name: Linux test dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config fish
       - name: Pinned tmux with verified input-mode support
         if: runner.os == 'Linux'
         shell: bash

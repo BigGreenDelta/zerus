@@ -333,6 +333,35 @@ pub fn join<S: AsRef<str>>(args: &[S]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+/// Quotes a word for an SSH peer's login shell, which may be fish. fish also
+/// reads `\\` and `\'` inside single quotes, so every backslash stays outside
+/// them; a word without one keeps the `quote` form.
+pub fn remote_quote(word: &str) -> String {
+    if !word.contains('\\') {
+        return quote(word);
+    }
+    let mut quoted = String::from("'");
+    for c in word.chars() {
+        match c {
+            '\'' => quoted.push_str(r"'\''"),
+            '\\' => quoted.push_str(r"'\\'"),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+pub fn remote_join<S: AsRef<str>>(args: &[S]) -> String {
+    args.iter()
+        .map(|s| remote_quote(s.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+/// Runs a POSIX script under `sh` on an SSH peer. The peer's login shell,
+/// which may be fish, then parses only one quoted word.
+pub fn remote_sh(script: &str) -> String {
+    format!("sh -c {}", remote_quote(script))
+}
 
 fn konsole_args(method: &str, args: &[&str]) -> Option<Vec<String>> {
     let service = env::var("KONSOLE_DBUS_SERVICE")
@@ -494,6 +523,16 @@ mod tests {
             join(&["inspect", "zerus://session?a=1&b=2", "--local"]),
             "inspect 'zerus://session?a=1&b=2' --local"
         );
+    }
+
+    #[test]
+    fn remote_words_keep_backslashes_outside_quotes_for_fish() {
+        assert_eq!(remote_quote("~/.local/bin/hgs"), "~/.local/bin/hgs");
+        assert_eq!(remote_quote("it's"), quote("it's"));
+        assert_eq!(remote_quote(r"a\b"), r"'a'\\'b'");
+        assert_eq!(remote_quote(r"a\'b\"), r"'a'\\''\''b'\\''");
+        assert_eq!(remote_join(&["search", r"C:\x y"]), r"search 'C:'\\'x y'");
+        assert_eq!(remote_sh("if true; then :; fi"), "sh -c 'if true; then :; fi'");
     }
 
     #[test]

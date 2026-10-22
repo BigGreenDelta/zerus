@@ -177,7 +177,7 @@ fn detail(output: &std::process::Output) -> String {
 }
 
 fn peer(config: &Config, peer: &str) -> Value {
-    let output = match ssh(config, peer, PEER_COMMAND) {
+    let output = match ssh(config, peer, &platform::remote_sh(PEER_COMMAND)) {
         Ok(output) => output,
         Err(error) => return json!({"host":peer,"ok":false,"error":"offline","detail":error.message}),
     };

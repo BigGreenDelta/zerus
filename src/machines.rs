@@ -354,7 +354,7 @@ fn check(config: &Config, alias: &str) -> Result<Value> {
                 "-o",
                 "StrictHostKeyChecking=yes",
                 alias,
-                PROBE,
+                &platform::remote_sh(PROBE),
             ])
             .stdin(Stdio::null()),
     )?;
@@ -424,8 +424,8 @@ printf 'Setup complete: '
 "#;
     let remote = format!(
         "sh -c {} hgs-setup {}",
-        platform::quote(script),
-        platform::quote(alias)
+        platform::remote_quote(script),
+        platform::remote_quote(alias)
     );
     let mut arguments = ssh_options(config, alias);
     arguments.extend([
@@ -591,10 +591,11 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             }
             arguments.push(alias.clone());
             if let Some(path) = directory {
-                arguments.push(format!(
+                // The login shell itself may be fish; sh expands its path.
+                arguments.push(platform::remote_sh(&format!(
                     "cd -- {} && exec \"${{SHELL:-/bin/sh}}\" -l",
                     platform::quote(path)
-                ));
+                )));
             }
             if dry {
                 println!("ssh {}", platform::join(&arguments));

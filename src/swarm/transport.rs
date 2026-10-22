@@ -64,7 +64,7 @@ pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>)
         .arg(alias)
         .arg(format!(
             "~/.local/bin/hgs swarm {}",
-            platform::quote(action)
+            platform::remote_quote(action)
         ));
     let ssh = platform::spawn_ssh(&mut command, true, true, true).context("start swarm connection")?;
     let mut child = ssh.child;

@@ -126,7 +126,8 @@ class Machines(unittest.TestCase):
         self.assertEqual(args[:6], ['-o', 'HostName=studio.local', '-l', 'alice', '-p', '2222'])
         self.assertEqual(args[-3:-1], ['-t', 'studio'])
         import shlex
-        command=args[-1]
+        shell, flag, command = shlex.split(args[-1])
+        self.assertEqual((shell, flag), ('sh', '-c'))
         self.assertEqual(shlex.split(command)[:3], ['cd', '--', folder])
         self.assertIn('&& exec "${SHELL:-/bin/sh}" -l', command)
         self.run_machine('ssh', 'studio', '--directory', 'relative', success=False)

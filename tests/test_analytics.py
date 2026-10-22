@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -104,7 +105,10 @@ class AnalyticsCli(unittest.TestCase):
                              env=self.env, text=True, capture_output=True, timeout=10)
         self.assertEqual(dry.returncode, 0, dry.stderr)
         self.assertIn("analytics --json --dry-run --read-only", dry.stdout)
-        self.assertIn("grep -qF 'hgs [@host] analytics --json'", dry.stdout)
+        # The probe runs under sh whatever the peer's login shell is.
+        remote = shlex.split(dry.stdout)[-3:]
+        self.assertEqual(remote[:2], ["sh", "-c"])
+        self.assertIn("grep -qF 'hgs [@host] analytics --json'", remote[2])
 
 
 if __name__ == "__main__":
