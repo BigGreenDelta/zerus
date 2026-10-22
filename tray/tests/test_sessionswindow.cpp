@@ -7685,8 +7685,11 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
     ComposerDraftStore store; ComposerDraft draft;
     draft.text = "Keep this draft and selection"; draft.anchor = 2; draft.position = 9;
     draft.attachments = {{"notes.txt", "text/plain", "retained bytes", {}}};
-    draft.attachmentHashes = {"retained-hash"}; draft.nextAttachmentNumber = 7;
+    draft.nextAttachmentNumber = 7;
     QVERIFY(store.save(oldKey, draft));
+    draft = store.load(oldKey);
+    QVERIFY(draft.storageError.isEmpty()); QCOMPARE(draft.attachments.size(), 1);
+    QCOMPARE(draft.attachments.first().data, QByteArray("retained bytes"));
     if (destinationDraft) { ComposerDraft newer; newer.text = "Existing live draft"; QVERIFY(store.save(liveKey, newer)); }
     SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(state); window.show();
     auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
