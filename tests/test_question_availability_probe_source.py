@@ -72,10 +72,10 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256((MAIN / "QuestionUi.kt").read_bytes()).hexdigest(),
                          "841c0d5b2df250497b0f54ef8854574ca386e83cb735dc1a0873096d719e22a2")
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
-        # The fixture baseline includes the parent-selection and Compose role-child corrections;
-        # physical case oracles stay exact.
+        # Reviewed indexed native queries avoid deadline-sensitive tree walks.
+        # test_approval_ui_harness reverses only these seams to the frozen 73cee baseline.
         self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
-                         "73cee450f08e33c007ad6f3188a6a69135674e2503f80ea48582ba8aa394a9f7")
+                         "f18cde22e8e390b1aa6073acfa1e29048e065e17a457f8ccf5b0183c31b444ff")
 
     def test_prepared_publication_uses_the_actual_bounded_owner_before_any_atomic_install(self):
         model = (MAIN / "ZerusViewModel.kt").read_text()

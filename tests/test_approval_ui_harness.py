@@ -38,6 +38,105 @@ def module(name, path):
     return value
 
 
+def restore_confirm_native_search(source):
+    """Reverse only the positively proven fixed-title lookup, retaining every original physical fixture byte."""
+    pattern = re.compile(r'^([ ]*)// BEGIN CONFIRM_NATIVE_SEARCH ([a-z]+)\n([\s\S]*?)^\1// END CONFIRM_NATIVE_SEARCH \2\n', re.M)
+    matches = list(pattern.finditer(source))
+    if not matches:
+        return source
+    assert [match[2] for match in matches] == ["send", "proof", "lookup", "definition"]
+    assert matches[1][3] == '            check(nativeConfirmTitleVisible()) { "Native Confirm-title lookup was not positively proven" }\n'
+    assert matches[2][3] == '                await("background retires confirmation") { !nativeConfirmTitleVisible(lifecycleSend.window) }\n'
+    return pattern.sub(lambda match: '                await("background retires confirmation") { visible("Confirm this option?") == null }\n'
+                       if match[2] == "lookup" else '            val fresh = checkNotNull(visible("Send answer")) { "Early-review live Send label is unavailable" }\n'
+                       if match[2] == "send" else '', source)
+
+
+def native_review_memory(source, active_root, package):
+    """Interpret the fixed helpers and actual scalar predicates over memory nodes, never Kotlin or Android."""
+    definition = source.split('    // BEGIN CONFIRM_NATIVE_SEARCH definition\n', 1)[1].split('    // END CONFIRM_NATIVE_SEARCH definition', 1)[0]
+    root = definition.split('    private fun nativeOwnedRoot(', 1)[1].split('    private fun nativeOwnedLabels(', 1)[0]
+    labels = definition.split('    private fun nativeOwnedLabels(', 1)[1].split('    private fun nativeSendLabel(', 1)[0]
+    confirm = definition.split('    private fun nativeConfirmTitleVisible(', 1)[1]
+    expressions = {
+        "root": root.split('        check(', 1)[1].split(') {', 1)[0],
+        "query": labels.split('        check(root.refresh()', 1)[1].split(') {', 1)[0],
+        "candidate": labels.split('            check(', 1)[1].split(') {', 1)[0],
+        "absence": confirm.split('        check(', 1)[1].split(') {', 1)[0],
+    }
+    expressions["query"] = 'root.refresh()' + expressions["query"]
+    structure = definition
+    for name, expression in expressions.items():
+        assert structure.count(expression) == 1
+        structure = structure.replace(expression, '__GUARD_' + name.upper() + '__', 1)
+    assert hashlib.sha256(structure.encode()).hexdigest() == 'c61151cb31769ae5477f93fc77a113a4e8c18a4614eebba5862a3d97fc128c98'
+    cap = int(re.search(r'check\(matches.size <= ([0-9]+)\)', labels)[1])
+    assert cap == 16
+    def guard(name, expected_window=None, **values):
+        expression = expressions[name]
+        for kotlin, python in (("root.refresh()", "root_fresh"), ("fresh.refresh()", "candidate_fresh"),
+                               ("root.windowId", "root_window"), ("fresh.windowId", "candidate_window"),
+                               ("root.packageName?.toString()", "root_package"), ("fresh.packageName?.toString()", "candidate_package"),
+                               ("targetContext.packageName", "package"), ("expectedEmptyWindow", "expected_window"),
+                               ("expectedWindow", "expected_window"), ("null", "None"), ("&&", " and "), ("||", " or ")):
+            expression = expression.replace(kotlin, python)
+        assert finite_source_predicate(' '.join(expression.splitlines()), dict(package=package, expected_window=expected_window, **values))
+    def owned_root(expected=None):
+        node = active_root()
+        assert node is not None
+        guard("root", expected, root_fresh=node.refresh(), root_window=node.window, root_package=node.package)
+        return node
+    def query(node, window, label):
+        assert label in {"Send answer", "Confirm this option?"}
+        guard("query", root_fresh=node.refresh(), root_window=node.window, root_package=node.package, window=window)
+        matches = node.query(label)
+        assert matches is not None and len(matches) <= cap
+        exact = []
+        for candidate in matches:
+            assert candidate is not None
+            guard("candidate", candidate_fresh=candidate.refresh(), candidate_window=candidate.window, candidate_package=candidate.package, window=window)
+            if candidate.visible and (candidate.text == label or candidate.description == label):
+                exact.append(candidate)
+        return exact
+    def send(window):
+        node = owned_root(window)
+        matches = query(node, window, "Send answer")
+        owned_root(window)
+        assert len(matches) == 1
+        return matches[0]
+    def confirm(expected=None):
+        node = owned_root()
+        window = node.window
+        present = bool(query(node, window, "Confirm this option?"))
+        owned_root(window)
+        guard("absence", expected, present=present, window=window)
+        if not present and expected is not None:
+            send(expected)
+        return present
+    return SimpleNamespace(send=send, confirm=confirm)
+
+
+def native_review_nodes():
+    """Finite accessibility data/cost fixtures only; no Android/SDK or real timing."""
+    calls, clock = [], SimpleNamespace(now=0)
+    class Node:
+        def __init__(self, text="", window=9, package="app.zerus.mobile", fresh=True, visible=True, cost=0):
+            self.text, self.description, self.window, self.package = text, "", window, package
+            self.fresh, self.visible, self.cost = fresh, visible, cost
+            self.matches, self.children = {}, []
+        def refresh(self):
+            calls.append("refresh"); clock.now += self.cost
+            return self.fresh.pop(0) if isinstance(self.fresh, list) and len(self.fresh) > 1 else self.fresh[0] if isinstance(self.fresh, list) else self.fresh
+        def query(self, label):
+            calls.append(label); clock.now += 1
+            result = self.matches.get(label, [])
+            if isinstance(result, BaseException): raise result
+            return result
+    root = Node(); send = Node("Send answer")
+    root.matches["Send answer"] = [send]
+    return SimpleNamespace(Node=Node, root=root, send=send, active=lambda: root, calls=calls, clock=clock)
+
+
 def without_android_focus_diagnostics(source):
     """Remove only the two explicitly additive failure-diagnostic regions for parent equivalence."""
     pattern = re.compile(r'^([ ]*)# BEGIN APPROVAL_FOCUS_DIAGNOSTIC ([a-z-]+)\n[\s\S]*?'
@@ -137,6 +236,7 @@ def cached_send_memory(source, anchor, window, package, end, clock, current_card
 
 def prepare_anchor_memory(source, cached, lookup, clock, package):
     """Interpret the finite fixture preparation source over memory fakes; never Kotlin or Android evidence."""
+    source = restore_confirm_native_search(source)
     state = source.split('// BEGIN EARLY_SEND_LIVE_ANCHOR state\n', 1)[1].split('// END EARLY_SEND_LIVE_ANCHOR state', 1)[0]
     setter = re.fullmatch(r'\s*var node: AccessibilityNodeInfo = initialNode\s*private set\s*'
         r'private var anchorPreparationAttempted = false\s*'
@@ -437,6 +537,7 @@ def touch_target(child, owner, density=2.625):
 
 def restore_compose_role_children(source):
     """Reverse only the touch-target and Send role-child admissions to the exact 304b bytes; no Kotlin execution."""
+    source = restore_confirm_native_search(source)
     helper = source.split('            // Compose reports the owner with its 48 dp minimum touch target; the role\n', 1)
     assert len(helper) == 2
     tail = helper[1].split('            // Compose UI 1.8.3 emits a role-only child for a merging selectable owner with children.\n', 1)
@@ -777,6 +878,107 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(self.ui.RESULT_NAMESPACE, "project")
         self.assertEqual(len(self.ui.CASES.split(",")), 6)
 
+    def test_native_review_search_reverses_only_two_queries_and_positive_proof(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        original = restore_confirm_native_search(source)
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(), "73cee450f08e33c007ad6f3188a6a69135674e2503f80ea48582ba8aa394a9f7")
+        for text in (source, original):
+            self.assertEqual(text.count('targetContext.startActivity(Intent(targetContext, MainActivity::class.java)'), 2)
+            self.assertEqual(text.count('check(count() == 4 && !button("Send answer").isEnabled)'), 1)
+        generic = lambda text: text.split('    private fun visible(', 1)[1].split('    private fun node(', 1)[0]
+        self.assertEqual(generic(source), generic(original))
+        helper = source.split('    // BEGIN CONFIRM_NATIVE_SEARCH definition\n', 1)[1].split('    // END CONFIRM_NATIVE_SEARCH definition', 1)[0]
+        for forbidden in ('sleep(', 'delay(', 'await(', 'find(', 'performAction', 'injectInputEvent', 'startActivity', 'resumeEnd', 'reviewStart', 'catch ('):
+            self.assertNotIn(forbidden, helper)
+        self.assertEqual(helper.count('findAccessibilityNodeInfosByText(label)'), 1)
+        self.assertLess(source.index('check(nativeConfirmTitleVisible())'), source.index('phase("early-home:lifecycle")'))
+        self.assertIn('!nativeConfirmTitleVisible(lifecycleSend.window)', source)
+        self.assertIn('val fresh = checkNotNull(nativeSendLabel(cached.window))', source)
+        prepare = source.split('    private fun prepareEarlySendAnchor(', 1)[1].split('// END EARLY_SEND_LIVE_ANCHOR preparation', 1)[0]
+        self.assertNotIn('visible("Send answer")', prepare)
+
+    def test_native_confirm_positive_modal_proof_never_becomes_absence(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        f = native_review_nodes(); f.root.window = 10
+        f.root.matches["Confirm this option?"] = [f.Node("Confirm this option?", window=10)]
+        reader = native_review_memory(source, f.active, "app.zerus.mobile")
+        self.assertTrue(reader.confirm())
+        self.assertTrue(reader.confirm(9))  # An owned modal still present makes the existing await continue.
+        self.assertNotIn("Send answer", f.calls)
+
+    def test_native_confirm_absence_requires_same_window_and_positive_native_send(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        f = native_review_nodes(); reader = native_review_memory(source, f.active, "app.zerus.mobile")
+        self.assertFalse(reader.confirm(9))
+        self.assertEqual([call for call in f.calls if call != "refresh"], ["Confirm this option?", "Send answer"])
+        self.assertIs(reader.send(9), f.send)
+        f.send.text = ""; f.send.description = "Send answer"
+        self.assertIs(reader.send(9), f.send)  # Existing exactVisible semantics on a native indexed result only.
+
+    def test_native_review_unknown_roots_and_candidates_never_establish_absence(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        cases = {
+            "root-null": lambda f: setattr(f, "active", lambda: None),
+            "root-stale": lambda f: setattr(f.root, "fresh", False),
+            "root-foreign": lambda f: setattr(f.root, "package", "other.fixture"),
+            "root-other-window": lambda f: setattr(f.root, "window", 10),
+            "root-stale-after-query": lambda f: setattr(f.root, "fresh", [True, True, False]),
+            "root-changed-after-query": lambda f: setattr(f, "active", iter([f.root, f.Node(window=10)]).__next__),
+            "root-changed-after-positive-witness": lambda f: setattr(f, "active", iter([f.root, f.root, f.root, f.Node(window=10)]).__next__),
+            "root-stale-after-positive-witness": lambda f: setattr(f.root, "fresh", [True] * 5 + [False]),
+            "null-query": lambda f: f.root.matches.update({"Confirm this option?": None}),
+            "throwing-query": lambda f: f.root.matches.update({"Confirm this option?": RuntimeError("unknown native query")}),
+            "null-candidate": lambda f: f.root.matches.update({"Confirm this option?": [None]}),
+            "stale-candidate": lambda f: f.root.matches.update({"Confirm this option?": [f.Node(fresh=False)]}),
+            "foreign-candidate": lambda f: f.root.matches.update({"Confirm this option?": [f.Node(package="other.fixture")]}),
+            "other-window-candidate": lambda f: f.root.matches.update({"Confirm this option?": [f.Node(window=10)]}),
+            "good-then-stale-candidate": lambda f: f.root.matches.update({"Confirm this option?": [f.Node("Confirm this option?"), f.Node(fresh=False)]}),
+            "good-then-foreign-candidate": lambda f: f.root.matches.update({"Confirm this option?": [f.Node("Confirm this option?"), f.Node(package="other.fixture")]}),
+            "candidate-overflow": lambda f: f.root.matches.update({"Confirm this option?": [f.Node()] * 17}),
+            "empty-positive-witness": lambda f: f.root.matches.update({"Send answer": []}),
+            "missing-positive-witness": lambda f: f.root.matches.update({"Send answer": None}),
+            "stale-positive-witness": lambda f: setattr(f.send, "fresh", False),
+            "foreign-positive-witness": lambda f: setattr(f.send, "package", "other.fixture"),
+            "hidden-positive-witness": lambda f: setattr(f.send, "visible", False),
+            "containment-is-not-exact": lambda f: setattr(f.send, "text", "Do not Send answer now"),
+            "ambiguous-positive-witness": lambda f: f.root.matches.update({"Send answer": [f.send, f.Node("Send answer")]}),
+        }
+        for name, change in cases.items():
+            f = native_review_nodes(); change(f)
+            with self.subTest(name=name), self.assertRaises((AssertionError, RuntimeError)):
+                native_review_memory(source, f.active, "app.zerus.mobile").confirm(9)
+
+    def test_native_review_negative_lookup_has_source_bound_old_walk_cost_counterexample(self):
+        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        original = restore_confirm_native_search(source)
+        visible = original.split('    private fun visible(', 1)[1].split('    private fun node(', 1)[0]
+        walker = original.split('    private fun find(', 1)[1].split('    private fun exactVisible(', 1)[0]
+        self.assertIn('root.findAccessibilityNodeInfosByText(label).orEmpty().firstOrNull', visible)
+        self.assertIn('return find(root) { exactVisible(it, label) }', visible)
+        self.assertIn('if (!root.refresh()) return null', walker)
+        self.assertIn('for (index in 0 until root.childCount) find(root.getChild(index), predicate)?.let { return it }', walker)
+        f = native_review_nodes(); f.root.children = [f.Node(cost=125) for _ in range(32)]
+        def old_find(node, label):
+            if not node.refresh(): return None
+            if node.visible and (node.text == label or node.description == label): return node
+            for child in node.children:
+                found = old_find(child, label)
+                if found is not None: return found
+            return None
+        def old_visible(label):
+            root = f.active()
+            if root is None: return None
+            for node in root.query(label) or []:
+                if node.refresh() and node.visible and (node.text == label or node.description == label): return node
+            return old_find(root, label)
+        self.assertIsNone(old_visible("Confirm this option?"))
+        self.assertGreaterEqual(f.clock.now, 3000)  # Finite simulated cost, not an Android timing result.
+        f.clock.now = 0; f.calls.clear()
+        self.assertFalse(native_review_memory(source, f.active, "app.zerus.mobile").confirm(9))
+        self.assertLess(f.clock.now, 3000)
+        self.assertEqual(f.calls.count("refresh"), 7)  # No traversal of the 32 unrelated children.
+        self.assertEqual([call for call in f.calls if call != "refresh"], ["Confirm this option?", "Send answer"])
+
     def test_approval_requires_all_seven_exact_cases_in_order(self):
         self.ui.select_suite(["--approval-choices"])
         self.assertEqual(self.ui.instrumentation_result(self.output())["approval_cases"], "7")
@@ -883,7 +1085,7 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertNotIn(forbidden, definition)
         body = source.split('await("same current card body restored") {', 1)[1].split('\n                }', 1)[0]
         self.assertNotIn('lifecycleCheckpoint(', body)
-        self.assertIn('await("background retires confirmation") { visible("Confirm this option?") == null }', source)
+        self.assertIn('await("background retires confirmation") { visible("Confirm this option?") == null }', restore_confirm_native_search(source))
         for literal, before, after in [
             ('await("same current card body restored")', 'BODY_RESTORE_BEGIN', 'BODY_RESTORE_PASSED'),
             ('await("background retires confirmation")', 'CONFIRM_RETIRE_BEGIN', 'CONFIRM_RETIRE_PASSED'),
@@ -1078,7 +1280,10 @@ class ApprovalHarnessTests(unittest.TestCase):
             "mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt": "beb6a3caf6ae07ca3a062f4f30286aad3b19b71427eed7c9e8d662f7d5ae85be",
             "mobile/android/app/src/main/java/app/zerus/mobile/QuestionUi.kt": "841c0d5b2df250497b0f54ef8854574ca386e83cb735dc1a0873096d719e22a2",
         }.items():
-            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digest, path)
+            raw = (ROOT / path).read_bytes()
+            if path.endswith("ApprovalChoicesSmokeInstrumentation.kt"):
+                raw = restore_confirm_native_search(raw.decode()).encode()
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), digest, path)
         tree = ast.parse(source)
         main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
         handler = next(node for node in main.body if isinstance(node, ast.Try)).handlers[0]
@@ -1324,7 +1529,7 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertNotIn(forbidden, resolver)
 
     def test_android_live_anchor_preparation_preserves_the_original_fixture_and_reader(self):
-        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        source = restore_confirm_native_search((ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text())
         pattern = re.compile(r'^([ ]*)// BEGIN EARLY_SEND_LIVE_ANCHOR ([a-z-]+)\n[\s\S]*?^\1// END EARLY_SEND_LIVE_ANCHOR \2\n', re.M)
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['state', 'preparation', 'early-review', 'lifecycle'])
         projected = pattern.sub('', source)
@@ -2327,7 +2532,7 @@ class ApprovalHarnessTests(unittest.TestCase):
 
 class StaleComposeRoleSourceTests(unittest.TestCase):
     def source(self):
-        return (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        return restore_confirm_native_search((ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text())
 
     def test_option_only_seams_restore_every_byte_of_4233_and_the_send_walker(self):
         source = self.source()

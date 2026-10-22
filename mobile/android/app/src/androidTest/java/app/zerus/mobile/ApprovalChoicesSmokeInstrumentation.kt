@@ -302,7 +302,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             val end = checkNotNull(cached.resumeEnd)
             check(cached.current()) { "Early-review card identity changed before label acquisition" }
             check(SystemClock.elapsedRealtime() < end) { "Early-review Send deadline expired before label acquisition" }
-            val fresh = checkNotNull(visible("Send answer")) { "Early-review live Send label is unavailable" }
+            // BEGIN CONFIRM_NATIVE_SEARCH send
+            val fresh = checkNotNull(nativeSendLabel(cached.window)) { "Early-review live Send label is unavailable" }
+            // END CONFIRM_NATIVE_SEARCH send
             check(cached.current()) { "Early-review card identity changed after label acquisition" }
             check(SystemClock.elapsedRealtime() < end) { "Early-review Send deadline expired after label acquisition" }
             check(fresh.refresh()) { "Early-review live Send label is obsolete" }
@@ -877,6 +879,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             proveBroaderDraft()
             val lifecycleSend = captureEarlySend() // Capture the underlying card before its native modal obscures it.
             tap("Send answer"); node("Confirm this option?")
+            // BEGIN CONFIRM_NATIVE_SEARCH proof
+            check(nativeConfirmTitleVisible()) { "Native Confirm-title lookup was not positively proven" }
+            // END CONFIRM_NATIVE_SEARCH proof
             // Real Activity/window lifecycle, not an injected foreground Boolean.
             check(earlySend == null && lifecycleSend.current())
             earlySend = lifecycleSend
@@ -924,7 +929,9 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
                 lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_BEGIN)
                 // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
-                await("background retires confirmation") { visible("Confirm this option?") == null }
+                // BEGIN CONFIRM_NATIVE_SEARCH lookup
+                await("background retires confirmation") { !nativeConfirmTitleVisible(lifecycleSend.window) }
+                // END CONFIRM_NATIVE_SEARCH lookup
                 // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
                 lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_PASSED)
                 // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
@@ -1349,6 +1356,51 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             if (primaryFailure == null) observerCleanup?.let { throw it }
         }
     }
+    // BEGIN CONFIRM_NATIVE_SEARCH definition
+    private fun nativeOwnedRoot(expectedWindow: Int? = null): AccessibilityNodeInfo {
+        val root = checkNotNull(uiAutomation.rootInActiveWindow) { "Native review root is unavailable" }
+        check(root.refresh() && root.windowId >= 0 && root.packageName?.toString() == targetContext.packageName &&
+            (expectedWindow == null || root.windowId == expectedWindow)) {
+            "Native review root is unknown"
+        }
+        return root
+    }
+    private fun nativeOwnedLabels(root: AccessibilityNodeInfo, window: Int, label: String): List<AccessibilityNodeInfo> {
+        check(label == "Send answer" || label == "Confirm this option?")
+        check(root.refresh() && root.windowId == window && root.packageName?.toString() == targetContext.packageName) {
+            "Native review root changed before query"
+        }
+        val matches = checkNotNull(root.findAccessibilityNodeInfosByText(label)) { "Native review query is unavailable" }
+        check(matches.size <= 16) { "Native review query exceeded its candidate bound" }
+        val exact = mutableListOf<AccessibilityNodeInfo>()
+        for (candidate in matches) {
+            val fresh = checkNotNull(candidate) { "Native review candidate is unavailable" }
+            check(fresh.refresh() && fresh.windowId == window && fresh.packageName?.toString() == targetContext.packageName) {
+                "Native review candidate is unknown"
+            }
+            if (exactVisible(fresh, label)) exact += fresh
+        }
+        return exact
+    }
+    private fun nativeSendLabel(window: Int): AccessibilityNodeInfo {
+        val root = nativeOwnedRoot(window)
+        val matches = nativeOwnedLabels(root, window, "Send answer")
+        nativeOwnedRoot(window)
+        return checkNotNull(matches.singleOrNull()) { "Current native Send label is unproven" }
+    }
+    /** Absence is accepted only after this exact query found the real modal and the card has a current Send witness. */
+    private fun nativeConfirmTitleVisible(expectedEmptyWindow: Int? = null): Boolean {
+        val root = nativeOwnedRoot()
+        val window = root.windowId
+        val present = nativeOwnedLabels(root, window, "Confirm this option?").isNotEmpty()
+        nativeOwnedRoot(window)
+        check(present || expectedEmptyWindow == null || window == expectedEmptyWindow) {
+            "Native Confirm-title absence is not from the original card window"
+        }
+        if (!present && expectedEmptyWindow != null) nativeSendLabel(expectedEmptyWindow)
+        return present
+    }
+    // END CONFIRM_NATIVE_SEARCH definition
     companion object {
         val CASES = listOf("countdown_once", "broader_cancel", "broader_confirm", "card_replacement", "feedback_keyboard", "lifecycle_no_submit", "readonly_stale_identity")
     }
