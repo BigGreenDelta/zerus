@@ -238,16 +238,16 @@ pub(crate) fn native_ui_url(name: &str) -> Result<String> {
     let pattern =
         regex::Regex::new(r"http://127\.0\.0\.1:[0-9]+/\?token=[A-Za-z0-9_%.-]+").unwrap();
     // A new host's adapter can answer before its web server logs the address.
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     let url = loop {
         let log = fs::read_to_string(host_dir(&record).join("host.log")).map_err(|e| e.to_string())?;
         if let Some(found) = pattern.find(&log) {
             break found.as_str().to_owned();
         }
-        if Instant::now() >= deadline {
+        if std::time::Instant::now() >= deadline {
             return Err("Native UI is still starting; try again in a moment".into());
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(100));
     };
     if name != "@account" {
         match rpc(
