@@ -250,6 +250,8 @@ Dependabot vulnerability alerts and security updates are enabled separately in
 repository settings. Security proposals have their own per-ecosystem groups;
 they are not delayed by the monthly version schedule or counted against its PR
 limit. A fix requiring a manifest migration still needs maintainer attention.
+The DeepSeek fixture lockfile has no version-update entry; a security proposal
+for it must keep the exact reviewed `@deepseek-ai/dsh` version.
 Do not disable security alerts to reduce routine version-update noise.
 
 Dependabot jobs on standard GitHub-hosted runners do not consume included Actions
@@ -279,8 +281,13 @@ module patches do not leak between suites. Terminal fixtures use private socket
 paths and synthetic homes. No check runs against existing agent sessions.
 Authenticated native-client tests remain explicit opt-ins; baseline CI needs no
 model API keys. Linux installs the pinned official `@deepseek-ai/dsh@0.2.0-rc.2`
-for its keyless local-model contract fixture. Native agent CLIs are not included
-in the product package.
+for its keyless local-model contract fixture with `npm ci` from
+`scripts/ci/dsh-fixture/package-lock.json`. The lockfile fixes every transitive
+version and its SHA-512 integrity, so a newly published dependency can neither
+change nor break the install. To adopt another DeepSeek version, change it in that
+`package.json` together with the adapter, regenerate the lock with
+`npm install --package-lock-only` under the CI Node major and review the dependency
+diff. Native agent CLIs are not included in the product package.
 
 The CI CLI jobs set `ZERUS_PYTHON_JOBS` to twice the runner vCPUs (8 on Ubuntu,
 6 on macOS): the Python test classes mostly wait on terminals and subprocesses.

@@ -575,11 +575,16 @@ jobs:
             target
           key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      # The reviewed lockfile fixes every transitive version and its SHA-512
+      # integrity. The copy keeps node_modules outside the workspace, caches and
+      # artifacts.
       - name: Keyless official DeepSeek contract fixture
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          npm install --prefix "$RUNNER_TEMP/dsh" --no-audit --no-fund @deepseek-ai/dsh@0.2.0-rc.2
+          mkdir -p "$RUNNER_TEMP/dsh"
+          cp scripts/ci/dsh-fixture/package.json scripts/ci/dsh-fixture/package-lock.json "$RUNNER_TEMP/dsh/"
+          npm ci --prefix "$RUNNER_TEMP/dsh" --no-audit --no-fund
           echo "$RUNNER_TEMP/dsh/node_modules/.bin" >> "$GITHUB_PATH"
       - run: bash scripts/ci/cli.sh
       - name: Save Rust cache

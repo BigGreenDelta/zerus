@@ -1,0 +1,8 @@
+{
+  "name": "zerus-dsh-fixture",
+  "private": true,
+  "description": "Reviewed install of the keyless DeepSeek contract fixture; see docs/ci-and-aur.md.",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.0-rc.2"
+  }
+}
