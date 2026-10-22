@@ -238,7 +238,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     connect(buttons,&QDialogButtonBox::rejected,this,&QDialog::reject);connect(m_start,&QPushButton::clicked,this,&NewSessionDialog::start);
     connect(m_manage,&QToolButton::clicked,this,[this]{const auto id=m_project->currentData().toString();reject();emit projectFoldersRequested(id);});
     connect(m_openMachines,&QPushButton::clicked,this,[this]{if(m_creation)return;reject();emit machinesRequested();});
-    connect(m_project,&QComboBox::activated,this,[this]{m_projectExplicit=true;});
+    connect(m_project,&QComboBox::activated,this,[this]{m_projectExplicit=true;updateForm();});
     connect(m_project,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;loadMachines();loadFolders();});
     connect(m_machine,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;m_accountPreset=false;loadFolders();});
     connect(m_browse,&QPushButton::clicked,this,&NewSessionDialog::browseFolder);
@@ -531,6 +531,7 @@ void NewSessionDialog::updateForm()
     m_preview->setStyleSheet(outside?QStringLiteral("color: %1;").arg(palette().color(QPalette::Window).lightness()<128?"#f0b65a":"#9b6300"):QString());
     m_preview->setText(m_prefillRequest?tr("Checking the session's main working folder…"):
         path.isEmpty()?tr("Browse to choose a folder on this computer."):
+        implicitInbox()?tr("A matching project is detected automatically.\nOtherwise this session stays in Inbox."):
         outside?tr("This folder is outside the project.\nStarting here will add it to this project."):
         QString());
     m_preview->setToolTip(m_preview->text());m_preview->ensurePolished();m_preview->setFixedHeight(2*m_preview->fontMetrics().lineSpacing());

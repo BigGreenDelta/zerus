@@ -125,6 +125,8 @@ private val Amber = Color(0xFFFFCB7D)
     val projects = remember(catalog) { LaunchPresentation.projects(catalog) }
     val projectSupported = catalog?.opt("project_launch_supported") == true
     val project = projects.find { it.id == projectId }
+    val implicitProject = !projectExplicit && projectId=="ungrouped"
+    val projectDetectionNote = "A matching project is detected automatically. Otherwise this session stays in Inbox."
     LaunchedEffect(providers) { if(provider !in providers) provider = providers.firstOrNull().orEmpty() }
     LaunchedEffect(accounts) { account = LaunchPresentation.defaultAccount(accounts,account) }
     LaunchedEffect(projects) {
@@ -261,7 +263,7 @@ private val Amber = Color(0xFFFFCB7D)
                     LaunchSection("Folder") {
                         val projectFolders = project?.folders.orEmpty()
                         if(project != null && projectFolders.isEmpty() && folder.isBlank())
-                            LaunchNotice(Amber) { Text("${project.name} has no folder on $computer. Browse to choose one; it will be added to this project.",style = MaterialTheme.typography.bodyMedium) }
+                            LaunchNotice(Amber) { Text(if(implicitProject) "Browse to choose a folder. $projectDetectionNote" else "${project.name} has no folder on $computer. Browse to choose one; it will be added to this project.",style = MaterialTheme.typography.bodyMedium) }
                         if(projectFolders.isEmpty() && folder.isBlank()) {
                             Button(onClick = { browsing = true },enabled = !busy,modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) {
                                 Icon(Icons.Default.Folder,null,Modifier.size(20.dp));Spacer(Modifier.width(8.dp));Text("Browse folders")
@@ -281,7 +283,8 @@ private val Amber = Color(0xFFFFCB7D)
                             TextButton(onClick = { model.browseLaunchDirectory(machine,folder) }) { Text("Check again") }
                         }
                         if(!automatic && project != null && folder.isNotBlank()) {
-                            if(related) LaunchHint("Verified worktree of ${project.name}. No project folder will be added.")
+                            if(implicitProject) LaunchHint(projectDetectionNote)
+                            else if(related) LaunchHint("Verified worktree of ${project.name}. No project folder will be added.")
                             else if(!inProject) LaunchHint("This folder is outside ${project.name}. Starting here adds it to the project.",color = Amber)
                         }
                     }
@@ -311,7 +314,8 @@ private val Amber = Color(0xFFFFCB7D)
                             Text("New worktree",style = MaterialTheme.typography.labelMedium,color = MaterialTheme.colorScheme.onSurfaceVariant)
                             SelectionContainer { Text(plannedPath,style = MaterialTheme.typography.bodySmall) }
                             Text("New branch $branch from HEAD, created when the session starts.",style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            if(plannedAdded) LaunchHint("The new worktree will be added to ${project?.name}.",color = Amber)
+                            if(implicitProject) LaunchHint(projectDetectionNote)
+                            else if(plannedAdded) LaunchHint("The new worktree will be added to ${project?.name}.",color = Amber)
                         } else if(autoPossible) LaunchHint("The session starts directly in the selected folder.")
                         else WorktreePresentation.automaticNote(model.launchWorktreeState,folder,supported,model.launchWorktreeLoading)
                             .takeIf { it.isNotBlank() }?.let { LaunchHint(it) }
