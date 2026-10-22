@@ -194,6 +194,7 @@ private slots:
     void crashRestoresLastEditAndAttachmentBytes();
     void restartKeepsIsolationRenamesAndAttachmentRemoval();
     void restoredDraftPresenceNeedsNoConversationOrAttachmentRead();
+    void backgroundDraftLoadAndRenamePreserveVisibleSession();
     void deliveryPersistence_data();
     void deliveryPersistence();
     void storageFailureKeepsDraftAndBlocksDispatch();
@@ -642,6 +643,50 @@ void TestMessageComposer::restartKeepsIsolationRenamesAndAttachmentRemoval()
     setSessionReady(restored, "arch\nsame\nconversation\nchild"); QCOMPARE(restored.editor()->toPlainText(), "Child");
     restored.setAvailability(false, "Machine unavailable"); setSessionReady(restored, {});
     setSessionReady(restored, "arch\nsame"); QCOMPARE(restored.editor()->toPlainText(), "Local without marker");
+}
+
+void TestMessageComposer::backgroundDraftLoadAndRenamePreserveVisibleSession()
+{
+    const QString oldKey = "arch\nnever-opened\narchive-one", newKey = "arch\nnever-opened", currentKey = "mac\nvisible";
+    ComposerDraftStore store;
+    ComposerDraft archived; archived.text = "Never opened archived draft"; archived.anchor = 2; archived.position = 13;
+    archived.attachments = {{"notes.txt", "text/plain", QByteArray("retained\0attachment", 19), {}}}; archived.nextAttachmentNumber = 4;
+    QVERIFY(store.save(oldKey, archived));
+    const auto original = store.load(oldKey);
+    ComposerDraft current; current.text = "Keep this editor and selection"; current.anchor = 3; current.position = 11;
+    current.attachments = {{"current.txt", "text/plain", "current attachment", {}}}; current.nextAttachmentNumber = 2;
+    QVERIFY(store.save(currentKey, current));
+    MessageComposer composer; setSessionReady(composer, currentKey); composer.setAvailability(true);
+    QSignalSpy submitted(&composer, &MessageComposer::sendRequested);
+    QTRY_VERIFY(composer.hasDraft(oldKey)); // Presence may be indexed before bytes are loaded.
+    QSignalSpy loaded(&composer, &MessageComposer::draftLoaded);
+    const auto checkVisible = [&] {
+        QCOMPARE(composer.sessionKey(), currentKey);
+        QCOMPARE(composer.editor()->toPlainText(), current.text);
+        QCOMPARE(composer.editor()->textCursor().anchor(), current.anchor);
+        QCOMPARE(composer.editor()->textCursor().position(), current.position);
+        QVERIFY(composer.draftMatches(currentKey, current.text, current.attachments));
+        QCOMPARE(submitted.size(), 0);
+    };
+    composer.ensureDraftLoaded(oldKey);
+    QVERIFY(composer.isDraftLoading(oldKey));
+    composer.ensureDraftLoaded(oldKey); // A duplicate request keeps the same pending load.
+    checkVisible();
+    QTRY_VERIFY(!composer.isDraftLoading(oldKey));
+    QCOMPARE(loaded.size(), 1); QCOMPARE(loaded.first().first().toString(), oldKey);
+    composer.ensureDraftLoaded(oldKey); QCOMPARE(loaded.size(), 1);
+    QVERIFY(composer.draftMatches(oldKey, original.text, original.attachments));
+    checkVisible();
+    composer.renameDraft(oldKey, newKey);
+    QTRY_VERIFY(!composer.isDraftLoading(oldKey) && !composer.isDraftLoading(newKey));
+    checkVisible();
+    const auto moved = store.load(newKey);
+    QCOMPARE(moved.text, original.text); QCOMPARE(moved.anchor, original.anchor); QCOMPARE(moved.position, original.position);
+    QCOMPARE(moved.nextAttachmentNumber, original.nextAttachmentNumber); QCOMPARE(moved.attachmentHashes, original.attachmentHashes);
+    QCOMPARE(moved.attachments.size(), 1); QCOMPARE(moved.attachments.first().name, original.attachments.first().name);
+    QCOMPARE(moved.attachments.first().mime, original.attachments.first().mime); QCOMPARE(moved.attachments.first().data, original.attachments.first().data);
+    QVERIFY(store.load(oldKey).text.isEmpty()); QVERIFY(store.load(oldKey).attachments.isEmpty());
+    QVERIFY(!composer.hasDraft(oldKey)); QVERIFY(composer.hasDraft(newKey));
 }
 
 void TestMessageComposer::restoredDraftPresenceNeedsNoConversationOrAttachmentRead()

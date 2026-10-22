@@ -32,6 +32,8 @@ public:
     explicit MessageComposer(QWidget *parent = nullptr);
     ~MessageComposer() override;
     void setSessionKey(const QString &key);
+    // Read a retained draft in the background without navigating to its session.
+    void ensureDraftLoaded(const QString &key);
     void setAvailability(bool available, const QString &reason = {});
     // Session feedback uses the existing action row and never replaces a draft.
     void setSessionStatus(const QString &text, bool error = false, bool blockInput = false);
@@ -135,6 +137,8 @@ signals:
     void sendNowRequested(const QString &sessionKey);
     // hasDraft(sessionKey) changed.
     void draftChanged(const QString &sessionKey);
+    // A revision-bound background load completed, even if presence was already known.
+    void draftLoaded(const QString &sessionKey);
     // Go to session in Saved drafts, after the dialog has closed.
     void draftSessionRequested(const QString &draftKey);
     void controlsChanged();
