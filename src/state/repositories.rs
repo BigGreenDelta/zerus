@@ -60,10 +60,7 @@ fn valid_url(url: &str) -> bool {
     })
 }
 
-fn validate(url: &str, parent: &str, name: &str) -> Result<PathBuf> {
-    if !valid_url(url) {
-        return Err("Use an SSH or HTTPS repository address without embedded passwords, tokens, query or fragment".into());
-    }
+fn validate_name(name: &str) -> Result<()> {
     if name.is_empty()
         || name.len() > 240
         || name != name.trim()
@@ -77,6 +74,41 @@ fn validate(url: &str, parent: &str, name: &str) -> Result<PathBuf> {
             "Choose a single new folder name without separators or control characters".into(),
         );
     }
+    // Win32 resolves device stems even with extensions and ASCII spaces before
+    // the first dot. Keep this portable, like the forbidden leaf characters.
+    // COM/LPT also reserve the superscript digits documented by Microsoft:
+    // https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    let numbered = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|digit| {
+            matches!(
+                digit,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        });
+    if numbered
+        || matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        )
+    {
+        return Err("Choose a folder name that is not a reserved Windows device name".into());
+    }
+    Ok(())
+}
+
+fn validate(url: &str, parent: &str, name: &str) -> Result<PathBuf> {
+    if !valid_url(url) {
+        return Err("Use an SSH or HTTPS repository address without embedded passwords, tokens, query or fragment".into());
+    }
+    validate_name(name)?;
     if parent.is_empty() || parent.len() > 4096 || parent.chars().any(char::is_control) {
         return Err("Choose an existing parent folder".into());
     }
@@ -261,6 +293,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         return Err(USAGE.into());
     }
     let (url, parent, name) = (get("--url")?, get("--parent")?, get("--name")?);
+    // Reject unusable destination names before creating a receipt directory,
+    // request lock or checkout. Status reads of older receipts stay available.
+    validate_name(name)?;
     let fingerprint = format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&json!([url, parent, name])).unwrap())
@@ -392,6 +427,79 @@ mod tests {
         ] {
             assert!(!valid_url(url), "{url}");
         }
+    }
+    #[test]
+    fn destination_names_refuse_device_stems_without_rejecting_ordinary_unicode() {
+        for name in [
+            "CON",
+            "prn",
+            "AuX",
+            "NUL",
+            "CONIN$",
+            "conout$",
+            "con.txt",
+            "NUL.tar.gz",
+            "COM1",
+            "COM2",
+            "COM3",
+            "COM4",
+            "COM5",
+            "COM6",
+            "COM7",
+            "COM8",
+            "com9.git",
+            "LPT1",
+            "LPT2",
+            "LPT3",
+            "LPT4",
+            "LPT5",
+            "LPT6",
+            "LPT7",
+            "LPT8",
+            "lpt9.txt",
+            "CON  .git",
+            "COM1 .tar.gz",
+            "CONIN$ .txt",
+            "CONOUT$.git",
+            "COM¹",
+            "com².git",
+            "COM³.txt",
+            "LPT¹",
+            "lpt².tar.gz",
+            "LpT³  .git",
+        ] {
+            assert!(validate_name(name).is_err(), "{name}");
+        }
+        for name in [
+            "checkout",
+            "console",
+            "auxiliary",
+            "NUL-copy",
+            "COM0",
+            "COM10",
+            "LPT0",
+            "LPT10.git",
+            "COM1-copy",
+            "COM¹0",
+            "LPT³-copy",
+            ".CON",
+            "something.CON",
+            "repo with spaces",
+            "Проект",
+            "コード",
+            "☃",
+            "ＣＯＮ",
+            "COM₁",
+            "COM١",
+            "COM⁴",
+        ] {
+            assert!(validate_name(name).is_ok(), "{name}");
+        }
+        for name in ["", ".", "..", "a/b", "a\\b", "a:b", "a\n", "a.", " a", "a "] {
+            assert!(validate_name(name).is_err(), "{name}");
+        }
+        assert!(validate_name(&"x".repeat(241)).is_err());
+        assert!(validate_name(&"x".repeat(240)).is_ok());
     }
     #[test]
     fn receipt_limit_includes_escaped_detail_and_fields() {
