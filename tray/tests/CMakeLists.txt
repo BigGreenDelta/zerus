@@ -223,6 +223,10 @@ add_executable(test_downloadcachesettings test_downloadcachesettings.cpp)
 target_link_libraries(test_downloadcachesettings PRIVATE Qt6::Test hgs-tray-ui)
 zerus_add_test(downloadcachesettings test_downloadcachesettings)
 
+add_executable(test_clonerepository test_clonerepository.cpp)
+target_link_libraries(test_clonerepository PRIVATE Qt6::Test hgs-tray-ui)
+zerus_add_test(clonerepository test_clonerepository)
+
 add_executable(test_hgsclient test_hgsclient.cpp)
 add_executable(test_automaticapprovals test_automaticapprovals.cpp)
 target_link_libraries(test_automaticapprovals PRIVATE Qt6::Test hgs-tray-ui)

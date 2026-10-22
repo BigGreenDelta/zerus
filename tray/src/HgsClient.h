@@ -228,6 +228,9 @@ public:
                            const QString &fingerprint, bool deleteBranch, const QString &ignoredFingerprint = {}, const QString &discardFingerprint = {});
     quint64 requestDirectories(const QString &host, const QString &path, bool hidden = false);
     quint64 createDirectory(const QString &host, const QString &path);
+    // Selected-computer capability probe precedes every acquisition operation.
+    quint64 repositoryOperation(const QString &host, const QString &action, const QString &url,
+                                const QString &parent, const QString &name, const QString &token = {});
     // Whether an inspection of this session is running; one at a time per session.
     bool inspectionInFlight(const QString &host, const QString &name, const QString &archiveId = QString()) const
     { return m_inspectionsInFlight.contains(host + QLatin1Char('\n') + name + QLatin1Char('\n') + archiveId); }
@@ -381,6 +384,7 @@ signals:
     void worktreeCleanupFinished(const QString &host, const QString &operation, const QJsonObject &result);
     void directoriesReady(quint64 request, const QString &host, const QJsonObject &data);
     void directoryCreated(quint64 request, const QString &host, const QJsonObject &data);
+    void repositoryFinished(quint64 request, bool ok, const QJsonObject &data, const QString &error);
     void directoryCreationFailed(quint64 request, const QString &host, const QString &detail);
     void directoriesFailed(quint64 request, const QString &host, const QString &detail);
     // Процесс не запустился или не уложился в таймаут. Это НЕ то же самое, что ok:false:

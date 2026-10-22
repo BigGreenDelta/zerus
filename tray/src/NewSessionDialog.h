@@ -22,7 +22,7 @@ class NewSessionDialog : public QDialog {
 public:
     NewSessionDialog(const QString &hgsPath,const FleetState &fleet,const QString &host = {},
                      const QString &agent = {},const QString &project = {},QWidget *parent = nullptr,
-                     AccountUsageStore *usage = nullptr);
+                     AccountUsageStore *usage = nullptr, SessionOrganization *projects = nullptr);
     void setFleet(const FleetState &fleet);
     void setGroups(const SessionOrganization &organization,const QString &selectedProject = {});
     bool selectFolder(const QString &folderId);
@@ -39,10 +39,12 @@ signals:
     void projectFoldersRequested(const QString &project);
     // Open Machines with this computer selected (offered without a computer).
     void machinesRequested();
+    void organizationChanged();
 private:
     void loadMachines();
     void loadFolders(const QString &selectedPath = {});
     void browseFolder();
+    void cloneRepository();
     void updateWorktrees();
     QString matchingProjectFolder(const QString &path, const QString &canonicalPath = {}) const;
     void finishFolderPrefill(const QJsonObject &catalog);
@@ -83,6 +85,9 @@ private:
     AccountUsageStore *m_usageStore;
     FleetState m_fleet;
     SessionOrganization m_projects;
+    SessionOrganization *m_liveProjects=nullptr;
+    bool m_cloneLaunchPending=false,m_cloning=false;
+    QPushButton *m_clone;
     QString m_initialProject,m_initialHost,m_accountHost;
     QString m_preferredAccount;
     QString m_preferredAgent;
