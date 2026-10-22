@@ -447,7 +447,8 @@ def main():
             assert len(re.findall(r"^Success$", installed, re.M)) == 1 and "Failure" not in installed
         alive()
         instrumentation_started = True
-        output = run("instrumentation", [*device, "am", "instrument", "-w", "-r", "app.zerus.mobile.test/" + RUNNER], 90)
+        # Passing runs take about a minute; slow standard runners have needed 1.3-1.8 times as long.
+        output = run("instrumentation", [*device, "am", "instrument", "-w", "-r", "app.zerus.mobile.test/" + RUNNER], 240)
         alive()
         save("instrumentation-result.json", instrumentation_result(output))
         success = True

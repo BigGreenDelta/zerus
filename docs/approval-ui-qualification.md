@@ -81,7 +81,9 @@ reserve. The read filters to fixture and Android-runtime tags. The interceptor a
 failure with bounded method/encoded-path metadata only, emits that named diagnostic, and returns a fixed local failure
 response without network forwarding. Every wait and final qualification refuses a retained interceptor failure.
 Missing, late or failed diagnostics remain unknown and cannot replace the primary failure, qualify a missing
-case, relax the strict result parser, or authorize a retry. The instrumentation cap remains 90 seconds.
+case, relax the strict result parser, or authorize a retry. The instrumentation cap is 240 seconds (owner direction,
+2026-10-22): passing runs take about a minute, while slow standard runners took 1.3 to 1.8 times as long and exceeded
+the earlier 90-second cap, once after all seven cases had completed.
 Fixed lifecycle checkpoints bracket the existing body-restoration wait, confirmation-retirement wait and disabled-Send
 check, outside their polling predicates. Separate markers identify return from the resumed main-thread observation,
 entry into primary-failure capture and entry into cleanup. They use the same phase log, at most 64 markers plus one
