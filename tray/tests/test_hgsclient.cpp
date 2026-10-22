@@ -719,6 +719,17 @@ void TestHgsClient::nativeApiSessionsRetainExactCapabilities()
     legacy.terminalReported=false;QVERIFY(!NativeSessionCapabilities::terminal(legacy));
     QVERIFY(NativeSessionCapabilities::terminal(legacy,{{"terminal_supported",true}}));
     legacy.cmd="dsh";QVERIFY(!NativeSessionCapabilities::terminal(legacy,{{"terminal_supported",true}}));
+    // An interactive native attach client is not a pane-snapshot capability.
+    const auto nativeRows = HgsClient::parseSessions(QJsonArray{QJsonObject{
+        {"name", "opencode/project/tui"}, {"cmd", "opencode"}, {"terminal_supported", false},
+        {"terminal_attach_supported", true}}});
+    QCOMPARE(nativeRows.size(), 1);
+    const auto tui = nativeRows.first();
+    QVERIFY(tui.terminalAttachReported && tui.terminalAttachSupported);
+    QVERIFY(!tui.terminalSupported); QVERIFY(NativeSessionCapabilities::terminal(tui));
+    QVERIFY(!NativeSessionCapabilities::terminal(tui, {{"terminal_attach_supported", false}}));
+    QCOMPARE(NativeSessionCapabilities::terminalReason(tui, {{"terminal_attach_supported", false},
+        {"terminal_attach_reason", "OpenCode service is unavailable"}}), QString("OpenCode service is unavailable"));
     QSignalSpy launched(&client,&HgsClient::nativeSessionLaunched);
     const auto model=QString("ollama/qwen3:8b");client.launchDetachedSession("remote","opencode","/fixture/folder","local","native-opencode","launch-local",model);
     QTRY_COMPARE(launched.size(),1);QVERIFY(launched[0][1].toBool());

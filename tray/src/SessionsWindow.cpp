@@ -1691,8 +1691,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         }
         if (!ok && !m_forkKey.isEmpty()) { m_forkKey.clear(); m_forkGroup.clear(); m_forkBefore.clear(); }
         if (!m_restoreKey.isEmpty()) {
-            if (ok) { m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); m_pages->setCurrentIndex(0); m_projectsNav->setChecked(false); }
-            else m_restoreKey.clear();
+            if (operation == QStringLiteral("restore %1").arg(m_restoreKey.section('\n', 1, 1))) {
+                m_restoreSucceeded = ok;
+                // Only the list filter changes. Keep machine/project/search
+                // scope and a conversation the user selected in the meantime.
+                if (ok && m_restoreSource && m_selectedKey == m_restoreSource->key && m_filter == "archived") m_filter = "all";
+                if (!ok) { m_restoreKey.clear(); m_restoreSource.reset(); }
+            }
         }
         showNotice(ok ? (renamed ? tr("Session renamed. Refreshing…") : tr("Session updated. Refreshing…")) : detail, !ok);
         emit refreshRequested(); rebuild(); inspect();
@@ -2696,6 +2701,9 @@ QString SessionsWindow::selectedHostTarget() const {
 const SessionsWindow::Entry *SessionsWindow::selected() const
 {
     for (const auto &entry : m_entries) if (entry.key == m_selectedKey) return &entry;
+    // Archive and live catalog reads finish independently. Keep the opened
+    // archived view while its exact restore is awaiting the live row/draft.
+    if (!m_restoreKey.isEmpty() && m_restoreSource && m_restoreSource->key == m_selectedKey) return &*m_restoreSource;
     return nullptr;
 }
 
@@ -2903,9 +2911,37 @@ void SessionsWindow::rebuild()
             break;
         }
     }
-    if (!m_pending && !m_restoreKey.isEmpty()) {
+    if (!m_pending && m_restoreSucceeded && !m_restoreKey.isEmpty()) {
         for (const auto &entry : m_entries) if (entry.key == m_restoreKey && entry.session.state == "running") {
-            requestedSelection = m_restoreKey; m_restoreKey.clear(); break;
+            if (m_restoreSource && !m_restoreConversation.isEmpty() && entry.session.conversationId == m_restoreConversation) {
+                const auto oldKey = m_restoreSource->key;
+                // Loading finishes via draftChanged, which schedules rebuild.
+                // Never move an empty placeholder over the retained draft.
+                if (m_composer->isDraftLoading(oldKey)) break;
+                m_composer->renameDraft(oldKey, entry.key);
+                if (m_localMessages.contains(oldKey)) m_localMessages.insert(entry.key, m_localMessages.take(oldKey));
+                if (m_selectedKey == oldKey) {
+                    m_activityView->continueSession(oldKey, entry.key);
+                    m_selectedKey = entry.key; requestedSelection = entry.key;
+                    m_composer->setSessionKey(entry.key);
+                    // Keep the visible history, but no old-run controls are
+                    // enabled before a fresh inspection of the resumed run.
+                    m_inspectError = tr("Session restored. Refreshing its current state…");
+                    m_cursor = 0; m_inspectionAge.invalidate(); m_processPollAge.invalidate();
+                    const auto key = entry.key;
+                    QTimer::singleShot(0, this, [this, key] { if (m_selectedKey == key) inspect(); });
+                }
+            } else if (m_restoreSource && m_selectedKey == m_restoreSource->key) {
+                // Missing/different native identity is not a draft migration.
+                // The archived draft remains recoverable in Saved drafts.
+                if (entry.session.conversationId.isEmpty()) requestedSelection = entry.key;
+                else {
+                    requestedSelection.clear();
+                    showNotice(tr("The restored conversation could not be verified. Your archived draft remains in Saved drafts."), true);
+                }
+            }
+            m_restoreKey.clear(); m_restoreSource.reset(); m_restoreConversation.clear(); m_restoreSucceeded = false;
+            break;
         }
     }
     if (!m_pending && !m_renameKey.isEmpty()) {
@@ -5219,6 +5255,9 @@ void SessionsWindow::changeSession()
     m_pending = true; m_restoreKey.clear();
     if (e->session.state == "archived") {
         m_restoreKey = e->host + '\n' + e->session.name;
+        m_restoreSource = *e;
+        m_restoreConversation = m_details.value("conversation_id").toString(e->session.conversationId);
+        m_restoreSucceeded = false;
         m_client.restoreArchive(e->host, e->session.name, e->session.archiveId);
     } else if (e->session.state == "running") m_client.pauseSession(e->host, e->session.name);
     else m_client.resumeSession(e->host, e->session.name);

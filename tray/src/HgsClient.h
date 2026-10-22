@@ -55,6 +55,8 @@ struct SessionInfo {
     double archivedAt = 0;
     bool resumable = false;
     bool terminalSupported = true, terminalReported = false, bulkLifecycleSupported = true, actionsReported = false;
+    bool terminalAttachSupported = false, terminalAttachReported = false;
+    QString terminalAttachReason;
     QString terminalReason;
     QSet<QString> allowedActions;
     QJsonObject actionReasons;

@@ -362,6 +362,9 @@ private:
     QSet<QString> m_terminationFinished;
     QString m_terminationCommand;
     QString m_restoreKey, m_renameKey, m_forkKey, m_forkGroup, m_forkBefore;
+    std::optional<Entry> m_restoreSource;
+    QString m_restoreConversation;
+    bool m_restoreSucceeded = false;
     bool m_renameArchived = false;
     QString m_selectedKey, m_filter = "all";
     bool m_initialSelectionPending = true;

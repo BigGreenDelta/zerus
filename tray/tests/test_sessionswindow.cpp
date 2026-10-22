@@ -221,6 +221,9 @@ private slots:
     // Chords a test rebinds end with it.
     void cleanup() { ShortcutRegistry::instance().resetAll(); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
+    void archiveRestoreKeepsDraftAndConversation_data();
+    void archiveRestoreKeepsDraftAndConversation();
+    void openCodeNativeTerminalIsExplicitAndKeepsDraft();
     void savedDraftsGoToTheirSession_data();
     void savedDraftsGoToTheirSession();
     void independentWaitRemainsVisibleWithoutExpandingHeader_data();
@@ -7542,6 +7545,96 @@ void TestSessionsWindow::archiveFiltersIdentityRestoreAndForget()
     QVERIFY(!menu->actions()[0]->menu()->actions().last()->isEnabled());
 }
 
+void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation_data()
+{
+    QTest::addColumn<bool>("navigateAway");
+    QTest::addColumn<bool>("sameConversation");
+    QTest::addColumn<bool>("destinationDraft");
+    QTest::newRow("same-conversation") << false << true << false;
+    QTest::newRow("newer-user-selection") << true << true << false;
+    QTest::newRow("different-conversation") << false << false << false;
+    QTest::newRow("existing-live-draft") << false << true << true;
+}
+
+void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
+{
+    QFETCH(bool, navigateAway);
+    QFETCH(bool, sameConversation);
+    QFETCH(bool, destinationDraft);
+    auto state = fleet(); auto local = state.local();
+    auto archived = local.sessions[0];
+    archived.name = "codex/hgs/restore-draft"; archived.tag = "restore-draft";
+    archived.state = "archived"; archived.archiveId = "draft-archive";
+    archived.runId = "archived-run"; archived.conversationId = "conversation-one";
+    auto other = local.sessions[1];
+    local.sessions = {archived, other}; state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    const QString oldKey = "\n" + archived.name + "\n" + archived.archiveId;
+    const QString liveKey = "\n" + archived.name;
+    ComposerDraftStore store; ComposerDraft draft;
+    draft.text = "Keep this draft and selection"; draft.anchor = 2; draft.position = 9;
+    draft.attachments = {{"notes.txt", "text/plain", "retained bytes", {}}};
+    draft.attachmentHashes = {"retained-hash"}; draft.nextAttachmentNumber = 7;
+    QVERIFY(store.save(oldKey, draft));
+    if (destinationDraft) { ComposerDraft newer; newer.text = "Existing live draft"; QVERIFY(store.save(liveKey, newer)); }
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(state); window.show();
+    auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
+    auto *list = window.findChild<QListWidget *>("sessionList");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *activity = window.findChild<ActivityView *>();
+    auto *machines = window.findChild<MachineFilter *>("machineFilterChips");
+    QVERIFY(client && list && composer && activity && machines);
+    machines->setSelection({"@local"});
+    QPushButton *archiveFilter = nullptr;
+    for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "archived") archiveFilter = button;
+    QVERIFY(archiveFilter); archiveFilter->click();
+    QCOMPARE(list->count(), 1); list->setCurrentRow(0);
+    QTRY_COMPARE(composer->sessionKey(), oldKey);
+    QTRY_VERIFY(!composer->isDraftLoading(oldKey));
+    QCOMPARE(composer->editor()->toPlainText(), draft.text);
+    QCOMPARE(composer->editor()->textCursor().anchor(), draft.anchor);
+    QCOMPARE(composer->editor()->textCursor().position(), draft.position);
+    QTRY_VERIFY(!activity->renderPending());
+    const auto history = activity->plainText(); QVERIFY(!history.isEmpty());
+    QSignalSpy terminal(&window, &SessionsWindow::sessionActivated);
+    auto *restore = window.findChild<QPushButton *>("restoreSessionAction");
+    QVERIFY(restore && restore->isEnabled()); restore->click();
+    QTRY_COMPARE(writes.size(), 1);
+    QCOMPARE(writes[0][0].toString(), "restore " + archived.name); QVERIFY(writes[0][1].toBool());
+    if (navigateAway) window.showSession({}, other.name);
+    auto restored = archived; restored.state = "running"; restored.archiveId.clear(); restored.runId = "resumed-run";
+    if (!sameConversation) restored.conversationId = "different-conversation";
+    local.sessions = {restored, other}; state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QCOMPARE(machines->selection(), QSet<QString>{"@local"});
+    QCOMPARE(terminal.size(), 0); QCOMPARE(writes.size(), 1);
+    if (!sameConversation) {
+        QVERIFY(composer->sessionKey() != liveKey);
+        QCOMPARE(store.load(oldKey).text, draft.text);
+        QVERIFY(store.load(liveKey).text.isEmpty());
+        return;
+    }
+    const auto expectedKey = navigateAway ? "\n" + other.name : liveKey;
+    QTRY_COMPARE(composer->sessionKey(), expectedKey);
+    QTRY_VERIFY(!composer->isDraftLoading(liveKey));
+    if (destinationDraft) {
+        QCOMPARE(store.load(oldKey).text, draft.text);
+        QCOMPARE(store.load(liveKey).text, QString("Existing live draft"));
+        QTRY_COMPARE(composer->editor()->toPlainText(), QString("Existing live draft"));
+    } else {
+        QTRY_COMPARE(store.load(liveKey).text, draft.text);
+        const auto written = store.load(liveKey);
+        QCOMPARE(written.attachments.size(), 1); QCOMPARE(written.attachments.first().data, QByteArray("retained bytes"));
+        QCOMPARE(written.attachmentHashes, draft.attachmentHashes); QCOMPARE(written.nextAttachmentNumber, 7);
+        QCOMPARE(written.anchor, draft.anchor); QCOMPARE(written.position, draft.position);
+        QVERIFY(store.load(oldKey).text.isEmpty());
+        if (!navigateAway) {
+            QTRY_COMPARE(composer->editor()->toPlainText(), draft.text);
+            QCOMPARE(composer->editor()->textCursor().anchor(), draft.anchor);
+            QCOMPARE(composer->editor()->textCursor().position(), draft.position);
+            QVERIFY(activity->plainText().contains(history));
+        }
+    }
+}
+
 void TestSessionsWindow::savedSessionsCanMoveToArchive()
 {
     SessionsWindow window(program()); window.setFleet(fleet()); window.show();
@@ -9427,6 +9520,36 @@ void TestSessionsWindow::machineBatchCountsExcludeNativeOpenCodeSessions()
     box.sessions={api,saved};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);QMetaObject::invokeMethod(menu,"aboutToShow");
     machine=menu->actions().first()->menu();pause=action("Pause all (0)");resume=action("Resume all in background (0)");
     QVERIFY(pause);QVERIFY(resume);QVERIFY(!pause->isEnabled());QVERIFY(!resume->isEnabled());
+}
+
+void TestSessionsWindow::openCodeNativeTerminalIsExplicitAndKeepsDraft()
+{
+    const QString name = "opencode/project/native-terminal", run = "native-terminal-run", conversation = "ses_native_terminal";
+    const QJsonObject details{{"tracked", true}, {"cmd", "opencode"}, {"name", name},
+        {"conversation_id", conversation}, {"run_id", run}, {"state", "running"},
+        {"phase", "idle"}, {"activity", "idle"}, {"process_state", "running"}, {"runtime_state", "live"},
+        {"terminal_supported", false}, {"terminal_attach_supported", true}, {"events", QJsonArray{}}, {"cursor", 0}};
+    auto state = openCodeSelectionFleet(); auto box = state.local(); auto session = box.sessions.first();
+    session.name = name; session.runId = run; session.conversationId = conversation;
+    box.sessions = {session}; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(programInspecting("opencode-native-terminal", details)); keepDetailsPollsOut(window);
+    window.setFleet(state); window.show(); window.showSession({}, name);
+    auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *terminal = window.findChild<TerminalView *>(); auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");
+    QVERIFY(client && composer && terminal && tabs);
+    QSignalSpy attached(terminal, &TerminalView::connectedChanged); QSignalSpy writes(client, &HgsClient::writeDone);
+    settleSelectedInspection(composer, client, {}, name, details);
+    setComposerText(composer, "Keep the Activity draft while opening the native TUI");
+    QVERIFY(tabs->isTabVisible(1)); QCOMPARE(tabs->currentIndex(), 0);
+    QVERIFY(!terminal->isConnected()); QCOMPARE(attached.size(), 0); QCOMPARE(writes.size(), 0);
+    tabs->setCurrentIndex(1);
+    QTRY_VERIFY(std::any_of(attached.cbegin(), attached.cend(), [](const QList<QVariant> &row) { return row[0].toBool(); }));
+    QCOMPARE(composer->editor()->toPlainText(), QString("Keep the Activity draft while opening the native TUI"));
+    QCOMPARE(writes.size(), 0);
+    tabs->setCurrentIndex(0);
+    terminal->disconnectSession();
+    QVERIFY(!terminal->isConnected());
+    QCOMPARE(composer->editor()->toPlainText(), QString("Keep the Activity draft while opening the native TUI"));
 }
 
 void TestSessionsWindow::openCodeCapabilitiesPreserveDraftWithoutTerminal()

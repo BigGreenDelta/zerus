@@ -31,6 +31,9 @@ class ActivityView : public QWidget {
 public:
     explicit ActivityView(QWidget *parent = nullptr);
     void setSessionKey(const QString &key);
+    // A confirmed archive restore changes the list key, not the conversation.
+    // Keep its document, selection, scroll position and expanded messages.
+    void continueSession(const QString &oldKey, const QString &newKey);
     void setActivity(const QJsonObject &details, const QJsonArray &events,
                      const QString &fallbackPrompt = {}, bool tracked = true);
     void setTimeline(const QJsonObject &details, const QJsonArray &events,

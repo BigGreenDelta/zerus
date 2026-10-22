@@ -371,6 +371,12 @@ and removes an archive binding only after the native agent confirms the expected
 conversation. Failed restore keeps it. **Forget archive** preserves native history;
 `resume --all` excludes archives.
 
+Desktop Restore keeps the opened conversation and its message draft when the
+resumed row confirms the archived conversation ID. Text, attachments and editor
+selection move to the live draft key; machine/project/search scopes stay in
+place. An existing live draft is never overwritten: the archive draft remains
+in Saved drafts. A later user selection is not replaced when Restore completes.
+
 ### Browse Archive by date
 
 Desktop and Android filter **Archived date**, the time a conversation moved into
@@ -2270,8 +2276,14 @@ background service. Select an offered `provider/model` (keyless free models are
 listed when the service offers them) and, where the model has variants, an
 effort, or retain the default model. Supported: text and voice conversations,
 queued messages, Stop, native questions and permissions, status and history,
-model and effort change, rename and forgetting the Zerus binding. Pause/resume,
-Terminal, attachments, compaction, fork and child sessions are unavailable.
+model and effort change, rename and forgetting the Zerus binding. The desktop
+Terminal tab opens OpenCode's native TUI on the existing service and conversation,
+also available as `hgs a NAME --existing --run-id RUN`. Disconnecting closes that
+client; the service and conversation keep running. Opening Terminal never starts
+or replaces a service and disables the attach client's automatic updates.
+This interactive capability is separate from pane snapshots: mobile Terminal
+snapshots remain unavailable. Pause/resume, attachments, compaction, fork and
+child sessions are unavailable.
 See [OpenCode versions, service and controls](opencode.md).
 
 From the CLI, `hgs [@host] opencode DIRECTORY --new -n TAG --model PROVIDER/MODEL`
