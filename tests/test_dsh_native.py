@@ -434,10 +434,11 @@ class NativeHarness(unittest.TestCase):
     def test_parent_interrupt_leaves_its_child_running(self):
         # Children run independently of the turn that created them: stopping the
         # parent ends its turn, while the child keeps its own work and catalog entry.
+        # The fixture keeps the parent's turn waiting so the interrupt meets it.
         parent,other=self.create(),self.create();hold='HOLD_CHILD_'+uuid.uuid4().hex
-        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
+        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold+' INTERRUPT_WAIT_FIXTURE',attachments=[]))
         try:
-            self.wait(lambda:(self.root/'holds'/(hold+'.waiting')).exists())
+            self.wait(lambda:(self.root/'holds'/(hold+'.waiting')).exists(),timeout=30)
             running=self.wait(lambda: d if (d:=self.cli('inspect',parent)).get('interrupt_supported') and d['subagents'] else None)
             child=next(iter(running['subagents']))
             self.rpc('interrupt',{'sessionId':parent['conversation_id'],
