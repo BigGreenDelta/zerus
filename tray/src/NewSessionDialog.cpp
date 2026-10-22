@@ -1,4 +1,5 @@
 #include "NewSessionDialog.h"
+#include "CloneRepositoryDialog.h"
 #include "WorkspaceIcons.h"
 #include "DirectoryDialog.h"
 #include "WorktreePanel.h"
@@ -129,9 +130,10 @@ QString exactSavedProject(const SessionOrganization &projects,const FleetState &
 }
 }
 NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &fleet,const QString &selectedHost,
-    const QString &agent,const QString &project,QWidget *parent,AccountUsageStore *usage)
+    const QString &agent,const QString &project,QWidget *parent,AccountUsageStore *usage,SessionOrganization *projects)
     : QDialog(parent),m_client(hgsPath,this),m_fleet(fleet),m_initialProject(project),m_initialHost(selectedHost)
 {
+    m_liveProjects=projects;
     m_usageStore=usage?usage:new AccountUsageStore(hgsPath,this);m_usageStore->setFleet(fleet);
     setObjectName("newSessionDialog");setWindowTitle(tr("New session"));resize(660,730);setMinimumWidth(520);
     auto *layout=new QVBoxLayout(this);layout->setContentsMargins(28,24,28,24);layout->setSpacing(18);
@@ -153,10 +155,12 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_folder->setPlaceholderText(tr("Choose a folder…"));
     m_browse=new QPushButton(tr("Browse…"));m_browse->setObjectName("browseLaunchFolder");m_browse->setAutoDefault(false);
     auto *folderRow=new QHBoxLayout;folderRow->setSpacing(8);folderRow->addWidget(m_folder,1);folderRow->addWidget(m_browse);
+    m_clone=new QPushButton(tr("Clone repository…"));m_clone->setObjectName("cloneLaunchRepository");m_clone->setAutoDefault(false);
     auto *folderField=new QVBoxLayout;folderField->setSpacing(6);folderField->addLayout(folderRow);
     m_projectPath=plainLabel();m_projectPath->setObjectName("launchFolderPath");m_projectPath->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_projectPath->setWordWrap(false);
-    m_projectPath->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);folderField->addWidget(m_projectPath);
+    m_projectPath->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
+    auto *pathRow=new QHBoxLayout;pathRow->addWidget(m_projectPath,1);pathRow->addWidget(m_clone);folderField->addLayout(pathRow);
     m_preview=plainLabel();m_preview->setObjectName("muted");folderField->addWidget(m_preview);
     // Keep the form stable as paths and repository discovery change.
     for(auto *widget:QList<QWidget *>{m_projectPath}) {
@@ -242,6 +246,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     connect(m_project,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;loadMachines();loadFolders();});
     connect(m_machine,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;m_accountPreset=false;loadFolders();});
     connect(m_browse,&QPushButton::clicked,this,&NewSessionDialog::browseFolder);
+    connect(m_clone,&QPushButton::clicked,this,&NewSessionDialog::cloneRepository);
     connect(m_folder,&QComboBox::currentIndexChanged,this,[this]{
         m_prefillRequest=0;
         m_browsedFolders.remove(host());
@@ -408,12 +413,13 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     });
     setGroups(SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()),project);
 }
-void NewSessionDialog::reject(){if(!m_creation)QDialog::reject();}
+void NewSessionDialog::reject(){if(!m_creation&&!m_cloning){m_cloneLaunchPending=false;QDialog::reject();}}
 QString NewSessionDialog::host() const {return m_machine->currentData().toString();}
 void NewSessionDialog::setFleet(const FleetState &fleet)
 {
     m_fleet=fleet;
     m_usageStore->setFleet(fleet);
+    if(m_cloning||m_cloneLaunchPending){updateForm();return;}
     if(folderStyle(m_fleet,host())!=m_accountStyle)updateAccounts();else refreshUsage();
     if(m_creation||m_validation){updateForm();return;}
     loadMachines();loadFolders();
@@ -519,6 +525,36 @@ void NewSessionDialog::browseFolder()
     m_browsedFolders[target]=MachinePlatform::clean(path,folderStyle(m_fleet,target));
 }
 
+void NewSessionDialog::cloneRepository()
+{
+    const auto target=host();const auto *machine=target.isEmpty()?&m_fleet.local():m_fleet.peer(target);
+    if(!machine||!machine->ok||m_cloning)return;
+    auto *projects=m_liveProjects?m_liveProjects:&m_projects;
+    const auto style=folderStyle(m_fleet,target);
+    const auto label=machine->host;
+    CloneRepositoryDialog dialog(&m_client,target,label,style,*projects,m_project->currentData().toString(),true,this);
+    m_cloning=true;updateForm();const auto result=dialog.exec();m_cloning=false;
+    if(result!=QDialog::Accepted){updateForm();return;}
+    auto project=dialog.projectId();
+    if(!project.isEmpty()&&!projects->group(project)){
+        m_error->setText(tr("The project changed. The checkout is available at %1 on %2.").arg(dialog.createdPath(),label));updateForm();return;
+    }
+    if(project.isEmpty())project=projects->createGroup(dialog.newProjectName());
+    const auto machineName=target.isEmpty()?m_fleet.local().host:target;
+    const auto folder=projects->addFolder(project,machineName,dialog.createdPath(),{},style);
+    emit organizationChanged();
+    const auto snapshot=*projects;setGroups(snapshot,project);
+    // Clone confirmation includes the project choice, even an unchanged Inbox.
+    setProjectExplicit(true);
+    const auto index=m_machine->findData(target);
+    if(index<0||folder.isEmpty()){
+        m_error->setText(tr("Checkout saved. Select its computer and folder to start a session."));updateForm();return;
+    }
+    m_machine->setCurrentIndex(index);
+    if(!selectFolder(folder)){selectPath(dialog.createdPath());}
+    m_cloneLaunchPending=true;updateForm();
+}
+
 void NewSessionDialog::updateForm()
 {
     const auto path=m_folder->currentData(Qt::UserRole+2).toString();
@@ -537,20 +573,22 @@ void NewSessionDialog::updateForm()
     m_preview->setToolTip(m_preview->text());m_preview->ensurePolished();m_preview->setFixedHeight(2*m_preview->fontMetrics().lineSpacing());
     const QString nameProblem=SessionTag::problem(m_name->text());const bool validName=nameProblem.isEmpty();
     m_nameError->setText(nameProblem);m_nameError->setVisible(!validName);
-    const bool busy=m_validation||m_creation;
+    const bool busy=m_validation||m_creation||m_cloning;
+    const bool locked=busy||m_cloneLaunchPending;
     const bool noMachine=m_machine->count()==0;
     const bool automatic=m_autoPreferred&&automaticWorktreeAvailable();
     m_start->setEnabled(!noMachine&&m_account->currentItem()&&(!m_accountRequest||agent()=="sh")&&!busy&&!m_prefillRequest&&validName&&!path.isEmpty()&&m_folder->currentData(Qt::UserRole+3).toBool()
         &&(!m_autoPreferred||!m_catalogRequest)&&!(automatic&&m_creationFailed));
     m_start->setText(m_creation?tr("Creating worktree…"):m_validation?tr("Checking folder…"):tr("Start session"));
-    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_account,m_model,m_effort,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!busy);
+    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_account,m_model,m_effort,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!locked);
     m_refreshAccounts->setEnabled(!busy&&!noMachine&&!m_accountRequest);
     m_autoWorktree->setEnabled(!busy&&automaticWorktreeAvailable());m_plainFolder->setEnabled(!busy);m_cancel->setEnabled(!m_creation);
     m_autoWorktree->setChecked(automatic);m_plainFolder->setChecked(!automatic);
     m_worktreeTarget->setText(automatic?MachinePlatform::native(automaticWorktreePath(),folderStyle(m_fleet,host())):QString());m_worktreeTarget->setToolTip(automatic?tr("New branch: %1\nStart from: HEAD").arg(m_generatedBranch):QString());
     m_worktreeTarget->ensurePolished();m_worktreeTarget->setFixedHeight(2*m_worktreeTarget->fontMetrics().lineSpacing());
     const auto *machine=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
-    m_browse->setEnabled(!busy&&!noMachine&&machine&&machine->ok);
+    m_browse->setEnabled(!locked&&!noMachine&&machine&&machine->ok);
+    m_clone->setEnabled(!locked&&!noMachine&&machine&&machine->ok&&validName&&m_account->currentItem()&&!m_accountRequest);
     m_worktrees->setEnabled(!busy&&!m_catalogRequest&&!m_worktreeCatalog["stale"].toBool()&&!m_worktreeCatalog["worktrees"].toArray().isEmpty());
     m_newWorktree->setEnabled(!busy&&!m_catalogRequest&&machine&&machine->ok&&automaticWorktreeAvailable());
     m_worktreeOptions->setEnabled(m_worktrees->isEnabled()||m_newWorktree->isEnabled());
@@ -570,6 +608,15 @@ void NewSessionDialog::updateForm()
     else if(m_error->text()==remoteOnly||m_error->text()==enableOrRemote)m_error->clear();
     m_openMachines->setVisible(noMachine);
     updateModelButton();updateOpenCodeService();
+    if(m_cloneLaunchPending&&m_start->isEnabled())QTimer::singleShot(0,this,[this]{
+        if(m_cloneLaunchPending&&m_start->isEnabled()){
+            m_cloneLaunchPending=false;
+            if(m_liveProjects&&!m_liveProjects->group(m_project->currentData().toString())){
+                m_error->setText(tr("Project changed. Select the checkout again before starting."));updateForm();return;
+            }
+            start();
+        }
+    });
 }
 void NewSessionDialog::start()
 {

@@ -1945,6 +1945,68 @@ hgs project rm infra
 Alias names reject spaces, `/` and `=`; logical project names are not restricted
 that way. Absolute paths remain available directly from the CLI.
 
+### Cloning a repository
+
+**Clone repository…** in the desktop **New session** dialog prepares a repository on the selected
+computer and starts the chosen agent. Enter an SSH or HTTPS address, choose an
+existing parent folder and review the suggested, editable folder name and full
+destination. Select an existing logical project or **New project…**. Parent
+folders are remembered separately for each computer. **Projects → Clone
+repository…** offers the same preparation without starting an agent.
+
+**Clone and start** checks the selected computer's installed CLI, Git, parent
+folder, destination and repository access before cloning. Access uses that
+computer's existing SSH configuration and Git credential helpers; passwords and
+tokens embedded in repository addresses are refused. Configure missing access on
+that computer, then try again. These checks run in the background and create no
+checkout. Cloning begins only after explicit confirmation. Existing destinations,
+including empty folders and symlinks, are preserved: choose another name or use
+**Browse…** to select an existing checkout.
+
+A confirmed clone joins the selected project even if the agent cannot start.
+Its confirmed project choice, including Inbox, takes precedence over automatic
+folder-based project detection.
+The normal **Auto** / **None** worktree choice applies to the new checkout. Failed
+launches retain the checkout for another session. Ordinary folders remain
+supported without Git initialization.
+
+Cloning has a ten-minute Git deadline and never automatically retries an
+uncertain operation. Private native receipts and local pending-request metadata
+retain the original identity across dialog or application restarts. **Check
+result** reads that original receipt; a recovered checkout requires an explicit
+**Use checkout** or **Use checkout and start** action. Failed or partial checkouts
+are kept for inspection. A timeout or lost connection is not permission to remove
+files or run the clone again. **Choose another destination…** leaves the original
+checkout and native receipt in place and lets you prepare a different clone.
+
+The CLI is `hgs [@host] repository check --url URL --parent PATH --name NAME
+--json`, followed by `repository clone` with the same fields and an explicit
+`--request-id UUID`. `hgs [@host] repository status --request-id UUID --json`
+reads its durable receipt. Reusing a request ID with identical fields returns
+the original result without repeating Git; different fields are refused.
+Remote acquisition requires the exact selected CLI's `repository-clone-v1`
+capability. Older peers continue to support ordinary folder selection.
+
+The native operation pins the parent and new destination through Git and checks
+their identities before accepting the result. Unix Git starts in the held
+destination directory, so replacing its pathname cannot redirect checkout writes.
+An unpredictable private staging folder is pinned before atomic publication of
+the destination name; its fallback `staging_path` is reserved in the receipt before
+creation. A failed publication can leave that staging folder for inspection.
+Windows creates and holds the new directory atomically and retains its ancestors
+without write/delete sharing; a conflicting handle or reparse point fails closed.
+Zerus never removes a replaced or partially populated directory.
+
+On Unix, a separate native worker owns Git's deadline and watches a wrapper-owned
+pipe. Ending the GUI/SSH wrapper closes that pipe and cancels the worker's own Git
+process group, including its descendants. The original receipt remains
+unconfirmed after abrupt wrapper termination; status and duplicate requests never
+restart the clone. Windows retains the existing kill-on-close job containment.
+The complete encoded receipt is limited to 16 KiB; large Git errors are truncated
+within that envelope, and status and duplicate requests return the same saved
+result. Local paths, including Windows drive, UNC and device paths, are refused.
+A single-letter SSH alias must use an explicit address such as `ssh://c/repo`.
+
 ### Worktrees and ordinary folders
 
 Session cards show a checkout line of the form `folder / branch`, such as

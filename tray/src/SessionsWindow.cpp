@@ -2567,7 +2567,8 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     const auto *row=m_sessions->currentItem();
     const bool sessionRow=!row||(!row->data(SessionRoles::Header).toBool()&&row->data(SessionRoles::LaunchId).toString().isEmpty());
     const auto *context=sessionRow&&project.isEmpty()&&folder.isEmpty()&&path.isEmpty()&&account.isNull()?selected():nullptr;
-    NewSessionDialog dialog(m_client.executable(), m_fleet, context?context->host:host, agent, launchProject, this, m_usageStore);
+    NewSessionDialog dialog(m_client.executable(), m_fleet, context?context->host:host, agent, launchProject, this, m_usageStore, &m_organization);
+    connect(&dialog,&NewSessionDialog::organizationChanged,this,[this]{saveOrganization();rebuild();});
     dialog.setProjectExplicit(!project.isEmpty());
     dialog.setProjectCatalogSwarm(m_swarm ? m_swarm->snapshot().value("swarm_id").toString() : QString());
     dialog.setGroups(m_organization, launchProject);

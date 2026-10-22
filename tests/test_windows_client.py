@@ -255,6 +255,33 @@ class WindowsClient(unittest.TestCase):
                 self.assertIn(message, result.stderr)
         self.assertEqual(self.calls(), [])
 
+    def test_repository_preparation_reaches_validation_without_a_session_host(self):
+        request = '11111111-2222-4333-8444-555555555555'
+        common = ['--url', 'https://example.invalid/team/repository.git',
+                  '--parent', str(self.root), '--name', 'NUL', '--json']
+        for action in ('check', 'clone'):
+            with self.subTest(action=action):
+                args = ['repository', action, *common]
+                if action == 'clone':
+                    args += ['--request-id', request]
+                result = self.hgs(*args)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('reserved Windows device name', result.stderr)
+        result = self.hgs('repository', 'status', '--request-id', request, '--json')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('Clone receipt unavailable', result.stderr)
+        result = self.hgs('--dry-run', 'repository', 'clone', *common, '--request-id', request)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('Repository operations do not support --dry-run', result.stderr)
+        # Public checkout preparation never opens the session-state entry point
+        # or enables local agents. Keep both boundaries blocked afterwards.
+        for args in (['inspect', 'claude/p'],
+                     ['__state', 'repository', 'status', '--request-id', request, '--json']):
+            with self.subTest(still_blocked=args):
+                result = self.hgs(*args)
+                self.assertEqual((result.returncode, result.stderr), (2, LOCAL), result.stdout)
+        self.assertEqual(self.calls(), [])
+
     def test_only_an_isolated_test_host_session_reaches_state_and_run(self):
         # Sessions of an isolated test host run `--run` and `__state` (their
         # hooks) where local sessions are off (src/host/gate.rs): with

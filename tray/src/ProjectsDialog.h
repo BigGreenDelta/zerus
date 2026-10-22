@@ -53,6 +53,7 @@ private:
     void addProject();
     void removeProject();
     void addFolder();
+    void cloneRepository();
     void editFolder(const QString &id, const QString &projectId = {});
     void removeFolder(const QString &projectId, const QString &id);
     void transferFolder(const QString &projectId, const SessionOrganization::Folder &folder,
