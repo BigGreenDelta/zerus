@@ -138,16 +138,58 @@ object AccountPresentation {
         }
         return remaining
     }
-    fun warning(account:ReportedAccount)=account.status in setOf("expired","signed_out","credentials_locked","desktop_session_unavailable","credentials_unavailable","error") || account.authStatus in setOf("expired","signed_out","locked","credentials_locked")
-    fun type(account:ReportedAccount)=account.identity.plan.ifBlank { account.identity.authMethod.ifBlank { "Plan not reported" } }
-    fun compactStatus(catalog:AccountCatalog,account:ReportedAccount):String {
-        val problem=when(account.authStatus) {
-            "expired" -> "Sign-in expired";"signed_out" -> "Signed out";"locked","credentials_locked" -> "Credentials locked"
-            else -> if(warning(account) || account.status=="offline") status(account) else ""
+    private fun authenticationProblem(account:ReportedAccount):String=when(account.authStatus) {
+        "signed_in" -> ""
+        "expired" -> "Sign-in expired"
+        "signed_out" -> "Signed out"
+        "locked","credentials_locked" -> "Credentials locked"
+        else -> when(account.status) {
+            // Older Claude producers called an expired usage access token an
+            // expired sign-in. Only explicit native auth can establish that.
+            "expired" -> if(account.provider=="claude") "" else "Sign-in expired"
+            "signed_out" -> "Signed out"
+            "credentials_locked" -> "Credentials locked"
+            "desktop_session_unavailable" -> "Desktop session unavailable"
+            "credentials_unavailable" -> "Credentials unavailable"
+            else -> ""
         }
-        val offline=if(!catalog.online) "Offline" else ""
-        return listOf(problem,offline,if(!account.installed) "Provider not installed" else "",if(account.refreshError) "Refresh failed" else if(account.refreshing) "Refreshing" else "").filter(String::isNotBlank).joinToString(" / ")
     }
+    fun warning(account:ReportedAccount)=authenticationProblem(account).isNotBlank() || account.status=="error"
+    fun refreshing(catalog:AccountCatalog,account:ReportedAccount)=catalog.online && !catalog.stale && account.refreshing
+    fun type(account:ReportedAccount)=account.identity.plan.ifBlank { account.identity.authMethod.ifBlank { "Plan not reported" } }
+    fun compactStatus(catalog:AccountCatalog,account:ReportedAccount,now:Double?=null):String {
+        val auth=authenticationProblem(account)
+        val lastKnown=!catalog.online || catalog.stale || account.stale || account.refreshError ||
+            (now!=null && stale(catalog,account,now))
+        val problem=if(auth.isNotBlank()) (if(lastKnown) "Last reported: " else "")+auth
+            else when {
+                account.status in setOf("expired","unavailable") && account.authStatus=="signed_in" ->
+                    (if(lastKnown) "Last reported: " else "")+"Signed in / Usage unavailable"
+                account.status=="expired" -> "Usage unavailable"
+                account.status=="error" || account.status=="offline" -> status(account)
+                else -> ""
+            }
+        val offline=if(!catalog.online) "Offline" else ""
+        return listOf(problem,offline,if(!account.installed) "Provider not installed" else "",if(refreshing(catalog,account)) "Updating provider report" else if(account.refreshError) "Provider refresh failed" else "").filter(String::isNotBlank).joinToString(" / ")
+    }
+    fun freshness(catalog:AccountCatalog,account:ReportedAccount,now:Double):String {
+        val values=if(account.windows.isNotEmpty() || account.creditBalance!=null || account.unlimited!=null || account.balances.isNotEmpty()) "Showing saved values" else "No saved usage values"
+        val state=when {
+            !catalog.online -> "Saved report · Machine offline"
+            refreshing(catalog,account) -> "Updating provider report · $values"
+            account.refreshError -> "Provider refresh failed · $values"
+            account.status in setOf("unavailable","expired","error","signed_out","credentials_locked","desktop_session_unavailable","credentials_unavailable","unknown") -> "Usage unavailable · $values"
+            account.status=="loading" -> "Waiting for provider report"
+            account.status=="offline" -> "Provider unavailable · $values"
+            account.status=="configured" -> "Configured · No usage report"
+            stale(catalog,account,now) -> "Saved report"
+            else -> "Current report"
+        }
+        val at=account.checkedAt?.takeIf { it<=now+60 }?.let(::date)
+        return state+if(at==null) " · Provider update time unknown" else " · Provider updated $at"
+    }
+    fun reportedStatus(catalog:AccountCatalog,account:ReportedAccount,now:Double):String =
+        (if(stale(catalog,account,now)) "Last reported: " else "")+status(account)
     fun stale(catalog:AccountCatalog,account:ReportedAccount,now:Double):Boolean = !catalog.online || catalog.stale || account.stale || account.refreshError || account.checkedAt==null || account.checkedAt>now+60 || now-account.checkedAt>600
     fun ended(window:AccountWindow,now:Double)=window.resetsAt?.let { it<=now } == true
     fun percent(value:Double?)=value?.let { java.math.BigDecimal.valueOf(it).setScale(1,java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()+"% used" } ?: "Usage unknown"
@@ -166,7 +208,10 @@ object AccountPresentation {
     fun period(window:AccountWindow):String {
         return listOf(window.label.ifBlank { "Usage window" },duration(window)).filter(String::isNotBlank).joinToString(" ")
     }
-    fun status(account:ReportedAccount)=when(account.status) {
-        "ok" -> "Reported usage";"configured" -> "Configured";"loading" -> "Loading provider data";"expired" -> "Sign-in expired";"signed_out" -> "Signed out";"credentials_locked" -> "Credentials locked";"desktop_session_unavailable" -> "Desktop session unavailable";"credentials_unavailable" -> "Credentials unavailable";"offline" -> "Provider offline";else -> "Usage unavailable"
+    fun status(account:ReportedAccount):String=authenticationProblem(account).ifBlank {
+        when(account.status) {
+            "ok" -> "Reported usage";"configured" -> "Configured";"loading" -> "Loading provider data"
+            "offline" -> "Provider offline";else -> "Usage unavailable"
+        }
     }
 }

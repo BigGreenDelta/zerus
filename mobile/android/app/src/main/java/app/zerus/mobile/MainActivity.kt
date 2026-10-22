@@ -306,6 +306,7 @@ class MainActivity : ComponentActivity() {
                 if (!model.demo && (model.busy || model.catalogProgress))
                     LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
             }
+            if (selected == null) CatalogRefreshStatus(model)
             if (selected != null) SessionHeaderTools(model,selected,onDetails = { sessionDetails = true }) { messageJump = it }
             if (model.error.isNotBlank()) Surface(color = Color(0xFF3A2821), modifier = Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {

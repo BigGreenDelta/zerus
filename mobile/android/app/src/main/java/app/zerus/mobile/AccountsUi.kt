@@ -33,6 +33,7 @@ import kotlinx.coroutines.delay
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
         item { Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {
             Text("Accounts",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.SemiBold)
+            Text("Usage reports update independently on each computer. Phone sync reads the latest available report.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
             if(model.demo) Text("PREVIEW / Sample account data",color=MaterialTheme.colorScheme.primary,style=MaterialTheme.typography.labelMedium)
             if(model.accountsError.isNotBlank()) Text(model.accountsError,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)
         } }
@@ -95,10 +96,13 @@ private fun workspaceName(model:ZerusViewModel,catalog:AccountCatalog)=model.con
                         Column(verticalArrangement=Arrangement.spacedBy(3.dp)) {
                             AccountMachineLabel(model,members.first().catalog)
                             members.map { member ->
-                                val marker=AccountPresentation.compactStatus(member.catalog,member.account)
+                                val marker=AccountPresentation.compactStatus(member.catalog,member.account,now)
                                 if(marker.isBlank()) "" else (if(members.size>1) "${member.account.id} / " else "")+marker
                             }.filter(String::isNotBlank).distinct().forEach { marker ->
                                 Text(marker,style=MaterialTheme.typography.labelSmall,color=if(members.any { AccountPresentation.warning(it.account) || it.account.refreshError }) Color(0xFFF0A35B) else muted)
+                            }
+                            members.map { AccountPresentation.freshness(it.catalog,it.account,now) }.distinct().forEach { freshness ->
+                                Text(freshness,style=MaterialTheme.typography.labelSmall,color=muted)
                             }
                         }
                     }
@@ -169,11 +173,10 @@ private fun compactBalance(account:ReportedAccount):String?=when {
                 members.forEach { member ->
                     val a=member.account
                     Text("Profile: ${a.id}"+(if(a.isDefault) " / Default" else ""),style=MaterialTheme.typography.bodySmall)
-                    Text(AccountPresentation.status(a),style=MaterialTheme.typography.bodySmall,color=if(AccountPresentation.warning(a)) Color(0xFFF0A35B) else muted)
-                    val problem=AccountPresentation.compactStatus(member.catalog,a)
+                    Text(AccountPresentation.reportedStatus(member.catalog,a,now),style=MaterialTheme.typography.bodySmall,color=if(AccountPresentation.warning(a)) Color(0xFFF0A35B) else muted)
+                    val problem=AccountPresentation.compactStatus(member.catalog,a,now)
                     if(problem.isNotBlank()) Text(problem,style=MaterialTheme.typography.bodySmall,color=muted)
-                    if(AccountPresentation.stale(member.catalog,a,now)) Text("Last known report",style=MaterialTheme.typography.bodySmall,color=muted)
-                    AccountPresentation.date(a.checkedAt)?.let { Text("Provider updated $it",style=MaterialTheme.typography.bodySmall,color=muted) }
+                    Text(AccountPresentation.freshness(member.catalog,a,now),style=MaterialTheme.typography.bodySmall,color=muted)
                     a.openCode?.let { OpenCodeProvidersDetails(it) }
                 }
             }
@@ -182,11 +185,11 @@ private fun compactBalance(account:ReportedAccount):String?=when {
             Text("Usage report",style=MaterialTheme.typography.labelMedium,color=muted)
             AccountMachineLabel(model,catalog)
         }
-        Text(AccountPresentation.status(account),style=MaterialTheme.typography.labelMedium,color=if(AccountPresentation.warning(account)) Color(0xFFF0A35B) else muted)
-        val marker=AccountPresentation.compactStatus(catalog,account)
+        Text(AccountPresentation.reportedStatus(catalog,account,now),style=MaterialTheme.typography.labelMedium,color=if(AccountPresentation.warning(account)) Color(0xFFF0A35B) else muted)
+        val marker=AccountPresentation.compactStatus(catalog,account,now)
         if(marker.isNotBlank()) Text(marker,style=MaterialTheme.typography.bodySmall,color=muted)
         if(account.identityCached) Text("Identity retained from the last provider report",style=MaterialTheme.typography.bodySmall,color=muted)
-        if(account.refreshing) Text("Provider refresh in progress",style=MaterialTheme.typography.bodySmall,color=muted)
+        if(AccountPresentation.refreshing(catalog,account)) Text("Provider refresh in progress",style=MaterialTheme.typography.bodySmall,color=muted)
         if(account.refreshError) Text("The last provider refresh failed. Retained values may be out of date.",style=MaterialTheme.typography.bodySmall,color=muted)
         account.windows.forEach { window ->
             Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {

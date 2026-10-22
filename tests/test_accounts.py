@@ -463,6 +463,24 @@ sys.exit(0 if signed_in else 1)
         row=next(p for p in self.ls()['profiles'] if p['id']=='claude-work')
         self.assertEqual(row['account_status']['auth_status'],'signed_in')
 
+    def test_expired_claude_usage_token_does_not_expire_native_sign_in(self):
+        home,_=self.claude_login_fixture()
+        credentials=home/'.credentials.json'
+        credentials.write_text(json.dumps({'claudeAiOauth':{'expiresAt':1,'accessToken':'SYNTHETIC-EXPIRED-TOKEN'}}))
+        before=credentials.read_bytes()
+        # No usage request or refresh is needed when the saved access token is old.
+        marker=self.root/'unexpected-network'
+        curl=self.bin/'curl';curl.write_text('#!/bin/sh\nprintf unexpected > '+str(marker)+'\nexit 99\n');curl.chmod(0o755)
+        result=json.loads(self.run_hgs('account','inspect','claude-work','--refresh').stdout)
+        self.assertEqual((result['auth_status'],result['status']),('signed_in','unavailable'))
+        self.assertEqual(result['windows'],[])
+        self.assertEqual(credentials.read_bytes(),before)
+        self.assertFalse(marker.exists())
+        (home/'signed-out').touch()
+        result=json.loads(self.run_hgs('account','inspect','claude-work','--refresh').stdout)
+        self.assertEqual(result['auth_status'],'signed_out')
+        self.assertEqual(result['status'],'signed_out')
+
     @unittest.skipUnless(os.uname().sysname=='Darwin', 'macOS Keychain diagnostic')
     def test_claude_inaccessible_saved_sign_in_preserves_profile_identity(self):
         import hashlib

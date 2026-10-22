@@ -2169,6 +2169,18 @@ IDs remain separate. Local results appear first; remote profiles arrive
 incrementally. Known rows and selection survive refresh, failure and offline
 hosts. Limits use one current account snapshot, never the sum of machine usage.
 
+On Android, the refresh status below the toolbar remains readable after a quick
+sync. **Refresh details** lists each workspace's current read/apply stage, last
+received report and failures; retained sessions and counters stay visible when
+a read fails. Phone sync reads machine reports, while providers refresh their
+usage independently. Account cards show the machine's provider refresh state,
+saved/current report and provider update time, including after phone sync ends.
+An unavailable quota report or an expired short-lived Claude usage token does
+not mean the native account is signed out. Explicit native sign-in status takes
+precedence; older authentication problems are labelled **Last reported** when
+their report is stale or offline. Viewing accounts never refreshes Claude's
+credentials on Zerus's behalf.
+
 **Add account** creates a separate profile on the selected host and starts native
 sign-in. Default/native profiles retain existing authorization. Its agents use New
 session's rows: a large colored provider logo, the agent and what adding does.

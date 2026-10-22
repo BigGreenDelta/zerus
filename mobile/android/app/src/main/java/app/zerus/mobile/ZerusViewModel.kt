@@ -782,6 +782,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var detailBusy by mutableStateOf(false); private set
     var catalogBusy by mutableStateOf(false); private set
     var catalogProgress by mutableStateOf(false); private set
+    var catalogRefresh by mutableStateOf(CatalogRefreshState()); private set
     var detailProgress by mutableStateOf(false); private set
     private val catalogGate = LoadingGate(android.os.SystemClock::elapsedRealtime)
     private val detailGate = LoadingGate(android.os.SystemClock::elapsedRealtime)
@@ -2174,20 +2175,24 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val operation = start.operation
         val originalConnections = connections
         catalogBusy = true
+        catalogRefresh=catalogRefresh.begin(operation.id,originalConnections.map { it.id to it.displayName })
         catalogTimer?.cancel()
         catalogTimer = viewModelScope.launch {
             delay(catalogGate.remaining(operation.id))
             if (catalogGate.owns(operation.id)) catalogProgress = catalogGate.visible()
         }
         catalogJob = viewModelScope.launch {
-        pushStatuses = withContext(Dispatchers.IO) { connections.associate { it.id to store.pushStatus(it.id) } }
         val newSessions = mutableListOf<Session>(); val newMachines = mutableListOf<Machine>(); val newAccounts=mutableListOf<AccountCatalog>()
         val successfulConnections=mutableSetOf<String>()
+        var published=false
         val newProjects = mutableListOf<ProjectSummary>(); val newOperations = mutableMapOf<MachineKey, Set<String>>(); val warnings = mutableListOf<String>()
         try {
+            pushStatuses = withContext(Dispatchers.IO) { originalConnections.associate { it.id to store.pushStatus(it.id) } }
             for (connection in originalConnections) {
                 try {
+                    if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
                     if (explicit || connection.id !in relayOperations) {
+                        catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Capabilities)
                         try {
                             val capabilities = api.capabilities(connection)
                             val operations = OperationCapabilities.parse(capabilities,requireVersion=false)
@@ -2201,6 +2206,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                                 relayOperations = relayOperations - connection.id
                         }
                     }
+                    if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
+                    catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Reports)
                     val computers = api.computers(connection)
                     val retained=catalogSessions;val actions=messageState.sessionActions
                     val prepared = withContext(Dispatchers.Default) {
@@ -2212,10 +2219,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     val catalog = prepared.projects
                     newSessions += catalog.sessions; newProjects += catalog.projects; warnings += catalog.unavailableComputers
                     successfulConnections += connection.id
+                    catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Applying)
                     if (catalogGate.owns(operation.id) && connections == originalConnections && catalogErrorOwner == connection.id) error = ""
                 } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { if (catalogGate.owns(operation.id) && connections == originalConnections && selected == null) {
-                    error = "${connection.displayName}: ${ReadFailure.message(e, "sessions")}"; catalogErrorOwner = connection.id
+                catch (e: Exception) { if (catalogGate.owns(operation.id) && connections == originalConnections) {
+                    catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Failed)
+                    if(selected==null) { error = "${connection.displayName}: ${ReadFailure.message(e, "sessions")}"; catalogErrorOwner = connection.id }
                 } }
             }
             if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
@@ -2253,8 +2262,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     pendingNotification = null; open(it)
                 }
             }
+            published=connections==originalConnections && catalogGate.owns(operation.id)
         } finally {
             if (catalogGate.finish(operation.id)) {
+                catalogRefresh=catalogRefresh.finish(operation.id,if(published) successfulConnections else emptySet(),System.currentTimeMillis()/1000.0)
                 catalogTimer?.cancel(); catalogProgress = false; catalogBusy = false
                 if (connections != originalConnections) refresh()
             }

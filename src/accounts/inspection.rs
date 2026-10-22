@@ -300,7 +300,9 @@ fn claude(home: &Path, native: bool) -> Value {
         .as_u64()
         .is_some_and(|expiry| expiry / 1000 <= now())
     {
-        result["status"] = json!("expired");
+        // This is the short-lived usage access token, not the native account's
+        // sign-in. Claude owns refreshing its grant; never contradict its auth
+        // status or refresh credentials just to display a quota report.
         return result;
     }
     // Native OAuth usage endpoint used by /usage; never sends a message or refreshes a grant.
