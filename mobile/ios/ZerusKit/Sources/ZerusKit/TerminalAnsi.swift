@@ -309,6 +309,30 @@ public struct TerminalPolling: Equatable, Sendable {
     public func observed(changed: Bool) -> TerminalPolling { changed ? TerminalPolling() : TerminalPolling(unchanged: min(unchanged + 1, 3)) }
 }
 
+/// Following keeps the native cursor in view. Snapshots have the pane's fixed size, so the
+/// followed position depends only on the cursor, the cell size and the viewport.
+public enum TerminalFollow {
+    /// The native cursor row, or the last row when the snapshot reports none.
+    public static func row(cursorY: Int, rows: Int) -> Int { (0..<rows).contains(cursorY) ? cursorY : rows - 1 }
+
+    /// The bottom while it shows `row`; otherwise `row` at the bottom edge with the rows above it.
+    public static func vertical(row: Int, line: Double, viewport: Double, max limit: Double) -> Double {
+        let limit = Swift.max(limit, 0)
+        return Double(row) * line >= limit ? limit : Swift.min(Swift.max(Double(row + 1) * line - viewport, 0), limit)
+    }
+
+    /// The left edge while the cursor cell fits there; otherwise the cursor cell at the right edge.
+    public static func horizontal(cursorX: Int, cols: Int, cell: Double, viewport: Double, max limit: Double) -> Double {
+        guard (0..<cols).contains(cursorX) else { return 0 }
+        return Swift.min(Swift.max(Double(cursorX + 1) * cell - viewport, 0), Swift.max(limit, 0))
+    }
+
+    /// A settled user scroll resumes following only at the followed position, within half a cell.
+    public static func atFollowed(y: Double, x: Double, followedY: Double, followedX: Double, line: Double, cell: Double) -> Bool {
+        abs(y - followedY) <= line / 2 && abs(x - followedX) <= cell / 2
+    }
+}
+
 /// Terminal input reducers: a buffer is cleared only by the durable write that records its request.
 public enum TerminalBuffers {
     public static func edit(_ state: MessageState, _ editor: TerminalBuffer) -> MessageState {

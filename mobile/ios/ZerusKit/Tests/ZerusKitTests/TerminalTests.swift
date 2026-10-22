@@ -89,6 +89,41 @@ final class TerminalAnsiTests: XCTestCase {
     }
 }
 
+/// Ported from Android TerminalFollowTest: a 50-row pane of 10 pt lines in a 200 pt viewport.
+final class TerminalFollowTests: XCTestCase {
+    func testCursorNearTheBottomFollowsTheBottomOfThePane() {
+        XCTAssertEqual(47, TerminalFollow.row(cursorY: 47, rows: 50))
+        XCTAssertEqual(300, TerminalFollow.vertical(row: 47, line: 10, viewport: 200, max: 300))
+        XCTAssertEqual(300, TerminalFollow.vertical(row: 30, line: 10, viewport: 200, max: 300))
+    }
+
+    func testHigherCursorSitsAtTheBottomEdgeWithTheRowsAboveIt() {
+        XCTAssertEqual(100, TerminalFollow.vertical(row: 29, line: 10, viewport: 200, max: 300))
+        XCTAssertEqual(10, TerminalFollow.vertical(row: 20, line: 10, viewport: 200, max: 300))
+        XCTAssertEqual(0, TerminalFollow.vertical(row: 0, line: 10, viewport: 200, max: 300))
+        XCTAssertEqual(0, TerminalFollow.vertical(row: 5, line: 10, viewport: 200, max: 0))
+    }
+
+    func testMissingCursorFollowsTheLastRowAndTheLeftEdge() {
+        XCTAssertEqual(49, TerminalFollow.row(cursorY: -1, rows: 50))
+        XCTAssertEqual(49, TerminalFollow.row(cursorY: 50, rows: 50))
+        XCTAssertEqual(300, TerminalFollow.vertical(row: TerminalFollow.row(cursorY: -1, rows: 50), line: 10, viewport: 200, max: 300))
+        XCTAssertEqual(0, TerminalFollow.horizontal(cursorX: -1, cols: 200, cell: 5, viewport: 100, max: 900))
+    }
+
+    func testWideCursorColumnStaysAtTheRightEdge() {
+        XCTAssertEqual(0, TerminalFollow.horizontal(cursorX: 19, cols: 200, cell: 5, viewport: 100, max: 900))
+        XCTAssertEqual(5, TerminalFollow.horizontal(cursorX: 20, cols: 200, cell: 5, viewport: 100, max: 900))
+        XCTAssertEqual(900, TerminalFollow.horizontal(cursorX: 199, cols: 200, cell: 5, viewport: 100, max: 900))
+    }
+
+    func testOnlyAReturnToTheFollowedPositionResumesFollowing() {
+        XCTAssertTrue(TerminalFollow.atFollowed(y: 296, x: 2, followedY: 300, followedX: 0, line: 10, cell: 5))
+        XCTAssertFalse(TerminalFollow.atFollowed(y: 290, x: 0, followedY: 300, followedX: 0, line: 10, cell: 5))
+        XCTAssertFalse(TerminalFollow.atFollowed(y: 300, x: 10, followedY: 300, followedX: 0, line: 10, cell: 5))
+    }
+}
+
 /// Ported from Android TerminalBufferTest.
 @MainActor
 final class TerminalBufferTests: XCTestCase {

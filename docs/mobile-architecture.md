@@ -648,6 +648,12 @@ captures bounded ANSI-styled screen snapshots, preserves horizontal scrolling
 and zoom, and freezes the displayed snapshot during text selection. Reads adapt
 between 250 ms and two seconds and run only while the view is active. The native
 program keeps its existing terminal size; opening a phone does not resize it.
+Terminal opens following the native cursor: it shows the bottom of the pane when
+that includes the cursor row, otherwise the cursor row at the bottom edge, and on
+a wider pane the cursor cell at the right edge. Without a cursor it follows the
+last row. Following tracks new snapshots, zoom and viewport changes until the
+user scrolls. Returning to the followed position or choosing Follow cursor
+resumes it, and following never moves a selection.
 
 The renderer adapts MuxPod's Apache-2.0 implementation. It accepts bounded SGR
 styles and discards terminal control strings, including clipboard and hyperlink

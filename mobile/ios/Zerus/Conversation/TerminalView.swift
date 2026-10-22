@@ -4,8 +4,8 @@
  * Adapted from MuxPod lib/screens/terminal/widgets/ansi_text_view.dart, commit
  * c33d0fdeb66ca7bbdf4745203578088961982c13.
  * Modified for Zerus: SwiftUI snapshot renderer ported from the Compose adaptation, frozen
- * selection, explicit buffered input, adaptive outbound relay reads, fixed keys, no SSH
- * credentials or input replay.
+ * selection, cursor following, explicit buffered input, adaptive outbound relay reads, fixed
+ * keys, no SSH credentials or input replay.
  */
 import SwiftUI
 import UIKit
@@ -192,11 +192,28 @@ struct TerminalView: View {
 }
 
 /// The captured screen at its native size, scrollable both ways, with the native cursor cell.
+/// Following starts on open, stops when the user scrolls away and never moves a selection.
 struct TerminalScreenView: View {
     let screen: TerminalScreen
     let raw: JSONObject?
     let fontSize: CGFloat
     let selecting: Bool
+    @State private var position = ScrollPosition()
+    @State private var following = true
+    @State private var dragged = false
+    @State private var viewport: Viewport?
+
+    /// Scroll sizes without the offset, so scrolling itself does not render the screen again.
+    struct Viewport: Equatable {
+        let content: CGSize
+        let container: CGSize
+        let insets: EdgeInsets
+
+        var width: Double { container.width - insets.leading - insets.trailing }
+        var height: Double { container.height - insets.top - insets.bottom }
+        var maxX: Double { content.width - width }
+        var maxY: Double { content.height - height }
+    }
 
     var body: some View {
         let font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
@@ -205,7 +222,14 @@ struct TerminalScreenView: View {
         let cols = min(max(raw?.int("cols") ?? 1, 1), 1000), rows = min(max(raw?.int("rows") ?? 1, 1), 1000)
         let cursor = raw?.object("cursor")
         let x = cursor.map { $0.has("x") ? $0.int("x") : -1 } ?? -1, y = cursor.map { $0.has("y") ? $0.int("y") : -1 } ?? -1
+        let followed = viewport.map { viewport in
+            CGPoint(x: TerminalFollow.horizontal(cursorX: x, cols: cols, cell: cellWidth, viewport: viewport.width, max: viewport.maxX),
+                    y: TerminalFollow.vertical(row: TerminalFollow.row(cursorY: y, rows: rows), line: lineHeight,
+                                               viewport: viewport.height, max: viewport.maxY))
+        }
+        let target = following && !selecting ? followed : nil
         GeometryReader { proxy in
+        ZStack(alignment: .bottomTrailing) {
         ScrollView([.horizontal, .vertical]) {
             Text(Self.attributed(screen, size: fontSize))
                 .font(Font(font))
@@ -227,6 +251,34 @@ struct TerminalScreenView: View {
                 .frame(minWidth: proxy.size.width, minHeight: proxy.size.height, alignment: .topLeading)
         }
         .defaultScrollAnchor(.topLeading)
+        .scrollPosition($position)
+        .onScrollGeometryChange(for: Viewport.self) { geometry in
+            Viewport(content: geometry.contentSize, container: geometry.containerSize, insets: geometry.contentInsets)
+        } action: { _, value in
+            viewport = value
+        }
+        .onScrollPhaseChange { _, phase, context in
+            if phase == .interacting {
+                dragged = true
+                following = false
+            } else if phase == .idle && dragged, let followed {
+                dragged = false
+                let offset = context.geometry.contentOffset, insets = context.geometry.contentInsets
+                following = TerminalFollow.atFollowed(y: offset.y + insets.top, x: offset.x + insets.leading, followedY: followed.y,
+                                                      followedX: followed.x, line: lineHeight, cell: cellWidth)
+            }
+        }
+        if !following && !selecting {
+            Button { following = true } label: { Label("Follow cursor", systemImage: "arrow.down.to.line") }
+                .buttonStyle(.borderedProminent)
+                .font(.footnote)
+                .padding(8)
+        }
+        }
+        }
+        .onChange(of: target, initial: true) { _, target in
+            guard let target, let viewport else { return }
+            position.scrollTo(point: CGPoint(x: target.x - viewport.insets.leading, y: target.y - viewport.insets.top))
         }
     }
 
