@@ -542,7 +542,8 @@ private struct ConversationTools: ViewModifier {
     func body(content: Content) -> some View {
         let target = session.target
         content
-            .sheet(item: Binding(get: { app.computerFiles.selection }, set: { if $0 == nil { app.computerFiles.close() } })) { ComputerFileSheet(selection: $0) }
+            // While Terminal covers the conversation, it presents its own file links.
+            .sheet(item: Binding(get: { terminalOpen ? nil : app.computerFiles.selection }, set: { if $0 == nil { app.computerFiles.close() } })) { ComputerFileSheet(selection: $0) }
             .environment(\.computerFileLink, ComputerFileLink { [weak app] reference in app?.computerFiles.show(target, reference) })
             .onChange(of: terminal) { _, requested in
                 guard requested else { return }

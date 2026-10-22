@@ -656,9 +656,16 @@ user scrolls. Returning to the followed position or choosing Follow cursor
 resumes it, and following never moves a selection.
 
 The renderer adapts MuxPod's Apache-2.0 implementation. It accepts bounded SGR
-styles and discards terminal control strings, including clipboard and hyperlink
-commands. Native cursor coordinates also work on blank lines. The bundled
-license and source notices identify the upstream revision and modifications.
+styles and OSC 8 hyperlinks and discards other terminal control strings,
+including clipboard and title commands. A link target keeps at most 2,048
+printable ASCII characters and a screen at most 1,024 links; any other target
+ends the link. Tapping a link first shows its whole target and the text it was
+shown as. HTTP and HTTPS links then open in the browser. A `file:` link reads its
+path on the session's computer through the computer file flow (Open or Save) and
+names the host the link itself gives. Other targets can only be copied. Links are
+inert while selecting. Native cursor coordinates also work on blank lines. The
+bundled license and source notices identify the upstream revision and
+modifications.
 
 Input has a separate encrypted composition and durable receipt. Enter submits
 literal buffered text with a newline; Insert text sends it without a newline.

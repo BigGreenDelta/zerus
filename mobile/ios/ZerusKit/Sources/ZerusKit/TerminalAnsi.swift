@@ -4,7 +4,7 @@
  * Adapted from MuxPod lib/services/terminal/ansi_parser.dart, commit
  * c33d0fdeb66ca7bbdf4745203578088961982c13.
  * Modified for Zerus: Swift model ported from the Kotlin adaptation, bounded parsing,
- * control suppression and cursor mapping.
+ * control suppression, OSC 8 link ranges and cursor mapping.
  */
 import Foundation
 
@@ -38,10 +38,18 @@ public struct TerminalSpan: Hashable, Sendable {
     public let style: TerminalStyle
 }
 
+/// An OSC 8 hyperlink range of `TerminalScreen.text` in UTF-16 offsets; its target opens only after confirmation.
+public struct TerminalLink: Hashable, Sendable {
+    public let start: Int
+    public let end: Int
+    public let uri: String
+}
+
 public struct TerminalScreen: Hashable, Sendable {
     public let text: String
     public let spans: [TerminalSpan]
     public let truncated: Bool
+    public var links: [TerminalLink] = []
 }
 
 /// Parses captured text, not a terminal emulator. Escape sequences never execute actions.
@@ -51,12 +59,18 @@ public final class TerminalAnsi: @unchecked Sendable {
         let spans: [TerminalSpan]
         let length: Int
         let endStyle: TerminalStyle
+        let links: [TerminalLink]
+        let endLink: String?
     }
 
     struct Key: Hashable {
         let style: TerminalStyle
+        let link: String?
         let raw: String
     }
+
+    public static let maxLinks = 1024
+    public static let maxLinkLength = 2048
 
     private var previous: [Key: Line] = [:]
     private let lock = NSLock()
@@ -74,7 +88,7 @@ public final class TerminalAnsi: @unchecked Sendable {
         var truncated = bounded.count < all.count
         var clean = String.UnicodeScalarView()
         var i = 0
-        // Keep only bounded SGR; remove OSC (including hyperlinks/title/clipboard), DCS and CSI controls.
+        // Keep only bounded SGR and OSC 8 link markers; remove other OSC (title/clipboard), DCS and CSI controls.
         while i < bounded.count {
             let c = bounded[i]
             i += 1
@@ -109,16 +123,26 @@ public final class TerminalAnsi: @unchecked Sendable {
                         }
                     }
                 case "]", "P", "^", "_":
+                    let start = i
+                    var end: Int?
                     while i < bounded.count {
                         if bounded[i] == "\u{07}" || bounded[i].value == 0x9c {
+                            end = i
                             i += 1
                             break
                         }
                         if bounded[i] == Self.escape, i + 1 < bounded.count, bounded[i + 1] == "\\" {
+                            end = i
                             i += 2
                             break
                         }
                         i += 1
+                    }
+                    if control == "]", let end, let target = Self.hyperlink(bounded[start..<end]) {
+                        clean.append(Self.escape)
+                        clean.append("]")
+                        clean.append(contentsOf: target.unicodeScalars)
+                        clean.append("\u{07}")
                     }
                 case "(", ")":
                     if i < bounded.count { i += 1 } // Character set designation.
@@ -133,11 +157,13 @@ public final class TerminalAnsi: @unchecked Sendable {
         var text = ""
         var length = 0
         var spans: [TerminalSpan] = []
+        var links: [TerminalLink] = []
         var style = TerminalStyle()
+        var link: String?
         let lines = String(clean).split(separator: "\n", omittingEmptySubsequences: false)
         for (index, raw) in lines.prefix(1000).enumerated() {
-            let key = Key(style: style, raw: String(raw))
-            let line = next[key] ?? previous[key] ?? Self.line(key.raw, style)
+            let key = Key(style: style, link: link, raw: String(raw))
+            let line = next[key] ?? previous[key] ?? Self.line(key.raw, style, link)
             next[key] = line
             if index > 0 {
                 text += "\n"
@@ -151,18 +177,36 @@ public final class TerminalAnsi: @unchecked Sendable {
                 break
             }
             spans += line.spans.map { TerminalSpan(start: $0.start + offset, end: $0.end + offset, style: $0.style) }
+            // Text past the link bound stays visible; it is just not a link.
+            if links.count + line.links.count <= Self.maxLinks {
+                links += line.links.map { TerminalLink(start: $0.start + offset, end: $0.end + offset, uri: $0.uri) }
+            }
             style = line.endStyle
+            link = line.endLink
         }
         previous = next
-        return TerminalScreen(text: text, spans: spans, truncated: truncated || lines.count > 1000)
+        return TerminalScreen(text: text, spans: spans, truncated: truncated || lines.count > 1000, links: links)
     }
 
-    static func line(_ raw: String, _ initial: TerminalStyle) -> Line {
+    /// The OSC 8 target, or an empty string that ends a link; nil for other OSC commands.
+    static func hyperlink(_ body: ArraySlice<Unicode.Scalar>) -> String? {
+        guard body.count >= 2, body[body.startIndex] == "8", body[body.startIndex + 1] == ";" else { return nil }
+        guard let separator = body[(body.startIndex + 2)...].firstIndex(of: ";") else { return "" }
+        let uri = body[(separator + 1)...]
+        // OSC 8 targets are URI bytes 32-126; a space or anything longer ends the link instead.
+        guard uri.count <= maxLinkLength, uri.allSatisfy({ (0x21...0x7e).contains($0.value) }) else { return "" }
+        return String(String.UnicodeScalarView(uri))
+    }
+
+    static func line(_ raw: String, _ initial: TerminalStyle, _ initialLink: String?) -> Line {
         var style = initial
+        var link = initialLink
         var text = String.UnicodeScalarView()
         var length = 0
         var spans: [TerminalSpan] = []
+        var links: [TerminalLink] = []
         var start = 0
+        var linkStart = 0
         var column = 0
         let scalars = Array(raw.unicodeScalars)
         var i = 0
@@ -170,9 +214,20 @@ public final class TerminalAnsi: @unchecked Sendable {
             if length > start { spans.append(TerminalSpan(start: start, end: length, style: style)) }
             start = length
         }
+        func close() {
+            if let link, length > linkStart { links.append(TerminalLink(start: linkStart, end: length, uri: link)) }
+            linkStart = length
+        }
         while i < scalars.count {
             let scalar = scalars[i]
-            if scalar == escape {
+            if scalar == escape, i + 1 < scalars.count, scalars[i + 1] == "]" {
+                close()
+                var end = i + 2
+                while end < scalars.count, scalars[end] != "\u{07}" { end += 1 }
+                let target = String(String.UnicodeScalarView(scalars[(i + 2)..<end]))
+                link = target.isEmpty ? nil : target
+                i = end + 1
+            } else if scalar == escape {
                 flush()
                 var end = i + 2
                 while end < scalars.count, scalars[end] != "m" { end += 1 }
@@ -192,7 +247,8 @@ public final class TerminalAnsi: @unchecked Sendable {
             }
         }
         flush()
-        return Line(text: String(text), spans: spans, length: length, endStyle: style)
+        close()
+        return Line(text: String(text), spans: spans, length: length, endStyle: style, links: links, endLink: link)
     }
 
     static func sgr(_ body: String, _ initial: TerminalStyle) -> TerminalStyle {
@@ -379,5 +435,33 @@ public enum TerminalBuffers {
         var copy = current.action(recorded)
         copy.terminalBuffers = current.terminalBuffers.filter { $0.key != buffer.key } + [next]
         return copy
+    }
+}
+
+/// What a confirmed Terminal link may do. Web links open in the browser and file links read
+/// from the session's computer through file_read; every other target can only be copied.
+public enum TerminalLinkTarget: Hashable, Sendable {
+    case web(uri: String, url: URL)
+    /// `host` is the link's own host name; the path is read on the session's computer.
+    case file(uri: String, host: String, reference: ComputerFileReference)
+    case other(String)
+
+    public var uri: String {
+        switch self {
+        case .web(let uri, _), .file(let uri, _, _), .other(let uri): uri
+        }
+    }
+
+    public static func of(_ uri: String) -> TerminalLinkTarget {
+        if let url = MarkdownText.safeURL(uri) { return .web(uri: uri, url: url) }
+        if uri.lowercased().hasPrefix("file:/"), let components = URLComponents(string: uri), components.scheme?.lowercased() == "file",
+           components.percentEncodedQuery == nil, components.user == nil, components.password == nil, components.port == nil {
+            var destination = "file:" + components.percentEncodedPath
+            if let fragment = components.percentEncodedFragment { destination += "#" + fragment }
+            if let reference = ComputerFileReference.parse(destination) {
+                return .file(uri: uri, host: components.host ?? "", reference: reference)
+            }
+        }
+        return .other(uri)
     }
 }

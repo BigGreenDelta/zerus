@@ -656,6 +656,11 @@ scrollers' accessibility actions, that opening follows the bottom cursor row, a
 higher cursor and back, that a user scroll pauses following across snapshots,
 that **Follow cursor** resumes it and that a selection never moves.
 
+`TerminalLinkSmokeInstrumentation` uses the same steps. It parses tmux
+`capture-pane -e` OSC 8 output and checks the link spans, a confirmation that
+shows the whole target and host, **Copy link**, the hand-off of only the parsed
+path to computer files, and inert links while selecting. Nothing opens.
+
 `QuestionLayoutSmokeInstrumentation` uses the same build, install and fresh-data
 steps. It opens synthetic history with a pending question, measures the inline
 card from a screenshot and checks the card limit, the whole answer field, the

@@ -4,8 +4,8 @@
  * Adapted from MuxPod lib/screens/terminal/widgets/ansi_text_view.dart, commit
  * c33d0fdeb66ca7bbdf4745203578088961982c13.
  * Modified for Zerus: SwiftUI snapshot renderer ported from the Compose adaptation, frozen
- * selection, cursor following, explicit buffered input, adaptive outbound relay reads, fixed
- * keys, no SSH credentials or input replay.
+ * selection, cursor following, confirmed OSC 8 links, explicit buffered input, adaptive outbound
+ * relay reads, fixed keys, no SSH credentials or input replay.
  */
 import SwiftUI
 import UIKit
@@ -19,6 +19,7 @@ struct TerminalView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
     let session: Session
 
     @State private var frozen: JSONObject?
@@ -28,6 +29,14 @@ struct TerminalView: View {
     @State private var reviewInput: SessionAction?
     @State private var parser = TerminalAnsi()
     @State private var parsed: ParsedScreen?
+    @State private var link: LinkChoice?
+
+    /// A tapped link with the text it was shown as.
+    struct LinkChoice: Identifiable {
+        let id = UUID()
+        let target: TerminalLinkTarget
+        let label: String
+    }
 
     struct DangerousKey: Identifiable {
         let key: String
@@ -68,7 +77,11 @@ struct TerminalView: View {
                 }
                 Group {
                     if let parsed, parsed.source == source, displayed != nil {
-                        TerminalScreenView(screen: parsed.screen, raw: displayed, fontSize: fontSize, selecting: selecting)
+                        TerminalScreenView(screen: parsed.screen, raw: displayed, fontSize: fontSize, selecting: selecting) { chosen in
+                            let utf16 = parsed.screen.text.utf16
+                            let start = utf16.index(utf16.startIndex, offsetBy: chosen.start), end = utf16.index(utf16.startIndex, offsetBy: chosen.end)
+                            link = LinkChoice(target: TerminalLinkTarget.of(chosen.uri), label: String(String(parsed.screen.text[start..<end]).prefix(200)))
+                        }
                     } else {
                         Text("Loading captured screen…").foregroundStyle(Theme.muted).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
@@ -146,6 +159,23 @@ struct TerminalView: View {
         } message: { danger in
             Text("Send \(danger.key) to \(session.title) on \(app.machineName(target.machineKey, fallback: target.computerId))? This may interrupt or close the native program.")
         }
+        .alert(Self.linkTitle(link?.target, computer: computer), isPresented: Binding(get: { link != nil }, set: { if !$0 { link = nil } }),
+               presenting: link) { choice in
+            switch choice.target {
+            case .web(_, let url):
+                Button("Open in Browser") { openURL(url) }
+            case .file(_, _, let reference):
+                Button("Read on \(computer)") { app.computerFiles.show(target, reference) }
+            case .other:
+                EmptyView()
+            }
+            Button("Copy Link") { UIPasteboard.general.string = choice.target.uri }
+            Button("Cancel", role: .cancel) {}
+        } message: { choice in
+            Text("Shown as: \(choice.label)\n\n\(choice.target.uri)\n\n\(Self.linkDetail(choice.target, computer: computer))")
+        }
+        // Terminal covers the conversation, so its file links present the Open or Save sheet here.
+        .sheet(item: Binding(get: { app.computerFiles.selection }, set: { if $0 == nil { app.computerFiles.close() } })) { ComputerFileSheet(selection: $0) }
         .alert("Review uncertain Terminal input", isPresented: Binding(get: { reviewInput != nil }, set: { if !$0 { reviewInput = nil } }),
                presenting: reviewInput) { action in
             Button("Mark reviewed") {
@@ -180,6 +210,27 @@ struct TerminalView: View {
         }
     }
 
+    private var computer: String { app.machineName(target.machineKey, fallback: target.computerId) }
+
+    static func linkTitle(_ target: TerminalLinkTarget?, computer: String) -> String {
+        switch target {
+        case .web: "Open link?"
+        case .file: "Read file from \(computer)?"
+        case .other, nil: "Terminal link"
+        }
+    }
+
+    /// The whole target is shown before anything opens; its visible text may say something else.
+    static func linkDetail(_ target: TerminalLinkTarget, computer: String) -> String {
+        switch target {
+        case .web: return "Opens in your browser."
+        case .file(_, let host, let reference):
+            let named = host.isEmpty || host.lowercased() == "localhost" ? "" : " The link names host \(host)."
+            return "Zerus reads \(reference.path) on \(computer), the computer of this session.\(named)"
+        case .other: return "Zerus opens only web and file links. You can copy this one."
+        }
+    }
+
     static func inputStatus(_ status: String) -> String {
         switch status {
         case "sending": "Sending input…"
@@ -198,6 +249,7 @@ struct TerminalScreenView: View {
     let raw: JSONObject?
     let fontSize: CGFloat
     let selecting: Bool
+    var onLink: (TerminalLink) -> Void = { _ in }
     @State private var position = ScrollPosition()
     @State private var following = true
     @State private var dragged = false
@@ -231,7 +283,7 @@ struct TerminalScreenView: View {
         GeometryReader { proxy in
         ZStack(alignment: .bottomTrailing) {
         ScrollView([.horizontal, .vertical]) {
-            Text(Self.attributed(screen, size: fontSize))
+            Text(Self.attributed(screen, size: fontSize, links: !selecting))
                 .font(Font(font))
                 .foregroundStyle(Color(argb: terminalForeground))
                 .lineSpacing(0)
@@ -248,6 +300,13 @@ struct TerminalScreenView: View {
                     }
                 }
                 .modifier(Selectable(enabled: selecting))
+                // Links carry only their index; nothing opens before the confirmation.
+                .environment(\.openURL, OpenURLAction { url in
+                    if url.scheme == Self.linkScheme, let index = Int(url.host() ?? ""), screen.links.indices.contains(index) {
+                        onLink(screen.links[index])
+                    }
+                    return .handled
+                })
                 .frame(minWidth: proxy.size.width, minHeight: proxy.size.height, alignment: .topLeading)
         }
         .defaultScrollAnchor(.topLeading)
@@ -290,37 +349,52 @@ struct TerminalScreenView: View {
         }
     }
 
-    static func attributed(_ screen: TerminalScreen, size: CGFloat) -> AttributedString {
+    static let linkScheme = "zerus-terminal-link"
+
+    static func attributed(_ screen: TerminalScreen, size: CGFloat, links: Bool) -> AttributedString {
         let utf16 = screen.text.utf16
         var result = AttributedString()
         var position = 0
         var index = utf16.startIndex
-        func take(_ end: Int) -> Substring {
-            let next = utf16.index(index, offsetBy: end - position)
-            defer {
+        var link = 0
+        // Appends the text up to `end`, split where OSC 8 links start or end. Links stay plain
+        // underlined text while selecting; otherwise a tap asks before anything opens.
+        func append(_ end: Int, _ styled: (inout AttributedString) -> Void) {
+            while position < end {
+                while link < screen.links.count, screen.links[link].end <= position { link += 1 }
+                let current = link < screen.links.count ? screen.links[link] : nil
+                let inside = current.map { $0.start <= position } ?? false
+                let stop = min(end, current.map { inside ? $0.end : $0.start } ?? end)
+                let next = utf16.index(index, offsetBy: stop - position)
+                var piece = AttributedString(screen.text[index..<next])
+                styled(&piece)
+                if inside {
+                    piece.underlineStyle = .single
+                    if links { piece.link = URL(string: "\(linkScheme)://\(link)") }
+                }
+                result += piece
                 index = next
-                position = end
+                position = stop
             }
-            return screen.text[index..<next]
         }
         for span in screen.spans where span.start >= position && span.end > span.start {
-            if span.start > position { result += AttributedString(take(span.start)) }
-            var piece = AttributedString(take(span.end))
-            let style = span.style
-            let foreground = style.inverse ? style.background ?? terminalBackground : style.foreground ?? terminalForeground
-            let background = style.inverse ? style.foreground ?? terminalForeground : style.background
-            if foreground != terminalForeground || style.dim { piece.foregroundColor = Color(argb: foreground).opacity(style.dim ? 0.5 : 1) }
-            if let background { piece.backgroundColor = Color(argb: background) }
-            if style.bold || style.italic {
-                var font = Font.system(size: size, weight: style.bold ? .bold : .regular, design: .monospaced)
-                if style.italic { font = font.italic() }
-                piece.font = font
+            if span.start > position { append(span.start) { _ in } }
+            append(span.end) { piece in
+                let style = span.style
+                let foreground = style.inverse ? style.background ?? terminalBackground : style.foreground ?? terminalForeground
+                let background = style.inverse ? style.foreground ?? terminalForeground : style.background
+                if foreground != terminalForeground || style.dim { piece.foregroundColor = Color(argb: foreground).opacity(style.dim ? 0.5 : 1) }
+                if let background { piece.backgroundColor = Color(argb: background) }
+                if style.bold || style.italic {
+                    var font = Font.system(size: size, weight: style.bold ? .bold : .regular, design: .monospaced)
+                    if style.italic { font = font.italic() }
+                    piece.font = font
+                }
+                if style.underline { piece.underlineStyle = .single }
+                if style.strike { piece.strikethroughStyle = .single }
             }
-            if style.underline { piece.underlineStyle = .single }
-            if style.strike { piece.strikethroughStyle = .single }
-            result += piece
         }
-        if position < utf16.count { result += AttributedString(take(utf16.count)) }
+        if position < utf16.count { append(utf16.count) { _ in } }
         return result
     }
 }
