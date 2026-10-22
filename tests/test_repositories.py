@@ -150,6 +150,26 @@ class Repositories(unittest.TestCase):
             self.operation("clone", token=token, rc=1)
         self.assertFalse((self.root / "checkout").exists())
 
+    def test_reserved_device_names_refuse_before_receipts_or_destinations(self):
+        names = ("CON", "prn", "AuX", "NUL", "CONIN$", "conout$.git", "con.txt",
+                 "NUL.tar.gz", "com9.git", "LPT1", "lpt9.txt", "CON  .git",
+                 "COM1 .tar.gz", "COM¹", "com².git", "LPT³  .git")
+        receipts = self.root / "state" / "hgs" / "sessions" / "repository-clones"
+        self.assertFalse(receipts.exists())
+        for name in names:
+            for action in ("check", "clone"):
+                with self.subTest(name=name, action=action):
+                    result = self.operation(action, name=name,
+                                            token=str(uuid.uuid4()) if action == "clone" else None,
+                                            rc=1)
+                    self.assertIn("reserved Windows device name", result.stderr)
+                    self.assertFalse(receipts.exists(), "Refusal must precede receipt or request-lock creation")
+                    # NUL.exists() describes a Win32 device, not an actual
+                    # directory entry. Enumerate the known parent instead.
+                    entries = {entry.name.casefold() for entry in self.root.iterdir()}
+                    self.assertNotIn(name.casefold(), entries)
+                    self.assertEqual((self.source / "content").read_text(), "preserved\n")
+
     @unittest.skipIf(os.name == "nt", "Unix synthetic executable")
     def test_large_escaped_error_keeps_status_and_duplicate_readable(self):
         self.synthetic_git("if 'clone' in sys.argv:\n"
