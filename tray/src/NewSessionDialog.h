@@ -30,6 +30,7 @@ public:
     void prefillSessionFolder(const QString &path, const QString &canonicalPath = {});
     void selectAccount(const QString &account);
     void setProjectExplicit(bool explicitChoice) { m_projectExplicit = explicitChoice; }
+    void setProjectCatalogSwarm(const QString &swarm) { m_projectCatalogSwarm = swarm; }
     void reject() override;
 signals:
     // addFolder: the confirmed folder outside the project that joins it once the
@@ -84,7 +85,7 @@ private:
     AccountUsageStore *m_usageStore;
     FleetState m_fleet;
     SessionOrganization m_projects;
-    QString m_initialProject,m_initialHost,m_accountHost;
+    QString m_initialProject,m_initialHost,m_accountHost,m_projectCatalogSwarm;
     QString m_preferredAccount;
     QString m_preferredAgent;
     QStringList m_agents;

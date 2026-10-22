@@ -1230,6 +1230,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     };
     connect(m_composer, &MessageComposer::draftChanged, this, draftChanged);
     connect(m_subagentComposer, &MessageComposer::draftChanged, this, draftChanged);
+    connect(m_composer, &MessageComposer::draftLoaded, this, draftChanged);
+    connect(m_subagentComposer, &MessageComposer::draftLoaded, this, draftChanged);
     for (auto *composer : {m_composer, m_subagentComposer}) {
         composer->canOpenDraftSession = [this](const QString &key) { return draftOwner(key) != nullptr; };
         composer->savedDraftSessionRoles = [this](const QString &key) {
@@ -2567,6 +2569,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     const auto *context=sessionRow&&project.isEmpty()&&folder.isEmpty()&&path.isEmpty()&&account.isNull()?selected():nullptr;
     NewSessionDialog dialog(m_client.executable(), m_fleet, context?context->host:host, agent, launchProject, this, m_usageStore);
     dialog.setProjectExplicit(!project.isEmpty());
+    dialog.setProjectCatalogSwarm(m_swarm ? m_swarm->snapshot().value("swarm_id").toString() : QString());
     dialog.setGroups(m_organization, launchProject);
     if(context)dialog.prefillSessionFolder(selectedDirectory(),m_details.value("cwd_canonical").toString(context->session.canonicalCwd));
     if(!folder.isEmpty()&&!dialog.selectFolder(folder)){showNotice(tr("This project folder changed. Select it again."),true);return;}
@@ -2942,17 +2945,19 @@ void SessionsWindow::rebuild()
         const auto live = std::find_if(m_entries.cbegin(), m_entries.cend(), [&restore](const Entry &entry) {
             return entry.key == restore.key() && entry.session.state == "running";
         });
-        if (live == m_entries.cend() || m_composer->isDraftLoading(restore->source.key)) { ++restore; continue; }
+        if (live == m_entries.cend()) { ++restore; continue; }
+        m_composer->ensureDraftLoaded(restore->source.key);
+        if (m_composer->isDraftLoading(restore->source.key)) { ++restore; continue; }
         const auto &entry = *live;
         const auto oldKey = restore->source.key;
         const bool follow = m_restoreKey == restore.key() && m_selectedKey == oldKey;
-        // Only a continued visible document retains stale run details. Normal
-        // navigation clears them; keep at most this one inspection guard.
-        if (follow || m_selectedKey == entry.key) {
-            m_restoredInspections.clear();
-            m_restoredInspections.insert(entry.key, {entry.session.runId, entry.session.conversationId});
-        }
         if (!restore->conversation.isEmpty() && entry.session.conversationId == restore->conversation) {
+            // Only a verified continuation retains old run details. Legacy
+            // rows without native IDs use normal navigation and inspection.
+            if (follow || m_selectedKey == entry.key) {
+                m_restoredInspections.clear();
+                m_restoredInspections.insert(entry.key, {entry.session.runId, entry.session.conversationId});
+            }
             if (!follow && m_selectedKey == oldKey) {
                 // A canceled follow must not be revived by renameDraft's
                 // asynchronous editor continuation, even if archive paging

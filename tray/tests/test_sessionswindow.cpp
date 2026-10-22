@@ -7658,6 +7658,8 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation_data()
     QTest::newRow("filter-before-live-row") << false << true << false << QString("filter");
     QTest::newRow("search-before-live-row") << false << true << false << QString("search");
     QTest::newRow("preserved-archive-search") << false << true << false << QString("preserved-search");
+    QTest::newRow("selection-toolbar-restore") << false << true << false << QString("bulk");
+    QTest::newRow("selection-toolbar-disk-only") << false << true << false << QString("bulk-disk-only");
 }
 
 void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
@@ -7695,17 +7697,27 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
     QVERIFY(archiveFilter); archiveFilter->click();
     auto *search = window.findChild<QLineEdit *>("search"); QVERIFY(search);
     if (scopeChange == "preserved-search") search->setText("restore-draft");
-    QCOMPARE(list->count(), 1); list->setCurrentRow(0);
-    QTRY_COMPARE(composer->sessionKey(), oldKey);
-    QTRY_VERIFY(!composer->isDraftLoading(oldKey));
-    QCOMPARE(composer->editor()->toPlainText(), draft.text);
-    QCOMPARE(composer->editor()->textCursor().anchor(), draft.anchor);
-    QCOMPARE(composer->editor()->textCursor().position(), draft.position);
+    QCOMPARE(list->count(), 1);
+    if (scopeChange == "bulk-disk-only") {
+        window.showSession({}, other.name); archiveFilter->click();
+        QCOMPARE(list->count(), 1); list->item(0)->setSelected(true);
+        QVERIFY(composer->sessionKey() != oldKey);
+    } else {
+        list->setCurrentRow(0);
+        QTRY_COMPARE(composer->sessionKey(), oldKey);
+        QTRY_VERIFY(!composer->isDraftLoading(oldKey));
+        QCOMPARE(composer->editor()->toPlainText(), draft.text);
+        QCOMPARE(composer->editor()->textCursor().anchor(), draft.anchor);
+        QCOMPARE(composer->editor()->textCursor().position(), draft.position);
+    }
     QTRY_VERIFY(!activity->renderPending());
     const auto history = activity->plainText(); QVERIFY(!history.isEmpty());
     QSignalSpy terminal(&window, &SessionsWindow::sessionActivated);
     auto *restore = window.findChild<QPushButton *>("restoreSessionAction");
-    QVERIFY(restore && restore->isEnabled()); restore->click();
+    QVERIFY(restore && restore->isEnabled());
+    if (scopeChange == "bulk" || scopeChange == "bulk-disk-only") {
+        auto *resume = window.findChild<QAction *>("selectionplay"); QVERIFY(resume && resume->isEnabled()); resume->trigger();
+    } else restore->click();
     QTRY_COMPARE(writes.size(), 1);
     QCOMPARE(writes[0][0].toString(), "restore " + archived.name); QVERIFY(writes[0][1].toBool());
     if (navigateAway) window.showSession({}, other.name);
@@ -7719,14 +7731,16 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
     local.sessions = {restored, other}; state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
     QCOMPARE(machines->selection(), QSet<QString>{"@local"});
     QCOMPARE(terminal.size(), 0); QCOMPARE(writes.size(), 1);
-    if (scopeChange == "filter" || scopeChange == "search") {
+    if (scopeChange == "filter" || scopeChange == "search" || scopeChange == "bulk" || scopeChange == "bulk-disk-only") {
         QTRY_COMPARE(store.load(liveKey).text, draft.text);
         QVERIFY(store.load(oldKey).text.isEmpty());
-        if (scopeChange == "filter") {
+        if (scopeChange == "bulk" || scopeChange == "bulk-disk-only") QVERIFY(archiveFilter->isChecked());
+        else if (scopeChange == "filter") {
             for (auto *button : window.findChildren<QPushButton *>()) if (button->property("filter") == "paused") QVERIFY(button->isChecked());
         } else QCOMPARE(search->text(), QString("restore-draft"));
         // The user's scope change canceled follow-navigation, not the handoff.
         QVERIFY(composer->sessionKey() != liveKey);
+        if (scopeChange == "bulk-disk-only") QCOMPARE(composer->sessionKey(), "\n" + other.name);
         return;
     }
     if (scopeChange == "preserved-search") {

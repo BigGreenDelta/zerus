@@ -103,6 +103,30 @@ void markCatalogFavorite(QJsonObject &catalog,const QString &value,bool favorite
 MachinePlatform::Style folderStyle(const FleetState &fleet,const QString &host) {
     return MachinePlatform::of(fleet.local().metrics,host.isEmpty());
 }
+// Local Windows folders do not enter the POSIX Swarm catalog. Their saved
+// membership is still evidence when the selected computer confirms that exact
+// canonical path. Never turn a lexical prefix or an unverified alias into it.
+QString exactSavedProject(const SessionOrganization &projects,const FleetState &fleet,
+    const QString &host,const QString &canonical)
+{
+    if(projects.groups().size()>512)return {};
+    const auto style=folderStyle(fleet,host);
+    QString found;int folders=0;
+    for(const auto &project:projects.groups()){
+        for(const auto &folder:project.folders){
+            if(++folders>512)return {};
+            if(project.id=="ungrouped"||project.id.isEmpty()
+                ||(folder.machine==fleet.local().host?QString():folder.machine)!=host
+                ||!MachinePlatform::absolute(folder.path,style)
+                ||!MachinePlatform::same(folder.path,MachinePlatform::clean(folder.path,style),style)
+                ||!MachinePlatform::same(folder.path,canonical,style))continue;
+            // Even an inaccessible second project makes the placement ambiguous.
+            if(!found.isEmpty()&&found!=project.id)return {};
+            found=project.id;
+        }
+    }
+    return found;
+}
 }
 NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &fleet,const QString &selectedHost,
     const QString &agent,const QString &project,QWidget *parent,AccountUsageStore *usage)
@@ -262,12 +286,19 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         }
         // Only an untouched Inbox is a fallback. The owning computer confirmed
         // this exact directory; a selected project (including Inbox) always wins.
-        const auto inferred=data.value("project_inference").toObject();
-        const auto inferredId=inferred.value("project_id").toString();
+        QString inferredId;
+        if(data.contains("project_inference")){
+            const auto inferred=data.value("project_inference").toObject();
+            if(inferred.value("schema").toInt()==1&&!m_projectCatalogSwarm.isEmpty()
+                &&inferred.value("swarm_id").toString()==m_projectCatalogSwarm)
+                inferredId=inferred.value("project_id").toString();
+            // A foreign or invalid hint never falls back to an unrelated local
+            // project with the same ID or path. Joining remains explicit.
+        }else if(!m_projectExplicit&&m_project->currentData()=="ungrouped")
+            inferredId=exactSavedProject(m_projects,m_fleet,host(),path);
         const int inferredIndex=m_project->findData(inferredId);
         const bool infer=!m_projectExplicit&&m_project->currentData()=="ungrouped"
-            &&inferred.value("schema").toInt()==1&&!inferred.value("swarm_id").toString().isEmpty()
-            &&inferredId!="ungrouped"&&inferredIndex>=0;
+            &&!inferredId.isEmpty()&&inferredId!="ungrouped"&&inferredIndex>=0;
         if(infer){const QSignalBlocker block(m_project);m_project->setCurrentIndex(inferredIndex);}
         // Listed folders and verified worktrees already belong to the project.
         // Decide before creation: the selection then moves to the new worktree.

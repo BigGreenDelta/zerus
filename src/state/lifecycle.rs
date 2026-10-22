@@ -117,7 +117,6 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     let token = nonempty_env("HGS_RUN_ID").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let pane = backend::current().own_pane()?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let infer_project;
     {
         let _guard = lock(None)?;
         let actual_name = backend::current()
@@ -149,7 +148,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         } else {
             "new"
         };
-        infer_project = startup_kind == "new" && replaced.is_none()
+        let infer_project = startup_kind == "new" && replaced.is_none()
             && nonempty_env("HGS_FORK_PARENT_ID").is_none();
         let mut record = json!({"version": 1, "run_identity_version": 1, "name": name, "agent": agent, "run_id": token, "pane": pane,
             "cwd": cwd, "launch_dir": cwd, "base": base, "hgs": required_env("HGS_EXECUTABLE")?,
@@ -229,13 +228,20 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         }
         backend::current().set_run_marker(&name, &token)?;
         write(&mut record)?;
+        // Keep this exact newly-created binding pinned during optional initial
+        // placement. A removal/replacement must not inherit the old folder's
+        // inference. The swarm lock is nonblocking and Git shares one 3s cap.
+        if infer_project {
+            if let Ok(config) = crate::config::Config::load() {
+                crate::swarm::infer_new_session(&config, &name, &cwd);
+            }
+        }
     }
     std::env::set_var("HGS_RUN_ID", &token);
     std::env::set_var("HGS_SESSION", &name);
     std::env::set_var("HGS_STATE_DIR", absolute_root()?);
     std::env::remove_var("HGS_EXPECTED_ID");
     let config = crate::config::Config::load().map_err(|e|e.message)?;
-    if infer_project { crate::swarm::infer_new_session(&config, &name, &cwd); }
     let permission_mode = crate::accounts::permission_mode(&config,
         &nonempty_env("HGS_ACCOUNT_ID").unwrap_or_default(), &agent).map_err(|e|e.message)?;
     for argv in [&mut base, &mut first] { crate::accounts::apply_permissions(&agent, &permission_mode, argv); }

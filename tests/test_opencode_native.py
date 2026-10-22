@@ -571,6 +571,9 @@ class OpenCodeNative(unittest.TestCase):
             self.assertIsNone(child.poll(), text[-2000:])
             self.assertIn(title, text, 'native TUI did not render the existing conversation')
             self.assertEqual(self.registration(), registration)
+            inspected = self.hgs(['inspect', name])
+            self.assertEqual((inspected['run_id'], inspected['conversation_id']),
+                             (run, binding['conversation_id']))
             self.assertEqual(len(self.api('GET', '/api/session/' + binding['conversation_id'] + '/message')[1]['data']), 0)
             if registration.get('password'):
                 self.assertNotIn(registration['password'], text)

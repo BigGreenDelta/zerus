@@ -311,7 +311,18 @@ void SessionsWindow::runNextSelectionAction()
             m_selectionCommand = "pause " + s.name; m_client.pauseSession(entry.host, s.name); return;
         case SelectionAction::Resume:
             m_selectionCommand = (s.state == "archived" ? "restore " : "resume ") + s.name;
-            if (s.state == "archived") m_client.restoreArchive(entry.host, s.name, s.archiveId); else m_client.resumeSession(entry.host, s.name); return;
+            if (s.state == "archived") {
+                const auto key = entry.host + '\n' + s.name;
+                if (m_restores.contains(key) || m_restores.size() + m_restoredInspections.size() >= 64) {
+                    ++m_selectionFailed; m_selectionErrors << tr("%1: earlier restores still need a refresh").arg(s.name);
+                    m_selectionCommand.clear(); continue;
+                }
+                const auto conversation = entry.key == m_selectedKey
+                    ? m_details.value("conversation_id").toString(s.conversationId) : s.conversationId;
+                m_restores.insert(key, {entry, conversation, false}); m_selectionRestoreKey = key;
+                m_client.restoreArchive(entry.host, s.name, s.archiveId);
+            } else m_client.resumeSession(entry.host, s.name);
+            return;
         case SelectionAction::Archive:
             m_selectionCommand = "archive " + s.name; m_client.archiveSession(entry.host, s.name); return;
         case SelectionAction::Forget:
@@ -340,6 +351,13 @@ bool SessionsWindow::finishSelectionAction(const QString &operation, bool ok, co
     if (!m_selectionRunning) return false;
     // A binding forget finishes only with the result of its own request.
     if (operation != m_selectionCommand || m_selectionForgetRequest) return true;
+    if (!m_selectionRestoreKey.isEmpty()) {
+        if (auto pending = m_restores.find(m_selectionRestoreKey); pending != m_restores.end()) {
+            if (ok) pending->succeeded = true;
+            else m_restores.erase(pending);
+        }
+        m_selectionRestoreKey.clear();
+    }
     if (ok) ++m_selectionDone;
     else { ++m_selectionFailed; m_selectionErrors << operation + ": " + detail; }
     m_selectionCommand.clear();

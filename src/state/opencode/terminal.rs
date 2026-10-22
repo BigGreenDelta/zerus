@@ -9,6 +9,7 @@ fn command(
     record: &Value,
     reg: &service::Registration,
     expected_run: Option<&str>,
+    environment: Vec<(String, String)>,
 ) -> Result<Command> {
     let run = string(record, "run_id");
     if expected_run.is_some_and(|expected| expected != run) {
@@ -33,7 +34,7 @@ fn command(
         ])
         .current_dir(string(record, "cwd"))
         .env_clear()
-        .envs(service::start_environment(std::env::vars().collect()))
+        .envs(service::start_environment(environment))
         .env_remove("OPENCODE_PASSWORD")
         .env("OPENCODE_CONFIG_DIR", string(record, "agent_home"))
         // Opening Terminal must never update an installed native agent.
@@ -68,7 +69,12 @@ pub(crate) fn attach(name: &str, expected_run: Option<&str>, dry: bool) -> Resul
         // private password go only to this explicit attach client.
         let service = running_service()?;
         verify_session(&service, &record)?;
-        let mut command = command(&record, &service.reg, expected_run)?;
+        let mut command = command(
+            &record,
+            &service.reg,
+            expected_run,
+            std::env::vars().collect(),
+        )?;
         // Recheck the binding after I/O. A rename/forget/new run cannot silently
         // redirect this client to another native conversation.
         let current = binding(name)?;
@@ -100,9 +106,18 @@ mod tests {
             password: Some("synthetic-password".into()),
         }
     }
+    fn contaminated_environment() -> Vec<(String, String)> {
+        vec![("OPENCODE_PASSWORD".into(), "inherited-password".into())]
+    }
     #[test]
     fn terminal_uses_only_the_existing_service_and_native_conversation() {
-        let cmd = command(&record(), &registration(), Some("run-one")).unwrap();
+        let cmd = command(
+            &record(),
+            &registration(),
+            Some("run-one"),
+            contaminated_environment(),
+        )
+        .unwrap();
         let args = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -145,7 +160,13 @@ mod tests {
     }
     #[test]
     fn terminal_refuses_changed_unsettled_or_unscoped_sessions() {
-        assert!(command(&record(), &registration(), Some("another-run")).is_err());
+        assert!(command(
+            &record(),
+            &registration(),
+            Some("another-run"),
+            contaminated_environment()
+        )
+        .is_err());
         for (key, value) in [
             ("run_id", json!("")),
             ("service", json!("opencode1")),
@@ -156,13 +177,16 @@ mod tests {
         ] {
             let mut record = record();
             record[key] = value;
-            assert!(command(&record, &registration(), None).is_err(), "{key}");
+            assert!(
+                command(&record, &registration(), None, contaminated_environment()).is_err(),
+                "{key}"
+            );
         }
         let mut reg = registration();
         reg.password = None;
-        let cmd = command(&record(), &reg, None).unwrap();
-        assert!(cmd
+        let cmd = command(&record(), &reg, None, contaminated_environment()).unwrap();
+        assert!(!cmd
             .get_envs()
-            .any(|(key, value)| key == "OPENCODE_PASSWORD" && value.is_none()));
+            .any(|(key, value)| key == "OPENCODE_PASSWORD" && value.is_some()));
     }
 }

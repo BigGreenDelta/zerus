@@ -228,7 +228,7 @@ private:
     QAction *m_clearArchiveAction = nullptr;
     QList<Entry> m_selectionQueue;
     SelectionAction m_selectionOperation = SelectionAction::Pause;
-    QString m_selectionCommand;
+    QString m_selectionCommand, m_selectionRestoreKey;
     // The scoped request of the selected OpenCode binding being forgotten; only
     // its own result advances the selection.
     quint64 m_selectionForgetRequest = 0;
