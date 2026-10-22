@@ -23,7 +23,7 @@ namespace { constexpr auto Mime = "application/x-hgs-session-placement"; }
 
 SessionList::SessionList(QWidget *parent) : WorkspaceList(parent), m_token(QUuid::createUuid().toString())
 {
-    // Ordinary navigation selects one row. Explicit Ctrl clicks below operate
+    // Ordinary navigation selects one row. Explicit modified clicks operate
     // on the selection model without changing the open conversation.
     setSelectionMode(QAbstractItemView::SingleSelection);
     setDragEnabled(true); setAcceptDrops(true); setDragDropMode(QAbstractItemView::DragDrop);
@@ -117,7 +117,8 @@ void SessionList::hideEvent(QHideEvent *event) { m_activityTimer.stop(); m_elaps
 
 void SessionList::clearBulkSelection()
 {
-    m_bulkSelecting = false; clearSelection(); emit bulkSelectionChanged();
+    m_bulkSelecting = false; m_rangeAnchor.clear(); m_rangeCursor.clear();
+    clearSelection(); emit bulkSelectionChanged();
 }
 void SessionList::setSelectionBar(QWidget *bar, bool visible)
 {
@@ -162,30 +163,37 @@ void SessionList::syncRowExpandButtons()
         const auto index = indexAt(QPoint(viewport()->width() / 2, y));
         if (!index.isValid()) { ++y; continue; }
         const auto option = animationOption(index);
-        const QRect rect = SessionDelegate::expandRowRect(option, index);
+        const QRect rect = SessionDelegate::rowDensityRect(option, index);
         y = qMax(y + 1, option.rect.bottom() + 1);
         if (rect.isEmpty()) continue;
         ++controls;
         QPersistentModelIndex pin(index);
         auto *button = m_rowExpandButtons.value(pin);
         if (!button) {
-            button = new QToolButton(viewport()); button->setObjectName("expandSessionRow");
+            button = new QToolButton(viewport());
             button->setAutoRaise(true); button->setIconSize({16, 16}); button->setFocusPolicy(Qt::StrongFocus);
-            button->setToolTip(tr("Expand session row"));
             connect(button, &QToolButton::clicked, this, [this, pin] {
-                if (pin.isValid() && SessionDelegate::rowCollapsed(pin)) emit rowExpanded(pin.data(SessionRoles::Key).toString());
+                if (!pin.isValid()) return;
+                if (SessionDelegate::rowCollapsed(pin)) emit rowExpanded(pin.data(SessionRoles::Key).toString());
+                else emit rowCompacted(pin.data(SessionRoles::Key).toString());
             });
             m_rowExpandButtons.insert(pin, button);
         }
         unused.remove(pin);
+        const bool collapsed = SessionDelegate::rowCollapsed(index);
+        const auto caption = collapsed ? tr("Expand session row") : tr("Compact session row");
+        button->setObjectName(collapsed ? "expandSessionRow" : "compactSessionRow");
         button->setProperty("sessionKey", index.data(SessionRoles::Key));
-        button->setAccessibleName(tr("Expand session row: %1").arg(index.data(SessionRoles::Title).toString()));
+        button->setAccessibleName((collapsed ? tr("Expand session row: %1") : tr("Compact session row: %1"))
+            .arg(index.data(SessionRoles::Title).toString()));
         button->setAccessibleDescription(SessionDelegate::compactDescription(option, index));
         const auto tooltip = SessionDelegate::compactTooltip(option, index);
-        button->setToolTip(tooltip.isEmpty() ? tr("Expand session row") : tr("Expand session row") + '\n' + tooltip);
-        if (!button->property("rowTheme").isValid() || button->property("rowTheme").toBool() != dark) {
+        button->setToolTip(tooltip.isEmpty() ? caption : caption + '\n' + tooltip);
+        if (!button->property("rowTheme").isValid() || button->property("rowTheme").toBool() != dark
+            || button->property("rowCollapsed").toBool() != collapsed) {
             button->setProperty("rowTheme", dark);
-            button->setIcon(workspaceIcon("expand-row", QColor(dark ? "#a1adbb" : "#647386")));
+            button->setProperty("rowCollapsed", collapsed);
+            button->setIcon(workspaceIcon(collapsed ? "expand-row" : "compact-row", QColor(dark ? "#a1adbb" : "#647386")));
             button->setStyleSheet(QString("QToolButton { background:transparent; border:1px solid transparent; border-radius:4px; padding:0; } QToolButton:hover { background:%1; } QToolButton:focus { border-color:%2; }")
                 .arg(dark ? "#344650" : "#d4e4e9", dark ? "#8bdfc0" : "#22795b"));
         }
@@ -288,11 +296,15 @@ void SessionList::mousePressEvent(QMouseEvent *e)
     m_press = e->position().toPoint(); m_pressedGroup.clear(); m_pressedParent.clear(); m_togglePress = false;
     if (e->button() == Qt::RightButton) { e->accept(); return; }
     auto *item = itemAt(m_press);
-    if (e->button() == Qt::LeftButton && e->modifiers().testFlag(Qt::ControlModifier)) {
+    const bool additive = e->modifiers().testFlag(Qt::ControlModifier) || e->modifiers().testFlag(Qt::MetaModifier);
+    if (e->button() == Qt::LeftButton && (additive || e->modifiers().testFlag(Qt::ShiftModifier))) {
         m_togglePress = true;
-        if (item && !item->data(SessionRoles::Header).toBool()
-            && item->data(SessionRoles::ChildId).toString().isEmpty() && item->data(SessionRoles::LaunchId).toString().isEmpty()) {
-            m_bulkSelecting = true; selectionModel()->select(indexFromItem(item), QItemSelectionModel::Toggle);
+        if (rangeSelectable(item)) {
+            if (e->modifiers().testFlag(Qt::ShiftModifier)) selectRange(row(item), additive);
+            else {
+                m_rangeAnchor = m_rangeCursor = item->data(SessionRoles::Key).toString();
+                m_bulkSelecting = true; selectionModel()->select(indexFromItem(item), QItemSelectionModel::Toggle);
+            }
             setFocus(); emit bulkSelectionChanged();
         }
         e->accept(); return;
@@ -306,6 +318,51 @@ void SessionList::mousePressEvent(QMouseEvent *e)
         m_pressedParent = item->data(SessionRoles::Key).toString(); setFocus(); e->accept(); return;
     }
     QListWidget::mousePressEvent(e);
+    if (e->button() == Qt::LeftButton && rangeSelectable(currentItem()))
+        m_rangeAnchor = m_rangeCursor = currentItem()->data(SessionRoles::Key).toString();
+}
+
+bool SessionList::rangeSelectable(const QListWidgetItem *item) const
+{
+    return item && !item->isHidden() && !item->data(SessionRoles::Header).toBool()
+        && item->flags().testFlag(Qt::ItemIsEnabled) && item->flags().testFlag(Qt::ItemIsSelectable)
+        && item->data(SessionRoles::ChildId).toString().isEmpty()
+        && item->data(SessionRoles::LaunchId).toString().isEmpty();
+}
+
+int SessionList::rangeRow(const QString &key) const
+{
+    if (key.isEmpty()) return -1;
+    for (int i = 0; i < count(); ++i)
+        if (rangeSelectable(item(i)) && item(i)->data(SessionRoles::Key).toString() == key) return i;
+    return -1;
+}
+
+void SessionList::selectRange(int targetRow, bool additive)
+{
+    auto *target = item(targetRow);
+    if (!rangeSelectable(target)) return;
+    int anchor = rangeRow(m_rangeAnchor);
+    if (anchor < 0) {
+        anchor = rangeSelectable(currentItem()) ? row(currentItem()) : targetRow;
+        m_rangeAnchor = item(anchor)->data(SessionRoles::Key).toString();
+    }
+    QItemSelection selection;
+    int first = -1;
+    for (int i = 0; i <= count(); ++i) {
+        const bool included = i < count() && rangeSelectable(item(i))
+            && ((i >= qMin(anchor, targetRow) && i <= qMax(anchor, targetRow))
+                || (additive && selectionModel()->isSelected(model()->index(i, 0))));
+        if (included && first < 0) first = i;
+        else if (!included && first >= 0) {
+            selection.select(model()->index(first, 0), model()->index(i - 1, 0)); first = -1;
+        }
+    }
+    m_bulkSelecting = true;
+    m_rangeCursor = target->data(SessionRoles::Key).toString();
+    // Keep the current/open conversation intact, independently of the range tip.
+    selectionModel()->select(selection, QItemSelectionModel::ClearAndSelect);
+    scrollToItem(target);
 }
 
 void SessionList::mouseMoveEvent(QMouseEvent *e)
@@ -462,6 +519,21 @@ void SessionList::keyPressEvent(QKeyEvent *e)
 {
     setKeyboardFocusVisible(true);
     if (e->key() == Qt::Key_Escape && m_bulkSelecting) { clearBulkSelection(); e->accept(); return; }
+    if (e->modifiers().testFlag(Qt::ShiftModifier)
+        && (e->key() == Qt::Key_Up || e->key() == Qt::Key_Down || e->key() == Qt::Key_Home || e->key() == Qt::Key_End)) {
+        const bool forward = e->key() == Qt::Key_Down || e->key() == Qt::Key_Home;
+        int target = rangeRow(m_rangeCursor);
+        if (target < 0 && rangeSelectable(currentItem())) target = row(currentItem());
+        if (e->key() == Qt::Key_Home) target = -1;
+        else if (e->key() == Qt::Key_End) target = count();
+        else if (target < 0) target = forward ? -1 : count();
+        for (target += forward ? 1 : -1; target >= 0 && target < count(); target += forward ? 1 : -1)
+            if (rangeSelectable(item(target))) {
+                selectRange(target, e->modifiers().testFlag(Qt::ControlModifier) || e->modifiers().testFlag(Qt::MetaModifier));
+                emit bulkSelectionChanged(); break;
+            }
+        e->accept(); return;
+    }
     if ((e->key() == Qt::Key_Left || e->key() == Qt::Key_Right) && currentItem()) {
         const auto *current = currentItem();
         if (e->key() == Qt::Key_Right && current->data(SessionRoles::RowCollapsed).toBool() && !narrow(this)) {
@@ -487,6 +559,9 @@ void SessionList::keyPressEvent(QKeyEvent *e)
         }
     }
     QListWidget::keyPressEvent(e);
+    if (rangeSelectable(currentItem()) && (e->key() == Qt::Key_Up || e->key() == Qt::Key_Down
+        || e->key() == Qt::Key_Home || e->key() == Qt::Key_End))
+        m_rangeAnchor = m_rangeCursor = currentItem()->data(SessionRoles::Key).toString();
 }
 void SessionList::paintEvent(QPaintEvent *e)
 {

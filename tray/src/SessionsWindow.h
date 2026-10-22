@@ -207,7 +207,7 @@ private:
     void renameSession();
     void forkSession();
     void populateBatchActions(QMenu *menu);
-    enum class SelectionAction { MarkRead, ReviewLater, Pause, Resume, Archive, Forget, Terminate, Move };
+    enum class SelectionAction { MarkRead, ReviewLater, CompactRows, ExpandRows, Pause, Resume, Archive, Forget, Terminate, Move };
     QList<Entry> selectionEntries() const;
     bool selectionActionApplies(const Entry &entry, SelectionAction action) const;
     static QString selectionActionText(SelectionAction action);

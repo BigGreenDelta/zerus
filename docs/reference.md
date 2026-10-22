@@ -643,8 +643,9 @@ the conversation and press **Voice** again; opening settings does not start a
 recording. If settings cannot open, the dialog keeps the manual navigation path.
 
 Session rows show provider, machine, current action, model, effort and Git context.
-Right-click a session and choose **Compact session row** to show only its name,
-status and agent type. The expand icon or the Right key restores the full row;
+Use the compact icon in a session row's upper-right corner, or right-click and
+choose **Compact session row**, to show only its name, status and agent type.
+The expand icon in that same position or the Right key restores the full row;
 the row remains selectable and keeps its normal context actions. This device
 remembers the preference for that conversation across restarts. **Expand all
 collapsed** in the Sessions menu restores every compact row, including sessions
@@ -812,9 +813,17 @@ attention keep their reply unread; pending approvals, questions and errors stay
 highlighted.
 
 Ctrl/Command-click selects multiple sessions while preserving the open conversation
-and draft. Batch actions include read/review later, pause, resume, archive, project
-move, termination and forgetting. Applicability is shown per selection. Ctrl-click
-does not select project headers or subagents. Escape or the selection close button
+and draft. Shift-click selects the visible range from the last selection anchor;
+Ctrl/Command+Shift-click adds that range to the selection. Shift with Up/Down or
+Home/End selects ranges by keyboard, using the current filtered row order and
+skipping hidden rows, project headers, subagents and pending launches. Anchors
+follow session identities across refreshes; a hidden or removed anchor falls back
+to the visible open row, or to the clicked row when none is visible.
+Batch actions include local **Compact session rows** and **Expand session rows**
+icons, read/review later, pause, resume, archive, project move, termination and
+forgetting. Both density actions are available for a mixed selection and apply
+only to rows needing that change, including offline rows. Applicability is shown
+per selection. Escape or the selection close button
 clears selection. Context menus and shortcuts preserve the target identity.
 **Clear archive…** requires confirmation, preserves offline records and excludes
 new records created after the confirmation snapshot; native history remains.

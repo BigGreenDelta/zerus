@@ -528,6 +528,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const auto found = std::find_if(m_entries.cbegin(), m_entries.cend(), [&key](const Entry &e) { return e.key == key; });
         if (found != m_entries.cend()) setSessionRowCollapsed(*found, false);
     });
+    connect(m_sessions, &SessionList::rowCompacted, this, [this](const QString &key) {
+        const auto found = std::find_if(m_entries.cbegin(), m_entries.cend(), [&key](const Entry &e) { return e.key == key; });
+        if (found != m_entries.cend()) setSessionRowCollapsed(*found, true);
+    });
     connect(&m_client, &HgsClient::notificationsFinished, this, [this](quint64 request, bool ok, const QJsonObject &result, const QString &error) {
         const auto found = m_pendingNotifications.find(request); if (found == m_pendingNotifications.end()) return;
         const auto original = found->entry; m_pendingNotifications.erase(found);
@@ -2167,6 +2171,7 @@ void SessionsWindow::updateSessionRowPresentation()
     }
     // A density edit changes no selection, native state, inspection or read mark.
     m_sessions->doItemsLayout(); m_sessions->syncRowExpandButtons(); m_sessions->syncActivityAnimation(); m_sessions->viewport()->update();
+    updateSelectionActions();
 }
 
 void SessionsWindow::saveOrganization()
@@ -3165,7 +3170,8 @@ void SessionsWindow::rebuild()
     if (!m_selectedKey.isEmpty()) m_initialSelectionPending = false;
     if (selectedRow < 0 && !preserveConversation && m_initialSelectionPending) selectedRow = firstVisible < 0 ? firstSession : firstVisible;
     if (selectedRow >= 0) m_initialSelectionPending = false;
-    if (selectedRow >= 0 && m_sessions->item(selectedRow)->data(KeyRole).toString() == m_selectedKey) {
+    if (m_sessions->bulkSelecting()
+        || (selectedRow >= 0 && m_sessions->item(selectedRow)->data(KeyRole).toString() == m_selectedKey)) {
         m_sessions->setCurrentRow(selectedRow, QItemSelectionModel::NoUpdate);
         QItemSelection selection;
         for (int i = 0; i < m_sessions->count(); ++i) {

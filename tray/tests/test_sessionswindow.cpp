@@ -80,6 +80,7 @@
 #include "MessageBoxIcons.h"
 #include "ComposerToolbar.h"
 #include "SessionList.h"
+#include <QToolBar>
 #include "SessionCardDelegate.h"
 #include "SessionOrganization.h"
 #include "MachineFilter.h"
@@ -313,6 +314,8 @@ private slots:
     void attentionNavigationResetsFiltersAndTab();
     void sessionContextMenuSignalsAndKeyboard();
     void compactSessionRowActionsPreserveSelectionAndDraft();
+    void selectedSessionRowsCompactAndExpandLocally();
+    void shiftRangeSurvivesFilteringReorderAndDeletedAnchor();
     void compactSessionRowsPersistAndExpandAllIncludesHidden();
     void sessionAttentionMenuPersistsWithoutSelection();
     void sessionAttentionMenuSurvivesRoutinePoll();
@@ -5359,6 +5362,101 @@ void TestSessionsWindow::compactSessionRowActionsPreserveSelectionAndDraft()
     QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selected); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this other conversation draft"));
     QCOMPARE(writes.size(), 0); QCOMPARE(sends.size(), 0); QCOMPARE(reads.size(), 0); QCOMPARE(activated.size(), 0);
     QVERIFY(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty());
+}
+
+void TestSessionsWindow::selectedSessionRowsCompactAndExpandLocally()
+{
+    auto state = fleet(); auto box = state.local();
+    for (int i = 0; i < box.sessions.size(); ++i) box.sessions[i].conversationId = QString("density-%1").arg(i);
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    auto peer = *state.peer("mac"); peer.ok = false; state.setPeer(peer, QDateTime::currentMSecsSinceEpoch());
+    SessionRowPreferences preferences; QVERIFY(preferences.setCollapsed({}, box.sessions[0], true));
+    QSettings().setValue("workspace/collapsedSessionRows", preferences.save());
+    SessionsWindow window(program()); window.setDetailsPollForTests(60000, 60000); window.setFleet(state); window.show();
+    window.showSession({}, box.sessions[0].name);
+    auto *list = window.findChild<SessionList *>("sessionList"); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    QVERIFY(list); QVERIFY(composer); setComposerText(composer, "Keep the open conversation draft");
+    const auto current = list->currentItem()->data(SessionRoles::Key).toString();
+    const auto find = [&](const QString &name) -> QListWidgetItem * {
+        for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key).toString().section('\n', 1, 1) == name) return list->item(i);
+        return nullptr;
+    };
+    const auto toggle = [&](const QString &name, Qt::KeyboardModifiers modifiers) {
+        auto *item = find(name); if (!item) return false;
+        list->scrollToItem(item); QTest::mouseClick(list->viewport(), Qt::LeftButton, modifiers, list->visualItemRect(item).center()); return true;
+    };
+    QVERIFY(toggle(box.sessions[1].name, Qt::ControlModifier)); QVERIFY(toggle(peer.sessions[0].name, Qt::MetaModifier));
+    QCOMPARE(list->selectedItems().size(), 3);
+    auto *compact = window.findChild<QAction *>("selectioncompact-row"); auto *expand = window.findChild<QAction *>("selectionexpand-row");
+    QVERIFY(compact); QVERIFY(expand); QVERIFY(compact->isVisible()); QVERIFY(expand->isVisible());
+    QCOMPARE(compact->text(), QString("Compact session rows (2)")); QCOMPARE(expand->text(), QString("Expand session rows (1)"));
+    QVERIFY(compact->isEnabled()); QVERIFY(expand->isEnabled()); // Offline rows are local presentation too.
+    auto *bar = window.findChild<QFrame *>("sessionSelectionBar"); QVERIFY(bar); QVERIFY(bar->isVisible());
+    auto *tools = window.findChild<QToolBar *>("selectionTools"); QVERIFY(tools);
+    auto *button = qobject_cast<QToolButton *>(tools->widgetForAction(compact)); QVERIFY(button);
+    QVERIFY(button->accessibleName().contains("2 of 3 selected sessions")); QVERIFY(!compact->icon().isNull());
+    QSignalSpy writes(window.findChild<HgsClient *>(), &HgsClient::writeDone), sends(window.findChild<HgsClient *>(), &HgsClient::messageSent);
+    QSignalSpy activated(&window, &SessionsWindow::sessionActivated), reads(&window, &SessionsWindow::replyViewed);
+    QSet<QString> selected; for (const auto *item : list->selectedItems()) selected.insert(item->data(SessionRoles::Key).toString());
+    compact->trigger();
+    for (const auto *item : list->selectedItems()) QVERIFY(item->data(SessionRoles::RowCollapsed).toBool());
+    QVERIFY(!compact->isVisible()); QCOMPARE(expand->text(), QString("Expand session rows (3)"));
+    QVERIFY(!find(box.sessions[2].name)->data(SessionRoles::RowCollapsed).toBool());
+    expand->trigger();
+    for (const auto *item : list->selectedItems()) QVERIFY(!item->data(SessionRoles::RowCollapsed).toBool());
+    QVERIFY(!expand->isVisible()); QCOMPARE(compact->text(), QString("Compact session rows (3)"));
+    QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), current);
+    QCOMPARE(composer->editor()->toPlainText(), QString("Keep the open conversation draft"));
+    QSet<QString> after; for (const auto *item : list->selectedItems()) after.insert(item->data(SessionRoles::Key).toString()); QCOMPARE(after, selected);
+    QVERIFY(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty());
+    QCOMPARE(writes.size(), 0); QCOMPARE(sends.size(), 0); QCOMPARE(activated.size(), 0); QCOMPARE(reads.size(), 0);
+    window.setFleet(state);
+    after.clear(); for (const auto *item : list->selectedItems()) after.insert(item->data(SessionRoles::Key).toString()); QCOMPARE(after, selected);
+}
+
+void TestSessionsWindow::shiftRangeSurvivesFilteringReorderAndDeletedAnchor()
+{
+    auto state = fleet(); auto box = state.local(); box.sessions[1].state = "paused";
+    box.sessions[1].resumable = true; box.sessions[1].activity = "idle"; box.sessions[1].phase = "idle";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); window.setDetailsPollForTests(60000, 60000); window.setFleet(state); window.show();
+    window.showSession({}, box.sessions[0].name);
+    auto *list = window.findChild<SessionList *>("sessionList"); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    QVERIFY(list); QVERIFY(composer); setComposerText(composer, "Keep this draft through list filtering");
+    const auto open = list->currentItem()->data(SessionRoles::Key).toString();
+    const auto find = [&](const QString &name) -> QListWidgetItem * {
+        for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key).toString().section('\n', 1, 1) == name) return list->item(i);
+        return nullptr;
+    };
+    const auto click = [&](const QString &name, Qt::KeyboardModifiers modifiers) {
+        auto *item = find(name); if (!item) return false;
+        list->scrollToItem(item); QTest::mouseClick(list->viewport(), Qt::LeftButton, modifiers, list->visualItemRect(item).center()); return true;
+    };
+    const auto names = [&] { QSet<QString> result; for (const auto *item : list->selectedItems()) result.insert(item->data(SessionRoles::Key).toString().section('\n', 1, 1)); return result; };
+    auto *anchor = find(box.sessions[1].name); auto *tip = find(box.sessions[2].name); QVERIFY(anchor); QVERIFY(tip);
+    // Saved sessions preserve insertion order in the configured session list.
+    QVERIFY(click(box.sessions[1].name, Qt::ControlModifier));
+    QPushButton *saved = nullptr, *all = nullptr;
+    for (auto *button : window.findChildren<QPushButton *>("sessionFilter")) {
+        if (button->property("filter") == "paused") saved = button;
+        if (button->property("filter") == "all") all = button;
+    }
+    QVERIFY(saved); QVERIFY(all); saved->click();
+    QVERIFY(!list->currentItem()); QVERIFY(list->bulkSelecting());
+    QCOMPARE(names(), (QSet<QString>{box.sessions[1].name}));
+    QVERIFY(click(box.sessions[2].name, Qt::ShiftModifier));
+    QCOMPARE(names(), (QSet<QString>{box.sessions[1].name, box.sessions[2].name})); QVERIFY(!list->currentItem());
+    QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft through list filtering"));
+    std::swap(box.sessions[1], box.sessions[2]); state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QCOMPARE(names(), (QSet<QString>{box.sessions[1].name, box.sessions[2].name}));
+    QVERIFY(click(box.sessions[1].name, Qt::ShiftModifier));
+    QCOMPARE(names(), (QSet<QString>{box.sessions[1].name, box.sessions[2].name}));
+    // Remove the anchor while the open conversation is still filtered out.
+    box.sessions.removeAt(2); state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    QVERIFY(click(box.sessions[1].name, Qt::ShiftModifier)); QCOMPARE(names(), (QSet<QString>{box.sessions[1].name}));
+    QVERIFY(!list->currentItem()); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this draft through list filtering"));
+    all->click(); QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), open);
+    QCOMPARE(names(), (QSet<QString>{box.sessions[1].name}));
 }
 
 void TestSessionsWindow::compactSessionRowsPersistAndExpandAllIncludesHidden()

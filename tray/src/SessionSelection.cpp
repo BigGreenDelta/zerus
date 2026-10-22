@@ -51,6 +51,8 @@ QString SessionsWindow::selectionActionText(SelectionAction action)
     switch (action) {
     case SelectionAction::MarkRead: return tr("Mark as read");
     case SelectionAction::ReviewLater: return tr("Mark needs attention");
+    case SelectionAction::CompactRows: return tr("Compact session rows");
+    case SelectionAction::ExpandRows: return tr("Expand session rows");
     case SelectionAction::Pause: return tr("Pause");
     case SelectionAction::Resume: return tr("Resume / restore");
     case SelectionAction::Archive: return tr("Move to archive");
@@ -65,6 +67,8 @@ QString SessionsWindow::selectionActionIcon(SelectionAction action)
     switch (action) {
     case SelectionAction::MarkRead: return "read-all";
     case SelectionAction::ReviewLater: return "attention";
+    case SelectionAction::CompactRows: return "compact-row";
+    case SelectionAction::ExpandRows: return "expand-row";
     case SelectionAction::Pause: return "pause";
     case SelectionAction::Resume: return "play";
     case SelectionAction::Archive: return "archived";
@@ -78,6 +82,8 @@ QString SessionsWindow::selectionActionIcon(SelectionAction action)
 bool SessionsWindow::selectionActionApplies(const Entry &entry, SelectionAction action) const
 {
     const auto &s = entry.session;
+    if (action == SelectionAction::CompactRows) return !m_sessionRowPreferences.collapsed(entry.host, s);
+    if (action == SelectionAction::ExpandRows) return m_sessionRowPreferences.collapsed(entry.host, s);
     if (action == SelectionAction::Move) return true;
     if (action == SelectionAction::MarkRead) return s.state != "archived" && entryNeedsAttention(entry);
     if (action == SelectionAction::ReviewLater) return s.state != "archived" && !entryNeedsAttention(entry);
@@ -110,7 +116,7 @@ void SessionsWindow::setupSelectionActions()
     m_selectionTools = new QToolBar; m_selectionTools->setObjectName("selectionTools");
     m_selectionTools->setIconSize(QSize(18, 18)); m_selectionTools->setMovable(false);
     m_selectionTools->setFixedHeight(32); layout->addWidget(m_selectionTools);
-    for (const auto action : {SelectionAction::MarkRead, SelectionAction::ReviewLater, SelectionAction::Pause,
+    for (const auto action : {SelectionAction::CompactRows, SelectionAction::ExpandRows, SelectionAction::MarkRead, SelectionAction::ReviewLater, SelectionAction::Pause,
             SelectionAction::Resume, SelectionAction::Archive, SelectionAction::Move, SelectionAction::Forget, SelectionAction::Terminate}) {
         auto *control = new QAction(this); control->setObjectName("selection" + selectionActionIcon(action));
         m_selectionActions[action] = control; m_selectionTools->addAction(control);
@@ -156,7 +162,9 @@ void SessionsWindow::updateSelectionActions()
         it.value()->setText(tr("%1 (%2)").arg(selectionActionText(it.key())).arg(count));
         it.value()->setToolTip(tr("%1 — %2 of %3 selected sessions").arg(selectionActionText(it.key())).arg(count).arg(entries.size()));
         if (themeChanged) it.value()->setIcon(workspaceIcon(selectionActionIcon(it.key()), QColor(m_muted)));
-        it.value()->setVisible(count > 0); it.value()->setEnabled(count > 0 && !busy);
+        const bool presentation = it.key() == SelectionAction::CompactRows || it.key() == SelectionAction::ExpandRows;
+        it.value()->setVisible(count > 0); it.value()->setEnabled(count > 0 && (presentation || !busy));
+        if (auto *button = m_selectionTools->widgetForAction(it.value())) button->setAccessibleName(it.value()->toolTip());
     }
     m_sessions->setSelectionBar(m_selectionBar, !entries.isEmpty() && (m_sessions->bulkSelecting() || entries.size() > 1));
     int archived = 0;
@@ -189,7 +197,7 @@ void SessionsWindow::populateSelectionProjects(QMenu *menu, const QList<Entry> &
 void SessionsWindow::populateSelectionMenu(QMenu *menu, const QList<Entry> &entries)
 {
     menu->addSection(tr("%1 selected sessions").arg(entries.size()));
-    for (const auto action : {SelectionAction::MarkRead, SelectionAction::ReviewLater, SelectionAction::Pause,
+    for (const auto action : {SelectionAction::CompactRows, SelectionAction::ExpandRows, SelectionAction::MarkRead, SelectionAction::ReviewLater, SelectionAction::Pause,
             SelectionAction::Resume, SelectionAction::Archive, SelectionAction::Move, SelectionAction::Forget, SelectionAction::Terminate}) {
         const int count = std::count_if(entries.cbegin(), entries.cend(), [&](const Entry &entry) { return selectionActionApplies(entry, action); });
         if (!count) continue;
@@ -198,7 +206,9 @@ void SessionsWindow::populateSelectionMenu(QMenu *menu, const QList<Entry> &entr
             populateSelectionProjects(projects, entries); continue;
         }
         auto *item = menu->addAction(workspaceIcon(selectionActionIcon(action), QColor(m_muted)), tr("%1 (%2)").arg(selectionActionText(action)).arg(count));
-        item->setObjectName("selection" + selectionActionIcon(action)); item->setEnabled(!m_pending && !m_settingsRequest && m_renameKey.isEmpty());
+        item->setObjectName("selection" + selectionActionIcon(action));
+        const bool presentation = action == SelectionAction::CompactRows || action == SelectionAction::ExpandRows;
+        item->setEnabled(presentation || (!m_pending && !m_settingsRequest && m_renameKey.isEmpty()));
         connect(item, &QAction::triggered, this, [this, action, entries] { runSelectionAction(action, entries); });
     }
     menu->addSeparator(); auto *clear = menu->addAction(tr("Deselect all")); clear->setObjectName("clearSessionSelection");
@@ -222,6 +232,20 @@ void SessionsWindow::clearArchive()
 
 void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entry> &entries, bool clearArchive)
 {
+    if (action == SelectionAction::CompactRows || action == SelectionAction::ExpandRows) {
+        const bool collapsed = action == SelectionAction::CompactRows;
+        QHash<QString, const Entry *> current;
+        for (const auto &entry : m_entries) current.insert(entry.key, &entry);
+        int limited = 0;
+        for (const auto &original : entries) {
+            const auto *entry = current.value(original.key);
+            if (!entry || !sameInstance(entry->session, original.session) || !selectionActionApplies(*entry, action)) continue;
+            if (!m_sessionRowPreferences.setCollapsed(entry->host, entry->session, collapsed)) ++limited;
+        }
+        saveSessionRowPreferences(); updateSessionRowPresentation();
+        if (limited) showNotice(tr("%1 session rows could not be compacted because the compact row limit was reached. Expand other rows first.").arg(limited), true);
+        return;
+    }
     if (m_pending || m_settingsRequest || !m_renameKey.isEmpty()) return;
     QList<Entry> targets;
     for (const auto &entry : entries) if (selectionActionApplies(entry, action)) targets << entry;

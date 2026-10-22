@@ -175,6 +175,10 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             p.drawLine(12, 8, 12, 16);
             p.drawLine(8, 11, 12, 7); p.drawLine(12, 7, 16, 11);
             p.drawLine(8, 13, 12, 17); p.drawLine(12, 17, 16, 13);
+        } else if (name == "compact-row") {
+            p.drawLine(5, 4, 19, 4); p.drawLine(5, 20, 19, 20);
+            p.drawLine(12, 5, 12, 10); p.drawLine(8, 7, 12, 11); p.drawLine(12, 11, 16, 7);
+            p.drawLine(12, 14, 12, 19); p.drawLine(8, 17, 12, 13); p.drawLine(12, 13, 16, 17);
         } else if (name == "search") {
             p.drawEllipse(QPointF(10.5, 10.5), 6, 6); p.drawLine(QPointF(15, 15), QPointF(20, 20));
         } else if (name == "collapse-panel") {
