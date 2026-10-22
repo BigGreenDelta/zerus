@@ -469,7 +469,11 @@ pub(crate) fn launch(
     // attempt so one launch never has two identities.
     record["creation_body"] = body;
     save(&record)?;
-    finish_creation(&service, record, true)
+    finish_creation(&service, record, true)?;
+    if let Ok(config) = crate::config::Config::load() {
+        crate::swarm::infer_new_session(&config, name, &cwd);
+    }
+    Ok(())
 }
 fn creation_body(record: &Value) -> Value {
     let name = string(record, "name");

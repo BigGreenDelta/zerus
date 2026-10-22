@@ -1764,6 +1764,15 @@ to the other project. The computer, path and label are preserved, including for
 offline computers. If the destination already has that folder, its existing link
 is reused. Files and session project assignments stay in place. These catalog
 changes use the normal Swarm synchronization.
+An untouched **Inbox** selection in New session follows an unambiguous project
+whose folder is confirmed on the selected computer. Desktop, Android and iOS
+use exact canonical folder membership or a complete, current worktree catalog;
+folder names and path prefixes do not assign projects. Explicit project choices,
+including explicitly choosing Inbox, win. Multiple matching projects or missing
+verification keep the current selection. A new tracked CLI session also infers
+its initial project from that computer's existing catalog; resume, fork, adoption,
+manual assignments and explicit unassignment are never reassigned. This optional
+metadata step does not initialize a catalog, join a swarm or create a repository.
 The general **New session** action inherits the selected session's project,
 computer and matching project folder. For a linked worktree, a verified catalog
 selects the main checkout instead. Choosing another folder, project or computer
@@ -1795,8 +1804,12 @@ Existing names and unrelated sessions are never repurposed.
 open mode; DeepSeek uses its embedded native interface.
 
 To join a swarm, configure SSH access and open Zerus on the initial machines so
-existing projects import once. Use **Projects → Swarm… → Connect computer**,
-**Preview connection**, review project mapping and **Join and merge projects**.
+existing projects import once. Projects shows **Connect project catalogs…** when
+an accessible computer has no project-sync connection. Session access over SSH
+alone does not connect project catalogs: the guide opens **Connect computer**
+with the missing computer selected. Choose **Preview connection**, review project
+mapping and **Join and merge projects**. Nothing is paired or joined by opening
+the page. The same flow remains under **Projects → Swarm… → Connect computer**.
 Names alone do not merge projects. Existing swarm membership wins by default;
 turn off that preference to compare conflicting assignments. HGS backs up the
 catalog before a merge. **Connect this member** adds a route to an existing member.
@@ -1824,8 +1837,15 @@ requests without members. Local changes normally trigger exchange within three
 seconds; unchanged peers are checked every 30 seconds, backing off to five minutes
 on failure. Zerus reads the local catalog every five seconds without SSH. Offline
 members catch up later. Independent fields merge; conflicts remain in the Swarm
-review UI. Deletion records prevent old replicas from resurrecting data; this
-version does not prune old journal records.
+review UI. A session's missing/Inbox placement is a fallback: a concurrent choice
+of one known live concrete project wins without review, and identical concrete
+choices coalesce. A newer explicit move to Inbox or unassignment still wins by
+causal identity. Different concrete projects and unknown/deleted project targets
+remain reviewable; project mappings are applied before join comparisons. Local
+passive observations never publish membership, including during import. All
+underlying versions are retained, so the next explicit choice consumes every
+observed candidate. Project/folder deletion records still prevent resurrection;
+this version does not prune old journal records.
 
 The worker records its version and process in `~/.config/hgs/swarm/worker.json`
 and exits when an upgrade replaces its executable, so `Restart=always` or launchd

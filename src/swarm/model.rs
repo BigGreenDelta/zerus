@@ -94,6 +94,10 @@ impl Store {
             }
             if let Some(sessions) = p["sessions"].as_array() {
                 for s in sessions {
+                    // The marker is local presentation, even if an importer or
+                    // older UI bypassed the current desktop's payload filter.
+                    if organization["unassigned_sessions"].as_array()
+                        .is_some_and(|unassigned| unassigned.contains(s)) { continue; }
                     let (machine, session) = s
                         .as_str()
                         .and_then(|s| s.split_once('\n'))
@@ -293,7 +297,7 @@ impl Store {
         }
         let conflicts: Vec<_> = self
             .catalog
-            .heads()
+            .effective_heads()
             .into_iter()
             // Concurrent preference and order edits resolve to the newest head
             // and the next choice on any device supersedes them; nothing to review.
@@ -398,6 +402,18 @@ mod tests {
         for private in ["SECRET", "collapsed", "default_project", "ssh_private_key"] {
             assert!(!wire.contains(private));
         }
+    }
+    #[test]
+    fn fallback_markers_never_become_shared_assignments_even_on_import() {
+        let mut a = store();
+        let mut document = org("Initial");
+        document["projects"][0]["sessions"] = json!(["local\ncodex/work/new"]);
+        document["unassigned_sessions"] = json!(["local\ncodex/work/new"]);
+        a.initialize(&document).unwrap();
+        assert!(!a.catalog.values().keys().any(|key| matches!(key, Key::Session { .. })));
+        let before = a.snapshot(&config());
+        a.apply(Patch { base: before["organization"].clone(), desired: document, versions: a.catalog.versions() }).unwrap();
+        assert!(!a.catalog.values().keys().any(|key| matches!(key, Key::Session { .. })));
     }
     #[test]
     fn observing_a_session_does_not_undo_a_remote_project_assignment() {

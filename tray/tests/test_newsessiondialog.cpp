@@ -78,7 +78,7 @@ private slots:
         QSettings().clear();
         for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started","opencode-ids",
             "model-calls","favorite-calls","favorite-fails","models-stopped","old-hgs","favorites","slow-models","slow-favorite","favorite-started",
-            "hold-next-models","models-held"})flag(name,false);
+            "hold-next-models","models-held","project-inference"})flag(name,false);
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -197,7 +197,10 @@ elif a[:2]==['account','favorite']:
  starred=[v for v in starred if v!=model]+([model] if on else [])
  (root/'favorites').write_text(json.dumps(starred))
  print(json.dumps({'status':'applied','request_id':a[a.index('--request-id')+1],'model':model,'favorite':on,'favorites':starred}))
-elif a and a[0]=='dirs':print(json.dumps({'path':a[-1],'directories':[]}))
+elif a and a[0]=='dirs':
+ answer={'path':a[-1],'directories':[]}
+ if (root/'project-inference').exists():answer['project_inference']={'schema':1,'swarm_id':'swarm-fixture','project_id':(root/'project-inference').read_text()}
+ print(json.dumps(answer))
 elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]}))
 )PY"));
     }
@@ -288,6 +291,27 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][1].toString(),QString("codex"));QCOMPARE(launched[0][4].toString(),QString("work"));
         NewSessionDialog next(program(),fleet(),host);QTRY_VERIFY(row(next,"work")>=0);QTRY_COMPARE(choices(next)->count(),5);
         QCOMPARE(choices(next)->currentItem()->data(Qt::UserRole).toString(),QString("work"));
+    }
+    void untouchedInboxUsesNativeFolderInferenceAndExplicitInboxWins() {
+        for(int explicitChoice=0;explicitChoice<3;++explicitChoice){
+            SessionOrganization projects;const auto project=projects.createGroup("Work");
+            QFile hint(m_fixture.filePath("project-inference"));QVERIFY(hint.open(QIODevice::WriteOnly));hint.write(project.toUtf8());hint.close();
+            NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.setGroups(projects,"ungrouped");
+            dialog.setProjectExplicit(explicitChoice==1);dialog.selectPath("/workspace/example",false);dialog.show();
+            auto *choice=dialog.findChild<QComboBox *>("launchProject");QVERIFY(choice);
+            if(explicitChoice==2)QVERIFY(QMetaObject::invokeMethod(choice,"activated",Q_ARG(int,choice->currentIndex())));
+            QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);auto *start=dialog.findChild<QPushButton *>("primary");
+            QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+            QCOMPARE(launched[0][5].toString(),explicitChoice?QString("ungrouped"):project);
+            if(!explicitChoice)QVERIFY(launched[0][7].toString().isEmpty()); // already belongs; no duplicate folder
+        }
+    }
+    void unknownNativeProjectInferenceDoesNotChangeTheChosenProject() {
+        QFile hint(m_fixture.filePath("project-inference"));QVERIFY(hint.open(QIODevice::WriteOnly));hint.write("unknown-project");hint.close();
+        NewSessionDialog dialog(program(),fleet(),{},"codex");SessionOrganization projects;dialog.setGroups(projects,"ungrouped");
+        dialog.selectPath("/workspace/example",false);QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][5].toString(),QString("ungrouped"));
     }
     void rememberedAndExplicitMissingAccounts() {
         QSettings().setValue("workspace/launchAccounts",QByteArray(R"({"":{"codex":"gone"}})"));

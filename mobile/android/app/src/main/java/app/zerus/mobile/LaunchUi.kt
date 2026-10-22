@@ -95,6 +95,7 @@ private val Amber = Color(0xFFFFCB7D)
     var selectedEffort by rememberSaveable(form) { mutableStateOf("") }
     var choosingModel by remember(form) { mutableStateOf(false) }
     var projectId by rememberSaveable(form) { mutableStateOf("") }
+    var projectExplicit by rememberSaveable(form) { mutableStateOf(false) }
     var folder by rememberSaveable(form) { mutableStateOf("") }
     var browsedFolder by rememberSaveable(form) { mutableStateOf("") }
     var tag by rememberSaveable(form) { mutableStateOf(model.launchGeneratedName) }
@@ -160,6 +161,8 @@ private val Amber = Color(0xFFFFCB7D)
     val plannedPath = if(automatic) WorktreePresentation.automaticPath(evidence,branch) else ""
     val plannedAdded = automatic && project != null && evidence != null &&
         WorktreePresentation.anchor(WorktreePresentation.withCreated(evidence,plannedPath),project,plannedPath) == null
+    val inferredProject = LaunchPresentation.inferredProject(catalog,projectId,projectExplicit,folder,model.launchDirectoryState,evidence)
+    LaunchedEffect(inferredProject) { if(inferredProject!=projectId) projectId=inferredProject }
     val folderValid = LaunchPresentation.selectedFolder(model.launchDirectoryState,folder)
     val changed = allowedCatalog.isNotBlank() && signature != allowedCatalog
     val machineActions = model.sessionActions.filter { it.target.connectionId == machine.connectionId && it.target.computerId == machine.computerId }
@@ -345,7 +348,7 @@ private val Amber = Color(0xFFFFCB7D)
             Modifier.fillMaxWidth().heightIn(max=560.dp).padding(16.dp),nativeDefault="Native default model")
     }
     if(choosingProject) ProjectPickerDialog(projects,projectId,{ chosen ->
-        choosingProject = false
+        choosingProject = false;projectExplicit = true
         if(chosen != projectId) { projectId = chosen;folder = browsedFolder;edited = true }
     }) { choosingProject = false }
     if(choosingWorktree) WorktreeChooserDialog(WorktreePresentation.entries(evidence),folder,{ path ->

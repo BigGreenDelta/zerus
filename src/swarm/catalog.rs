@@ -366,8 +366,33 @@ impl Catalog {
         });
         deleted.copied().or_else(|| heads.last().copied())
     }
+    /// Presentation resolves only safe concurrent session fallbacks. Keep every
+    /// raw head in versions()/set(): an explicit later choice must consume all
+    /// of them, including an Inbox or unassignment from an older desktop.
+    pub fn effective_heads(&self) -> BTreeMap<Key, Vec<&Operation>> {
+        let mut heads = self.heads();
+        let live: BTreeSet<_> = heads.iter().filter_map(|(key, versions)| {
+            let Key::Project { id, field } = key else { return None; };
+            (field == "alive" && Self::selected(key, versions).is_some_and(|op| op.value == true))
+                .then_some(id.clone())
+        }).collect();
+        for (key, versions) in &mut heads {
+            if !matches!(key, Key::Session { .. }) { continue; }
+            let concrete: BTreeSet<_> = versions.iter().filter_map(|op| op.value.as_str())
+                .filter(|id| *id != "ungrouped").map(str::to_owned).collect();
+            // Unknown/deleted projects and two different real projects need a
+            // review. Never make their apparent clock order an assignment rule.
+            if concrete.len() > 1 || concrete.iter().any(|id| !live.contains(id)) { continue; }
+            let preferred = concrete.first().cloned().or_else(||
+                versions.iter().any(|op| op.value == "ungrouped").then_some("ungrouped".into()));
+            if let Some(project) = preferred {
+                versions.retain(|op| op.value == project);
+            }
+        }
+        heads
+    }
     pub fn values(&self) -> BTreeMap<Key, Value> {
-        self.heads()
+        self.effective_heads()
             .into_iter()
             .filter_map(|(k, h)| Self::selected(&k, &h).map(|o| (k, o.value.clone())))
             .collect()
@@ -490,6 +515,63 @@ mod tests {
         assert_eq!(second.heads()[&name].len(), 1);
         assert_eq!(second.values()[&name], "Resolved");
         assert_eq!(first.digest(), second.digest());
+    }
+    #[test]
+    fn concurrent_session_fallbacks_converge_but_later_explicit_moves_win() {
+        let actor = new_id();
+        let key = Key::Session { machine: actor.clone(), session: "codex/work/one".into() };
+        for fallback in [Value::Null, json!("ungrouped")] {
+            for concrete_first in [false, true] {
+                let mut a = Catalog::default();
+                a.set(&actor, Key::project("work", "alive"), json!(true)).unwrap();
+                a.set(&actor, Key::project("other", "alive"), json!(true)).unwrap();
+                let mut b = a.clone();
+                a.set(&actor, key.clone(), if concrete_first { json!("work") } else { fallback.clone() }).unwrap();
+                b.set(&new_id(), key.clone(), if concrete_first { fallback.clone() } else { json!("work") }).unwrap();
+                merge(&mut a, &b); merge(&mut b, &a);
+                assert_eq!(a.heads()[&key].len(), 2); // custody/causal versions retained
+                assert_eq!(a.effective_heads()[&key].len(), 1);
+                assert_eq!(a.values()[&key], "work");
+                assert_eq!(a.values(), b.values());
+                let digest = a.digest(); merge(&mut a, &b); assert_eq!(a.digest(), digest);
+                // A deliberate newer Inbox/unassignment consumes both heads.
+                a.set(&actor, key.clone(), fallback.clone()).unwrap();
+                merge(&mut b, &a); assert_eq!(b.values()[&key], fallback);
+                assert_eq!(b.heads()[&key].len(), 1);
+                b.set(&actor, key.clone(), json!("other")).unwrap();
+                merge(&mut a, &b); assert_eq!(a.values()[&key], "other");
+            }
+        }
+    }
+    #[test]
+    fn unknown_deleted_and_distinct_projects_remain_reviewable() {
+        let actor = new_id();
+        let key = Key::Session { machine: actor.clone(), session: "codex/work/one".into() };
+        for (left, right, live) in [
+            ("work", "other", vec!["work", "other"]),
+            ("unknown", "ungrouped", vec!["work"]),
+            ("deleted", "ungrouped", vec![]),
+        ] {
+            let mut a = Catalog::default();
+            for id in live { a.set(&actor, Key::project(id, "alive"), json!(true)).unwrap(); }
+            let mut b = a.clone();
+            a.set(&actor, key.clone(), json!(left)).unwrap();
+            b.set(&new_id(), key.clone(), json!(right)).unwrap();
+            merge(&mut a, &b);
+            assert_eq!(a.effective_heads()[&key].len(), 2, "{left}/{right}");
+        }
+    }
+    #[test]
+    fn machine_redirects_normalize_concurrent_session_fallbacks() {
+        let (actor, alias) = (new_id(), new_id());
+        let mut a = Catalog::default();
+        a.set(&actor, Key::project("work", "alive"), json!(true)).unwrap();
+        a.set(&actor, Key::Session { machine: alias.clone(), session: "one".into() }, json!("ungrouped")).unwrap();
+        a.set(&actor, Key::Session { machine: actor.clone(), session: "one".into() }, json!("work")).unwrap();
+        a.set(&actor, Key::machine(&alias, "redirect"), json!(actor)).unwrap();
+        let key = Key::Session { machine: actor, session: "one".into() };
+        assert_eq!(a.heads()[&key].len(), 2);
+        assert_eq!(a.values()[&key], "work");
     }
     #[test]
     fn offline_edits_and_repeated_exchange_never_resurrect_deleted_projects() {

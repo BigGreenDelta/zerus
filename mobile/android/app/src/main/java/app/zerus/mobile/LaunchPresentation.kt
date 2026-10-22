@@ -205,6 +205,24 @@ object LaunchPresentation {
                 }.distinctBy { it.id })
         }.distinctBy { it.id }
     }
+    /** Only an untouched Inbox may follow the current computer's verified folder.
+     * No ancestry/name guesses; ambiguous or incomplete evidence stays Inbox. */
+    fun inferredProject(raw:JSONObject?, selected:String, explicit:Boolean, directory:String,
+                        browser:JSONObject?, worktrees:JSONObject?):String {
+        if(explicit || selected!="ungrouped" || raw?.optJSONArray("projects")==null || raw.optJSONArray("projects")!!.length()>500) return selected
+        if(browser?.string("path")!=directory && browser?.string("requested_path")!=directory) return selected
+        val canonical=browser?.string("path").orEmpty()
+        if(!absoluteFolder(canonical)) return selected
+        val offered=projects(raw)
+        if(offered.none { it.id==selected }) return selected
+        val candidates=offered.filter { it.id!="ungrouped" }
+        if(candidates.sumOf { it.folders.size }>512) return selected
+        val related=WorktreePresentation.forFolder(worktrees,directory)?.takeIf {
+            it.opt("partial")==false && WorktreePresentation.healthy(it) && it.optJSONArray("worktrees")?.length()?.let { count -> count<=512 }==true }
+        return candidates.filter { project -> project.folders.any { it.path==canonical } ||
+            related!=null && WorktreePresentation.anchor(related,project,canonical)!=null }
+            .singleOrNull()?.id ?: selected
+    }
     fun projectArguments(raw:JSONObject,projectId:String,directory:String,worktrees:JSONObject?=null):JSONObject {
         val project=projects(raw).singleOrNull { it.id == projectId } ?: error("Choose a current native project.")
         val folder=project.folders.singleOrNull { it.path == directory }

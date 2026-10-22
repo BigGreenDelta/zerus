@@ -47,6 +47,7 @@ struct LaunchForm: View {
     @State private var selectedModel = ""
     @State private var selectedEffort = ""
     @State private var projectId = ""
+    @State private var projectExplicit = false
     @State private var folder = ""
     @State private var browsedFolder = ""
     @State private var tag = ""
@@ -89,6 +90,8 @@ struct LaunchForm: View {
         let plannedPath = automatic ? WorktreePresentation.automaticPath(evidence, branch: branch) : ""
         let plannedAdded = automatic && project != nil && evidence != nil &&
             WorktreePresentation.anchor(WorktreePresentation.withCreated(evidence!, path: plannedPath), project!, plannedPath) == nil
+        let inferredProject = LaunchPresentation.inferredProject(catalog, selected: projectId, explicit: projectExplicit, directory: folder,
+                                                                 browser: launch.directory, worktrees: evidence)
         let folderValid = LaunchPresentation.selectedFolder(launch.directory, folder)
         let changed = !allowedCatalog.isEmpty && signature != allowedCatalog
         let actions = app.conversation.sessionActions.filter { $0.target.machineKey == machine }
@@ -369,6 +372,7 @@ struct LaunchForm: View {
             projectId = projects.first { $0.id == preferred }?.id ?? projects.first?.id ?? ""
             folder = browsedFolder
         }
+        .onChange(of: inferredProject) { if inferredProject != projectId { projectId = inferredProject } }
         .onChange(of: FolderKey(project: projectId, loading: launch.directoryLoading)) {
             if folder.isEmpty && !launch.directoryLoading, let first = project?.folders.first {
                 folder = first.path
@@ -390,6 +394,7 @@ struct LaunchForm: View {
         .sheet(isPresented: $choosingProject) {
             ProjectPicker(projects: projects, selected: projectId) { chosen in
                 choosingProject = false
+                projectExplicit = true
                 if chosen != projectId {
                     projectId = chosen
                     folder = browsedFolder

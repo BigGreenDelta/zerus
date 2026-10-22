@@ -373,12 +373,6 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
             {
                 continue;
             }
-            if request.prefer_peer_memberships
-                && matches!(key, Key::Session { .. })
-                && existing.get(&key).is_some_and(|v| !v.is_null())
-            {
-                continue;
-            }
             match &mut key {
                 Key::Project { id, .. } => {
                     if let Some(target) = request.project_map.get(id) {
@@ -415,6 +409,17 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
                         .collect();
                 }
                 _ => {}
+            }
+            // Compare only after mapping the joining catalog's project IDs.
+            // Keeping peer placement never promotes its Inbox above a concrete
+            // local project. Distinct concrete choices retain the explicit
+            // preview's keep-peer policy; without it they remain causal heads.
+            if request.prefer_peer_memberships && matches!(key, Key::Session { .. })
+                && existing.get(&key).is_some_and(|peer| peer.as_str()
+                    .is_some_and(|id| (id != "ungrouped" || value == "ungrouped")
+                        && existing.get(&Key::project(id, "alive")) == Some(&json!(true))))
+            {
+                continue;
             }
             if existing.get(&key) != Some(&value) {
                 existing.insert(key.clone(), value.clone());

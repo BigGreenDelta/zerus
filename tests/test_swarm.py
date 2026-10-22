@@ -139,7 +139,7 @@ class Swarm(unittest.TestCase):
         self.join('a', 'b')
         self.assertEqual(len(self.call('a', 'get')['organization']['projects']), 2)
 
-    def test_observation_cannot_race_launch_but_explicit_inbox_choices_can_conflict(self):
+    def test_observation_and_concurrent_inbox_cannot_undo_concrete_projects(self):
         before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
         desired['projects'].append(dict(id='ungrouped', name='Inbox', color='#123456', folders=[], sessions=[]))
         self.patch('a', before, desired)
@@ -180,16 +180,16 @@ class Swarm(unittest.TestCase):
                 self.assertEqual(snapshot['conflicts'], [])
                 self.assertIn(session, next(p for p in snapshot['organization']['projects'] if p['id'] == 'b')['sessions'])
 
-        # A deliberate first choice is different: even when another assignment
-        # reached the local CLI before the GUI saw it, keep both real choices.
+        # A concurrent Inbox choice loses to one known concrete project. The
+        # observed versions still include it, so a later explicit Inbox move wins.
         a, b = sync(); session = 'a\ncodex/example/explicit-choice'
         self.patch('b', b, assignment(b, session, 'b'))
         sync()
         self.patch('a', a, assignment(a, session, 'ungrouped'))
         a, b = sync()
-        conflict = next(c for c in a['conflicts'] if c['field'].get('session') == session.split('\n', 1)[1])
-        self.assertEqual({v['value'] for v in conflict['variants']}, {'b', 'ungrouped'})
-        self.call('a', 'resolve', data=dict(key=conflict['key'], versions=[v['id'] for v in conflict['variants']], value='ungrouped'))
+        self.assertEqual(a['conflicts'], [])
+        self.assertIn(session, next(p for p in a['organization']['projects'] if p['id'] == 'b')['sessions'])
+        self.patch('a', a, assignment(a, session, 'ungrouped'))
         for snapshot in sync():
             self.assertEqual(snapshot['conflicts'], [])
             self.assertIn(session, next(p for p in snapshot['organization']['projects'] if p['id'] == 'ungrouped')['sessions'])
@@ -407,6 +407,34 @@ class Swarm(unittest.TestCase):
         self.assertEqual(result['conflicts'], [])
         owner = next(p['id'] for p in result['organization']['projects'] if 'b\ncodex/shared/session' in p['sessions'])
         self.assertEqual(owner, 'b')
+
+    def test_join_maps_membership_before_comparing_and_concrete_beats_peer_inbox(self):
+        session = 'b\ncodex/shared/mapped'
+        for node in ['a', 'b']:
+            before = self.call(node, 'get'); desired = copy.deepcopy(before['organization'])
+            desired['projects'][0]['sessions'] = [session]
+            self.patch(node, before, desired)
+        self.join('a', 'b', mapping={'a': 'b'}, prefer_peer=False)
+        result = self.call('a', 'get')
+        self.assertEqual(result['conflicts'], [])
+        self.assertIn(session, next(p for p in result['organization']['projects'] if p['id'] == 'b')['sessions'])
+        exported = self.call('a', 'export')['catalog']['operations'].values()
+        heads = [o for o in exported if o['key'].get('session') == session.split('\n', 1)[1]]
+        self.assertTrue(all(o['value'] == 'b' for o in heads))
+
+    def test_concrete_local_project_beats_peer_inbox_even_when_keeping_peer_placement(self):
+        session = 'b\ncodex/shared/concrete'
+        for node in ['a', 'b']:
+            before = self.call(node, 'get'); desired = copy.deepcopy(before['organization'])
+            if node == 'b':
+                desired['projects'].append(dict(id='ungrouped',name='Inbox',color='#123456',folders=[],sessions=[session]))
+            else:
+                desired['projects'][0]['sessions'] = [session]
+            self.patch(node, before, desired)
+        self.join('a', 'b', prefer_peer=True)
+        result = self.call('a', 'get')
+        self.assertEqual(result['conflicts'], [])
+        self.assertIn(session, next(p for p in result['organization']['projects'] if p['id'] == 'a')['sessions'])
 
     def test_concurrent_delivery_choices_converge_without_conflict_review(self):
         self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')

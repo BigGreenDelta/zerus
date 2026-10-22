@@ -1436,6 +1436,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_organization=updated;saveOrganization();m_projectsPage->refresh();rebuild();
     });
     connect(m_swarm,&SwarmController::statusChanged,m_projectsPage,&ProjectsDialog::setSwarmStatus);
+    connect(m_swarm,&SwarmController::snapshotChanged,m_projectsPage,&ProjectsDialog::setSwarmSnapshot);
+    connect(m_projectsPage,&ProjectsDialog::connectSwarmRequested,this,[this,projectClient](const QString &computer){
+        showSwarmDialog(projectClient,m_swarm,m_fleet,this,[this]{m_pages->setCurrentIndex(2);},true,computer);
+    });
     connect(m_projectsPage,&ProjectsDialog::swarmRequested,this,[this,projectClient]{
         showSwarmDialog(projectClient,m_swarm,m_fleet,this,[this]{m_pages->setCurrentIndex(2);});
     });
@@ -2557,6 +2561,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     const bool sessionRow=!row||(!row->data(SessionRoles::Header).toBool()&&row->data(SessionRoles::LaunchId).toString().isEmpty());
     const auto *context=sessionRow&&project.isEmpty()&&folder.isEmpty()&&path.isEmpty()&&account.isNull()?selected():nullptr;
     NewSessionDialog dialog(m_client.executable(), m_fleet, context?context->host:host, agent, launchProject, this, m_usageStore);
+    dialog.setProjectExplicit(!project.isEmpty());
     dialog.setGroups(m_organization, launchProject);
     if(context)dialog.prefillSessionFolder(selectedDirectory(),m_details.value("cwd_canonical").toString(context->session.canonicalCwd));
     if(!folder.isEmpty()&&!dialog.selectFolder(folder)){showNotice(tr("This project folder changed. Select it again."),true);return;}

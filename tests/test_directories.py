@@ -22,9 +22,9 @@ class Directories(unittest.TestCase):
                         XDG_STATE_HOME=str(self.root / "state"),
                         XDG_DATA_HOME=str(self.root / "data"))
 
-    def hgs(self, *args, rc=0):
+    def hgs(self, *args, rc=0, input_=None):
         result = subprocess.run([str(HGS), *args], env=self.env, cwd=self.root,
-                                capture_output=True, text=True, timeout=15)
+                                input=input_, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, rc, result.stdout + result.stderr)
         return result
 
@@ -33,6 +33,34 @@ class Directories(unittest.TestCase):
         self.hgs("dirs", str(target), rc=1)
         self.assertFalse(target.exists())
         self.assertEqual(json.loads(self.hgs("dirs").stdout)["path"], str(self.root.resolve()))
+
+    def test_project_hint_reads_existing_exact_catalog_without_git_or_membership_write(self):
+        self.env['HGS_CONFIG_DIR'] = str(self.root / 'catalog')
+        identity = json.loads(self.hgs('swarm', 'hello').stdout)
+        project = dict(id='work',name='Work',color='#123456',sessions=[],folders=[dict(
+            id='folder',machine=identity['node_id'],path=str(self.root.resolve()),name='')])
+        self.hgs('swarm','initialize',input_=json.dumps(dict(projects=[project])))
+        catalog = self.root / 'catalog/swarm/catalog.json'
+        before = catalog.read_bytes()
+        tools = self.root / 'bin'; tools.mkdir()
+        git = tools / 'git'
+        git.write_text('#!/bin/sh\nprintf called > "'+str(self.root / 'git-called')+'"\nexit 1\n')
+        git.chmod(0o700); self.env['PATH'] = str(tools) + os.pathsep + self.env.get('PATH','')
+        observed = json.loads(self.hgs('dirs',str(self.root)).stdout)
+        self.assertEqual(observed['project_inference'],dict(schema=1,swarm_id=identity['swarm_id'],project_id='work'))
+        self.assertFalse((self.root / 'git-called').exists())
+        self.assertEqual(catalog.read_bytes(),before)
+        nested = self.root / 'nested'; nested.mkdir()
+        self.assertNotIn('project_inference',json.loads(self.hgs('dirs',str(nested)).stdout))
+        self.assertEqual(catalog.read_bytes(),before)
+        self.assertFalse((self.root / '.git').exists())
+
+    def test_browsing_never_initializes_a_missing_project_catalog(self):
+        catalog = self.root / 'missing-catalog'
+        self.env['HGS_CONFIG_DIR'] = str(catalog)
+        result = json.loads(self.hgs('dirs',str(self.root)).stdout)
+        self.assertNotIn('project_inference',result)
+        self.assertFalse(catalog.exists())
 
     def test_create_literal_path_then_browse_and_select(self):
         target = self.root / "new ' проект $(touch injected) `touch injected2`"

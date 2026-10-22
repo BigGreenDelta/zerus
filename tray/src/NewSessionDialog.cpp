@@ -214,6 +214,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     connect(buttons,&QDialogButtonBox::rejected,this,&QDialog::reject);connect(m_start,&QPushButton::clicked,this,&NewSessionDialog::start);
     connect(m_manage,&QToolButton::clicked,this,[this]{const auto id=m_project->currentData().toString();reject();emit projectFoldersRequested(id);});
     connect(m_openMachines,&QPushButton::clicked,this,[this]{if(m_creation)return;reject();emit machinesRequested();});
+    connect(m_project,&QComboBox::activated,this,[this]{m_projectExplicit=true;});
     connect(m_project,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;loadMachines();loadFolders();});
     connect(m_machine,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;m_accountPreset=false;loadFolders();});
     connect(m_browse,&QPushButton::clicked,this,&NewSessionDialog::browseFolder);
@@ -259,9 +260,18 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         if(m_startWithWorktree&&!automaticWorktreeAvailable()){
             m_error->setText(tr("The repository could not be confirmed. Choose a working folder again."));updateForm();return;
         }
-        // Listed folders and worktrees of them already belong to the project.
+        // Only an untouched Inbox is a fallback. The owning computer confirmed
+        // this exact directory; a selected project (including Inbox) always wins.
+        const auto inferred=data.value("project_inference").toObject();
+        const auto inferredId=inferred.value("project_id").toString();
+        const int inferredIndex=m_project->findData(inferredId);
+        const bool infer=!m_projectExplicit&&m_project->currentData()=="ungrouped"
+            &&inferred.value("schema").toInt()==1&&!inferred.value("swarm_id").toString().isEmpty()
+            &&inferredId!="ungrouped"&&inferredIndex>=0;
+        if(infer){const QSignalBlocker block(m_project);m_project->setCurrentIndex(inferredIndex);}
+        // Listed folders and verified worktrees already belong to the project.
         // Decide before creation: the selection then moves to the new worktree.
-        const auto addFolder=m_folder->currentData().toString().isEmpty()&&!projectWorktree(m_folder->currentData(Qt::UserRole+2).toString())?path:QString();
+        const auto addFolder=!infer&&m_folder->currentData().toString().isEmpty()&&!projectWorktree(m_folder->currentData(Qt::UserRole+2).toString())?path:QString();
         if(m_startWithWorktree){
             m_creationCatalog=m_worktreeCatalog;m_creationFolder=addFolder;m_error->setText(tr("Creating worktree…"));
             m_creation=m_client.createWorktree(host(),path,m_creationCatalog["common_dir"].toString(),m_generatedBranch,"HEAD",automaticWorktreePath());updateForm();

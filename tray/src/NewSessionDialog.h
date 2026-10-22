@@ -29,6 +29,7 @@ public:
     void selectPath(const QString &path, bool automaticWorktree = true);
     void prefillSessionFolder(const QString &path, const QString &canonicalPath = {});
     void selectAccount(const QString &account);
+    void setProjectExplicit(bool explicitChoice) { m_projectExplicit = explicitChoice; }
     void reject() override;
 signals:
     // addFolder: the confirmed folder outside the project that joins it once the
@@ -88,6 +89,7 @@ private:
     QString m_preferredAgent;
     QStringList m_agents;
     bool m_accountPreset=false;
+    bool m_projectExplicit=false;
     bool m_accountCatalogLoaded=false;
     // Rows group the catalog when it arrives; later limits never regroup them.
     bool m_regroupAccounts=true,m_forceUsage=false;

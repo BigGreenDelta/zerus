@@ -36,7 +36,7 @@ protected:
 };
 }
 
-void showSwarmDialog(HgsClient *client,SwarmController *controller,const FleetState &fleet,QWidget *parent,const std::function<void()> &manageConnections)
+void showSwarmDialog(HgsClient *client,SwarmController *controller,const FleetState &fleet,QWidget *parent,const std::function<void()> &manageConnections, bool connectComputer, const QString &computer)
 {
     CatalogDialog dialog(parent);
     dialog.setWindowTitle(QObject::tr("Project swarm"));dialog.setObjectName("swarmDialog");dialog.resize(780,680);
@@ -82,6 +82,10 @@ void showSwarmDialog(HgsClient *client,SwarmController *controller,const FleetSt
     auto placementPolicy=keepPlacement->sizePolicy();placementPolicy.setRetainSizeWhenHidden(true);keepPlacement->setSizePolicy(placementPolicy);keepPlacement->hide();connectLayout->addWidget(keepPlacement);
     auto *join=new QPushButton(QObject::tr("Connect this member"));join->setObjectName("swarmJoin");connectLayout->addWidget(join,0,Qt::AlignRight);
     tabs->addTab(connectPage,QObject::tr("Connect computer"));
+    if (connectComputer) {
+        tabs->setCurrentWidget(connectPage);
+        const int index = peer->findText(computer); if(index>=0) peer->setCurrentIndex(index);
+    }
 
     auto *conflictStack=new QStackedWidget;conflictStack->setObjectName("swarmConflictReview");
     auto *noConflicts=message(QObject::tr("No conflicting changes.\nChanges from connected computers are merged automatically."));conflictStack->addWidget(noConflicts);

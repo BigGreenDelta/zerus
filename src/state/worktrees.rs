@@ -129,6 +129,15 @@ fn load(path: &Path) -> Option<Value> {
         .filter(|m| m.len() <= 2 * MAX_OUTPUT as u64)?;
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
+/// Existing recent exact-path evidence only. Directory browsing never runs Git
+/// merely to suggest a project; absent/stale snapshots do not relate worktrees.
+pub(super) fn cached_catalog(path: &Path) -> Option<Value> {
+    let path = crate::platform::canonical(path).ok()?;
+    let value = load(&cache_file("path", &path.to_string_lossy()))?;
+    let age = now() - value["sampled_at"].as_f64()?;
+    (value["path"].as_str() == path.to_str() && value["state"] == "ok"
+        && value["stale"] == false && value["partial"] == false && (0.0..TTL).contains(&age)).then_some(value)
+}
 pub(super) fn canonical(path: &str) -> PathBuf {
     crate::platform::canonical(path).unwrap_or_else(|_| PathBuf::from(path))
 }
@@ -238,6 +247,9 @@ pub(super) fn list(
 }
 
 pub(super) fn catalog(path: &Path, refresh: bool) -> Value {
+    catalog_until(path, refresh, Instant::now() + Duration::from_secs(3))
+}
+pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Value {
     let requested = path.to_string_lossy();
     let path_cache = cache_file("path", &requested);
     let previous = load(&path_cache);
@@ -247,7 +259,6 @@ pub(super) fn catalog(path: &Path, refresh: bool) -> Value {
             return json!({"path":requested,"state":"folder_unavailable","detail":"Folder is missing or inaccessible","worktrees":[],"sampled_at":now()})
         }
     };
-    let deadline = Instant::now() + Duration::from_secs(3);
     let result = (|| {
         let common = git(
             &path,
