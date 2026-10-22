@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
@@ -24,7 +25,8 @@ QString CloneRepositoryDialog::suggestedName(const QString &url)
 }
 QString CloneRepositoryDialog::settingsKey() const
 {
-    return "workspace/repositoryClone/"+QString::fromUtf8((m_host.isEmpty()?QStringLiteral("local"):m_host).toUtf8().toHex());
+    const QJsonArray source{m_client->executable(),m_host};
+    return "workspace/repositoryClone/"+QString::fromLatin1(QJsonDocument(source).toJson(QJsonDocument::Compact).toHex());
 }
 QString CloneRepositoryDialog::destination() const
 {

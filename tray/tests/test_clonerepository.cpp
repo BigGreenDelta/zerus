@@ -29,13 +29,29 @@ class TestCloneRepository : public QObject {
         dialog.findChild<QLineEdit *>("cloneParentFolder")->setText("/alias");
     }
     SessionOrganization projects() const {SessionOrganization p;p.createGroup("Example");return p;}
+    static void sourceContexts(){
+        QTest::addColumn<QString>("firstHost");QTest::addColumn<QString>("secondHost");QTest::addColumn<bool>("differentCli");
+        QTest::newRow("local-then-peer-local")<<QString()<<QString("local")<<false;
+        QTest::newRow("peer-local-then-local")<<QString("local")<<QString()<<false;
+        QTest::newRow("local-distinct-cli")<<QString()<<QString()<<true;
+        QTest::newRow("peer-distinct-cli")<<QString("mac")<<QString("mac")<<true;
+    }
+    QString anotherProgram(bool different) const {
+        if(!different)return program();
+        QFile source(m_fixture.filePath("hgs"));if(!source.open(QIODevice::ReadOnly))return {};
+        const auto script=m_fixture.filePath("hgs-alternate");
+        return FakeCli::install(script,source.readAll())?FakeCli::program(script):QString();
+    }
+    void canonicalParent(const QByteArray &path){
+        QFile file(m_fixture.filePath("canonical-parent"));QVERIFY(file.open(QIODevice::WriteOnly));QCOMPARE(file.write(path),qint64(path.size()));
+    }
 private slots:
     void initTestCase(){
         QVERIFY(m_settings.isValid());QCoreApplication::setOrganizationName("hgs-tests");QCoreApplication::setApplicationName("repository-clone");
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_settings.path());
     }
     void init(){
-        QSettings().clear();for(const auto &n:{"calls","old","fail-check","uncertain","wrong","hold-check","release","check-started","wrong-check"})QFile::remove(m_fixture.filePath(n));
+        QSettings().clear();for(const auto &n:{"calls","old","fail-check","uncertain","wrong","hold-check","release","check-started","wrong-check","canonical-parent"})QFile::remove(m_fixture.filePath(n));
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -52,7 +68,8 @@ if a[:2]==['repository','check']:
    if (root/'release').exists():break
    time.sleep(.02)
  if (root/'fail-check').exists():sys.stderr.write('Access unavailable');sys.exit(1)
- print(json.dumps({'status':'ready','name':get('--name'),'parent':'/canonical','path':'/different' if (root/'wrong-check').exists() else '/canonical/'+get('--name')}))
+ parent=(root/'canonical-parent').read_text() if (root/'canonical-parent').exists() else '/canonical'
+ print(json.dumps({'status':'ready','name':get('--name'),'parent':parent,'path':'/different' if (root/'wrong-check').exists() else parent+'/'+get('--name')}))
 elif a[:2]==['repository','clone']:
  receipt={'status':'cloned','request_id':get('--request-id'),'name':get('--name'),'parent':get('--parent'),'path':get('--parent')+'/'+get('--name')}
  (root/'receipt').write_text(json.dumps(receipt))
@@ -103,6 +120,61 @@ elif a[:2]==['repository','status']:print((root/'receipt').read_text())
         restored.findChild<QPushButton *>("cloneCheckResult")->click();
         QTRY_VERIFY(restored.findChild<QPushButton *>("cloneRepositoryConfirm")->isEnabled());QCOMPARE(accepted.size(),0);QCOMPARE(mutations(),1);
         QCOMPARE(restored.createdPath(),"/canonical/example");restored.findChild<QPushButton *>("cloneRepositoryConfirm")->click();QCOMPARE(accepted.size(),1);QCOMPARE(mutations(),1);
+    }
+    void rememberedParentsAreScopedToExecutableAndHost_data(){sourceContexts();}
+    void rememberedParentsAreScopedToExecutableAndHost(){
+        QFETCH(QString,firstHost);QFETCH(QString,secondHost);QFETCH(bool,differentCli);
+        const auto secondProgram=anotherProgram(differentCli);QVERIFY(!secondProgram.isEmpty());
+        HgsClient firstClient(program()),secondClient(secondProgram);auto p=projects();
+        QSettings().setValue("workspace/unrelated-clone-test","kept");
+        {
+            CloneRepositoryDialog first(&firstClient,firstHost,"First",MachinePlatform::Style::Posix,p,{},false);fill(first);
+            QSignalSpy accepted(&first,&QDialog::accepted);first.findChild<QPushButton *>("cloneRepositoryConfirm")->click();QTRY_COMPARE(accepted.size(),1);
+        }
+        {
+            CloneRepositoryDialog second(&secondClient,secondHost,"Second",MachinePlatform::Style::Posix,p,{},false);
+            QCOMPARE(second.findChild<QLineEdit *>("cloneParentFolder")->text(),QString("~"));
+            canonicalParent("/second-canonical");fill(second);
+            QSignalSpy accepted(&second,&QDialog::accepted);second.findChild<QPushButton *>("cloneRepositoryConfirm")->click();QTRY_COMPARE(accepted.size(),1);
+        }
+        const auto before=mutations();
+        CloneRepositoryDialog firstAgain(&firstClient,firstHost,"First",MachinePlatform::Style::Posix,p,{},false);
+        CloneRepositoryDialog secondAgain(&secondClient,secondHost,"Second",MachinePlatform::Style::Posix,p,{},false);
+        QCOMPARE(firstAgain.findChild<QLineEdit *>("cloneParentFolder")->text(),QString("/canonical"));
+        QCOMPARE(secondAgain.findChild<QLineEdit *>("cloneParentFolder")->text(),QString("/second-canonical"));
+        QCOMPARE(mutations(),before);QCOMPARE(QSettings().value("workspace/unrelated-clone-test").toString(),QString("kept"));
+    }
+    void pendingRecoveryIsScopedToExecutableAndHost_data(){sourceContexts();}
+    void pendingRecoveryIsScopedToExecutableAndHost(){
+        QFETCH(QString,firstHost);QFETCH(QString,secondHost);QFETCH(bool,differentCli);
+        const auto secondProgram=anotherProgram(differentCli);QVERIFY(!secondProgram.isEmpty());
+        HgsClient firstClient(program()),secondClient(secondProgram);auto p=projects();flag("uncertain");
+        {
+            CloneRepositoryDialog first(&firstClient,firstHost,"First",MachinePlatform::Style::Posix,p,{},true);fill(first);
+            first.findChild<QPushButton *>("cloneRepositoryConfirm")->click();
+            QTRY_VERIFY(first.findChild<QLabel *>("cloneRepositoryStatus")->text().contains("still running"));
+        }
+        {
+            CloneRepositoryDialog second(&secondClient,secondHost,"Second",MachinePlatform::Style::Posix,p,{},true);
+            QVERIFY(second.findChild<QLineEdit *>("cloneFolderName")->text().isEmpty());
+            QVERIFY(second.findChild<QLineEdit *>("cloneRepositoryUrl")->isEnabled());
+            QVERIFY(second.findChild<QLabel *>("cloneRepositoryStatus")->text().isEmpty());
+            canonicalParent("/second-canonical");fill(second);second.findChild<QLineEdit *>("cloneFolderName")->setText("second");
+            second.findChild<QPushButton *>("cloneRepositoryConfirm")->click();
+            QTRY_VERIFY(second.findChild<QLabel *>("cloneRepositoryStatus")->text().contains("still running"));
+        }
+        const auto before=mutations();
+        CloneRepositoryDialog firstAgain(&firstClient,firstHost,"First",MachinePlatform::Style::Posix,p,{},true);
+        CloneRepositoryDialog secondAgain(&secondClient,secondHost,"Second",MachinePlatform::Style::Posix,p,{},true);
+        QCOMPARE(firstAgain.findChild<QLineEdit *>("cloneParentFolder")->text(),QString("/canonical"));
+        QCOMPARE(firstAgain.findChild<QLineEdit *>("cloneFolderName")->text(),QString("example"));
+        QCOMPARE(secondAgain.findChild<QLineEdit *>("cloneParentFolder")->text(),QString("/second-canonical"));
+        QCOMPARE(secondAgain.findChild<QLineEdit *>("cloneFolderName")->text(),QString("second"));
+        for(auto *form:{&firstAgain,&secondAgain}){
+            QVERIFY(!form->findChild<QLineEdit *>("cloneRepositoryUrl")->isEnabled());
+            QVERIFY(form->findChild<QLabel *>("cloneRepositoryStatus")->text().contains("previous clone is unconfirmed"));
+        }
+        QCOMPARE(mutations(),before);
     }
     void inconsistentPreflightCannotClone(){
         auto p=projects();HgsClient client(program());flag("wrong-check");CloneRepositoryDialog d(&client,"mac","Mac",MachinePlatform::Style::Posix,p,{},true);fill(d);
