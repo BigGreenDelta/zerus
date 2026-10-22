@@ -216,6 +216,43 @@ final class LaunchProjectTests: XCTestCase {
                       ["id": "hidden", "name": "Unavailable", "accessible": false]]]
     }
 
+    private func inferenceCatalog() -> JSONObject {
+        var raw = catalog(); var projects = raw.objects("projects")
+        projects.append(["id": "ungrouped", "name": "Inbox", "folders": []]); raw["projects"] = .array(projects.map(JSON.object))
+        return raw
+    }
+    private func infer(_ raw: JSONObject, directory: String = "/example/source", explicit: Bool = false,
+                       worktrees: JSONObject? = nil, browser: JSONObject? = nil) -> String {
+        LaunchPresentation.inferredProject(raw, selected: "ungrouped", explicit: explicit, directory: directory,
+                                           browser: browser ?? ["path": .string(directory)], worktrees: worktrees)
+    }
+    func testUntouchedInboxFollowsOnlyExactVerifiedFolderAndExplicitChoiceWins() {
+        let raw = inferenceCatalog()
+        XCTAssertEqual("project-one", infer(raw)); XCTAssertEqual("ungrouped", infer(raw, explicit: true))
+        XCTAssertEqual("ungrouped", infer(raw, directory: "/example/source/nested"))
+        XCTAssertEqual("ungrouped", infer(raw, browser: ["path": "/other"]))
+        XCTAssertEqual("project-one", infer(raw, directory: "/example/link", browser: ["path": "/example/source", "requested_path": "/example/link"]))
+        XCTAssertEqual("project-one", LaunchPresentation.inferredProject(raw, selected: "project-one", explicit: false, directory: "/other", browser: ["path": "/other"], worktrees: nil))
+    }
+    func testAmbiguousOrOtherComputerFoldersNeverChooseAutomatically() {
+        var raw = inferenceCatalog(); var projects = raw.objects("projects")
+        projects.append(["id": "other", "name": "Other", "folders": [["id": "other-folder", "path": "/example/source"]]])
+        raw["projects"] = .array(projects.map(JSON.object)); XCTAssertEqual("ungrouped", infer(raw))
+        projects[projects.count-1]["folders"] = [["id": "other-folder", "path": "/example/source", "local": false]]
+        raw["projects"] = .array(projects.map(JSON.object)); XCTAssertEqual("project-one", infer(raw))
+        projects[0]["folders"] = [["id": "folder-one", "path": "/example/source", "local": false]]
+        raw["projects"] = .array(projects.map(JSON.object)); XCTAssertEqual("ungrouped", infer(raw))
+    }
+    func testRelatedWorktreeInferenceRequiresCompleteExactAvailableCatalog() {
+        let raw = inferenceCatalog()
+        let trees: JSONObject = ["state": "ok", "stale": false, "partial": false, "path": "/example/linked", "common_dir": "/example/source/.git",
+                                 "worktrees": [["path": "/example/source", "kind": "main", "available": true], ["path": "/example/linked", "kind": "linked", "available": true]]]
+        XCTAssertEqual("project-one", infer(raw, directory: "/example/linked", worktrees: trees))
+        for field in ["partial", "stale"] { var changed = trees; changed[field] = true; XCTAssertEqual("ungrouped", infer(raw, directory: "/example/linked", worktrees: changed)) }
+        var changed = trees; changed["path"] = "/other"; XCTAssertEqual("ungrouped", infer(raw, directory: "/example/linked", worktrees: changed))
+        changed = trees; changed["worktrees"] = [["path": "/example/source", "kind": "bare", "available": true], ["path": "/example/linked", "kind": "linked", "available": true]]
+        XCTAssertEqual("ungrouped", infer(raw, directory: "/example/linked", worktrees: changed))
+    }
     func testDistinctSameLabelProfilesHaveConcreteDefaultAndExactIdentifiers() {
         let accounts = LaunchPresentation.accounts(catalog(), "claude")
         XCTAssertEqual(["profile-one", "profile-two"], accounts.map(\.id))
@@ -252,6 +289,23 @@ final class LaunchProjectTests: XCTestCase {
         XCTAssertEqual("project-one", sanitized.string("default_project"))
     }
 
+    func testOnlyUntouchedInboxOmitsAssignmentAndNeverAddsAProtocolField() throws {
+        let raw = inferenceCatalog()
+        func args(_ project: String = "ungrouped", implicitInbox: Bool = false) throws -> JSONObject {
+            try LaunchPresentation.arguments(raw, agent: "claude", directory: "/example/linked", tag: "new-session", accountId: "profile-two",
+                                             projectId: project, worktrees: nil, implicitInbox: implicitInbox)
+        }
+        let implicit = try args(implicitInbox: true)
+        XCTAssertEqual(Set(["agent", "directory", "tag", "account_id"]), Set(implicit.keys))
+        XCTAssertFalse(implicit.has("implicitInbox")); XCTAssertFalse(implicit.has("implicit_inbox"))
+        let explicit = try args()
+        XCTAssertEqual("ungrouped", explicit.string("project_id")); XCTAssertEqual("swarm-exact", explicit.string("swarm_id")); XCTAssertEqual(.bool(true), explicit["add_folder"])
+        XCTAssertEqual(explicit, try args(implicitInbox: false))
+        XCTAssertEqual(try args("project-one"), try args("project-one", implicitInbox: true))
+        XCTAssertEqual("project-one", try args("project-one", implicitInbox: true).string("project_id"))
+        XCTAssertThrowsError(try LaunchPresentation.arguments(catalog(), agent: "claude", directory: "/example/linked", tag: "new-session", accountId: "profile-two",
+                                                            projectId: "ungrouped", worktrees: nil, implicitInbox: true))
+    }
     func testProjectFolderIsExactAndOutsideFolderAdditionIsExplicit() throws {
         let raw = catalog()
         let existing = try LaunchPresentation.projectArguments(raw, projectId: "project-one", directory: "/example/source")

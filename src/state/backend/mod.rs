@@ -67,11 +67,6 @@ pub(crate) const TERMINAL_NEEDS_PANE: Wording = Wording {
     tmux: "Terminal requires this exact live tracked tmux pane",
     neutral: "Terminal requires this exact live tracked pane",
 };
-/// `hgs a` of an OpenCode session.
-pub(crate) const OPENCODE_ATTACH: Wording = Wording {
-    tmux: "OpenCode uses Activity; this adapter has no tmux Terminal",
-    neutral: "OpenCode uses Activity; this adapter has no Terminal",
-};
 /// `hgs terminal` of an OpenCode session.
 pub(crate) const OPENCODE_TERMINAL: Wording = Wording {
     tmux: "OpenCode uses its native API without a tmux Terminal",
@@ -606,11 +601,6 @@ mod wording_tests {
                 TERMINAL_NEEDS_PANE,
                 "Terminal requires this exact live tracked tmux pane",
                 "Terminal requires this exact live tracked pane",
-            ),
-            (
-                OPENCODE_ATTACH,
-                "OpenCode uses Activity; this adapter has no tmux Terminal",
-                "OpenCode uses Activity; this adapter has no Terminal",
             ),
             (
                 OPENCODE_TERMINAL,

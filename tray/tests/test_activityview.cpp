@@ -195,6 +195,7 @@ QAction *menuAction(QMenu *menu, const QString &text)
 class TestActivityView : public QObject {
     Q_OBJECT
 private slots:
+    void archiveRestoreKeepsVisibleHistoryAndSelection();
     void hiddenSnapshotsDoNotBuildDocuments();
     void preparedWorkerLifetimeFollowsDocuments();
     void longUpdatesKeepQueuedEditorInputResponsive();
@@ -306,6 +307,27 @@ QJsonArray longHistory()
     }
     return events;
 }
+}
+
+void TestActivityView::archiveRestoreKeepsVisibleHistoryAndSelection()
+{
+    SettledActivityView view; view.resize(600, 400); view.setSessionKey("archived-key");
+    view.setActivity({{"conversation_id", "same-conversation"}}, history(24));
+    auto *browser = view.browser();
+    auto cursor = browser->textCursor(); cursor.setPosition(4); cursor.setPosition(18, QTextCursor::KeepAnchor);
+    browser->setTextCursor(cursor);
+    browser->verticalScrollBar()->setValue(browser->verticalScrollBar()->maximum() / 2);
+    const auto text = view.plainText(), selected = browser->textCursor().selectedText();
+    const int scroll = browser->verticalScrollBar()->value();
+    view.continueSession("unrelated-key", "wrong-destination");
+    QCOMPARE(view.plainText(), text); QCOMPARE(browser->textCursor().selectedText(), selected);
+    view.continueSession("archived-key", "live-key");
+    // Unlike a switch to another conversation, rekeying never clears the document.
+    QCOMPARE(view.plainText(), text); QCOMPARE(browser->textCursor().selectedText(), selected);
+    settle(view);
+    QCOMPARE(view.plainText(), text); QCOMPARE(browser->textCursor().selectedText(), selected);
+    QCOMPARE(browser->verticalScrollBar()->value(), scroll);
+    view.setSessionKey("another-conversation"); QVERIFY(view.plainText().isEmpty());
 }
 
 void TestActivityView::hiddenSnapshotsDoNotBuildDocuments()

@@ -123,7 +123,7 @@ object LaunchPresentation {
         else models(raw,provider,accountId).find { it.value==model }?.efforts.orEmpty()
     /** The checked native launch request for the current form choices. */
     fun arguments(catalog:JSONObject,agent:String,directory:String,tag:String,accountId:String?,projectId:String,worktrees:JSONObject?,
-        model:String="",effort:String="",effortSupported:Boolean=false):JSONObject {
+        model:String="",effort:String="",effortSupported:Boolean=false,implicitInbox:Boolean=false):JSONObject {
         check(catalog.optJSONArray("agents")?.let { array -> (0 until array.length()).any { array.optString(it) == agent } } == true) { "This native provider is unavailable." }
         check(accountId != null && accounts(catalog,agent).any { it.id == accountId }) { "Choose an offered account for the selected provider." }
         val args=JSONObject().put("agent",agent).put("directory",directory).put("tag",tag).put("account_id",accountId)
@@ -136,8 +136,13 @@ object LaunchPresentation {
             check(efforts(catalog,agent,accountId,model,true).any { it.value==effort }) { "The model's effort choices changed. Review the current choices." }
             args.put("effort",effort)
         }
-        if(catalog.opt("project_launch_supported")==true) projectArguments(catalog,projectId,directory,worktrees).let { fields -> fields.keys().forEach { key -> args.put(key,fields.get(key)) } }
-        else check(projectId.isBlank()) { "This computer does not support scoped project assignment." }
+        if(catalog.opt("project_launch_supported")==true) {
+            // Untouched Inbox is presentation only. A fresh native creation may
+            // infer a concrete project after the form's cached evidence ran out.
+            // This private hint is never a backend protocol field.
+            if(implicitInbox && projectId=="ungrouped") check(projects(catalog).any { it.id==projectId }) { "Choose a current native project." }
+            else projectArguments(catalog,projectId,directory,worktrees).let { fields -> fields.keys().forEach { key -> args.put(key,fields.get(key)) } }
+        } else check(projectId.isBlank()) { "This computer does not support scoped project assignment." }
         return SessionActionPolicies.arguments("launch",args)
     }
     fun defaultAccount(accounts:List<LaunchAccount>,selected:String=""):String = accounts.firstOrNull { it.id == selected }?.id
@@ -204,6 +209,24 @@ object LaunchPresentation {
                     if(folderId.isNullOrBlank() || folderId.trim()!=folderId || folderId.toByteArray(Charsets.UTF_8).size>128 || path==null || !absoluteFolder(path) || folder.opt("local")==false) null else LaunchProjectFolder(folderId,path,folder.string("name").ifBlank { path.substringAfterLast('/') })
                 }.distinctBy { it.id })
         }.distinctBy { it.id }
+    }
+    /** Only an untouched Inbox may follow the current computer's verified folder.
+     * No ancestry/name guesses; ambiguous or incomplete evidence stays Inbox. */
+    fun inferredProject(raw:JSONObject?, selected:String, explicit:Boolean, directory:String,
+                        browser:JSONObject?, worktrees:JSONObject?):String {
+        if(explicit || selected!="ungrouped" || raw?.optJSONArray("projects")==null || raw.optJSONArray("projects")!!.length()>500) return selected
+        if(browser?.string("path")!=directory && browser?.string("requested_path")!=directory) return selected
+        val canonical=browser?.string("path").orEmpty()
+        if(!absoluteFolder(canonical)) return selected
+        val offered=projects(raw)
+        if(offered.none { it.id==selected }) return selected
+        val candidates=offered.filter { it.id!="ungrouped" }
+        if(candidates.sumOf { it.folders.size }>512) return selected
+        val related=WorktreePresentation.forFolder(worktrees,directory)?.takeIf {
+            it.opt("partial")==false && WorktreePresentation.healthy(it) && it.optJSONArray("worktrees")?.length()?.let { count -> count<=512 }==true }
+        return candidates.filter { project -> project.folders.any { it.path==canonical } ||
+            related!=null && WorktreePresentation.anchor(related,project,canonical)!=null }
+            .singleOrNull()?.id ?: selected
     }
     fun projectArguments(raw:JSONObject,projectId:String,directory:String,worktrees:JSONObject?=null):JSONObject {
         val project=projects(raw).singleOrNull { it.id == projectId } ?: error("Choose a current native project.")

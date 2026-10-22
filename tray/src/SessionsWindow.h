@@ -207,7 +207,7 @@ private:
     void renameSession();
     void forkSession();
     void populateBatchActions(QMenu *menu);
-    enum class SelectionAction { MarkRead, ReviewLater, Pause, Resume, Archive, Forget, Terminate, Move };
+    enum class SelectionAction { MarkRead, ReviewLater, CompactRows, ExpandRows, Pause, Resume, Archive, Forget, Terminate, Move };
     QList<Entry> selectionEntries() const;
     bool selectionActionApplies(const Entry &entry, SelectionAction action) const;
     static QString selectionActionText(SelectionAction action);
@@ -228,7 +228,7 @@ private:
     QAction *m_clearArchiveAction = nullptr;
     QList<Entry> m_selectionQueue;
     SelectionAction m_selectionOperation = SelectionAction::Pause;
-    QString m_selectionCommand;
+    QString m_selectionCommand, m_selectionRestoreKey;
     // The scoped request of the selected OpenCode binding being forgotten; only
     // its own result advances the selection.
     quint64 m_selectionForgetRequest = 0;
@@ -287,6 +287,7 @@ private:
     void openSessionFolder();
     void openLocalFolder(const QString &directory);
     const Entry *selected() const;
+    bool awaitingRestoredInspection(const Entry &entry) const;
     bool isTerminating(const Entry &entry) const;
     void reconcileTerminations();
     bool archiveNameOccupied(const Entry &archive) const;
@@ -362,6 +363,12 @@ private:
     QSet<QString> m_terminationFinished;
     QString m_terminationCommand;
     QString m_restoreKey, m_renameKey, m_forkKey, m_forkGroup, m_forkBefore;
+    struct PendingRestore { Entry source; QString conversation; bool succeeded = false; };
+    // Durable draft handoffs outlive list navigation. Only m_restoreKey follows
+    // the user's selected conversation, and only one legacy write is in flight.
+    QMap<QString, PendingRestore> m_restores;
+    QString m_restoreWriteKey;
+    QMap<QString, QPair<QString, QString>> m_restoredInspections;
     bool m_renameArchived = false;
     QString m_selectedKey, m_filter = "all";
     bool m_initialSelectionPending = true;

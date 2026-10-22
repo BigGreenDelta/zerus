@@ -1233,6 +1233,15 @@ void ActivityView::setSessionKey(const QString &key)
     m_compaction->hide(); m_queue->hide();
 }
 
+void ActivityView::continueSession(const QString &oldKey, const QString &newKey)
+{
+    if (m_sessionKey != oldKey || newKey.isEmpty() || oldKey == newKey) return;
+    m_sessionKey = newKey;
+    // A worker for the archive key cannot publish into the resumed view.
+    ++m_renderGeneration;
+    render(false);
+}
+
 namespace {
 // Everything setActivity renders from. Polls refresh live fields that Activity
 // never shows (goal observation time, cache age, token usage, process load);

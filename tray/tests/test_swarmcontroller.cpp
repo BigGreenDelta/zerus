@@ -78,6 +78,20 @@ print(json.dumps(result))
 )PY";
         write("hgs",script);QVERIFY(FakeCli::makeRunnable(m_program));response("Original");
     }
+    void projectGuideOpensTheConnectionPreviewWithoutSending() {
+        HgsClient client(FakeCli::program(m_program)); SwarmController controller(&client);
+        FleetState state;BoxState local;local.host="desktop";local.ok=true;state.setLocal(local,1);
+        BoxState peer;peer.host="laptop";peer.ok=true;state.setPeer(peer,1);
+        bool inspected=false;
+        QTimer::singleShot(0,qApp,[&]{
+            auto *dialog=qobject_cast<QDialog *>(QApplication::activeModalWidget());if(!dialog)return;
+            auto *tabs=dialog->findChild<QTabWidget *>("swarmTabs");auto *computer=dialog->findChild<QComboBox *>("swarmPeer");
+            inspected=tabs&&computer&&tabs->tabText(tabs->currentIndex())=="Connect computer"&&computer->currentText()=="laptop";
+            dialog->reject();
+        });
+        showSwarmDialog(&client,&controller,state,nullptr,[]{},true,"laptop");
+        QVERIFY(inspected);QVERIFY(requests().isEmpty());
+    }
     void localPresentationSurvivesRemoteMembership() {
         auto local=organization("Old");auto project=local["projects"].toArray()[0].toObject();project["collapsed"]=true;project["sessions"]=QJsonArray{"b","a","removed"};local["projects"]=QJsonArray{project};local["runs"]=QJsonObject{{"run","a"}};local["run_groups"]=QJsonObject{{"arch\nrun","p"}};
         auto remote=organization("Renamed");project=remote["projects"].toArray()[0].toObject();project["sessions"]=QJsonArray{"a","new","b"};remote["projects"]=QJsonArray{project};

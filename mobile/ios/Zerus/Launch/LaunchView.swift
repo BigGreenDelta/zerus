@@ -47,6 +47,7 @@ struct LaunchForm: View {
     @State private var selectedModel = ""
     @State private var selectedEffort = ""
     @State private var projectId = ""
+    @State private var projectExplicit = false
     @State private var folder = ""
     @State private var browsedFolder = ""
     @State private var tag = ""
@@ -75,6 +76,8 @@ struct LaunchForm: View {
         let projects = LaunchPresentation.projects(catalog)
         let projectSupported = catalog?["project_launch_supported"] == .bool(true)
         let project = projects.first { $0.id == projectId }
+        let implicitProject = !projectExplicit && projectId == "ungrouped"
+        let projectDetectionNote = "A matching project is detected automatically. Otherwise this session stays in Inbox."
         let computer = app.machineName(machine)
         let busy = launch.busy
         let supported = launch.worktreeOperationsSupported(machine)
@@ -89,6 +92,8 @@ struct LaunchForm: View {
         let plannedPath = automatic ? WorktreePresentation.automaticPath(evidence, branch: branch) : ""
         let plannedAdded = automatic && project != nil && evidence != nil &&
             WorktreePresentation.anchor(WorktreePresentation.withCreated(evidence!, path: plannedPath), project!, plannedPath) == nil
+        let inferredProject = LaunchPresentation.inferredProject(catalog, selected: projectId, explicit: projectExplicit, directory: folder,
+                                                                 browser: launch.directory, worktrees: evidence)
         let folderValid = LaunchPresentation.selectedFolder(launch.directory, folder)
         let changed = !allowedCatalog.isEmpty && signature != allowedCatalog
         let actions = app.conversation.sessionActions.filter { $0.target.machineKey == machine }
@@ -191,7 +196,7 @@ struct LaunchForm: View {
                     section("Folder") {
                         let projectFolders = project?.folders ?? []
                         if let project, projectFolders.isEmpty, folder.isEmpty {
-                            notice(Theme.amber) { Text("\(project.name) has no folder on \(computer). Browse to choose one; it will be added to this project.") }
+                            notice(Theme.amber) { Text(implicitProject ? "Browse to choose a folder. \(projectDetectionNote)" : "\(project.name) has no folder on \(computer). Browse to choose one; it will be added to this project.") }
                         }
                         if projectFolders.isEmpty && folder.isEmpty {
                             Button { browsing = true } label: {
@@ -231,7 +236,8 @@ struct LaunchForm: View {
                             }
                         }
                         if !automatic, let project, !folder.isEmpty {
-                            if related { hint("Verified worktree of \(project.name). No project folder will be added.") }
+                            if implicitProject { hint(projectDetectionNote) }
+                            else if related { hint("Verified worktree of \(project.name). No project folder will be added.") }
                             else if !inProject { hint("This folder is outside \(project.name). Starting here adds it to the project.", color: Theme.amber) }
                         }
                     }
@@ -260,7 +266,8 @@ struct LaunchForm: View {
                                 Text("New worktree").font(.caption.weight(.semibold)).foregroundStyle(Theme.muted)
                                 Text(plannedPath).font(.footnote).textSelection(.enabled)
                                 hint("New branch \(branch) from HEAD, created when the session starts.")
-                                if plannedAdded, let project { hint("The new worktree will be added to \(project.name).", color: Theme.amber) }
+                                if implicitProject { hint(projectDetectionNote) }
+                                else if plannedAdded, let project { hint("The new worktree will be added to \(project.name).", color: Theme.amber) }
                             }
                         } else if autoPossible {
                             hint("The session starts directly in the selected folder.")
@@ -364,11 +371,13 @@ struct LaunchForm: View {
         .onChange(of: effortOptions.map(\.value)) { if !selectedEffort.isEmpty && !effortOptions.contains(where: { $0.value == selectedEffort }) { selectedEffort = "" } }
         .onChange(of: projects.map(\.id), initial: true) {
             guard !projects.contains(where: { $0.id == projectId }) else { return }
-            let scoped = app.sessionProjectScope?.key
-            let preferred = scoped.flatMap { $0.connectionId == machine.connectionId && $0.swarmId == catalog?.string("swarm_id") ? $0.id : nil } ?? catalog?.string("default_project")
+            let scoped = (app.sessionProjectScope?.key).flatMap { $0.connectionId == machine.connectionId && $0.swarmId == catalog?.string("swarm_id") ? $0.id : nil }
+            let preferred = scoped ?? catalog?.string("default_project")
+            if scoped != nil { projectExplicit = true }
             projectId = projects.first { $0.id == preferred }?.id ?? projects.first?.id ?? ""
             folder = browsedFolder
         }
+        .onChange(of: inferredProject) { if inferredProject != projectId { projectId = inferredProject } }
         .onChange(of: FolderKey(project: projectId, loading: launch.directoryLoading)) {
             if folder.isEmpty && !launch.directoryLoading, let first = project?.folders.first {
                 folder = first.path
@@ -390,6 +399,7 @@ struct LaunchForm: View {
         .sheet(isPresented: $choosingProject) {
             ProjectPicker(projects: projects, selected: projectId) { chosen in
                 choosingProject = false
+                projectExplicit = true
                 if chosen != projectId {
                     projectId = chosen
                     folder = browsedFolder
@@ -471,12 +481,13 @@ struct LaunchForm: View {
 
     private func create(automatic: Bool, reason: String, placement: JSONObject?) {
         guard !launch.busy, reason.isEmpty else { return }
+        let implicitInbox = !projectExplicit && projectId == "ungrouped"
         if automatic {
             launch.launchWithWorktree(machine, agent: provider, folder: folder, tag: tag, accountId: account, expectedCatalog: allowedCatalog, projectId: projectId,
-                                      model: selectedModel, effort: selectedEffort)
+                                      model: selectedModel, effort: selectedEffort, implicitInbox: implicitInbox)
         } else {
             launch.launch(machine, agent: provider, directory: folder, tag: tag, accountId: account, expectedCatalog: allowedCatalog, projectId: projectId,
-                          worktrees: placement, model: selectedModel, effort: selectedEffort)
+                          worktrees: placement, model: selectedModel, effort: selectedEffort, implicitInbox: implicitInbox)
         }
     }
 

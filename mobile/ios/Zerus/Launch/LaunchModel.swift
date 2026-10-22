@@ -401,13 +401,13 @@ final class LaunchModel {
     }
 
     private func launchArguments(_ machine: MachineKey, _ catalog: JSONObject, agent: String, directory: String, tag: String, accountId: String?,
-                                 projectId: String, worktrees: JSONObject?, model: String = "", effort: String = "") throws -> JSONObject {
+                                 projectId: String, worktrees: JSONObject?, model: String = "", effort: String = "", implicitInbox: Bool = false) throws -> JSONObject {
         try LaunchPresentation.arguments(catalog, agent: agent, directory: directory, tag: tag, accountId: accountId, projectId: projectId,
-                                         worktrees: worktrees, model: model, effort: effort, effortSupported: effortSupported(machine))
+                                         worktrees: worktrees, model: model, effort: effort, effortSupported: effortSupported(machine), implicitInbox: implicitInbox)
     }
 
     func launch(_ machine: MachineKey, agent: String, directory: String, tag: String, accountId: String?, expectedCatalog: String, projectId: String,
-                worktrees: JSONObject?, model: String = "", effort: String = "") {
+                worktrees: JSONObject?, model: String = "", effort: String = "", implicitInbox: Bool = false) {
         if let problem = reason(machine).nonEmpty {
             error = problem
             return
@@ -424,7 +424,7 @@ final class LaunchModel {
         let args: JSONObject
         do {
             args = try launchArguments(machine, catalog, agent: agent, directory: directory, tag: tag, accountId: accountId, projectId: projectId,
-                                       worktrees: worktrees, model: model, effort: effort)
+                                       worktrees: worktrees, model: model, effort: effort, implicitInbox: implicitInbox)
         }
         catch {
             self.error = AppModel.message(error, fallback: "Invalid launch choices.")
@@ -497,7 +497,7 @@ final class LaunchModel {
     /// Desktop Auto: create the generated sibling worktree, verify its folder and catalog, then launch there.
     /// Every step is pinned to this form; a failed or unknown creation is never replayed and never launches.
     func launchWithWorktree(_ machine: MachineKey, agent: String, folder: String, tag: String, accountId: String?, expectedCatalog: String,
-                            projectId: String, model: String = "", effort: String = "") {
+                            projectId: String, model: String = "", effort: String = "", implicitInbox: Bool = false) {
         if let problem = worktreeReason(machine).nonEmpty {
             error = problem
             return
@@ -526,7 +526,7 @@ final class LaunchModel {
         do {
             // Everything the session needs is checked before anything is created.
             _ = try launchArguments(machine, catalog, agent: agent, directory: destination, tag: tag, accountId: accountId, projectId: projectId,
-                                    worktrees: WorktreePresentation.withCreated(evidence, path: destination), model: model, effort: effort)
+                                    worktrees: WorktreePresentation.withCreated(evidence, path: destination), model: model, effort: effort, implicitInbox: implicitInbox)
             creation = try worktreeAction(machine, evidence, branch: branch, base: "HEAD", destination: destination)
         } catch {
             self.error = AppModel.message(error, fallback: "Invalid launch choices.")
@@ -585,7 +585,7 @@ final class LaunchModel {
             let args: JSONObject
             do {
                 args = try launchArguments(machine, catalog, agent: agent, directory: created, tag: tag, accountId: accountId, projectId: projectId,
-                                           worktrees: placement, model: model, effort: effort)
+                                           worktrees: placement, model: model, effort: effort, implicitInbox: implicitInbox)
             }
             catch {
                 self.error = "Worktree created at \(created). \(AppModel.message(error, fallback: ""))"

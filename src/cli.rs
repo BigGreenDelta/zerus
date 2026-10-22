@@ -1145,7 +1145,6 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
 fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool) -> Result<i32> {
     const HELP: &str = "usage: hgs a <session> [--existing [--run-id ID]]";
     let session = require(args, 0, HELP)?;
-    if state::opencode::exists(session) {return Err(Error::new(1,state::backend::OPENCODE_ATTACH.text()));}
     if state::dsh::exists(session) {
         return crate::native_ui::open(config, "", session, dry || has(args, "--dry-run"));
     }
@@ -1166,6 +1165,9 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
     }
     if run_id.is_some() && !existing {
         return Err(Error::new(1, "--run-id requires --existing"));
+    }
+    if state::opencode::exists(session) {
+        return state::opencode::attach(session, run_id, dry).map_err(|error| Error::new(1, error));
     }
     if !existing {
         return attach(config, session, client, dry);

@@ -92,6 +92,13 @@ pub(crate) fn worktree_catalog(path: &std::path::Path) -> serde_json::Value {
     }
     worktrees::catalog(path, true)
 }
+pub(crate) fn cached_worktree_catalog(path: &std::path::Path) -> Option<serde_json::Value> {
+    worktrees::cached_catalog(path)
+}
+/// One optional launch inference shares one total Git deadline.
+pub(crate) fn worktree_catalog_until(path: &std::path::Path, deadline: std::time::Instant) -> serde_json::Value {
+    worktrees::catalog_until(path, true, deadline)
+}
 mod launch_project;
 pub(crate) use launch_project::with_launch_binding;
 mod session_project;
@@ -252,10 +259,14 @@ fn directories(path: &str, hidden: bool) -> Result<Value> {
     });
     let truncated = entries.len() > 2000;
     entries.truncate(2000);
-    Ok(
-        json!({"path": directory, "parent": directory.parent().unwrap_or(Path::new("/")),
-        "home": home(), "directories": entries, "truncated": truncated}),
-    )
+    let mut result = json!({"path": directory, "parent": directory.parent().unwrap_or(Path::new("/")),
+        "home": home(), "directories": entries, "truncated": truncated});
+    if let Ok(config) = crate::config::Config::load() {
+        if let Some(project) = crate::swarm::directory_project(&config, &directory) {
+            result["project_inference"] = project;
+        }
+    }
+    Ok(result)
 }
 
 fn create_directory(path: &str, request_id: &str) -> Result<Value> {

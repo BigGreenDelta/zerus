@@ -55,14 +55,18 @@ pub struct LockedStore {
 
 impl LockedStore {
     pub fn load(config: &Config) -> Result<Self> {
-        Self::load_with(config, false)
+        Self::load_with(config, false, false)
     }
     /// An existing catalog for one scoped metadata operation. Do not stage the
     /// ordinary loader's machine-name/binding refresh as another shared edit.
     pub fn load_scoped(config: &Config) -> Result<Self> {
-        Self::load_with(config, true)
+        Self::load_with(config, true, false)
     }
-    fn load_with(config: &Config, scoped: bool) -> Result<Self> {
+    /// Optional launch metadata must not wait behind a sync or user edit.
+    pub fn try_load_scoped(config: &Config) -> Result<Self> {
+        Self::load_with(config, true, true)
+    }
+    fn load_with(config: &Config, scoped: bool, nonblocking: bool) -> Result<Self> {
         let dir = config.dir.join("swarm");
         if scoped {
             ensure!(
@@ -81,7 +85,12 @@ impl LockedStore {
                 .write(true),
         )
         .open(dir.join("catalog.lock"))?;
-        let lock = platform::FileLock::exclusive(lock)?;
+        let lock = if nonblocking {
+            fs2::FileExt::try_lock_exclusive(&lock)?;
+            platform::FileLock::held(lock)
+        } else {
+            platform::FileLock::exclusive(lock)?
+        };
         let path = dir.join("catalog.json");
         let original = if scoped {
             let metadata = fs::symlink_metadata(&path)?;

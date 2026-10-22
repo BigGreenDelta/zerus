@@ -251,7 +251,7 @@ public enum LaunchPresentation {
     /// The exact launch request for the current catalog. `effort` is sent only for an offered variant of the chosen
     /// model and only when the computer's connector accepts it; otherwise the request is exactly the older one.
     public static func arguments(_ catalog: JSONObject, agent: String, directory: String, tag: String, accountId: String?, projectId: String,
-                                 worktrees: JSONObject?, model: String = "", effort: String = "", effortSupported: Bool = false) throws -> JSONObject {
+                                 worktrees: JSONObject?, model: String = "", effort: String = "", effortSupported: Bool = false, implicitInbox: Bool = false) throws -> JSONObject {
         guard agents(catalog).contains(agent) else { throw ZerusError.invalid("This native provider is unavailable.") }
         guard let accountId, accounts(catalog, agent).contains(where: { $0.id == accountId }) else {
             throw ZerusError.invalid("Choose an offered account for the selected provider.")
@@ -270,8 +270,14 @@ public enum LaunchPresentation {
             args["effort"] = .string(effort)
         }
         if catalog["project_launch_supported"] == .bool(true) {
-            let fields = try projectArguments(catalog, projectId: projectId, directory: directory, worktrees: worktrees)
-            for key in fields.keys { args[key] = fields[key] }
+            // A private client hint, never a new backend protocol field. Keep
+            // implicit Inbox passive if native creation finds fresher evidence.
+            if implicitInbox && projectId == "ungrouped" {
+                guard projects(catalog).contains(where: { $0.id == projectId }) else { throw ZerusError.invalid("Choose a current native project.") }
+            } else {
+                let fields = try projectArguments(catalog, projectId: projectId, directory: directory, worktrees: worktrees)
+                for key in fields.keys { args[key] = fields[key] }
+            }
         } else if !projectId.isEmpty {
             throw ZerusError.invalid("This computer does not support scoped project assignment.")
         }
@@ -385,6 +391,27 @@ public enum LaunchPresentation {
             !id.unicodeScalars.contains(where: PairingInvite.isISOControl)
     }
 
+    /// Only an untouched Inbox follows exact native folder/worktree membership.
+    /// Explicit project choices, ambiguity and incomplete evidence keep selection.
+    public static func inferredProject(_ raw: JSONObject?, selected: String, explicit: Bool, directory: String,
+                                       browser: JSONObject?, worktrees: JSONObject?) -> String {
+        guard !explicit, selected == "ungrouped", let raw, raw.objects("projects").count <= 500,
+              let browser, browser.string("path") == directory || browser.string("requested_path") == directory else { return selected }
+        let canonical = browser.string("path")
+        guard absoluteFolder(canonical) else { return selected }
+        let offered = projects(raw)
+        guard offered.contains(where: { $0.id == selected }) else { return selected }
+        let candidates = offered.filter { $0.id != "ungrouped" }
+        guard candidates.reduce(0, { $0 + $1.folders.count }) <= 512 else { return selected }
+        let related = WorktreePresentation.forFolder(worktrees, directory).flatMap { value -> JSONObject? in
+            value["partial"] == .bool(false) && WorktreePresentation.healthy(value) && value.objects("worktrees").count <= 512 ? value : nil
+        }
+        let matching = candidates.filter { project in
+            project.folders.contains { $0.path == canonical } ||
+                (related != nil && WorktreePresentation.anchor(related, project, canonical) != nil)
+        }
+        return matching.count == 1 ? matching[0].id : selected
+    }
     public static func projectArguments(_ raw: JSONObject, projectId: String, directory: String, worktrees: JSONObject? = nil) throws -> JSONObject {
         let matching = projects(raw).filter { $0.id == projectId }
         guard matching.count == 1 else { throw ZerusError.invalid("Choose a current native project.") }

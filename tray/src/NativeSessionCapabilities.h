@@ -34,12 +34,20 @@ inline QString actionReason(const SessionInfo &session, const QString &operation
 inline bool terminal(const SessionInfo &session, const QJsonObject &details = {})
 {
     if (session.cmd == "dsh") return false;
+    if (session.cmd == "opencode") {
+        if (details.value("terminal_attach_supported").isBool()) return details.value("terminal_attach_supported").toBool();
+        if (session.terminalAttachReported) return session.terminalAttachSupported;
+    }
     if (details.value("terminal_supported").isBool()) return details.value("terminal_supported").toBool();
     if (session.cmd == "opencode" && !session.terminalReported) return false;
     return session.terminalSupported;
 }
 inline QString terminalReason(const SessionInfo &session, const QJsonObject &details = {})
 {
+    if (session.cmd == "opencode" && (details.value("terminal_attach_supported").isBool() || session.terminalAttachReported)) {
+        const auto reason = details.value("terminal_attach_reason").toString(session.terminalAttachReason);
+        return reason.isEmpty() ? QObject::tr("Refresh this session after its OpenCode service reconnects.") : reason;
+    }
     const auto reason=details.value("terminal_reason").toString(session.terminalReason);
     return reason.isEmpty() ? QObject::tr("This native adapter does not provide Terminal.") : reason;
 }

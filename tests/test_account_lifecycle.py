@@ -12,6 +12,49 @@ test_pause.HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().pa
 
 class AccountLifecycle(test_fork.Base):
     fork = test_fork.Forks.fork
+    def test_initial_project_inference_keeps_the_exact_native_binding_locked(self):
+        import shutil
+        real_git = shutil.which('git', path=self.env['PATH'])
+        self.assertIsNotNone(real_git)
+        # This fixture deliberately contaminates its login shell's native
+        # account path. Select a private managed account, as its other cases do.
+        self.hgs('account', 'add', 'inference', '--provider', 'codex')
+        identity = json.loads(self.hgs('swarm', 'hello'))
+        project = dict(id='work', name='Work', color='#123456', sessions=[], folders=[dict(
+            id='work-folder', machine=identity['node_id'], path=str(self.project.resolve()), name='')])
+        initialized = subprocess.run([str(test_pause.HGS), 'swarm', 'initialize'], input=json.dumps(dict(projects=[project])),
+                                     env=self.env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
+        self.script('git', r'''#!/usr/bin/env python3
+import fcntl,json,os,pathlib,sys
+home=pathlib.Path.home()
+def held(path):
+ try:lock=path.open('r+b')
+ except FileNotFoundError:return False
+ with lock:
+  try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+  except BlockingIOError:return True
+  return False
+# Only the actual inference owns this catalog lock; ordinary repository probes
+# and later SessionStart hooks must not provide a substitute observation.
+if held(home/'cfg/swarm/catalog.lock'):
+ rows=[json.loads(path.read_text()) for path in (home/'state').glob('*.json')]
+ rows += [json.loads(path.read_text()) for path in (home/'state/bindings').glob('*.json')]
+ exact=[row for row in rows if row.get('name')==os.environ.get('HGS_SESSION') and row.get('supervisor',{}).get('pid')==os.getppid()]
+ with (home/'inference-lock.jsonl').open('a') as out:
+  out.write(json.dumps({'bindings':len(exact),'run':exact[0].get('run_id') if len(exact)==1 else None,'native_writer_held':held(home/'state/.lock')})+'\n')
+ sys.exit(1)
+# Leave ordinary launch discovery and later hook probes unchanged. Only the
+# inference's locked observation stands in for a non-Git working directory.
+os.execv(REAL_GIT,[REAL_GIT,*sys.argv[1:]])
+'''.replace('REAL_GIT', repr(real_git)))
+        name = self.start('codex', 'project-lock', '--new', '--account', 'inference')
+        rows = list(map(json.loads, (self.root/'inference-lock.jsonl').read_text().splitlines()))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0], dict(bindings=1, run=self.binding(name)['run_id'], native_writer_held=True))
+        catalog = json.loads(self.hgs('swarm', 'get'))['organization']['projects']
+        self.assertIn('test\n'+name, next(row for row in catalog if row['id']=='work')['sessions'])
+
     def setUp(self):
         original = test_pause.AGENT
         test_pause.AGENT = test_fork.AGENT.replace('"codex_home": os.environ.get("CODEX_HOME")', '"codex_home": os.environ.get("CODEX_HOME"), "api_key": os.environ.get("OPENAI_API_KEY"), "anthropic_home": os.environ.get("ANTHROPIC_CONFIG_DIR"), "anthropic_key": os.environ.get("ANTHROPIC_API_KEY")')

@@ -89,6 +89,44 @@ class AccountSnapshotsTest {
         assertEquals("Provider offline",AccountPresentation.compactStatus(c,a.copy(authStatus="signed_in",status="offline")))
     }
 
+    @Test fun nativeSignedInWinsOverLegacyExpiredUsageTokenAndUnavailableQuota() {
+        val c=AccountSnapshots.parse("w",computer(JSONArray().put(account(provider="claude",usage=JSONObject()
+            .put("status","expired").put("auth_status","signed_in").put("checked_at",1000)))))
+        val a=c.accounts.single().copy(installed=true)
+        assertFalse(AccountPresentation.warning(a))
+        assertEquals("Usage unavailable",AccountPresentation.status(a))
+        assertEquals("Signed in / Usage unavailable",AccountPresentation.compactStatus(c,a,1001.0))
+        assertFalse(AccountPresentation.compactStatus(c,a.copy(refreshError=true),1001.0).contains("Sign-in expired"))
+        assertTrue(AccountPresentation.compactStatus(c,a.copy(refreshError=true),1001.0).contains("Provider refresh failed"))
+        assertEquals("Usage unavailable",AccountPresentation.status(a.copy(authStatus="unknown")))
+        assertEquals("Signed in / Usage unavailable",AccountPresentation.compactStatus(c,a.copy(status="unavailable"),1001.0))
+    }
+    @Test fun confirmedAuthProblemsRemainManualAndStaleReportsAreExplicit() {
+        val c=parse(JSONObject().put("status","signed_out").put("auth_status","signed_out").put("checked_at",1000))
+        val a=c.accounts.single().copy(installed=true)
+        assertTrue(AccountPresentation.warning(a))
+        assertEquals("Signed out",AccountPresentation.compactStatus(c,a,1001.0))
+        assertEquals("Last reported: Signed out / Offline",AccountPresentation.compactStatus(c.copy(online=false),a,1001.0))
+        assertEquals("Last reported: Signed out",AccountPresentation.compactStatus(c,a,1700.0))
+        assertEquals("Sign-in expired",AccountPresentation.status(a.copy(status="ok",authStatus="expired")))
+        assertEquals("Credentials locked",AccountPresentation.status(a.copy(authStatus="locked")))
+    }
+    @Test fun freshnessSeparatesProviderProgressFailureSavedAndUnknownTimes() {
+        val c=parse(JSONObject().put("status","ok").put("checked_at",1000))
+        val a=c.accounts.single()
+        assertTrue(AccountPresentation.freshness(c,a,1001.0).startsWith("Current report"))
+        assertTrue(AccountPresentation.freshness(c,a.copy(refreshing=true),1001.0).startsWith("Updating provider report"))
+        assertTrue(AccountPresentation.freshness(c,a.copy(refreshError=true),1001.0).startsWith("Provider refresh failed"))
+        assertTrue(AccountPresentation.freshness(c.copy(online=false),a,1001.0).contains("Machine offline"))
+        assertFalse(AccountPresentation.refreshing(c.copy(online=false),a.copy(refreshing=true)))
+        assertFalse(AccountPresentation.refreshing(c.copy(stale=true),a.copy(refreshing=true)))
+        assertFalse(AccountPresentation.compactStatus(c.copy(online=false),a.copy(refreshing=true),1001.0).contains("Updating"))
+        assertTrue(AccountPresentation.freshness(c,a,1700.0).startsWith("Saved report"))
+        assertTrue(AccountPresentation.freshness(c,a.copy(checkedAt=null),1001.0).endsWith("Provider update time unknown"))
+        assertTrue(AccountPresentation.freshness(c,a.copy(checkedAt=2000.0),1001.0).endsWith("Provider update time unknown"))
+        assertTrue(AccountPresentation.freshness(c,a.copy(status="unavailable"),1001.0).startsWith("Usage unavailable"))
+    }
+
     @Test fun shortPeriodUsesOnlyValidWholeMinuteUnitsAndBoundsUnicodeFallback() {
         fun window(minutes:Double?,label:String="Session")=AccountWindow("window",label,0.0,minutes,null)
         assertEquals("5h",AccountPresentation.shortPeriod(window(300.0)))

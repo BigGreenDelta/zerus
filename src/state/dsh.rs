@@ -401,6 +401,9 @@ pub(crate) fn launch(
         "created":now(),"launch_id":launch_id,"paused":false});
     ensure_host(&record)?;
     create_session(&mut record)?;
+    if let Ok(config) = crate::config::Config::load() {
+        crate::swarm::infer_new_session(&config, name, &cwd);
+    }
     Ok(())
 }
 

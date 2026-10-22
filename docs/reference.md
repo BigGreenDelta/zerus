@@ -372,6 +372,12 @@ and removes an archive binding only after the native agent confirms the expected
 conversation. Failed restore keeps it. **Forget archive** preserves native history;
 `resume --all` excludes archives.
 
+Desktop Restore keeps the opened conversation and its message draft when the
+resumed row confirms the archived conversation ID. Text, attachments and editor
+selection move to the live draft key; machine/project/search scopes stay in
+place. An existing live draft is never overwritten: the archive draft remains
+in Saved drafts. A later user selection is not replaced when Restore completes.
+
 ### Browse Archive by date
 
 Desktop and Android filter **Archived date**, the time a conversation moved into
@@ -638,8 +644,9 @@ the conversation and press **Voice** again; opening settings does not start a
 recording. If settings cannot open, the dialog keeps the manual navigation path.
 
 Session rows show provider, machine, current action, model, effort and Git context.
-Right-click a session and choose **Compact session row** to show only its name,
-status and agent type. The expand icon or the Right key restores the full row;
+Use the compact icon in a session row's upper-right corner, or right-click and
+choose **Compact session row**, to show only its name, status and agent type.
+The expand icon in that same position or the Right key restores the full row;
 the row remains selectable and keeps its normal context actions. This device
 remembers the preference for that conversation across restarts. **Expand all
 collapsed** in the Sessions menu restores every compact row, including sessions
@@ -807,9 +814,17 @@ attention keep their reply unread; pending approvals, questions and errors stay
 highlighted.
 
 Ctrl/Command-click selects multiple sessions while preserving the open conversation
-and draft. Batch actions include read/review later, pause, resume, archive, project
-move, termination and forgetting. Applicability is shown per selection. Ctrl-click
-does not select project headers or subagents. Escape or the selection close button
+and draft. Shift-click selects the visible range from the last selection anchor;
+Ctrl/Command+Shift-click adds that range to the selection. Shift with Up/Down or
+Home/End selects ranges by keyboard, using the current filtered row order and
+skipping hidden rows, project headers, subagents and pending launches. Anchors
+follow session identities across refreshes; a hidden or removed anchor falls back
+to the visible open row, or to the clicked row when none is visible.
+Batch actions include local **Compact session rows** and **Expand session rows**
+icons, read/review later, pause, resume, archive, project move, termination and
+forgetting. Both density actions are available for a mixed selection and apply
+only to rows needing that change, including offline rows. Applicability is shown
+per selection. Escape or the selection close button
 clears selection. Context menus and shortcuts preserve the target identity.
 **Clear archive…** requires confirmation, preserves offline records and excludes
 new records created after the confirmation snapshot; native history remains.
@@ -1753,6 +1768,23 @@ to the other project. The computer, path and label are preserved, including for
 offline computers. If the destination already has that folder, its existing link
 is reused. Files and session project assignments stay in place. These catalog
 changes use the normal Swarm synchronization.
+An untouched **Inbox** selection in New session follows an unambiguous project
+whose folder is confirmed on the selected computer. Desktop, Android and iOS
+use exact canonical folder membership or a complete, current worktree catalog;
+folder names and path prefixes do not assign projects. Explicit project choices,
+including explicitly choosing Inbox, win. Multiple matching projects or missing
+verification keep the current selection. An untouched Inbox stays a local fallback,
+so later native project discovery cannot be overwritten by launch bookkeeping.
+Older saved desktop launch intents retain their original placement semantics.
+Desktop also checks existing saved folders on that exact computer against the
+CLI-confirmed canonical path, including local Windows drive and UNC folders
+that remain outside the POSIX shared catalog. It does not resolve saved aliases
+or infer from a parent folder. A native project hint must name the same known
+Swarm catalog; a foreign hint never selects a same-ID local project.
+A new tracked CLI session also infers its initial project from that computer's
+existing catalog; resume, fork, adoption,
+manual assignments and explicit unassignment are never reassigned. This optional
+metadata step does not initialize a catalog, join a swarm or create a repository.
 The general **New session** action inherits the selected session's project,
 computer and matching project folder. For a linked worktree, a verified catalog
 selects the main checkout instead. Choosing another folder, project or computer
@@ -1784,8 +1816,12 @@ Existing names and unrelated sessions are never repurposed.
 open mode; DeepSeek uses its embedded native interface.
 
 To join a swarm, configure SSH access and open Zerus on the initial machines so
-existing projects import once. Use **Projects → Swarm… → Connect computer**,
-**Preview connection**, review project mapping and **Join and merge projects**.
+existing projects import once. Projects shows **Connect project catalogs…** when
+an accessible computer has no project-sync connection. Session access over SSH
+alone does not connect project catalogs: the guide opens **Connect computer**
+with the missing computer selected. Choose **Preview connection**, review project
+mapping and **Join and merge projects**. Nothing is paired or joined by opening
+the page. The same flow remains under **Projects → Swarm… → Connect computer**.
 Names alone do not merge projects. Existing swarm membership wins by default;
 turn off that preference to compare conflicting assignments. HGS backs up the
 catalog before a merge. **Connect this member** adds a route to an existing member.
@@ -1813,8 +1849,15 @@ requests without members. Local changes normally trigger exchange within three
 seconds; unchanged peers are checked every 30 seconds, backing off to five minutes
 on failure. Zerus reads the local catalog every five seconds without SSH. Offline
 members catch up later. Independent fields merge; conflicts remain in the Swarm
-review UI. Deletion records prevent old replicas from resurrecting data; this
-version does not prune old journal records.
+review UI. A session's missing/Inbox placement is a fallback: a concurrent choice
+of one known live concrete project wins without review, and identical concrete
+choices coalesce. A newer explicit move to Inbox or unassignment still wins by
+causal identity. Different concrete projects and unknown/deleted project targets
+remain reviewable; project mappings are applied before join comparisons. Local
+passive observations never publish membership, including during import. All
+underlying versions are retained, so the next explicit choice consumes every
+observed candidate. Project/folder deletion records still prevent resurrection;
+this version does not prune old journal records.
 
 The worker records its version and process in `~/.config/hgs/swarm/worker.json`
 and exits when an upgrade replaces its executable, so `Restart=always` or launchd
@@ -2167,6 +2210,18 @@ IDs remain separate. Local results appear first; remote profiles arrive
 incrementally. Known rows and selection survive refresh, failure and offline
 hosts. Limits use one current account snapshot, never the sum of machine usage.
 
+On Android, the refresh status below the toolbar remains readable after a quick
+sync. **Refresh details** lists each workspace's current read/apply stage, last
+received report and failures; retained sessions and counters stay visible when
+a read fails. Phone sync reads machine reports, while providers refresh their
+usage independently. Account cards show the machine's provider refresh state,
+saved/current report and provider update time, including after phone sync ends.
+An unavailable quota report or an expired short-lived Claude usage token does
+not mean the native account is signed out. Explicit native sign-in status takes
+precedence; older authentication problems are labelled **Last reported** when
+their report is stale or offline. Viewing accounts never refreshes Claude's
+credentials on Zerus's behalf.
+
 **Add account** creates a separate profile on the selected host and starts native
 sign-in. Default/native profiles retain existing authorization. Its agents use New
 session's rows: a large colored provider logo, the agent and what adding does.
@@ -2274,8 +2329,14 @@ background service. Select an offered `provider/model` (keyless free models are
 listed when the service offers them) and, where the model has variants, an
 effort, or retain the default model. Supported: text and voice conversations,
 queued messages, Stop, native questions and permissions, status and history,
-model and effort change, rename and forgetting the Zerus binding. Pause/resume,
-Terminal, attachments, compaction, fork and child sessions are unavailable.
+model and effort change, rename and forgetting the Zerus binding. The desktop
+Terminal tab opens OpenCode's native TUI on the existing service and conversation,
+also available as `hgs a NAME --existing --run-id RUN`. Disconnecting closes that
+client; the service and conversation keep running. Opening Terminal never starts
+or replaces a service and disables the attach client's automatic updates.
+This interactive capability is separate from pane snapshots: mobile Terminal
+snapshots remain unavailable. Pause/resume, attachments, compaction, fork and
+child sessions are unavailable.
 See [OpenCode versions, service and controls](opencode.md).
 
 From the CLI, `hgs [@host] opencode DIRECTORY --new -n TAG --model PROVIDER/MODEL`

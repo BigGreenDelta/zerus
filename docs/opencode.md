@@ -160,9 +160,14 @@ The project directory remains on the agent computer.
   256 MiB.
 - **Voice** transcripts use the same guarded send path; a refused voice message
   shows as failed, and the original audio stays in Zerus history.
+- **Terminal** on desktop opens the native OpenCode TUI on the existing service
+  and conversation. The CLI equivalent is `hgs a NAME --existing --run-id RUN`.
+  Closing the client keeps that service and conversation running; opening it
+  never starts or replaces a service and disables the client's automatic updates.
+  Mobile pane snapshots remain unavailable.
 
 Not available in this version: pause/resume (OpenCode sessions have no separate
-process to pause), Terminal, attachments, compaction, fork and child sessions
+process to pause), attachments, compaction, fork and child sessions
 (a later update).
 
 ### Delivery

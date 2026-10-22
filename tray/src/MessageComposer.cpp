@@ -380,6 +380,14 @@ void MessageComposer::setSessionKey(const QString &key)
     // Another session or none: the OpenCode picker's context ends here, also when the same one returns.
     m_openCodeContext.clear(); resetOpenCodeModels();
     m_toolbar->closePopovers(); m_preview->hide();
+    ensureDraftLoaded(key);
+    m_key = key; m_loading = true;
+    restoreDraft();
+    m_loading = false; rebuildAttachments(); updateControls(); updatePlaceholder();
+}
+
+void MessageComposer::ensureDraftLoaded(const QString &key)
+{
     if (!key.isEmpty() && !m_drafts.contains(key)) {
         m_drafts.insert(key, {}); m_loadingKeys.insert(key);
         const auto revision = m_saveRevision.value(key);
@@ -390,11 +398,9 @@ void MessageComposer::setSessionKey(const QString &key)
                 m_loading = true; restoreDraft(); m_loading = false;
                 rebuildAttachments(); updateControls(); updatePlaceholder();
             }
+            emit draftLoaded(key);
         });
     }
-    m_key = key; m_loading = true;
-    restoreDraft();
-    m_loading = false; rebuildAttachments(); updateControls(); updatePlaceholder();
 }
 
 bool MessageComposer::insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved)
@@ -614,7 +620,7 @@ void MessageComposer::deliveryFinished(const QString &key, bool ok, const QStrin
 
 void MessageComposer::renameDraft(const QString &oldKey, const QString &newKey)
 {
-    if (oldKey == newKey || !m_drafts.contains(oldKey) || isSending(oldKey) || isWaitingToSend(oldKey)
+    if (oldKey == newKey || !m_drafts.contains(oldKey) || !m_drafts.value(oldKey).storageError.isEmpty() || isSending(oldKey) || isWaitingToSend(oldKey)
         || isDraftLoading(oldKey) || isSending(newKey) || isWaitingToSend(newKey) || m_renamingKeys.contains(newKey)) return;
     const auto destination = m_drafts.value(newKey);
     if (m_drafts.contains(newKey) && (!destination.text.isEmpty() || !destination.attachments.isEmpty() || !destination.storageError.isEmpty())) {

@@ -9,8 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
 # Product baseline includes prepared inspection publication before installation.
-MODEL_SHA = "36d8d64399e3ed9dc54bc0815165c2d7d61d6b70ba33ed432682d6750bd0fd83"
-MAIN_SHA = "aeadbc12421065f20ce51957a9504e071d65f3f85321153706ebdaf6e900fdfa"
+# It also includes catalog refresh reporting and private implicit-Inbox launch
+# arguments; the probe definitions and all ten question-verification writes are unchanged.
+MODEL_SHA = "a94c04695da3626c49f1cc5a875c82f8b3893688d256c7cfa3ebf66cad9e619a"
+MAIN_SHA = "7c676d33a2218da83511697f5a597c4876b946e1c130d601c265e855b7259f4b"
 WRITERS = ["INSTALL_WAIT_PRESENTATION", "INSTALL_PRESENTATION", "PREPARE_PRESENTATION", "TERMINAL_CLOSED",
            "ACTION_RESULT", "CONNECTION_FORGOTTEN", "OPEN_SESSION", "BACK", "CLEAR_UNCONFIRMED", "INSPECT_FAILED"]
 

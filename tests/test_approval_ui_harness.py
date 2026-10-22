@@ -38,6 +38,14 @@ def module(name, path):
     return value
 
 
+def without_android_focus_diagnostics(source):
+    """Remove only the two explicitly additive failure-diagnostic regions for parent equivalence."""
+    pattern = re.compile(r'^([ ]*)# BEGIN APPROVAL_FOCUS_DIAGNOSTIC ([a-z-]+)\n[\s\S]*?'
+                         r'^\1# END APPROVAL_FOCUS_DIAGNOSTIC \2\n', re.M)
+    assert [match[2] for match in pattern.finditer(source)] == ["definition", "capture"]
+    return pattern.sub('', source)
+
+
 def finite_source_predicate(expression, values):
     """Finite source-expression stand-in only; never Kotlin/Swift compilation or native API evidence."""
     tree = ast.parse(expression.strip(), mode="eval")
@@ -1049,7 +1057,7 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertEqual(calls, [] if stage == "ownership" else ["owned-alive", "attempted-once"])
         source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
         self.assertIn('if RESULT_NAMESPACE == "approval" and instrumentation_started:', source)
-        self.assertIn('diagnostics = failure_diagnostics(run, alive, device)\n        raise', source)
+        self.assertIn('diagnostics = failure_diagnostics(run, alive, device)\n        raise', without_android_focus_diagnostics(source))
         self.assertIn('"primary_failure": primary_failure, "diagnostics": diagnostics', source)
         self.assertIn('end = time.monotonic() + 1200', source)
         self.assertIn('remaining = min(cap, end - time.monotonic() - 20)', source)
@@ -1060,6 +1068,94 @@ class ApprovalHarnessTests(unittest.TestCase):
         expected = [(event, name) for name in self.ui.CASES.split(",") for event in ("begin", "complete")]
         self.assertEqual(re.findall(r'boundary\("(begin|complete)", "([a-z_]+)"\)', fixture), expected)
         self.assertEqual(re.findall(r'cases \+= "([a-z_]+)"', fixture), self.ui.CASES.split(","))
+
+    def test_android_focus_diagnostics_project_to_exact_reviewed_driver_and_unchanged_ui(self):
+        source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
+        self.assertEqual(hashlib.sha256(without_android_focus_diagnostics(source).encode()).hexdigest(),
+                         "f71a2bfe21b1803897c3aec3297bdb29971d5c5dbb9521486b68a4405bc5f770")
+        for path, digest in {
+            "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt": "73cee450f08e33c007ad6f3188a6a69135674e2503f80ea48582ba8aa394a9f7",
+            "mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt": "beb6a3caf6ae07ca3a062f4f30286aad3b19b71427eed7c9e8d662f7d5ae85be",
+            "mobile/android/app/src/main/java/app/zerus/mobile/QuestionUi.kt": "841c0d5b2df250497b0f54ef8854574ca386e83cb735dc1a0873096d719e22a2",
+        }.items():
+            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digest, path)
+        tree = ast.parse(source)
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        handler = next(node for node in main.body if isinstance(node, ast.Try)).handlers[0]
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == "focus_failure_diagnostics"]
+        self.assertEqual(len(calls), 1)
+        guarded = next(node for node in handler.body if isinstance(node, ast.If))
+        self.assertEqual(ast.unparse(guarded.test), "RESULT_NAMESPACE == 'approval' and instrumentation_started")
+        self.assertIn(calls[0], list(ast.walk(guarded)))
+        self.assertEqual(ast.unparse(handler.body[-1]), "raise")
+
+    def test_android_focus_capture_has_one_owned_filtered_read_and_no_new_clock(self):
+        calls = []
+        device = ["/fixture/adb", "-H", "127.0.0.1", "-P", "5037", "-s", self.ui.SERIAL, "shell"]
+        def capture(name, command, cap):
+            calls.append((name, command, cap))
+            return "--------- beginning of events\n   101.613   500   501 I input_focus: [Focus entering fixture-window,reason=window-change]\n"
+        result = self.ui.focus_failure_diagnostics(capture, lambda: calls.append("owned-alive"), device)
+        self.assertEqual(result["status"], "captured")
+        self.assertEqual(result["focus_records"], 1)
+        self.assertEqual(calls, ["owned-alive", ("failure-focus-events", [*device, "logcat", "-d", "-b", "events",
+            "-v", "threadtime", "-v", "monotonic", "-v", "printable", "-t", "128", "input_focus:I", "wm_on_resume_called:I",
+            "wm_on_paused_called:I", "wm_on_stop_called:I", "wm_on_top_resumed_gained_called:I", "wm_on_top_resumed_lost_called:I", "*:S"], 5)])
+        source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
+        definition = source.split("# BEGIN APPROVAL_FOCUS_DIAGNOSTIC definition\n", 1)[1].split("# END APPROVAL_FOCUS_DIAGNOSTIC definition", 1)[0]
+        for forbidden in ("time.", "sleep(", "while ", "dumpsys", "executeShellCommand", "shell=True", "input tap", "serviceInfo", "instrumentation_result("):
+            self.assertNotIn(forbidden, definition)
+
+    def test_android_focus_parser_keeps_tail_metadata_without_claiming_an_owner(self):
+        text = ("--------- beginning of events\n"
+                "   101.481   500   501 I wm_on_resume_called: [42,app.zerus.mobile.MainActivity,RESUME,0]\n"
+                "   101.613   500   501 I input_focus: [Focus leaving fixture-window,reason=window-change]\n"
+                "   101.969   500   501 I input_focus: [Focus entering fixture-window,reason=window-change]\n")
+        result = self.ui.focus_event_observation(text)
+        self.assertEqual((result["records"], result["focus_records"], result["first_monotonic_ms"], result["last_monotonic_ms"]), (3, 2, 101481, 101969))
+        self.assertEqual(result["tags"]["wm_on_resume_called"], 1)
+        self.assertNotIn("owner", result)
+        self.assertIn("no complete-history or focus-owner claim", result["scope"])
+        for empty in ("", "--------- beginning of events\n"):
+            result = self.ui.focus_event_observation(empty)
+            self.assertEqual((result["status"], result["records"], result["focus_records"]), ("empty", 0, 0))
+
+    def test_android_focus_parser_refuses_unknown_overflow_or_reordered_metadata(self):
+        line = "   101.613   500   501 I input_focus: [Focus entering fixture-window,reason=window-change]\n"
+        self.assertEqual(self.ui.focus_event_observation(line * 128)["records"], 128)
+        for invalid in (line * 129, "x" * 65537, "x" * 1025, line.replace("input_focus", "unreviewed_tag"),
+                        line.replace(" I ", " V "), line.replace("[Focus", "\x00[Focus"), line.replace("[Focus", "Focus"),
+                        line.replace("fixture-window", "x" * 769), line + line.replace("101.613", "100.999"),
+                        line + "--------- beginning of events\n", "--------- beginning of events\n" * 2):
+            with self.subTest(invalid=invalid[:60]), self.assertRaises(AssertionError):
+                self.ui.focus_event_observation(invalid)
+
+    def test_android_focus_failure_keeps_raw_primary_error_and_attempts_each_capture_once(self):
+        source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
+        main = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        handler = copy.deepcopy(next(node for node in main.body if isinstance(node, ast.Try)).handlers[0])
+        wrapper = ast.Module(body=[ast.Try(body=[ast.Raise(exc=ast.Name(id="primary", ctx=ast.Load()))], handlers=[handler], orelse=[], finalbody=[])], type_ignores=[])
+        code = compile(ast.fix_missing_locations(wrapper), "<exact-android-failure-handler>", "exec")
+        for fault in (None, "ownership", "capture", "parse"):
+            calls = []
+            primary = RuntimeError("retained original instrumentation failure")
+            def capture(name, command, cap):
+                calls.append(name)
+                if name == "failure-logcat" or fault == "capture":
+                    raise OSError("capture unavailable")
+                return "invalid" if fault == "parse" else "   101.613   500   501 I input_focus: [Focus entering fixture-window,reason=window-change]\n"
+            def alive():
+                if fault == "ownership": raise TimeoutError("same original end")
+            namespace = dict(primary=primary, RESULT_NAMESPACE="approval", instrumentation_started=True, device=["owned-device"],
+                run=capture, alive=alive, failure_diagnostics=self.ui.failure_diagnostics, focus_failure_diagnostics=self.ui.focus_failure_diagnostics)
+            with self.subTest(fault=fault), self.assertRaises(RuntimeError) as caught:
+                exec(code, namespace)
+            self.assertIs(caught.exception, primary)
+            self.assertEqual(namespace["primary_failure"], {"error": "RuntimeError", "message": str(primary)})
+            self.assertEqual(namespace["diagnostics"]["status"], "unknown")
+            self.assertEqual(calls, [] if fault == "ownership" else ["failure-logcat", "failure-focus-events"])
+            self.assertEqual(namespace["diagnostics"]["focus"]["status"], "captured" if fault is None else "unknown")
 
     def test_ios_fixture_launch_and_cleanup_stay_inside_each_main_actor_test(self):
         ios = module("ios_approval_ui", "scripts/ci/ios-approval-ui.py")

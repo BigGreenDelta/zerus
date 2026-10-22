@@ -37,6 +37,7 @@ signals:
     void groupToggled(const QString &group);
     void childrenToggled(const QString &parentKey);
     void rowExpanded(const QString &key);
+    void rowCompacted(const QString &key);
     void sessionMoved(const QString &identity, const QString &group, const QString &before);
     void groupMoved(const QString &group, const QString &before);
     void dragFinished();
@@ -59,6 +60,10 @@ protected:
     bool viewportEvent(QEvent *) override;
     bool event(QEvent *) override;
 private:
+    bool rangeSelectable(const QListWidgetItem *item) const;
+    int rangeRow(const QString &key) const;
+    void selectRange(int targetRow, bool additive);
+    QString m_rangeAnchor, m_rangeCursor;
     void scheduleRowExpandButtons();
     QHash<QPersistentModelIndex, QToolButton *> m_rowExpandButtons;
     bool m_rowExpandButtonsPending = false;

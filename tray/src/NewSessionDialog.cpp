@@ -103,6 +103,30 @@ void markCatalogFavorite(QJsonObject &catalog,const QString &value,bool favorite
 MachinePlatform::Style folderStyle(const FleetState &fleet,const QString &host) {
     return MachinePlatform::of(fleet.local().metrics,host.isEmpty());
 }
+// Local Windows folders do not enter the POSIX Swarm catalog. Their saved
+// membership is still evidence when the selected computer confirms that exact
+// canonical path. Never turn a lexical prefix or an unverified alias into it.
+QString exactSavedProject(const SessionOrganization &projects,const FleetState &fleet,
+    const QString &host,const QString &canonical)
+{
+    if(projects.groups().size()>512)return {};
+    const auto style=folderStyle(fleet,host);
+    QString found;int folders=0;
+    for(const auto &project:projects.groups()){
+        for(const auto &folder:project.folders){
+            if(++folders>512)return {};
+            if(project.id=="ungrouped"||project.id.isEmpty()
+                ||(folder.machine==fleet.local().host?QString():folder.machine)!=host
+                ||!MachinePlatform::absolute(folder.path,style)
+                ||!MachinePlatform::same(folder.path,MachinePlatform::clean(folder.path,style),style)
+                ||!MachinePlatform::same(folder.path,canonical,style))continue;
+            // Even an inaccessible second project makes the placement ambiguous.
+            if(!found.isEmpty()&&found!=project.id)return {};
+            found=project.id;
+        }
+    }
+    return found;
+}
 }
 NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &fleet,const QString &selectedHost,
     const QString &agent,const QString &project,QWidget *parent,AccountUsageStore *usage)
@@ -214,6 +238,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     connect(buttons,&QDialogButtonBox::rejected,this,&QDialog::reject);connect(m_start,&QPushButton::clicked,this,&NewSessionDialog::start);
     connect(m_manage,&QToolButton::clicked,this,[this]{const auto id=m_project->currentData().toString();reject();emit projectFoldersRequested(id);});
     connect(m_openMachines,&QPushButton::clicked,this,[this]{if(m_creation)return;reject();emit machinesRequested();});
+    connect(m_project,&QComboBox::activated,this,[this]{m_projectExplicit=true;updateForm();});
     connect(m_project,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;loadMachines();loadFolders();});
     connect(m_machine,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;m_accountPreset=false;loadFolders();});
     connect(m_browse,&QPushButton::clicked,this,&NewSessionDialog::browseFolder);
@@ -259,9 +284,25 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         if(m_startWithWorktree&&!automaticWorktreeAvailable()){
             m_error->setText(tr("The repository could not be confirmed. Choose a working folder again."));updateForm();return;
         }
-        // Listed folders and worktrees of them already belong to the project.
+        // Only an untouched Inbox is a fallback. The owning computer confirmed
+        // this exact directory; a selected project (including Inbox) always wins.
+        QString inferredId;
+        if(data.contains("project_inference")){
+            const auto inferred=data.value("project_inference").toObject();
+            if(inferred.value("schema").toInt()==1&&!m_projectCatalogSwarm.isEmpty()
+                &&inferred.value("swarm_id").toString()==m_projectCatalogSwarm)
+                inferredId=inferred.value("project_id").toString();
+            // A foreign or invalid hint never falls back to an unrelated local
+            // project with the same ID or path. Joining remains explicit.
+        }else if(!m_projectExplicit&&m_project->currentData()=="ungrouped")
+            inferredId=exactSavedProject(m_projects,m_fleet,host(),path);
+        const int inferredIndex=m_project->findData(inferredId);
+        const bool infer=!m_projectExplicit&&m_project->currentData()=="ungrouped"
+            &&!inferredId.isEmpty()&&inferredId!="ungrouped"&&inferredIndex>=0;
+        if(infer){const QSignalBlocker block(m_project);m_project->setCurrentIndex(inferredIndex);}
+        // Listed folders and verified worktrees already belong to the project.
         // Decide before creation: the selection then moves to the new worktree.
-        const auto addFolder=m_folder->currentData().toString().isEmpty()&&!projectWorktree(m_folder->currentData(Qt::UserRole+2).toString())?path:QString();
+        const auto addFolder=!infer&&m_folder->currentData().toString().isEmpty()&&!projectWorktree(m_folder->currentData(Qt::UserRole+2).toString())?path:QString();
         if(m_startWithWorktree){
             m_creationCatalog=m_worktreeCatalog;m_creationFolder=addFolder;m_error->setText(tr("Creating worktree…"));
             m_creation=m_client.createWorktree(host(),path,m_creationCatalog["common_dir"].toString(),m_generatedBranch,"HEAD",automaticWorktreePath());updateForm();
@@ -490,6 +531,7 @@ void NewSessionDialog::updateForm()
     m_preview->setStyleSheet(outside?QStringLiteral("color: %1;").arg(palette().color(QPalette::Window).lightness()<128?"#f0b65a":"#9b6300"):QString());
     m_preview->setText(m_prefillRequest?tr("Checking the session's main working folder…"):
         path.isEmpty()?tr("Browse to choose a folder on this computer."):
+        implicitInbox()?tr("A matching project is detected automatically.\nOtherwise this session stays in Inbox."):
         outside?tr("This folder is outside the project.\nStarting here will add it to this project."):
         QString());
     m_preview->setToolTip(m_preview->text());m_preview->ensurePolished();m_preview->setFixedHeight(2*m_preview->fontMetrics().lineSpacing());
@@ -554,6 +596,10 @@ QString NewSessionDialog::automaticWorktreePath() const
 {
     const QFileInfo root(m_worktreeCatalog["selected_root"].toString());
     return QDir(root.path()).filePath(root.fileName()+'-'+m_generatedBranch);
+}
+bool NewSessionDialog::implicitInbox() const
+{
+    return !m_projectExplicit && m_project->currentData()=="ungrouped";
 }
 void NewSessionDialog::launch(const QString &target,const QString &addFolder)
 {

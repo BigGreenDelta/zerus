@@ -532,6 +532,67 @@ class OpenCodeNative(unittest.TestCase):
         self.assertFalse(self.registration_path().exists())
         self.assertEqual(self.native_processes(), [])
 
+    def test_native_terminal_attaches_without_starting_or_stopping_the_service(self):
+        import fcntl
+        import pty
+        import select
+        import struct
+        import termios
+        binding = self.create()
+        name, run = binding['name'], binding['run_id']
+        registration = self.registration()
+        refused = self.hgs(['a', name, '--existing', '--run-id', str(uuid.uuid4())], success=False)
+        self.assertIn('changed', refused.stderr.lower())
+        master, slave = pty.openpty()
+        child = None
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 120, 0, 0))
+            environment = {**self.env, 'TERM': 'xterm-256color', 'COLORTERM': 'truecolor', 'HGS_TAB': '0'}
+            child = subprocess.Popen([str(HGS), 'a', name, '--existing', '--run-id', run], env=environment,
+                                     cwd=self.workspace, stdin=slave, stdout=slave, stderr=slave,
+                                     start_new_session=True)
+            os.close(slave); slave = -1
+            output = bytearray(); end = time.monotonic() + 25
+            title = self.session(binding['conversation_id'])['title']
+            text = ''
+            while time.monotonic() < end and child.poll() is None:
+                if select.select([master], [], [], min(0.2, max(0, end - time.monotonic())))[0]:
+                    try:
+                        chunk = os.read(master, min(8192, 262144 - len(output)))
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                    self.assertLess(len(output), 262144, 'native TUI output exceeded the fixture cap')
+                    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', output.decode('utf-8', errors='replace'))
+                    if title in text:
+                        break
+            self.assertIsNone(child.poll(), text[-2000:])
+            self.assertIn(title, text, 'native TUI did not render the existing conversation')
+            self.assertEqual(self.registration(), registration)
+            inspected = self.hgs(['inspect', name])
+            self.assertEqual((inspected['run_id'], inspected['conversation_id']),
+                             (run, binding['conversation_id']))
+            self.assertEqual(len(self.api('GET', '/api/session/' + binding['conversation_id'] + '/message')[1]['data']), 0)
+            if registration.get('password'):
+                self.assertNotIn(registration['password'], text)
+        finally:
+            if slave >= 0:
+                os.close(slave)
+            if child is not None:
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        child.kill(); child.wait(timeout=5)
+                else:
+                    child.wait()
+            os.close(master)
+        self.assertEqual(self.registration(), registration)
+        self.assertEqual(self.session(binding['conversation_id'])['id'], binding['conversation_id'])
+
     def test_02_launch_starts_service_with_own_ids_and_history(self):
         self.stop_service()
         # A registration left by a service that is gone does not block the start.
@@ -552,6 +613,7 @@ class OpenCodeNative(unittest.TestCase):
         self.assertRegex(b['conversation_id'], r'^ses_[A-Za-z0-9]{26}$')
         self.assertEqual(b['launch_id'], launch_id)
         self.assertFalse(b['terminal_supported'])
+        self.assertTrue(b['terminal_attach_supported'])
         self.assertFalse(b['native_ui_available'])
         self.assertEqual((b['state'], b['phase'], b['settings_model']), ('running', 'idle', 'fixture/local'))
         session = self.session(b['conversation_id'])

@@ -156,6 +156,9 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.archivedAt = obj.value(QStringLiteral("archived_at")).toDouble();
     s.resumable = obj.value(QStringLiteral("resumable")).toBool();
     s.terminalReported = obj.value("terminal_supported").isBool();
+    s.terminalAttachReported = obj.value("terminal_attach_supported").isBool();
+    s.terminalAttachSupported = obj.value("terminal_attach_supported").toBool();
+    s.terminalAttachReason = obj.value("terminal_attach_reason").toString();
     s.terminalSupported = obj.value("terminal_supported").toBool(s.cmd != "dsh" && s.cmd != "opencode");
     s.bulkLifecycleSupported = obj.value("bulk_lifecycle_supported").toBool(s.cmd != "opencode");
     s.terminalReason = obj.value("terminal_reason").toString();

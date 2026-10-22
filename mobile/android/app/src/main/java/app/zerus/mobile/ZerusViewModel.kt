@@ -782,6 +782,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var detailBusy by mutableStateOf(false); private set
     var catalogBusy by mutableStateOf(false); private set
     var catalogProgress by mutableStateOf(false); private set
+    var catalogRefresh by mutableStateOf(CatalogRefreshState()); private set
     var detailProgress by mutableStateOf(false); private set
     private val catalogGate = LoadingGate(android.os.SystemClock::elapsedRealtime)
     private val detailGate = LoadingGate(android.os.SystemClock::elapsedRealtime)
@@ -1374,12 +1375,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             } finally { actionFlights-=action.requestId;worktreeSubmitting=false }
         }
     }
-    fun launchSession(machine:MachineKey,agent:String,directory:String,tag:String,accountId:String?=null,expectedCatalog:String=launchCatalogSignature(),projectId:String="",worktrees:JSONObject?=null,model:String="",effort:String="") {
+    fun launchSession(machine:MachineKey,agent:String,directory:String,tag:String,accountId:String?=null,expectedCatalog:String=launchCatalogSignature(),projectId:String="",worktrees:JSONObject?=null,model:String="",effort:String="",implicitInbox:Boolean=false) {
         val reason=launchReason(machine);if(reason.isNotBlank()) { launchError=reason;return }
         if(launchBusy || !launchVisible || launchMachine != machine || launchCatalogLoading || launchDirectoryLoading || launchWorktreeLoading || expectedCatalog != launchCatalogEvidence) { launchError="The creation details changed. Review the current choices.";return }
         val catalog=launchCatalogState ?: return
         if(!LaunchPresentation.selectedFolder(launchDirectoryState,directory)) { launchError="Select a folder from the current native browser.";return }
-        val args=try { LaunchPresentation.arguments(catalog,agent,directory,tag,accountId,projectId,worktrees,model,effort,launchEffortSupported(machine)) } catch(e:Exception) { launchError=e.message.orEmpty();return }
+        val args=try { LaunchPresentation.arguments(catalog,agent,directory,tag,accountId,projectId,worktrees,model,effort,launchEffortSupported(machine),implicitInbox) } catch(e:Exception) { launchError=e.message.orEmpty();return }
         val connection=connections.find { it.id == machine.connectionId } ?: return
         val action=SessionAction(UUID.randomUUID().toString(),Target(machine.computerId,"","","",machine.connectionId),"launch",args.toString())
         val generation=launchGeneration;launchSubmitting=true;actionFlights+=action.requestId;launchError=""
@@ -1414,7 +1415,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
      * Desktop Auto: create the generated sibling worktree, verify its folder and catalog, then launch there.
      * Every step is pinned to this form; a failed or unknown creation is never replayed and never launches.
      */
-    fun launchWithWorktree(machine:MachineKey,agent:String,folder:String,tag:String,accountId:String?,expectedCatalog:String,projectId:String,model:String="",effort:String="") {
+    fun launchWithWorktree(machine:MachineKey,agent:String,folder:String,tag:String,accountId:String?,expectedCatalog:String,projectId:String,model:String="",effort:String="",implicitInbox:Boolean=false) {
         val reason=worktreeReason(machine);if(reason.isNotBlank()) { launchError=reason;return }
         if(launchBusy || !launchVisible || launchMachine != machine || launchCatalogLoading || launchDirectoryLoading || launchWorktreeLoading || expectedCatalog != launchCatalogEvidence) { launchError="The creation details changed. Review the current choices.";return }
         // One generated branch per form: after any creation or failed attempt, only direct launches remain.
@@ -1426,7 +1427,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val branch=launchGeneratedName
         val destination=WorktreePresentation.automaticPath(evidence,branch)
         // Everything the session needs is checked before anything is created.
-        try { LaunchPresentation.arguments(catalog,agent,destination,tag,accountId,projectId,WorktreePresentation.withCreated(evidence,destination),model,effort,launchEffortSupported(machine)) } catch(e:Exception) { launchError=e.message.orEmpty();return }
+        try { LaunchPresentation.arguments(catalog,agent,destination,tag,accountId,projectId,WorktreePresentation.withCreated(evidence,destination),model,effort,launchEffortSupported(machine),implicitInbox) } catch(e:Exception) { launchError=e.message.orEmpty();return }
         val (creation,arguments)=try { worktreeAction(machine,evidence,branch,"HEAD",destination) } catch(e:Exception) { launchError=e.message.orEmpty();return }
         val connection=connections.find { it.id == machine.connectionId } ?: return
         val generation=launchGeneration
@@ -1457,7 +1458,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(blocked.isNotBlank() || expectedCatalog != launchCatalogEvidence) { launchError="Worktree created at $created. ${blocked.ifBlank { "The creation details changed." }} Start the session there when ready.";return@launch }
                 val project=LaunchPresentation.projects(catalog).find { it.id == projectId }
                 val placement=WorktreePresentation.placement(fresh,launchCreatedEvidence,project,created)
-                val args=try { LaunchPresentation.arguments(catalog,agent,created,tag,accountId,projectId,placement,model,effort,launchEffortSupported(machine)) }
+                val args=try { LaunchPresentation.arguments(catalog,agent,created,tag,accountId,projectId,placement,model,effort,launchEffortSupported(machine),implicitInbox) }
                     catch(e:Exception) { launchError="Worktree created at $created. ${e.message.orEmpty()}";return@launch }
                 val launch=SessionAction(UUID.randomUUID().toString(),Target(machine.computerId,"","","",machine.connectionId),"launch",args.toString())
                 launchStage="launching";launchSubmitting=true;actionFlights+=launch.requestId
@@ -2174,20 +2175,24 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val operation = start.operation
         val originalConnections = connections
         catalogBusy = true
+        catalogRefresh=catalogRefresh.begin(operation.id,originalConnections.map { it.id to it.displayName })
         catalogTimer?.cancel()
         catalogTimer = viewModelScope.launch {
             delay(catalogGate.remaining(operation.id))
             if (catalogGate.owns(operation.id)) catalogProgress = catalogGate.visible()
         }
         catalogJob = viewModelScope.launch {
-        pushStatuses = withContext(Dispatchers.IO) { connections.associate { it.id to store.pushStatus(it.id) } }
         val newSessions = mutableListOf<Session>(); val newMachines = mutableListOf<Machine>(); val newAccounts=mutableListOf<AccountCatalog>()
         val successfulConnections=mutableSetOf<String>()
+        var published=false
         val newProjects = mutableListOf<ProjectSummary>(); val newOperations = mutableMapOf<MachineKey, Set<String>>(); val warnings = mutableListOf<String>()
         try {
+            pushStatuses = withContext(Dispatchers.IO) { originalConnections.associate { it.id to store.pushStatus(it.id) } }
             for (connection in originalConnections) {
                 try {
+                    if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
                     if (explicit || connection.id !in relayOperations) {
+                        catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Capabilities)
                         try {
                             val capabilities = api.capabilities(connection)
                             val operations = OperationCapabilities.parse(capabilities,requireVersion=false)
@@ -2201,6 +2206,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                                 relayOperations = relayOperations - connection.id
                         }
                     }
+                    if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
+                    catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Reports)
                     val computers = api.computers(connection)
                     val retained=catalogSessions;val actions=messageState.sessionActions
                     val prepared = withContext(Dispatchers.Default) {
@@ -2212,10 +2219,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     val catalog = prepared.projects
                     newSessions += catalog.sessions; newProjects += catalog.projects; warnings += catalog.unavailableComputers
                     successfulConnections += connection.id
+                    catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Applying)
                     if (catalogGate.owns(operation.id) && connections == originalConnections && catalogErrorOwner == connection.id) error = ""
                 } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { if (catalogGate.owns(operation.id) && connections == originalConnections && selected == null) {
-                    error = "${connection.displayName}: ${ReadFailure.message(e, "sessions")}"; catalogErrorOwner = connection.id
+                catch (e: Exception) { if (catalogGate.owns(operation.id) && connections == originalConnections) {
+                    catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Failed)
+                    if(selected==null) { error = "${connection.displayName}: ${ReadFailure.message(e, "sessions")}"; catalogErrorOwner = connection.id }
                 } }
             }
             if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
@@ -2253,8 +2262,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     pendingNotification = null; open(it)
                 }
             }
+            published=connections==originalConnections && catalogGate.owns(operation.id)
         } finally {
             if (catalogGate.finish(operation.id)) {
+                catalogRefresh=catalogRefresh.finish(operation.id,if(published) successfulConnections else emptySet(),System.currentTimeMillis()/1000.0)
                 catalogTimer?.cancel(); catalogProgress = false; catalogBusy = false
                 if (connections != originalConnections) refresh()
             }

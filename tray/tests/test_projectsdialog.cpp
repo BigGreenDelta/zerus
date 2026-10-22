@@ -26,6 +26,7 @@
 class TestProjectsDialog : public QObject {
     Q_OBJECT
 private slots:
+    void projectConnectionsGuideExplainsMissingCatalogsWithoutJoining();
     void worktreeOverviewIsVisibleWithoutSelectingAProjectFolder();
     void projectColorChangesRequireApply_data();
     void projectColorChangesRequireApply();
@@ -49,6 +50,29 @@ private slots:
     void warnsOnDotOrColon();
     void nameDefaultsToBasename();
 };
+
+void TestProjectsDialog::projectConnectionsGuideExplainsMissingCatalogsWithoutJoining()
+{
+    HgsClient client("/nonexistent/hgs"); SessionOrganization projects;
+    projects.markImported("desktop"); projects.markImported("laptop"); projects.markImported("office");
+    ProjectsDialog dialog(&client,nullptr,false,&projects);
+    FleetState fleet; BoxState local; local.host="desktop"; local.ok=true; fleet.setLocal(local,1);
+    for(const auto &alias:{"laptop","office"}){BoxState peer;peer.host=alias;peer.ok=true;fleet.setPeer(peer,1);}
+    dialog.setFleet(fleet);dialog.show();
+    auto *guide=dialog.findChild<QWidget *>("projectConnectionGuide");
+    auto *hint=dialog.findChild<QLabel *>("projectConnectionHint");
+    auto *connect=dialog.findChild<QPushButton *>("connectProjectCatalogs");
+    QVERIFY(guide);QVERIFY(connect);QVERIFY(guide->isHidden()); // unknown is not unjoined proof
+    QSignalSpy requested(&dialog,&ProjectsDialog::connectSwarmRequested);
+    QSignalSpy changed(&dialog,&ProjectsDialog::organizationChanged);
+    dialog.setSwarmSnapshot({{"node_id","desktop-id"},{"peers",QJsonObject{{"office",QJsonObject{{"node","office-id"},{"error","offline"}}}}}});
+    QVERIFY(!guide->isHidden());QVERIFY(hint->text().contains("laptop"));QVERIFY(!hint->text().contains("office"));
+    QVERIFY(hint->text().contains("Preview"));QVERIFY(hint->text().contains("explicitly join"));
+    connect->click();QCOMPARE(requested.size(),1);QCOMPARE(requested[0][0].toString(),QString("laptop"));
+    QCOMPARE(changed.size(),0); // navigation is not enrollment or membership mutation
+    dialog.setSwarmSnapshot({{"node_id","desktop-id"},{"peers",QJsonObject{{"laptop",QJsonObject{}},{"office",QJsonObject{}}}}});
+    QVERIFY(guide->isHidden());QCOMPARE(changed.size(),0);
+}
 
 void TestProjectsDialog::projectColorChangesRequireApply_data()
 {

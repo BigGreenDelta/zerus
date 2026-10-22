@@ -111,6 +111,16 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     connect(swarm,&QPushButton::clicked,this,&ProjectsDialog::swarmRequested);
     auto *hint = new QLabel(tr("Organize sessions and folders across your computers. A folder can be used by several projects."));
     hint->setWordWrap(true); hint->setObjectName("muted"); root->addWidget(hint);
+    m_swarmConnectionPanel = new QWidget; m_swarmConnectionPanel->setObjectName("projectConnectionGuide");
+    auto *connectionGuide = new QHBoxLayout(m_swarmConnectionPanel); connectionGuide->setContentsMargins(0,0,0,0);
+    m_swarmConnectionHint = new QLabel; m_swarmConnectionHint->setObjectName("projectConnectionHint");
+    m_swarmConnectionHint->setTextFormat(Qt::PlainText); m_swarmConnectionHint->setWordWrap(true); connectionGuide->addWidget(m_swarmConnectionHint,1);
+    m_connectSwarm = new QPushButton(tr("Connect project catalogs…")); m_connectSwarm->setObjectName("connectProjectCatalogs");
+    m_connectSwarm->setAutoDefault(false); connectionGuide->addWidget(m_connectSwarm); root->addWidget(m_swarmConnectionPanel);
+    connect(m_connectSwarm,&QPushButton::clicked,this,[this]{
+        if (!m_unconnectedComputers.isEmpty()) emit connectSwarmRequested(m_unconnectedComputers.first());
+    });
+    m_swarmConnectionPanel->hide();
     auto *catalogRow=new QHBoxLayout;
     m_allProjects=new QCheckBox(tr("All swarm projects"));m_allProjects->setObjectName("allSwarmProjects");
     m_allProjects->setToolTip(tr("Include projects on computers without a configured connection here."));
@@ -230,6 +240,23 @@ void ProjectsDialog::setSwarmStatus(const QString &text,bool error)
     m_swarmStatus->setText(text);m_swarmStatus->setToolTip(text);
     m_swarmStatus->setStyleSheet(error?QStringLiteral("color: #db9f42;"):QString());
 }
+void ProjectsDialog::setSwarmSnapshot(const QJsonObject &snapshot)
+{
+    m_swarmSnapshot = snapshot; updateSwarmConnections();
+}
+void ProjectsDialog::updateSwarmConnections()
+{
+    m_unconnectedComputers.clear();
+    const auto peers = m_swarmSnapshot.value("peers").toObject();
+    // A configured SSH connection permits session access; it does not join
+    // independent project catalogs. Only the local swarm snapshot proves that.
+    for (const auto &computer : m_fleet.peerNames())
+        if (!peers.contains(computer)) m_unconnectedComputers.append(computer);
+    const bool known = !m_swarmSnapshot.value("node_id").toString().isEmpty();
+    m_swarmConnectionPanel->setVisible(known && !m_unconnectedComputers.isEmpty());
+    m_connectSwarm->setEnabled(known && !m_unconnectedComputers.isEmpty());
+    m_swarmConnectionHint->setText(tr("Session connections for %1 do not share project catalogs yet. Preview the other catalog, match projects, then explicitly join to share their grouping.").arg(m_unconnectedComputers.join(", ")));
+}
 void ProjectsDialog::refresh()
 {
     if (m_worktreeOverview) m_worktreeOverview->setContext(*m_projects, m_fleet, m_allProjects->isChecked());
@@ -289,7 +316,7 @@ void ProjectsDialog::selectProject(const QString &id)
 void ProjectsDialog::selectHost(const QString &host) { m_host=host; refresh(); }
 void ProjectsDialog::setFleet(const FleetState &fleet)
 {
-    m_fleet=fleet;
+    m_fleet=fleet; updateSwarmConnections();
     if (m_worktreeOverview) m_worktreeOverview->setContext(*m_projects, m_fleet, m_allProjects->isChecked());
     updateFolderActions();
     const auto request=[this](const QString &host,const QString &machine,bool online){

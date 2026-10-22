@@ -10,6 +10,8 @@ mod history;
 #[cfg_attr(not(unix), allow(dead_code))]
 mod providers;
 mod service;
+mod terminal;
+pub(crate) use terminal::attach;
 #[cfg_attr(not(unix), allow(dead_code))]
 mod shortlist;
 #[cfg(unix)]
@@ -467,7 +469,11 @@ pub(crate) fn launch(
     // attempt so one launch never has two identities.
     record["creation_body"] = body;
     save(&record)?;
-    finish_creation(&service, record, true)
+    finish_creation(&service, record, true)?;
+    if let Ok(config) = crate::config::Config::load() {
+        crate::swarm::infer_new_session(&config, name, &cwd);
+    }
+    Ok(())
 }
 fn creation_body(record: &Value) -> Value {
     let name = string(record, "name");
@@ -635,7 +641,10 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
         "last_event_at":session["time"]["updated"].as_f64().unwrap_or(0.0)/1000.0,"turn_started":turn_started,"account_id":"native-opencode","account_home":record["agent_home"],
         "model":model["id"],"model_provider":model["providerID"],"settings_model":settings_model,"effort":effort});
     let controls = json!({"send_available":idle,"send_supported":idle,"settings_change_supported":idle && !active,"interrupt_supported":available && active,
-        "terminal_supported":false,"terminal_reason":backend::OPENCODE_TERMINAL_REASON.text(),"native_ui_available":false,"bulk_lifecycle_supported":false,"attachments_supported":false,
+        "terminal_supported":false,"terminal_reason":backend::OPENCODE_TERMINAL_REASON.text(),
+        "terminal_attach_supported":cfg!(unix) && available && record["service"] == "opencode2",
+        "terminal_attach_reason":if available { "" } else { "Refresh this session after its OpenCode service reconnects." },
+        "native_ui_available":false,"bulk_lifecycle_supported":false,"attachments_supported":false,
         "clear_context_supported":false,"clear_context_reason":"OpenCode context reset is not available in this adapter",
         "compact_context_supported":false,"compact_context_reason":"OpenCode compaction arrives in a later update",
         "allowed_actions":allowed,"action_reasons":{"pause":"OpenCode sessions have no separate process to pause","resume":"OpenCode sessions have no separate process to pause",

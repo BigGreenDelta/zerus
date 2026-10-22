@@ -29,6 +29,9 @@ public:
     void selectPath(const QString &path, bool automaticWorktree = true);
     void prefillSessionFolder(const QString &path, const QString &canonicalPath = {});
     void selectAccount(const QString &account);
+    void setProjectExplicit(bool explicitChoice) { m_projectExplicit = explicitChoice; }
+    bool implicitInbox() const;
+    void setProjectCatalogSwarm(const QString &swarm) { m_projectCatalogSwarm = swarm; }
     void reject() override;
 signals:
     // addFolder: the confirmed folder outside the project that joins it once the
@@ -83,11 +86,12 @@ private:
     AccountUsageStore *m_usageStore;
     FleetState m_fleet;
     SessionOrganization m_projects;
-    QString m_initialProject,m_initialHost,m_accountHost;
+    QString m_initialProject,m_initialHost,m_accountHost,m_projectCatalogSwarm;
     QString m_preferredAccount;
     QString m_preferredAgent;
     QStringList m_agents;
     bool m_accountPreset=false;
+    bool m_projectExplicit=false;
     bool m_accountCatalogLoaded=false;
     // Rows group the catalog when it arrives; later limits never regroup them.
     bool m_regroupAccounts=true,m_forceUsage=false;
