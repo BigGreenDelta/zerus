@@ -30,8 +30,8 @@ class NativeHarness(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         version = subprocess.check_output([DSH, '--version'], text=True).strip()
-        if version != '0.2.0-rc.2':
-            raise unittest.SkipTest('contract is pinned to official 0.2.0-rc.2')
+        if version != '0.2.1-rc.2':
+            raise unittest.SkipTest('contract is pinned to official 0.2.1-rc.2')
         cls.temp = tempfile.TemporaryDirectory(prefix='hgs-dsh-', dir='/tmp')
         cls.root = Path(cls.temp.name)
         cls.home = cls.root / 'native'
@@ -56,7 +56,6 @@ class NativeHarness(unittest.TestCase):
             bridge.write_text(source)
         patch = [
             {'id': 'llm-deepseek', 'disabled': True},
-            {'id': 'tool-subagent', 'config': {'backgroundMode': 'continuable'}},
             {'id': 'agent-default-model', 'config': {'provider': 'hgs-test', 'model': 'test-a'}},
             {'insert': [
                 {'id': 'hgs-test-model', 'name': str(REPO / 'tests/fixtures/dsh-model.mjs'), 'config': {'holds': str(cls.root / 'holds')}},
@@ -64,9 +63,11 @@ class NativeHarness(unittest.TestCase):
             ]},
         ]
         if getattr(cls, 'SCHEDULE_BUNDLE', False):
-            # The rows of the official optional bundle; shipped profiles omit them.
-            patch[-1]['insert'] += [{'id': 'time-context', 'name': '@deepseek-ai/dsh-time-context'},
-                                    {'id': 'schedule', 'name': '@deepseek-ai/dsh-schedule'}]
+            # The web bundle includes the Schedule plugin; its time context is optional.
+            patch[-1]['insert'] += [{'id': 'time-context', 'name': '@deepseek-ai/dsh-time-context'}]
+        else:
+            # A profile can still disable it; the other suites keep that profile.
+            patch.append({'id': 'schedule', 'disabled': True})
         overlay = cls.root / 'patch.json'
         overlay.write_text(json.dumps(patch))
         # hgs ls and the recovery worker also list tmux sessions. An existing
@@ -130,8 +131,8 @@ class NativeHarness(unittest.TestCase):
         return {'request_id': str(uuid.uuid4()), 'expected_run_id': binding['run_id'],
                 'expected_conversation_id': binding['conversation_id'], **fields}
 
-    def wait(self, predicate):
-        until = time.monotonic() + 15
+    def wait(self, predicate, timeout=15):
+        until = time.monotonic() + timeout
         while time.monotonic() < until:
             value = predicate()
             if value:
@@ -385,7 +386,9 @@ class NativeHarness(unittest.TestCase):
             data=json.loads(result.stdout)
             return data if any(e['type']=='AgentMessage' for e in data['events']) else None
         child_data=self.wait(child_events)
-        self.assertTrue(child_data['read_only'])
+        # Children are continuable: the live parent forwards messages to them.
+        self.assertEqual(child_data['child_mode'],'continuable')
+        self.assertFalse(child_data['read_only']);self.assertTrue(child_data['send_supported'])
         self.assertEqual(child_data['parent_conversation_id'],parent['conversation_id'])
         self.assertNotIn('PRIVATE_TEST_REASONING',json.dumps(child_data))
         with self.assertRaises(RuntimeError):
@@ -404,9 +407,9 @@ class NativeHarness(unittest.TestCase):
         self.rpc('interrupt',{'sessionId':parent['conversation_id'],
             'generation':running['host_generation'],'turnStarted':running['turn_started']})
 
-    def test_starting_child_has_no_history_until_it_records_its_descriptor(self):
-        # The parent catalogs a one-shot child before its first step records the
-        # descriptor after a durability checkpoint. The fixture holds that step.
+    def test_starting_child_has_no_history_until_its_first_step(self):
+        # The engine records a child's descriptor when it creates the child, so a
+        # child whose first step the fixture holds already accepts steering.
         parent,other=self.create(),self.create();hold='HOLD_CHILD_'+uuid.uuid4().hex
         def child_inspect(child):
             result=subprocess.run([str(HGS),'inspect',parent['name'],'--agent',child],env=self.env,text=True,capture_output=True,timeout=35)
@@ -416,7 +419,7 @@ class NativeHarness(unittest.TestCase):
             data=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'] else None)
             child=next(iter(data['subagents']))
             starting=child_inspect(child)
-            self.assertEqual(starting['events'],[]);self.assertFalse(starting['send_supported'])
+            self.assertEqual(starting['events'],[]);self.assertTrue(starting['send_supported'])
             self.assertEqual(starting['parent_conversation_id'],parent['conversation_id'])
             working=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'][child]['state']=='working' else None)
             self.assertEqual(working['subagent_active_count'],1)
@@ -428,34 +431,34 @@ class NativeHarness(unittest.TestCase):
         done=self.wait(lambda: next((e for e in child_inspect(child)['events'] if e['type']=='AgentMessage'),None))
         self.assertIn(hold,done['detail'])
 
-    def test_child_cancelled_before_its_first_step_stays_listed_and_empty(self):
-        # A one-shot child cancelled before its first step never records its
-        # descriptor, and the parent's catalog keeps it after it is stored.
-        parent,other=self.create(),self.create();hold='UNSTARTED_CHILD_'+uuid.uuid4().hex
-        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
-        self.wait(lambda:(self.root/'holds'/(hold+'.waiting')).exists())
-        running=self.wait(lambda: d if (d:=self.cli('inspect',parent)).get('interrupt_supported') and d['subagents'] else None)
-        child=next(iter(running['subagents']))
-        self.rpc('interrupt',{'sessionId':parent['conversation_id'],
-            'generation':running['host_generation'],'turnStarted':running['turn_started']})
-        self.wait(lambda: any(r['sessionId']==child and not r['agentAvailable'] for r in self.rpc('list')['items']))
+    def test_parent_interrupt_leaves_its_child_running(self):
+        # Children run independently of the turn that created them: stopping the
+        # parent ends its turn, while the child keeps its own work and catalog entry.
+        # The fixture keeps the parent's turn waiting so the interrupt meets it.
+        parent,other=self.create(),self.create();hold='HOLD_CHILD_'+uuid.uuid4().hex
+        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold+' INTERRUPT_WAIT_FIXTURE',attachments=[]))
+        try:
+            self.wait(lambda:(self.root/'holds'/(hold+'.waiting')).exists(),timeout=30)
+            running=self.wait(lambda: d if (d:=self.cli('inspect',parent)).get('interrupt_supported') and d['subagents'] else None)
+            child=next(iter(running['subagents']))
+            self.rpc('interrupt',{'sessionId':parent['conversation_id'],
+                'generation':running['host_generation'],'turnStarted':running['turn_started']})
+            stopped=self.wait(lambda: d if (d:=self.cli('inspect',parent))['phase']!='working' or not d['interrupt_supported'] else None)
+            self.assertEqual(stopped['subagents'][child]['state'],'working')
+            self.assertEqual(stopped['subagent_active_count'],1)
+            row=next(r for r in self.rpc('list')['items'] if r['sessionId']==child)
+            self.assertTrue(row['agentAvailable']);self.assertTrue(row['running'])
+            with self.assertRaises(RuntimeError):
+                self.rpc('inspect',{'sessionId':other['conversation_id'],'agentId':child})
+        finally:
+            (self.root/'holds'/hold).touch()
         result=subprocess.run([str(HGS),'inspect',parent['name'],'--agent',child],env=self.env,text=True,capture_output=True,timeout=35)
         self.assertEqual(result.returncode,0,result.stderr)
-        stored=json.loads(result.stdout)
-        self.assertEqual(stored['events'],[]);self.assertFalse(stored['send_supported']);self.assertTrue(stored['read_only'])
-        self.assertEqual(stored['parent_conversation_id'],parent['conversation_id'])
-        # A never-started child is a finished one-shot child, not an unknown one.
-        self.assertEqual(stored['phase'],'idle');self.assertEqual(stored['child_mode'],'one-shot')
-        native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
-        self.assertFalse(native['live']);self.assertEqual(native['page']['records'],[])
-        done=self.wait(lambda: d if (d:=self.cli('inspect',parent))['phase']=='idle' else None)
-        self.assertIn(child,done['subagents']);self.assertEqual(done['subagent_active_count'],0)
-        with self.assertRaises(RuntimeError):
-            self.rpc('inspect',{'sessionId':other['conversation_id'],'agentId':child})
+        done=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'][child]['state']=='finished' else None)
+        self.assertEqual(done['subagent_active_count'],0)
 
     def test_stored_child_with_a_damaged_or_missing_descriptor_stays_corrupt(self):
-        # Only a child without its own descriptor and step counts as unstarted:
-        # a malformed descriptor, or steps without one, remain native errors.
+        # A malformed descriptor, or steps without one, remain native errors.
         for damage in ('CORRUPT','UNRECORDED'):
             with self.subTest(damage=damage):
                 parent=self.create();marker=damage+'_CHILD_'+uuid.uuid4().hex
@@ -477,46 +480,44 @@ class NativeHarness(unittest.TestCase):
         # child leaves the live registry; the fixture holds that window open.
         # Nothing reads the child before it, so no earlier read can have
         # installed a model selection that later reads would reuse.
-        for mode in ('one-shot', 'continuable'):
-            with self.subTest(mode=mode):
-                parent=self.create();hold='DISPOSING_CHILD_'+uuid.uuid4().hex
-                text='SUBAGENT '+('CONTINUABLE ' if mode=='continuable' else '')+hold
-                self.cli('send',parent,self.payload(parent,text=text,attachments=[]))
-                try:
-                    self.wait(lambda:(self.root/'holds'/(hold+'.disposing')).exists())
-                    rows=self.rpc('list')['items']
-                    row=next(r for r in rows if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent')
-                    child=row['sessionId']
-                    self.assertTrue(row['agentAvailable']);self.assertFalse(row['running'])
-                    stored=row['projections']['values']['modelSelection']['next']
-                    self.assertEqual((stored['provider'],stored['model']),('hgs-test','test-a'))
-                    self.assertEqual(row['selection'],stored)
-                    parent_row=next(r for r in rows if r['sessionId']==parent['conversation_id'])
-                    self.assertEqual((parent_row['selection']['provider'],parent_row['selection']['model']),('hgs-test','test-a'))
-                    native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
-                    self.assertTrue(native['live'])
-                    self.assertEqual(native['selection'],native['baseline']['values']['modelSelection']['next'])
-                    inspected=self.cli('inspect',parent)
-                    self.assertEqual(inspected['model'],'test-a');self.assertIn(child,inspected['subagents'])
-                    # The child may leave the registry while an inspection
-                    # awaits the account; it keeps what it read before.
-                    gate=self.root/'holds'/'ACCOUNT_HOLD';gate.with_name('ACCOUNT_HOLD.waiting').unlink(missing_ok=True);gate.touch()
-                    try:
-                        with concurrent.futures.ThreadPoolExecutor(1) as pool:
-                            late=pool.submit(self.rpc,'inspect',{'sessionId':parent['conversation_id'],'agentId':child})
-                            self.wait(lambda:gate.with_name('ACCOUNT_HOLD.waiting').exists())
-                            (self.root/'holds'/hold).touch()
-                            self.wait(lambda:(self.root/'holds'/(hold+'.disposed')).exists())
-                            gate.unlink();late=late.result(timeout=30)
-                    finally:
-                        gate.unlink(missing_ok=True)
-                    self.assertTrue(late['live']);self.assertEqual(late['selection'],stored)
-                    self.assertEqual(late['goal'],native['goal'])
-                finally:
+        parent=self.create();hold='DISPOSING_CHILD_'+uuid.uuid4().hex
+        text='SUBAGENT '+hold
+        self.cli('send',parent,self.payload(parent,text=text,attachments=[]))
+        try:
+            self.wait(lambda:(self.root/'holds'/(hold+'.disposing')).exists())
+            rows=self.rpc('list')['items']
+            row=next(r for r in rows if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent')
+            child=row['sessionId']
+            self.assertTrue(row['agentAvailable']);self.assertFalse(row['running'])
+            stored=row['projections']['values']['modelSelection']['next']
+            self.assertEqual((stored['provider'],stored['model']),('hgs-test','test-a'))
+            self.assertEqual(row['selection'],stored)
+            parent_row=next(r for r in rows if r['sessionId']==parent['conversation_id'])
+            self.assertEqual((parent_row['selection']['provider'],parent_row['selection']['model']),('hgs-test','test-a'))
+            native=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+            self.assertTrue(native['live'])
+            self.assertEqual(native['selection'],native['baseline']['values']['modelSelection']['next'])
+            inspected=self.cli('inspect',parent)
+            self.assertEqual(inspected['model'],'test-a');self.assertIn(child,inspected['subagents'])
+            # The child may leave the registry while an inspection
+            # awaits the account; it keeps what it read before.
+            gate=self.root/'holds'/'ACCOUNT_HOLD';gate.with_name('ACCOUNT_HOLD.waiting').unlink(missing_ok=True);gate.touch()
+            try:
+                with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                    late=pool.submit(self.rpc,'inspect',{'sessionId':parent['conversation_id'],'agentId':child})
+                    self.wait(lambda:gate.with_name('ACCOUNT_HOLD.waiting').exists())
                     (self.root/'holds'/hold).touch()
-                self.wait(lambda: any(r['sessionId']==child and not r['agentAvailable'] for r in self.rpc('list')['items']))
-                done=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'][child]['state']=='finished' else None)
-                self.assertEqual(done['subagent_completed_count'],1)
+                    self.wait(lambda:(self.root/'holds'/(hold+'.disposed')).exists())
+                    gate.unlink();late=late.result(timeout=30)
+            finally:
+                gate.unlink(missing_ok=True)
+            self.assertTrue(late['live']);self.assertEqual(late['selection'],stored)
+            self.assertEqual(late['goal'],native['goal'])
+        finally:
+            (self.root/'holds'/hold).touch()
+        self.wait(lambda: any(r['sessionId']==child and not r['agentAvailable'] for r in self.rpc('list')['items']))
+        done=self.wait(lambda: d if (d:=self.cli('inspect',parent))['subagents'][child]['state']=='finished' else None)
+        self.assertEqual(done['subagent_completed_count'],1)
 
     def test_reads_leave_a_starting_child_on_its_inherited_model(self):
         # Upstream installs model selection only while composing a top-level
@@ -610,9 +611,10 @@ class NativeHarness(unittest.TestCase):
         # address. A compact or interrupt request that names a live child, here
         # held in its first step, is refused before it runs a command on the
         # child, records compaction state or touches goals or the parent's turn.
-        # The held child's goal is armed, so a disarm would show.
+        # The held child's goal is armed, so a disarm would show. A child no
+        # longer holds its parent's turn, so the fixture keeps that turn waiting.
         parent=self.create();hold='HOLD_CHILD_ARMED_'+uuid.uuid4().hex
-        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold,attachments=[]))
+        self.cli('send',parent,self.payload(parent,text='SUBAGENT '+hold+' INTERRUPT_WAIT_FIXTURE',attachments=[]))
         def child_row():
             return next((r for r in self.rpc('list')['items']
                          if r.get('parentSessionId')==parent['conversation_id'] and r.get('origin')=='subagent'),None)
@@ -639,7 +641,8 @@ class NativeHarness(unittest.TestCase):
             page=self.rpc('inspect',{'sessionId':parent['conversation_id'],'agentId':child})['page']
             return page if 'Native reply: Child result fixture '+hold in json.dumps(page['records']) else None
         self.assertNotIn('command/run',json.dumps(self.wait(replied)))
-        self.wait(lambda:self.cli('inspect',parent)['phase']=='idle')
+        # Each of the parent's remaining model calls waits in the fixture.
+        self.wait(lambda:self.cli('inspect',parent)['phase']=='idle',timeout=40)
         # The parent keeps both operations, and the refused request ID was not consumed.
         compacted=subprocess.run([str(HGS),'compact-context',parent['name'],'--json'],input=json.dumps(self.payload(parent,request_id=request_id)),
                                  env=self.env,text=True,capture_output=True,timeout=15)
@@ -677,7 +680,7 @@ class NativeHarness(unittest.TestCase):
 
     def test_continuable_child_send_is_addressed_and_idempotent(self):
         parent, other = self.create(), self.create()
-        self.cli('send', parent, self.payload(parent, text='SUBAGENT CONTINUABLE', attachments=[]))
+        self.cli('send', parent, self.payload(parent, text='SUBAGENT', attachments=[]))
         data = self.wait(lambda: d if (d := self.cli('inspect', parent))['subagents'] else None)
         child = next(iter(data['subagents']))
         self.assertEqual(data['subagents'][child]['mode'], 'continuable')

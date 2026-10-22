@@ -25,7 +25,7 @@ fn installer(provider: &str, windows: bool) -> Option<Installer> {
         |unix, windows_script| Installer::Script(if windows { windows_script } else { unix });
     Some(match provider {
         "codex" => Installer::Npm("@openai/codex"),
-        "dsh" => Installer::Npm("@deepseek-ai/dsh@0.2.0-rc.2"),
+        "dsh" => Installer::Npm("@deepseek-ai/dsh@0.2.1-rc.2"),
         "claude" => script(
             "https://claude.ai/install.sh",
             "https://claude.ai/install.ps1",
@@ -179,7 +179,7 @@ mod tests {
             );
             assert_eq!(
                 installer("dsh", windows),
-                Some(Installer::Npm("@deepseek-ai/dsh@0.2.0-rc.2"))
+                Some(Installer::Npm("@deepseek-ai/dsh@0.2.1-rc.2"))
             );
             for unknown in ["opencode", "sh", "arbitrary-command", ""] {
                 assert_eq!(installer(unknown, windows), None);

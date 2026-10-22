@@ -280,7 +280,7 @@ its own `HGS_TEST_BIN`. Python integration modules run in separate processes so
 module patches do not leak between suites. Terminal fixtures use private socket
 paths and synthetic homes. No check runs against existing agent sessions.
 Authenticated native-client tests remain explicit opt-ins; baseline CI needs no
-model API keys. Linux installs the pinned official `@deepseek-ai/dsh@0.2.0-rc.2`
+model API keys. Linux installs the pinned official `@deepseek-ai/dsh@0.2.1-rc.2`
 for its keyless local-model contract fixture with `npm ci` from
 `scripts/ci/dsh-fixture/package-lock.json`. The lockfile fixes every transitive
 version and its SHA-512 integrity, so a newly published dependency can neither

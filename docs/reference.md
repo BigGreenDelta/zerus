@@ -2287,11 +2287,11 @@ SSH launches; an `opencode` found earlier on PATH keeps precedence.
 
 ## Official DeepSeek Harness
 
-The native adapter is pinned to `@deepseek-ai/dsh@0.2.0-rc.2`. Install it on the
+The native adapter is pinned to `@deepseek-ai/dsh@0.2.1-rc.2`. Install it on the
 agent host, sign in and choose **DeepSeek Harness** in New session:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.0-rc.2
+npm install -g @deepseek-ai/dsh@0.2.1-rc.2
 hgs account login native-dsh
 hgs dsh /path/to/project --new -n work
 ```
@@ -2327,9 +2327,12 @@ keep that output private.
 
 Activity supports creation, messages/images, busy-session submission, questions,
 approvals, per-session model/effort, pause/resume, rename, goals, todos and child
-views. A new child view stays empty until the child's first step records its
-native identity; a child cancelled before that step stays listed with an empty
-view. A child that ran without a valid identity reports native corruption. A
+views. Children are continuable and run independently of the turn that created
+them: the engine records a child's native identity when it creates the child,
+and stopping the parent ends the parent's turn while the child keeps working. A
+new child view stays empty until the child's first step. A one-shot child stored
+by 0.2.0-rc.2 and cancelled before its first step stays listed with an empty
+view. A child without a valid identity reports native corruption. A
 child view shows the child's own model, which reading never changes. Request
 receipts prevent duplicate submission. Uncertain delivery requires inspection.
 Model changes do not replace profile defaults. A child keeps the model it
@@ -2359,8 +2362,10 @@ Hosts are asked at once, each scanning for at most 5 seconds; a stopped host, an
 older adapter or a host that does not answer within 7 seconds reports that
 history as unavailable.
 
-The official optional Schedule bundle (**Automation tasks** in Native UI
-Plugins; shipped profiles leave it off) is listed and managed per exact session:
+The official Schedule plugin (**Automation tasks** in Native UI Plugins) is
+listed and managed per exact session. The web bundle of 0.2.1-rc.2 includes it,
+and the profile Zerus creates layers that bundle, so it is on unless the
+profile's own patch disables it:
 
 ```sh
 hgs schedules dsh/project/work            # tasks of this session as JSON
@@ -2372,7 +2377,7 @@ echo '{"request_id":"UUID","expected_run_id":"RUN","expected_conversation_id":"s
 `action` is `delete`, `update` (the native compare-and-set; `title`, `prompt`
 and the native `change` timing object) or `history` (`limit` 1-100, optional
 `before`). Results keep native codes such as `schedule_conflict` and
-`schedule_not_found`. None of these activate the session. Without the bundle the
+`schedule_not_found`. None of these activate the session. Without the plugin the
 command refuses and listings omit `schedules`.
 
 Account transfer stays in Native UI. Native context reset awaits a supported
