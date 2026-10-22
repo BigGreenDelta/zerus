@@ -173,6 +173,56 @@ def failure_diagnostics(run, alive, device):
         return {"status": "unknown", "error": type(error).__name__}
 
 
+# BEGIN APPROVAL_FOCUS_DIAGNOSTIC definition
+# Android 15 source references, not installed-image equivalence or a focus-owner conclusion:
+# frameworks/native @ android-15.0.0_r1, services/inputflinger/dispatcher/EventLogTags.logtags
+# (SHA256 c7e8aedc514b4ad36b9606b00e106a35aa3542852e566f6c790a118bba669dfb) defines input_focus=62001.
+# InputDispatcher.cpp at the same tag writes entering/leaving channel names and reasons at lines1720-1723;
+# InputMonitor.java writes focus requests. frameworks/base/core/java/android/app/EventLogTags.logtags
+# (SHA256 5963f351940253b23bd595d8af3c371c3cc56832e04adfb846279ef870d12468) defines the five lifecycle tags.
+# Sources: https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/services/inputflinger/dispatcher/EventLogTags.logtags
+# https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/core/java/android/app/EventLogTags.logtags
+FOCUS_EVENT_TAGS = ("input_focus", "wm_on_resume_called", "wm_on_paused_called", "wm_on_stop_called",
+                    "wm_on_top_resumed_gained_called", "wm_on_top_resumed_lost_called")
+
+
+def focus_event_observation(text):
+    """Summarize a bounded metadata tail; the unchanged raw artifact retains channel/component names."""
+    assert len(text.encode("utf-8")) <= 65536, "focus event byte cap"
+    counts = dict.fromkeys(FOCUS_EVENT_TAGS, 0)
+    times, headers = [], 0
+    for line in text.splitlines():
+        if not line:
+            continue
+        assert len(line) <= 1024, "focus event line cap"
+        if line == "--------- beginning of events":
+            headers += 1
+            assert headers == 1 and not times, "focus event header"
+            continue
+        match = re.fullmatch(r"\s*([0-9]{1,12})\.([0-9]{3})\s+[0-9]{1,10}\s+[0-9]{1,10}\s+[IWEF]\s+"
+                             r"([a-z_]+)\s*:\s*(\[[ -~]{1,768}\])", line)
+        assert match and match[3] in counts, "unknown focus event metadata"
+        at = int(match[1]) * 1000 + int(match[2])
+        assert len(times) < 128 and (not times or at >= times[-1]), "focus event order/count"
+        times.append(at)
+        counts[match[3]] += 1
+    return {"status": "captured" if times else "empty", "records": len(times), "focus_records": counts["input_focus"],
+            "tags": counts, "first_monotonic_ms": times[0] if times else None, "last_monotonic_ms": times[-1] if times else None,
+            "scope": "last128 events-buffer records before tag filtering; metadata only, no complete-history or focus-owner claim"}
+
+
+def focus_failure_diagnostics(run, alive, device):
+    """One independent failure-only read within the original run deadline; never retries or changes UI state."""
+    try:
+        alive()
+        text = run("failure-focus-events", [*device, "logcat", "-d", "-b", "events", "-v", "threadtime", "-v", "monotonic",
+                                            "-v", "printable", "-t", "128", *[tag + ":I" for tag in FOCUS_EVENT_TAGS], "*:S"], 5)
+        return focus_event_observation(text)
+    except BaseException as error:
+        return {"status": "unknown", "error": type(error).__name__, "scope": "failure-only focus metadata capture; raw output kept when available"}
+
+
+# END APPROVAL_FOCUS_DIAGNOSTIC definition
 def certificate_digest(text):
     lines = [line for line in text.splitlines() if "certificate SHA-256 digest:" in line]
     assert len(lines) == 1
@@ -456,6 +506,9 @@ def main():
         primary_failure = {"error": type(error).__name__, "message": str(error)[:2048]}
         if RESULT_NAMESPACE == "approval" and instrumentation_started:
             diagnostics = failure_diagnostics(run, alive, device)
+            # BEGIN APPROVAL_FOCUS_DIAGNOSTIC capture
+            diagnostics["focus"] = focus_failure_diagnostics(run, alive, device)
+            # END APPROVAL_FOCUS_DIAGNOSTIC capture
         raise
     finally:
         cleanup = []
