@@ -446,6 +446,10 @@ private slots:
     void nativeLaunchStaysInWorkspace();
     void nativeSignInPreservesDraftAndUnblocks();
     void nativeUiOpensBrowserWithoutPlugin();
+    void newSessionPersistsImplicitInboxIntent_data();
+    void newSessionPersistsImplicitInboxIntent();
+    void pendingImplicitInboxDoesNotOverrideNativeProject_data();
+    void pendingImplicitInboxDoesNotOverrideNativeProject();
     void newSessionGroupFollowsLaunchIdentity_data();
     void newSessionGroupFollowsLaunchIdentity();
     void launchPlaceholderReportsASessionThatEndedUnlisted_data();
@@ -10754,6 +10758,86 @@ else: print('{}')
         if (call.contains(QJsonValue("native-ui"))) { browser = true; QVERIFY(!call.contains(QJsonValue("--json"))); }
     }
     QVERIFY(browser);
+}
+
+void TestSessionsWindow::newSessionPersistsImplicitInboxIntent_data()
+{
+    QTest::addColumn<bool>("explicitChoice");
+    QTest::newRow("implicit") << false;
+    QTest::newRow("explicit-inbox") << true;
+}
+void TestSessionsWindow::newSessionPersistsImplicitInboxIntent()
+{
+    QFETCH(bool, explicitChoice);
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show();
+    QSignalSpy native(&window,&SessionsWindow::newSessionRequested);
+    bool submitted=false;
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget());if(!dialog)return;
+        const auto close=qScopeGuard([dialog]{dialog->reject();});
+        dialog->setProjectExplicit(explicitChoice);
+        QCOMPARE(dialog->findChild<QComboBox *>("launchProject")->currentData().toString(),QString("ungrouped"));
+        QCOMPARE(dialog->implicitInbox(),!explicitChoice);
+        // Exercise the real synchronous launch signal/intent writer without
+        // starting a provider, shell, or fake native process.
+        dialog->launchRequested({},"codex","/workspace/linked","new-inference","native-codex","ungrouped",true,{}, {}, {});
+        submitted=true;
+    });
+    window.findChild<QPushButton *>("newSession")->click();QVERIFY(submitted);QCOMPARE(native.size(),1);
+    const auto pending=QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object();
+    QCOMPARE(pending.size(),1);
+    const auto intent=pending.begin().value().toObject();
+    QCOMPARE(intent.value("implicit_inbox"),QJsonValue(!explicitChoice));
+    QCOMPARE(intent.value("group").toString(),QString("ungrouped"));
+}
+void TestSessionsWindow::pendingImplicitInboxDoesNotOverrideNativeProject_data()
+{
+    QTest::addColumn<QString>("intent");QTest::addColumn<bool>("nativeFirst");
+    QTest::newRow("implicit-native-first") << QString("implicit") << true;
+    QTest::newRow("implicit-fleet-first") << QString("implicit") << false;
+    QTest::newRow("explicit-inbox") << QString("explicit") << true;
+    QTest::newRow("legacy-inbox") << QString("legacy") << true;
+    QTest::newRow("invalid-flag-is-legacy") << QString("invalid") << true;
+    QTest::newRow("concrete-even-with-implicit-flag") << QString("concrete") << true;
+}
+void TestSessionsWindow::pendingImplicitInboxDoesNotOverrideNativeProject()
+{
+    QFETCH(QString,intent);QFETCH(bool,nativeFirst);
+    SessionOrganization initial;const auto work=initial.createGroup("Native work"),chosen=initial.createGroup("Chosen work");
+    initial.markImported("arch");initial.markImported("mac");
+    const QString name="codex/work/new-inference",identity="arch\n"+name;
+    auto shared=initial;shared.moveSession(shared.observe("arch",name,"new-run"),work);
+    QSettings().setValue("workspace/organization",QJsonDocument((nativeFirst?shared:initial).toJson()).toJson(QJsonDocument::Compact));
+    const auto token=QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QJsonObject launch{{"host",QString()},{"cmd","codex"},{"tag","new-inference"},
+        {"group",intent=="concrete"?chosen:QString("ungrouped")},{"target","/workspace/linked"},
+        {"add_folder",true},{"folder","/workspace/linked"},{"show_pending",true},{"created",QDateTime::currentSecsSinceEpoch()}};
+    if(intent!="legacy")launch["implicit_inbox"]=intent=="invalid"?QJsonValue(QStringLiteral("true")):QJsonValue(intent=="implicit"||intent=="concrete");
+    QSettings().setValue("workspace/pendingLaunches",QJsonDocument(QJsonObject{{token,launch}}).toJson(QJsonDocument::Compact));
+    auto state=fleet();auto local=state.local();SessionInfo created;created.name=name;created.cmd="codex";created.project="work";
+    created.tag="new-inference";created.state="running";created.runId="new-run";created.launchId=token;local.sessions.append(created);
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program());window.setFleet(state);window.show();
+    const auto saved=[] {return QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object();};
+    const bool passive=intent=="implicit";
+    const auto expected=passive?(nativeFirst?work:QString("ungrouped")):intent=="concrete"?chosen:QString("ungrouped");
+    QCOMPARE(SessionOrganization(saved()).groupFor(identity),expected);
+    QVERIFY(QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().isEmpty());
+    if(passive){
+        QVERIFY(SessionOrganization(saved()).group("ungrouped")->folders.isEmpty());
+        QCOMPARE(saved().value("unassigned_sessions").toArray().contains(identity),!nativeFirst);
+        // The fleet-first path remains a marked fallback, which the existing
+        // controller serialization control proves is absent from shared writes.
+        // Then exercise the real organizationReady -> rebuild path for the
+        // native assignment arriving later; the launch was already consumed.
+        auto *controller=window.findChild<SwarmController *>();QVERIFY(controller);
+        controller->organizationReady(SwarmController::presentation(shared.toJson(),saved()));
+        QCOMPARE(SessionOrganization(saved()).groupFor(identity),work);
+        QVERIFY(!saved().value("unassigned_sessions").toArray().contains(identity));
+    }else{
+        QVERIFY(!saved().value("unassigned_sessions").toArray().contains(identity));
+        QCOMPARE(SessionOrganization(saved()).group(expected)->folders.size(),1);
+    }
 }
 
 void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity_data()

@@ -74,6 +74,20 @@ class LaunchProjectTest {
         trees.getJSONArray("worktrees").getJSONObject(0).put("kind","bare")
         assertEquals("ungrouped",infer(raw,"/example/linked",worktrees=trees))
     }
+    @Test fun onlyUntouchedInboxOmitsAssignmentAndNeverAddsAProtocolField() {
+        val raw=inferenceCatalog()
+        fun args(project:String="ungrouped",implicitInbox:Boolean=false)=LaunchPresentation.arguments(raw,"claude","/example/linked","new-session","profile-two",project,null,implicitInbox=implicitInbox)
+        val implicit=args(implicitInbox=true)
+        assertEquals(setOf("agent","directory","tag","account_id"),implicit.keys().asSequence().toSet())
+        assertFalse(implicit.has("implicitInbox"));assertFalse(implicit.has("implicit_inbox"))
+        val explicit=args()
+        assertEquals("ungrouped",explicit.getString("project_id"));assertEquals("swarm-exact",explicit.getString("swarm_id"));assertTrue(explicit.getBoolean("add_folder"))
+        assertEquals(explicit.toString(),args(implicitInbox=false).toString())
+        assertEquals(args("project-one").toString(),args("project-one",true).toString())
+        assertEquals("project-one",args("project-one",true).getString("project_id"))
+        val noInbox=catalog()
+        assertThrows(IllegalStateException::class.java) { LaunchPresentation.arguments(noInbox,"claude","/example/linked","new-session","profile-two","ungrouped",null,implicitInbox=true) }
+    }
     @Test fun projectFolderIsExactAndOutsideFolderAdditionIsExplicit() {
         val raw=catalog()
         val existing=LaunchPresentation.projectArguments(raw,"project-one","/example/source")

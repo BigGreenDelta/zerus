@@ -289,6 +289,23 @@ final class LaunchProjectTests: XCTestCase {
         XCTAssertEqual("project-one", sanitized.string("default_project"))
     }
 
+    func testOnlyUntouchedInboxOmitsAssignmentAndNeverAddsAProtocolField() throws {
+        let raw = inferenceCatalog()
+        func args(_ project: String = "ungrouped", implicitInbox: Bool = false) throws -> JSONObject {
+            try LaunchPresentation.arguments(raw, agent: "claude", directory: "/example/linked", tag: "new-session", accountId: "profile-two",
+                                             projectId: project, worktrees: nil, implicitInbox: implicitInbox)
+        }
+        let implicit = try args(implicitInbox: true)
+        XCTAssertEqual(Set(["agent", "directory", "tag", "account_id"]), Set(implicit.keys))
+        XCTAssertFalse(implicit.has("implicitInbox")); XCTAssertFalse(implicit.has("implicit_inbox"))
+        let explicit = try args()
+        XCTAssertEqual("ungrouped", explicit.string("project_id")); XCTAssertEqual("swarm-exact", explicit.string("swarm_id")); XCTAssertEqual(.bool(true), explicit["add_folder"])
+        XCTAssertEqual(explicit, try args(implicitInbox: false))
+        XCTAssertEqual(try args("project-one"), try args("project-one", implicitInbox: true))
+        XCTAssertEqual("project-one", try args("project-one", implicitInbox: true).string("project_id"))
+        XCTAssertThrowsError(try LaunchPresentation.arguments(catalog(), agent: "claude", directory: "/example/linked", tag: "new-session", accountId: "profile-two",
+                                                            projectId: "ungrouped", worktrees: nil, implicitInbox: true))
+    }
     func testProjectFolderIsExactAndOutsideFolderAdditionIsExplicit() throws {
         let raw = catalog()
         let existing = try LaunchPresentation.projectArguments(raw, projectId: "project-one", directory: "/example/source")

@@ -191,8 +191,9 @@ private val Amber = Color(0xFFFFCB7D)
     fun requestClose() { if(busy) return;if(dirty) discarding = true else model.closeLaunch() }
     fun create() {
         if(busy || reason.isNotBlank()) return
-        if(automatic) model.launchWithWorktree(machine,provider,folder,tag,account,allowedCatalog,projectId,selectedModel,effort)
-        else model.launchSession(machine,provider,folder,tag,account,allowedCatalog,projectId,placement,selectedModel,effort)
+        val implicitInbox=!projectExplicit && projectId=="ungrouped"
+        if(automatic) model.launchWithWorktree(machine,provider,folder,tag,account,allowedCatalog,projectId,selectedModel,effort,implicitInbox)
+        else model.launchSession(machine,provider,folder,tag,account,allowedCatalog,projectId,placement,selectedModel,effort,implicitInbox)
     }
     fun selectFolder(path: String) { folder = path;browsedFolder = "";edited = true;model.browseLaunchDirectory(machine,path) }
     val canChoose = !busy && !model.launchWorktreeLoading && WorktreePresentation.entries(evidence).isNotEmpty()

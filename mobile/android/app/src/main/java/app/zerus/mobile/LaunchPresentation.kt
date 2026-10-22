@@ -123,7 +123,7 @@ object LaunchPresentation {
         else models(raw,provider,accountId).find { it.value==model }?.efforts.orEmpty()
     /** The checked native launch request for the current form choices. */
     fun arguments(catalog:JSONObject,agent:String,directory:String,tag:String,accountId:String?,projectId:String,worktrees:JSONObject?,
-        model:String="",effort:String="",effortSupported:Boolean=false):JSONObject {
+        model:String="",effort:String="",effortSupported:Boolean=false,implicitInbox:Boolean=false):JSONObject {
         check(catalog.optJSONArray("agents")?.let { array -> (0 until array.length()).any { array.optString(it) == agent } } == true) { "This native provider is unavailable." }
         check(accountId != null && accounts(catalog,agent).any { it.id == accountId }) { "Choose an offered account for the selected provider." }
         val args=JSONObject().put("agent",agent).put("directory",directory).put("tag",tag).put("account_id",accountId)
@@ -136,8 +136,13 @@ object LaunchPresentation {
             check(efforts(catalog,agent,accountId,model,true).any { it.value==effort }) { "The model's effort choices changed. Review the current choices." }
             args.put("effort",effort)
         }
-        if(catalog.opt("project_launch_supported")==true) projectArguments(catalog,projectId,directory,worktrees).let { fields -> fields.keys().forEach { key -> args.put(key,fields.get(key)) } }
-        else check(projectId.isBlank()) { "This computer does not support scoped project assignment." }
+        if(catalog.opt("project_launch_supported")==true) {
+            // Untouched Inbox is presentation only. A fresh native creation may
+            // infer a concrete project after the form's cached evidence ran out.
+            // This private hint is never a backend protocol field.
+            if(implicitInbox && projectId=="ungrouped") check(projects(catalog).any { it.id==projectId }) { "Choose a current native project." }
+            else projectArguments(catalog,projectId,directory,worktrees).let { fields -> fields.keys().forEach { key -> args.put(key,fields.get(key)) } }
+        } else check(projectId.isBlank()) { "This computer does not support scoped project assignment." }
         return SessionActionPolicies.arguments("launch",args)
     }
     fun defaultAccount(accounts:List<LaunchAccount>,selected:String=""):String = accounts.firstOrNull { it.id == selected }?.id

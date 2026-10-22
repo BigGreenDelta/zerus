@@ -2576,10 +2576,10 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     if(!path.isEmpty())dialog.selectPath(path, false);
     if(!account.isNull())dialog.selectAccount(account);
     connect(&dialog, &NewSessionDialog::launchRequested, this,
-        [this](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort) {
+        [this,&dialog](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort) {
             const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_pendingLaunches.insert(id, QJsonObject{{"host", host}, {"cmd", cmd}, {"tag", name}, {"group", group},
-                {"target", target}, {"add_folder", !addFolder.isEmpty()}, {"folder", addFolder}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
+                {"target", target}, {"implicit_inbox", dialog.implicitInbox()}, {"add_folder", !addFolder.isEmpty()}, {"folder", addFolder}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
             savePendingLaunches();
             m_organization.setCollapsed(group, false);
             m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); showSessionList();
@@ -2644,6 +2644,13 @@ void SessionsWindow::placeLaunchedSessions()
                 || session.name.section('/', 2) != launch.value("tag").toString()) continue;
             const QString requested = launch.value("group").toString();
             const QString group = m_organization.group(requested) ? requested : m_organization.defaultProject();
+            // Only new, strictly marked implicit Inbox intents are passive.
+            // Legacy/explicit choices keep their original placement semantics.
+            // Native inference may arrive before OR after this fleet listing;
+            // neither order turns this local fallback into a shared assignment.
+            if (launch.value("implicit_inbox") == QJsonValue(true) && requested == "ungrouped") {
+                consumed = true; continue;
+            }
             // A generated worktree launches in its target but adds the folder it
             // came from. Launches saved before "folder" existed add their target.
             const auto path=launch.value("add_folder").toBool()?launch.value("folder").toString(launch.value("target").toString()):QString();

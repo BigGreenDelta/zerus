@@ -30,6 +30,7 @@ public:
     void prefillSessionFolder(const QString &path, const QString &canonicalPath = {});
     void selectAccount(const QString &account);
     void setProjectExplicit(bool explicitChoice) { m_projectExplicit = explicitChoice; }
+    bool implicitInbox() const;
     void setProjectCatalogSwarm(const QString &swarm) { m_projectCatalogSwarm = swarm; }
     void reject() override;
 signals:

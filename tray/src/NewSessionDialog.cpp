@@ -596,6 +596,10 @@ QString NewSessionDialog::automaticWorktreePath() const
     const QFileInfo root(m_worktreeCatalog["selected_root"].toString());
     return QDir(root.path()).filePath(root.fileName()+'-'+m_generatedBranch);
 }
+bool NewSessionDialog::implicitInbox() const
+{
+    return !m_projectExplicit && m_project->currentData()=="ungrouped";
+}
 void NewSessionDialog::launch(const QString &target,const QString &addFolder)
 {
     QSettings settings;settings.setValue("workspace/launchOpenTerminal",m_openTerminal->isChecked());

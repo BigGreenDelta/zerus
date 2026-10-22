@@ -477,12 +477,13 @@ struct LaunchForm: View {
 
     private func create(automatic: Bool, reason: String, placement: JSONObject?) {
         guard !launch.busy, reason.isEmpty else { return }
+        let implicitInbox = !projectExplicit && projectId == "ungrouped"
         if automatic {
             launch.launchWithWorktree(machine, agent: provider, folder: folder, tag: tag, accountId: account, expectedCatalog: allowedCatalog, projectId: projectId,
-                                      model: selectedModel, effort: selectedEffort)
+                                      model: selectedModel, effort: selectedEffort, implicitInbox: implicitInbox)
         } else {
             launch.launch(machine, agent: provider, directory: folder, tag: tag, accountId: account, expectedCatalog: allowedCatalog, projectId: projectId,
-                          worktrees: placement, model: selectedModel, effort: selectedEffort)
+                          worktrees: placement, model: selectedModel, effort: selectedEffort, implicitInbox: implicitInbox)
         }
     }
 

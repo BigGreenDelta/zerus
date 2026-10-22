@@ -1769,8 +1769,16 @@ whose folder is confirmed on the selected computer. Desktop, Android and iOS
 use exact canonical folder membership or a complete, current worktree catalog;
 folder names and path prefixes do not assign projects. Explicit project choices,
 including explicitly choosing Inbox, win. Multiple matching projects or missing
-verification keep the current selection. A new tracked CLI session also infers
-its initial project from that computer's existing catalog; resume, fork, adoption,
+verification keep the current selection. An untouched Inbox stays a local fallback,
+so later native project discovery cannot be overwritten by launch bookkeeping.
+Older saved desktop launch intents retain their original placement semantics.
+Desktop also checks existing saved folders on that exact computer against the
+CLI-confirmed canonical path, including local Windows drive and UNC folders
+that remain outside the POSIX shared catalog. It does not resolve saved aliases
+or infer from a parent folder. A native project hint must name the same known
+Swarm catalog; a foreign hint never selects a same-ID local project.
+A new tracked CLI session also infers its initial project from that computer's
+existing catalog; resume, fork, adoption,
 manual assignments and explicit unassignment are never reassigned. This optional
 metadata step does not initialize a catalog, join a swarm or create a repository.
 The general **New session** action inherits the selected session's project,
