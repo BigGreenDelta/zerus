@@ -261,7 +261,8 @@ sys.exit(result.returncode)
    expected[item['question']]=', '.join(labels+([answer['text']] if answer['text'] else []))
   def recorded():
    for event in records(self.record['transcript']):
-    if event.get('sessionId')!=self.conversation_id:continue
+    # Claude 2.1.304+ also writes api-request-blob rows; only user rows carry toolUseResult.
+    if event.get('sessionId')!=self.conversation_id or event.get('type')!='user':continue
     parts=event.get('message',{}).get('content',[])
     if isinstance(parts,list) and any(p.get('type')=='tool_result' and p.get('tool_use_id')=='toolu_native_fixture' for p in parts):return event.get('toolUseResult')
   result=self.wait_for(recorded)
