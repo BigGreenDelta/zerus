@@ -218,7 +218,7 @@ final class LaunchProjectTests: XCTestCase {
 
     private func inferenceCatalog() -> JSONObject {
         var raw = catalog(); var projects = raw.objects("projects")
-        projects.append(["id": "ungrouped", "name": "Inbox", "folders": []]); raw["projects"] = JSON(projects)
+        projects.append(["id": "ungrouped", "name": "Inbox", "folders": []]); raw["projects"] = .array(projects.map(JSON.object))
         return raw
     }
     private func infer(_ raw: JSONObject, directory: String = "/example/source", explicit: Bool = false,
@@ -237,11 +237,11 @@ final class LaunchProjectTests: XCTestCase {
     func testAmbiguousOrOtherComputerFoldersNeverChooseAutomatically() {
         var raw = inferenceCatalog(); var projects = raw.objects("projects")
         projects.append(["id": "other", "name": "Other", "folders": [["id": "other-folder", "path": "/example/source"]]])
-        raw["projects"] = JSON(projects); XCTAssertEqual("ungrouped", infer(raw))
+        raw["projects"] = .array(projects.map(JSON.object)); XCTAssertEqual("ungrouped", infer(raw))
         projects[projects.count-1]["folders"] = [["id": "other-folder", "path": "/example/source", "local": false]]
-        raw["projects"] = JSON(projects); XCTAssertEqual("project-one", infer(raw))
+        raw["projects"] = .array(projects.map(JSON.object)); XCTAssertEqual("project-one", infer(raw))
         projects[0]["folders"] = [["id": "folder-one", "path": "/example/source", "local": false]]
-        raw["projects"] = JSON(projects); XCTAssertEqual("ungrouped", infer(raw))
+        raw["projects"] = .array(projects.map(JSON.object)); XCTAssertEqual("ungrouped", infer(raw))
     }
     func testRelatedWorktreeInferenceRequiresCompleteExactAvailableCatalog() {
         let raw = inferenceCatalog()
