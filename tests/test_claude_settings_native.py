@@ -49,7 +49,7 @@ class NativeClaudeSettings(unittest.TestCase):
         (self.config / 'cache/model-catalog').mkdir(parents=True)
         (self.config / 'cache/model-catalog/fixture-000000000000-cc.json').write_text(json.dumps(CATALOG))
         (self.root / '.claude.json').write_text(json.dumps(dict(
-            hasCompletedOnboarding=True, theme='dark',
+            hasCompletedOnboarding=True, hasSeenAutoDefaultNudge=True, theme='dark',
             customApiKeyResponses=dict(approved=['fixture-key'], rejected=[]),
             projects={str(work): dict(hasTrustDialogAccepted=True, hasCompletedProjectOnboarding=True)})))
         self.settings_file = self.config / 'settings.json'

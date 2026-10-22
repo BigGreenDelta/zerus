@@ -562,7 +562,7 @@ class HintContract:
         self.env = private_environment(self.env)
         if self.AGENT == 'claude':
             (self.agent_home / '.claude.json').write_text(json.dumps(dict(
-                hasCompletedOnboarding=True, theme='dark',
+                hasCompletedOnboarding=True, hasSeenAutoDefaultNudge=True, theme='dark',
                 customApiKeyResponses=dict(approved=['fixture-key'], rejected=[]))))
             self.env['CLAUDE_CONFIG_DIR'] = str(self.agent_home)
             (self.agent_home / 'settings.json').write_text('{}\n')

@@ -46,7 +46,7 @@ class NativeRecovery(lifecycle.Harness):
   self.env.update(ANTHROPIC_API_KEY='hgs-offline-probe',ANTHROPIC_AUTH_TOKEN='hgs-offline-probe',ANTHROPIC_BASE_URL=base,OPENAI_API_KEY='hgs-offline-probe',OPENAI_BASE_URL=base+'/v1',CLAUDE_CODE_MAX_RETRIES='0',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1',DISABLE_AUTOUPDATER='1')
   for key in ('ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL','OPENAI_API_KEY','OPENAI_BASE_URL','CLAUDE_CODE_MAX_RETRIES','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC','DISABLE_AUTOUPDATER'):
    self.t('set-environment','-g',key,self.env[key])
-  (self.root/'.claude.json').write_text(json.dumps({'hasCompletedOnboarding':True,'bypassPermissionsModeAccepted':True,'theme':'dark','customApiKeyResponses':{'approved':['hgs-offline-probe'],'rejected':[]},'projects':{str(self.project.resolve()):{'hasTrustDialogAccepted':True}}}))
+  (self.root/'.claude.json').write_text(json.dumps({'hasCompletedOnboarding':True,'hasSeenAutoDefaultNudge':True,'bypassPermissionsModeAccepted':True,'theme':'dark','customApiKeyResponses':{'approved':['hgs-offline-probe'],'rejected':[]},'projects':{str(self.project.resolve()):{'hasTrustDialogAccepted':True}}}))
   (self.root/'.codex').mkdir()
   (self.root/'.codex/config.toml').write_text('check_for_update_on_startup = false\nmodel_provider = "probe"\n[model_providers.probe]\nname = "probe"\nbase_url = "'+base+'/v1"\nenv_key = "OPENAI_API_KEY"\nwire_api = "responses"\nrequest_max_retries = 0\nstream_max_retries = 0\n[projects.'+json.dumps(str(self.project.resolve()))+']\ntrust_level = "trusted"\n')
   (self.root/'.kimi-code').mkdir()

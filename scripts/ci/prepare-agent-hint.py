@@ -175,12 +175,12 @@ def prepare(args):
         compatibility.check_manifest(manifest)
         target = compatibility.host_target()
         packages = [row for row in manifest[args.agent] if row['target'] == target]
-        expected_versions = (['2.1.296'] if args.agent == 'claude' and target in
-                             ('linux-x64', 'darwin-arm64', 'win32-x64') else
+        expected_versions = (['2.1.296', '2.1.308'] if (args.agent, target) == ('claude', 'linux-x64') else
+                             ['2.1.308'] if args.agent == 'claude' and target in ('darwin-arm64', 'win32-x64') else
                              ['0.160.1', '0.162.0'] if (args.agent, target) == ('codex', 'linux-x64') else
                              ['0.162.0'] if (args.agent, target) == ('codex', 'win32-x64') else [])
         if not expected_versions or [row['version'] for row in packages] != expected_versions:
-            raise ValueError('Hosted hint allocation differs from its six reviewed pin/OS rows')
+            raise ValueError('Hosted hint allocation differs from its seven reviewed pin/OS rows')
         for package in packages:
             expected_url = compatibility.AGENTS[args.agent]['tarball'].format(version=package['version'], target=target)
             if package['url'] != expected_url:

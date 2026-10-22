@@ -78,7 +78,7 @@ class NativeClaudeQuestions(unittest.TestCase):
   channel=self._testMethodName.startswith('test_channel_');tall='_tall_' in self._testMethodName
   if self._testMethodName.startswith('test_channel_single_deadline_'):self.channel_seconds=4
   self.items=TALL_ITEMS if tall else ITEMS[:1] if self._testMethodName.startswith(('test_single_','test_channel_single_')) else WRAPPED_ITEMS if wrapped else ITEMS
-  (self.root/'.claude.json').write_text(json.dumps(dict(hasCompletedOnboarding=True,bypassPermissionsModeAccepted=True,theme='dark',customApiKeyResponses=dict(approved=['fixture-key'],rejected=[]),projects={str(work):dict(hasTrustDialogAccepted=True)})))
+  (self.root/'.claude.json').write_text(json.dumps(dict(hasCompletedOnboarding=True,hasSeenAutoDefaultNudge=True,bypassPermissionsModeAccepted=True,theme='dark',customApiKeyResponses=dict(approved=['fixture-key'],rejected=[]),projects={str(work):dict(hasTrustDialogAccepted=True)})))
   permission_mode=getattr(self,'native_permission_mode','default' if self.approval_fixture or self.message_fixture else 'bypassPermissions')
   settings={'permissions':{'defaultMode':permission_mode}}
   if hasattr(self,'native_settings'):settings.update(self.native_settings(work))
@@ -120,7 +120,7 @@ class NativeClaudeQuestions(unittest.TestCase):
   # tmux's default size for a session no client has attached to yet.
   columns,rows=('80','24') if tall or '_80x24' in self._testMethodName else ('87' if wrapped else '120','45')
   hgs_env=['HGS_SESSION='+self.name,'HGS_RUN_ID='+self.run_id,'HGS_STATE_DIR='+str(self.state),'HGS_CONFIG_DIR='+str(self.root/'config')]+(['HGS_ANSWER_CHANNEL_SECONDS='+str(self.channel_seconds)] if hasattr(self,'channel_seconds') else [])
-  self.tmux('new-session','-d','-s',self.name,'-x',columns,'-y',rows,'-c',str(work),'env','-i','HOME='+str(self.root),'PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),*(hgs_env if channel else []),CLAUDE,*(['--dangerously-skip-permissions'] if permission_mode=='bypassPermissions' else []),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
+  self.tmux('new-session','-d','-s',self.name,'-x',columns,'-y',rows,'-c',str(work),'env','-i','HOME='+str(self.root),'PATH='+os.environ['PATH'],'SHELL=/bin/bash','TERM=xterm-256color','LANG=C.UTF-8','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1','ANTHROPIC_API_KEY=fixture-key','ANTHROPIC_BASE_URL=http://127.0.0.1:'+str(server.server_port),*getattr(self,'native_env',()),*(hgs_env if channel else []),CLAUDE,*(['--dangerously-skip-permissions'] if permission_mode=='bypassPermissions' else []),'--model','claude-sonnet-4-6','Ask questions with the tool now.')
   self.pane=self.tmux('display-message','-p','-t','='+self.name+':','#{pane_id}').strip()
   # A drawn panel does not prove Claude has created its transcript yet. Both
   # must be ready within the existing startup wait before the fixture binds it.

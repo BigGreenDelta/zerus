@@ -80,6 +80,9 @@ class NativeClaudeReadApproval(NativeClaudeApprovals):
 
 class NativeClaudeFetchApproval(NativeClaudeReadApproval):
     tool_name = 'WebFetch'
+    # From 2.1.304 WebFetch can be deferred behind ToolSearch, so the fixture's
+    # first request would not list it; the approval panel is the same either way.
+    native_env = ('ENABLE_TOOL_SEARCH=false',)
     tool_input = {'url': 'https://example.com', 'prompt': 'title?'}
     panel_question = 'Do you want to allow Claude to fetch this content?'
     test_session_grant_is_marked_broader_and_deny_reaches_claude = None

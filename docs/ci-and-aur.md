@@ -303,18 +303,18 @@ usage lists the commands. A test the file does not list still runs exactly once.
 Claude TUI with a private home/socket and a localhost fake API; it never reads a
 user's account. Full Linux and macOS CI run it with the other Claude native
 suites against the pinned Claude Code package (see below); `HGS_CLAUDE_TEST_BIN`
-selects another executable for a manual run. Claude 2.1.296 coverage verifies
+selects another executable for a manual run. Claude 2.1.296 and 2.1.308 coverage verifies
 literal trailing backslashes, multiline messages and durable request replay.
 Terminal submission alone is insufficient: the test waits for the unchanged user
 message in native history. `tests/test_claude_settings_native.py` drives the
-real `/model` picker with a synthetic model catalog and history. Claude 2.1.296
-coverage changes model and effort in a fresh session, accepts Claude's own cache
+real `/model` picker with a synthetic model catalog and history. Claude 2.1.296 and
+2.1.308 coverage changes model and effort in a fresh session, accepts Claude's own cache
 notice in a resumed conversation, and requires the session-only transcript
 receipt while `settings.json` stays unchanged. A session-only change made in
 Terminal must reach hgs through `PostModelSwitch` with the exact model ID.
 `tests/test_claude_statusline_native.py` starts the real TUI through a tracked
 `hgs claude` launch, with the private home, state folder and socket and the
-loopback API of `tests/model_api_fixture.py`. Claude 2.1.296 coverage requires the
+loopback API of `tests/model_api_fixture.py`. Claude 2.1.296 and 2.1.308 coverage requires the
 user's own status line on screen and its `settings.json` unchanged, and the window
 from Claude's status line input in `hgs inspect` for the exact run, conversation and
 model: before the first reply, after a reply, after a session-only model change, a
@@ -760,7 +760,12 @@ for one target, `linux-x64`, `linux-x64-baseline`, `darwin-arm64` or `win32-x64`
 with an exact version and SHA-512 integrity pin. The runner selects the pins for its
 host and refuses an agent that has none. The Codex matrix pins 0.162.0 for Linux and
 Windows and retains 0.160.1 (a resident-session regression boundary) on Linux only.
-The Claude Code matrix pins 2.1.296 for all three targets. The OpenCode matrix pins
+The Claude Code matrix pins 2.1.308 for all three targets and retains 2.1.296, the
+oldest version whose hooks hgs registers, on Linux only. From 2.1.304 Claude also
+records each API request as an `api-request-blob` transcript row, may offer a
+one-time default permission mode change (fixtures set `hasSeenAutoDefaultNudge`)
+and can defer WebFetch behind ToolSearch (its approval fixture sets
+`ENABLE_TOOL_SEARCH=false`). The OpenCode matrix pins
 its reviewed minimum, 2.0.32, for Linux and macOS; on x86_64 Linux it uses the
 `@opencode/cli-linux-x64-baseline` package, which runs without AVX2 on every x86_64
 host. macOS therefore runs Claude Code and OpenCode, and Windows, where Zerus has no
@@ -1002,15 +1007,16 @@ Private Codex profiles set `sandbox_mode="danger-full-access"` and
 suite does. Hook and folder trust still require their exact public hgs cards and
 answers; the fixture never answers a Terminal-only sandbox setup card.
 
-The finite allocation is six pin/OS rows: Claude 2.1.296 on Linux x86_64,
-macOS arm64 and Windows x86_64; retained Codex 0.160.1 on Linux x86_64, and
+The finite allocation is seven pin/OS rows: retained Claude 2.1.296 and Claude
+2.1.308 on Linux x86_64, Claude 2.1.308 on macOS arm64 and Windows x86_64;
+retained Codex 0.160.1 on Linux x86_64, and
 Codex 0.162.0 on Linux x86_64 and Windows x86_64. A disposable Linux job needs
 Python, tmux and private short TMPDIR; macOS needs Python, tmux and its native
 arm64 build; Windows needs Python and the reviewed ConPTY pair supplied through
 `HGS_TEST_CONPTY_DIR`. Candidate and pre-feature hgs and the observer must be built
 for that job's OS/architecture, with separate source/command/toolchain/hash
-receipts. Linux Codex selection runs its two manifest pins sequentially; all
-other provider/OS selections run one row. Each selection uses the command above
+receipts. Linux Codex and Linux Claude selections run their two manifest pins
+sequentially; all other provider/OS selections run one row. Each selection uses the command above
 with `--agent claude` or `--agent codex` and fresh results, its OS-native binary
 paths and official public cache. Existing version/help/schema probes remain part
 of the runner. These focused disposable hosted or local jobs can be allocated
@@ -1031,16 +1037,16 @@ gh workflow run agent-hint.yml --ref <reviewed-source-branch-or-tag>
 
 | Job | Manifest pins, in order | Required methods |
 | --- | --- | --- |
-| Linux Claude | 2.1.296 linux-x64 | 4 |
+| Linux Claude | 2.1.296 then 2.1.308 linux-x64 | 8 |
 | Linux Codex | 0.160.1 then 0.162.0 linux-x64 | 8 |
-| macOS arm64 Claude | 2.1.296 darwin-arm64 | 4 |
-| Windows Claude | 2.1.296 win32-x64 | 4 |
+| macOS arm64 Claude | 2.1.308 darwin-arm64 | 4 |
+| Windows Claude | 2.1.308 win32-x64 | 4 |
 | Windows Codex | 0.162.0 win32-x64 | 4 |
 
 Every row must report its exact four raw IDs, four passes, zero skips/errors and
-verified owned cleanup. Linux Codex stops before the second pin if the first
-fails. Jobs collect evidence independently; all five must succeed for the
-24-occurrence campaign to qualify. The gate does not publish or release, and
+verified owned cleanup (eight for the two-pin Linux Codex and Claude rows). Each
+stops before its second pin if the first fails. Jobs collect evidence
+independently; all five must succeed for the 28-occurrence campaign to qualify. The gate does not publish or release, and
 the full standard CI matrix remains required before merging the product change.
 
 Before any Python interpreter starts, the workflow creates a short private Unix

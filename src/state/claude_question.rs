@@ -1082,7 +1082,10 @@ pub(super) fn response(record: &Value, card: &Value) -> Result<Option<Value>> {
         let Ok(event) = serde_json::from_slice::<Value>(line) else {
             continue;
         };
-        if string(&event, "sessionId") != id || event["isSidechain"] == true {
+        // Claude 2.1.304+ also records each API request as an api-request-blob
+        // row with the same tool_result part; only the user row carries the
+        // structured toolUseResult acknowledgement.
+        if string(&event, "sessionId") != id || event["isSidechain"] == true || event["type"] != "user" {
             continue;
         }
         let Some(parts) = event["message"]["content"].as_array() else {
@@ -1928,8 +1931,8 @@ mod tests {
         let path = dir.path().join(format!("{id}.jsonl"));
         let record = json!({"conversation_id":id,"transcript":path});
         let card = card();
-        let event = json!({"sessionId":id,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_native_fixture"}]},"toolUseResult":{"questions":items(),"answers":{"Which release should we prepare?":"Preview"}}});
-        for field in ["sessionId", "isSidechain", "message"] {
+        let event = json!({"type":"user","sessionId":id,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_native_fixture"}]},"toolUseResult":{"questions":items(),"answers":{"Which release should we prepare?":"Preview"}}});
+        for field in ["sessionId", "isSidechain", "message", "type"] {
             let mut stale = event.clone();
             stale[field] = if field == "isSidechain" {
                 json!(true)
@@ -1940,6 +1943,14 @@ mod tests {
             assert!(response(&record, &card).unwrap().is_none());
         }
         fs::write(&path, format!("{event}\n")).unwrap();
+        assert!(response(&record, &card).unwrap().is_some());
+        // Claude 2.1.304+ request blob: the same tool_result part, no acknowledgement.
+        let blob = json!({"type":"api-request-blob","sessionId":id,"hash":"0".repeat(64),
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_native_fixture",
+            "content":"Your questions have been answered"}]}});
+        fs::write(&path, format!("{blob}\n")).unwrap();
+        assert!(response(&record, &card).unwrap().is_none());
+        fs::write(&path, format!("{blob}\n{event}\n")).unwrap();
         assert!(response(&record, &card).unwrap().is_some());
         let mut changed = event;
         changed["toolUseResult"]["questions"][0]["question"] = json!("Changed request");
