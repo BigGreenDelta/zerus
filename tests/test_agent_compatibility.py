@@ -220,7 +220,7 @@ class AgentCompatibility(unittest.TestCase):
 
     def test_latest_claude_canary_uses_the_official_platform_package(self):
         manifest = json.loads(compat.MANIFEST.read_text())
-        pinned = next(package['version'] for package in reversed(manifest['claude']) if package['target'] == 'linux-x64')
+        pinned = [package['version'] for package in manifest['claude'] if package['target'] == 'linux-x64']
         metadata = {'version': '9.8.7', 'dist': {
             'tarball': compat.AGENTS['claude']['tarball'].format(version='9.8.7', target='linux-x64'),
             'integrity': 'sha512-fixture'}}
@@ -253,7 +253,7 @@ class AgentCompatibility(unittest.TestCase):
         self.assertTrue(failed)
         self.assertEqual(report['canary_versions'], {'claude': '9.8.7'})
         self.assertEqual([(row['agent'], row['version']) for row in report['contracts']],
-                         [('claude', pinned), ('claude', '9.8.7')])
+                         [('claude', version) for version in pinned] + [('claude', '9.8.7')])
         self.assertEqual(report['contracts'][-1]['url'], metadata['dist']['tarball'])
         self.assertEqual(report['cli_help_changed'], {'claude': True})
         self.assertIn('## Real Claude Code contracts', summary)
@@ -306,13 +306,14 @@ class AgentCompatibility(unittest.TestCase):
         for target, arguments, expected in [
                 # OpenCode runs its baseline x86_64 package on Linux.
                 ('linux-x64', [], [('codex', '0.160.1', 'linux-x64'), ('codex', '0.162.0', 'linux-x64'),
-                                   ('claude', '2.1.296', 'linux-x64'), ('opencode', '2.0.32', 'linux-x64-baseline')]),
+                                   ('claude', '2.1.296', 'linux-x64'), ('claude', '2.1.308', 'linux-x64'),
+                                   ('opencode', '2.0.32', 'linux-x64-baseline')]),
                 ('linux-x64', ['--agent', 'opencode'], [('opencode', '2.0.32', 'linux-x64-baseline')]),
-                ('darwin-arm64', [], [('claude', '2.1.296', 'darwin-arm64'), ('opencode', '2.0.32', 'darwin-arm64')]),
+                ('darwin-arm64', [], [('claude', '2.1.308', 'darwin-arm64'), ('opencode', '2.0.32', 'darwin-arm64')]),
                 ('darwin-arm64', ['--agent', 'codex'], SystemExit),
                 ('win32-x64', ['--agent', 'opencode'], SystemExit),
-                # The retained Codex 0.160.1 has no Windows pin.
-                ('win32-x64', [], [('codex', '0.162.0', 'win32-x64'), ('claude', '2.1.296', 'win32-x64')]),
+                # The retained Codex 0.160.1 and Claude 2.1.296 have no Windows pin.
+                ('win32-x64', [], [('codex', '0.162.0', 'win32-x64'), ('claude', '2.1.308', 'win32-x64')]),
                 ('win32-arm64', [], SystemExit),
                 (None, [], SystemExit)]:
             qualified.clear()

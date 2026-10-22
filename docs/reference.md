@@ -284,6 +284,10 @@ a launcher keeps the entry, as does a wrapper script that starts another Claude 
 without itself changing: delete the entry from its `settings.json` by hand there.
 `PreModelSwitch` is never registered.
 
+Claude Code 2.1.304 and later can offer once, after a reply, to make auto mode the
+default permission mode when the user settings name another default. The offer
+stays in Terminal until answered there; Zerus does not change that setting.
+
 Claude Code reports its context window only to a status line command. For a tracked
 Unix start of the `claude` CLI that reports 2.1.296 or later (the version read as
 for `PostModelSwitch`), `hgs` adds `--settings` with its own `statusLine`,

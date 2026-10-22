@@ -41,7 +41,7 @@ class NativeClaudeTrust(unittest.TestCase):
         (work / ".claude").mkdir(parents=True)
         (self.root / ".claude").mkdir()
         (self.root / ".claude.json").write_text(json.dumps(dict(
-            hasCompletedOnboarding=True, theme="dark",
+            hasCompletedOnboarding=True, hasSeenAutoDefaultNudge=True, theme="dark",
             customApiKeyResponses=dict(approved=["fixture-key"], rejected=[]))))
         (work / ".claude/settings.local.json").write_text(json.dumps({
             "permissions": {"allow": [f"Bash(echo fixture-{i}:*)" for i in range(83)]}}))

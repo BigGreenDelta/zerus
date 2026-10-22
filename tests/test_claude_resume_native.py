@@ -45,7 +45,7 @@ class NativeClaudeResume(unittest.TestCase):
         # The native quota estimator reads subscription metadata and cached
         # feature values. These are invented fixture values, never user settings.
         (self.root / '.claude.json').write_text(json.dumps(dict(
-            hasCompletedOnboarding=True, theme='dark',
+            hasCompletedOnboarding=True, hasSeenAutoDefaultNudge=True, theme='dark',
             projects={str(work): dict(hasTrustDialogAccepted=True)},
             cachedGrowthBookFeatures={'tengu_amber_tally': dict(
                 minPercent=1, fiveHourCredits={'default_claude_pro': 100},

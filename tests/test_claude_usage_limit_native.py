@@ -52,7 +52,7 @@ class NativeClaudeUsageLimit(unittest.TestCase):
                             organizationUuid='00000000-0000-4000-8000-000000000002',
                             billingType='stripe_subscription', hasExtraUsageEnabled=False)
         (self.root / '.claude.json').write_text(json.dumps(dict(
-            hasCompletedOnboarding=True, theme='dark', oauthAccount=self.account,
+            hasCompletedOnboarding=True, hasSeenAutoDefaultNudge=True, theme='dark', oauthAccount=self.account,
             projects={str(work): dict(hasTrustDialogAccepted=True)},
             cachedGrowthBookFeatures={'tengu_jade_anvil_4': True,
                 'tengu_harbor_kite_limits': True, 'tengu_drifting_nova': True})))

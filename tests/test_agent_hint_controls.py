@@ -212,7 +212,7 @@ class HintFixtureControls(unittest.TestCase):
             self.assertEqual(value.env['CLAUDE_CONFIG_DIR'], str(agent_home))
             self.assertFalse((home / '.claude.json').exists())
             self.assertEqual(json.loads((agent_home / '.claude.json').read_text()), dict(
-                hasCompletedOnboarding=True, theme='dark',
+                hasCompletedOnboarding=True, hasSeenAutoDefaultNudge=True, theme='dark',
                 customApiKeyResponses=dict(approved=['fixture-key'], rejected=[])))
             self.assertEqual(json.loads((agent_home / 'settings.json').read_text()), {})
 
