@@ -7679,7 +7679,14 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
     archived.state = "archived"; archived.archiveId = "draft-archive";
     archived.runId = "archived-run"; archived.conversationId = "conversation-one";
     auto other = local.sessions[1];
-    local.sessions = {archived, other}; state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    const bool diskOnly = scopeChange == "bulk-disk-only";
+    if (diskOnly) {
+        other.state = "archived"; other.archiveId = "other-retained-archive";
+        other.runId = "other-archived-run"; other.conversationId = "other-conversation";
+    }
+    const QString otherKey = '\n' + other.name + (diskOnly ? '\n' + other.archiveId : QString());
+    local.sessions = diskOnly ? QList<SessionInfo>{other} : QList<SessionInfo>{archived, other};
+    state.setLocal(local, QDateTime::currentMSecsSinceEpoch());
     const QString oldKey = "\n" + archived.name + "\n" + archived.archiveId;
     const QString liveKey = "\n" + archived.name;
     ComposerDraftStore store; ComposerDraft draft;
@@ -7705,11 +7712,21 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
     auto *search = window.findChild<QLineEdit *>("search"); QVERIFY(search);
     if (scopeChange == "preserved-search") search->setText("restore-draft");
     QCOMPARE(list->count(), 1);
-    if (scopeChange == "bulk-disk-only") {
-        window.showSession({}, other.name); archiveFilter->click();
-        machines->setSelection({"@local"});
-        QCOMPARE(list->count(), 1); list->clearSelection();
-        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::ControlModifier, list->visualItemRect(list->item(0)).center());
+    if (diskOnly) {
+        // The target has never appeared in this window: opening Archive cannot
+        // preload its saved draft before the background Restore path is tested.
+        QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), otherKey);
+        list->setCurrentRow(0);
+        QTRY_COMPARE(composer->sessionKey(), otherKey);
+        QTRY_VERIFY(!composer->isDraftLoading(otherKey));
+        local.sessions = {archived, other}; state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+        QCOMPARE(list->count(), 2); QCOMPARE(composer->sessionKey(), otherKey);
+        list->clearSelection();
+        QListWidgetItem *target = nullptr;
+        for (int row = 0; row < list->count(); ++row)
+            if (list->item(row)->data(Qt::UserRole).toString() == oldKey) target = list->item(row);
+        QVERIFY(target); QVERIFY(!target->isHidden());
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::ControlModifier, list->visualItemRect(target).center());
         QTRY_COMPARE(list->selectedItems().size(), 1);
         QCOMPARE(list->selectedItems().first()->data(Qt::UserRole).toString(), oldKey);
         QVERIFY(composer->sessionKey() != oldKey);
@@ -7756,7 +7773,7 @@ void TestSessionsWindow::archiveRestoreKeepsDraftAndConversation()
         } else QCOMPARE(search->text(), QString("restore-draft"));
         // The user's scope change canceled follow-navigation, not the handoff.
         QVERIFY(composer->sessionKey() != liveKey);
-        if (scopeChange == "bulk-disk-only") QCOMPARE(composer->sessionKey(), "\n" + other.name);
+        if (diskOnly) QCOMPARE(composer->sessionKey(), otherKey);
         return;
     }
     if (scopeChange == "preserved-search") {
