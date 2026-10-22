@@ -14,6 +14,7 @@
  "test_claude_approval_native.NativeClaudeReadApproval": 0,
  "test_claude_input_native.NativeClaudeInput": 0,
  "test_claude_permission.PermissionMode": 10,
+ "test_claude_permission_native.NativeClaudeAutoModeOffer": 0,
  "test_claude_questions_native.NativeClaudeQuestions[1/3]": 0,
  "test_claude_questions_native.NativeClaudeQuestions[2/3]": 0,
  "test_claude_questions_native.NativeClaudeQuestions[3/3]": 0,

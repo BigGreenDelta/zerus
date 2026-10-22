@@ -320,6 +320,11 @@ from Claude's status line input in `hgs inspect` for the exact run, conversation
 model: before the first reply, after a reply, after a session-only model change, a
 compaction and a clear, and in a resumed run. In a linked worktree whose repository's
 local settings set a status line, Claude keeps that status line and no window is reported.
+`tests/test_claude_permission_native.py` leaves Claude's one-time auto-mode offer
+enabled for a fixture account whose default mode is manual. Claude 2.1.296 and
+2.1.308 coverage requires an answerable Activity card under the launch prompt's reply
+that holds messages back, then answers it once: keeping the mode records Claude's own
+`hasSeenAutoDefaultNudge` with `defaultMode` unchanged, and accepting sets it to `auto`.
 
 ### Unix tmux census
 
@@ -762,10 +767,10 @@ host and refuses an agent that has none. The Codex matrix pins 0.162.0 for Linux
 Windows and retains 0.160.1 (a resident-session regression boundary) on Linux only.
 The Claude Code matrix pins 2.1.308 for all three targets and retains 2.1.296, the
 oldest version whose hooks hgs registers, on Linux only. From 2.1.304 Claude also
-records each API request as an `api-request-blob` transcript row, may offer a
-one-time default permission mode change (fixtures set `hasSeenAutoDefaultNudge`)
-and can defer WebFetch behind ToolSearch (its approval fixture sets
-`ENABLE_TOOL_SEARCH=false`). The OpenCode matrix pins
+records each API request as an `api-request-blob` transcript row and can defer
+WebFetch behind ToolSearch (its approval fixture sets `ENABLE_TOOL_SEARCH=false`).
+Both pins offer a one-time default permission mode change; fixtures set
+`hasSeenAutoDefaultNudge` except the suite that answers that offer. The OpenCode matrix pins
 its reviewed minimum, 2.0.32, for Linux and macOS; on x86_64 Linux it uses the
 `@opencode/cli-linux-x64-baseline` package, which runs without AVX2 on every x86_64
 host. macOS therefore runs Claude Code and OpenCode, and Windows, where Zerus has no
