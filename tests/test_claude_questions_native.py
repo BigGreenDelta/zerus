@@ -78,7 +78,9 @@ class NativeClaudeQuestions(unittest.TestCase):
   channel=self._testMethodName.startswith('test_channel_');tall='_tall_' in self._testMethodName
   if self._testMethodName.startswith('test_channel_single_deadline_'):self.channel_seconds=4
   self.items=TALL_ITEMS if tall else ITEMS[:1] if self._testMethodName.startswith(('test_single_','test_channel_single_')) else WRAPPED_ITEMS if wrapped else ITEMS
-  (self.root/'.claude.json').write_text(json.dumps(dict(hasCompletedOnboarding=True,hasSeenAutoDefaultNudge=True,bypassPermissionsModeAccepted=True,theme='dark',customApiKeyResponses=dict(approved=['fixture-key'],rejected=[]),projects={str(work):dict(hasTrustDialogAccepted=True)})))
+  # Claude Code 2.1.296 and later offer auto mode once; only its own suite keeps that offer.
+  offer={} if getattr(self,'auto_mode_offer',False) else dict(hasSeenAutoDefaultNudge=True)
+  (self.root/'.claude.json').write_text(json.dumps(dict(hasCompletedOnboarding=True,**offer,bypassPermissionsModeAccepted=True,theme='dark',customApiKeyResponses=dict(approved=['fixture-key'],rejected=[]),projects={str(work):dict(hasTrustDialogAccepted=True)})))
   permission_mode=getattr(self,'native_permission_mode','default' if self.approval_fixture or self.message_fixture else 'bypassPermissions')
   settings={'permissions':{'defaultMode':permission_mode}}
   if hasattr(self,'native_settings'):settings.update(self.native_settings(work))
