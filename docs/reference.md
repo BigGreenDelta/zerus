@@ -1948,12 +1948,19 @@ that way. Absolute paths remain available directly from the CLI.
 
 ### Cloning a repository
 
-**Clone repository…** in the desktop **New session** dialog prepares a repository on the selected
-computer and starts the chosen agent. Enter an SSH or HTTPS address, choose an
-existing parent folder and review the suggested, editable folder name and full
-destination. Select an existing logical project or **New project…**. Parent
-folders are remembered separately for each computer. **Projects → Clone
-repository…** offers the same preparation without starting an agent.
+In desktop **New session**, choose **Working folder** for an existing checkout or
+ordinary folder, or **Git repository** to prepare a new checkout. Project,
+computer, agent, account and session name stay in this one form. The Git source
+accepts an SSH or HTTPS URL from GitHub or another Git server. **Clone to** shows
+the suggested complete destination; edit it to rename the target folder or use
+**Browse…** to choose its parent. A manual destination stays when the URL changes.
+Parent folders are remembered separately for each computer.
+
+Select an existing logical project, Inbox, or **New project…**, then use the
+single **Clone and start** action. Progress, access errors and recovery controls
+stay inline. Switching source modes or opening the form never starts a clone.
+**Projects → Clone repository…** offers standalone preparation without starting
+an agent.
 
 **Clone and start** checks the selected computer's installed CLI, Git, parent
 folder, destination and repository access before cloning. Access uses that
