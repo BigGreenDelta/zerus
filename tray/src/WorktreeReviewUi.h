@@ -44,7 +44,7 @@ inline QString size(const QJsonObject &row) {
 }
 inline QString summary(const QJsonObject &row) {
     if (row["verdict"] == "missing") return QObject::tr("Folder is gone; forget its Git record");
-    QStringList parts;
+    QStringList parts{integration(row)};
     if (localData(row) && row["ignored_fingerprint"].toString().isEmpty()) parts << QObject::tr("Update Zerus on this computer to review local files before cleanup");
     if (row["changes"].toInt()) parts << QObject::tr("%1 changed").arg(row["changes"].toInt());
     if (row["untracked"].toInt()) parts << QObject::tr("%1 untracked").arg(row["untracked"].toInt());
@@ -53,8 +53,31 @@ inline QString summary(const QJsonObject &row) {
         const auto reason = value.toObject();
         if (reason["code"] != "changes" && reason["code"] != "untracked") parts << reason["message"].toString();
     }
-    if (parts.isEmpty()) parts << integration(row);
     return parts.join(QString::fromUtf8(" · "));
+}
+inline QStringList decision(const QJsonObject &row) {
+    QStringList lines{QObject::tr("Code: %1 (local Git refs).").arg(integration(row))};
+    if (row["verdict"] == "missing") {
+        lines << QObject::tr("The folder is already gone. Cleanup only forgets its Git worktree record.");
+        return lines;
+    }
+    if (row.contains("changes") && row.contains("untracked"))
+        lines << (row["changes"].toInt() || row["untracked"].toInt()
+            ? QObject::tr("Unsaved work: %1 changed and %2 untracked files.").arg(row["changes"].toInt()).arg(row["untracked"].toInt())
+            : QObject::tr("Unsaved work: no changed or untracked files."));
+    else lines << QObject::tr("Unsaved work: see the current file check below.");
+    if (localData(row)) {
+        lines << QObject::tr("Local data: %1 outside Git. These files may include caches, builds or unique data; Git cannot restore them.")
+            .arg(QLocale().formattedDataSize(qint64(row["ignored_bytes"].toDouble())));
+        lines << QObject::tr("Automatic cleanup keeps folders with any local data. Inspect the files before choosing to delete them.");
+    } else if (row.contains("ignored_count")) lines << QObject::tr("Local data: no ignored files found.");
+    for (const auto &value : row["reasons"].toArray()) lines << value.toObject()["message"].toString();
+    for (const auto &value : row["notes"].toArray()) {
+        const auto note = value.toObject();
+        if (note["code"] != "ignored_data") lines << note["message"].toString();
+    }
+    lines.removeDuplicates();
+    return lines;
 }
 inline bool removable(const QJsonObject &row) {
     return row["kind"] == "linked" && (row["verdict"] == "ready" || row["verdict"] == "review" || row["verdict"] == "missing")

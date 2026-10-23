@@ -7960,7 +7960,7 @@ void TestSessionsWindow::archivingLastWorktreeSessionOffersCleanup()
         QTRY_VERIFY(offer->isVisible()); QVERIFY(offer->toolTip().contains("/workspace/website-nav")); bool opened = false;
         QTimer::singleShot(0, &window, [&] {
             auto *dialog = window.findChild<QDialog *>("worktreeBatchCleanupDialog"); QVERIFY(dialog); QTimer::singleShot(3000, dialog, [dialog] { dialog->done(0); });
-            QCOMPARE(dialog->windowTitle(), QString("Review cleanup"));
+            QCOMPARE(dialog->windowTitle(), QString("Remove working folders"));
             const auto target = dialog->findChild<QTreeWidget *>("batchCleanupList")->topLevelItem(0)->data(0,Qt::UserRole).toJsonObject();
             QCOMPARE(target["row"].toObject()["path"].toString(),QString("/workspace/website-nav")); opened = true; dialog->reject();
         });
@@ -7995,7 +7995,7 @@ void TestSessionsWindow::keptWorktreeFooterFitsAndNamesItsSource()
     auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
     window.findChild<QAction *>("archiveSessionAction")->trigger(); QTRY_COMPARE(writes.size(), 1);
     auto *offer = window.findChild<QPushButton *>("archivedWorktreeCleanup"); QTRY_VERIFY(offer->isVisible());
-    QCOMPARE(offer->text(), QString("Review worktree: kept-checkout"));
+    QCOMPARE(offer->text(), QString("Folder kept: kept-checkout"));
     QVERIFY(offer->toolTip().contains("codex/website/navigation")); QVERIFY(offer->toolTip().contains("arch"));
     QVERIFY(offer->toolTip().contains("/workspace/kept-checkout"));
     QVERIFY(offer->accessibleName().contains("codex/website/navigation"));
@@ -8033,7 +8033,7 @@ void TestSessionsWindow::keptWorktreeReviewFollowsItsStoredTargetAndRechecksOccu
     // Once no live session uses the folder, the unresolved review remains reachable.
     occupied.sessions.removeIf([&](const SessionInfo &session) { return session.name == source; });
     updated.setLocal(occupied, QDateTime::currentMSecsSinceEpoch()); window.setFleet(updated);
-    QVERIFY(offer->isVisible()); QCOMPARE(offer->text(), QString("Check worktree: retained-checkout"));
+    QVERIFY(offer->isVisible()); QCOMPARE(offer->text(), QString("Cleanup unconfirmed: retained-checkout"));
     QVERIFY(offer->toolTip().contains("Outcome unknown"));
     auto shared = occupied;
     for (auto &session : shared.sessions) if (session.name == "codex/hgs/dashboard") session.gitRoot = root;
@@ -8047,6 +8047,7 @@ void TestSessionsWindow::keptWorktreeReviewFollowsItsStoredTargetAndRechecksOccu
         auto *list = dialog->findChild<QTreeWidget *>("batchCleanupList"); QVERIFY(list);
         const auto target = list->topLevelItem(0)->data(0, Qt::UserRole).toJsonObject();
         QCOMPARE(target["row"].toObject()["path"].toString(), root); QCOMPARE(target["common_dir"].toString(), common);
+        QCOMPARE(target["cleanup_reason"].toString(), QString("Outcome unknown"));
         reviewed = true;
     });
     offer->click(); QVERIFY(reviewed); QVERIFY(!offer->isVisible()); QCOMPARE(writes.size(), 1);
@@ -8135,7 +8136,7 @@ void TestSessionsWindow::keptWorktreeReviewFormatsTheSourceMachinePath()
         auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
         window.findChild<QAction *>("archiveSessionAction")->trigger(); QTRY_COMPARE(writes.size(), 1);
         auto *offer = window.findChild<QPushButton *>("archivedWorktreeCleanup"); QTRY_VERIFY(offer->isVisible());
-        QCOMPARE(offer->text(), QString("Review worktree: kept-checkout"));
+        QCOMPARE(offer->text(), QString("Folder kept: kept-checkout"));
         QVERIFY(offer->toolTip().contains("Folder: " + context.shown));
         QVERIFY(offer->accessibleDescription().contains("Folder: " + context.shown));
     }

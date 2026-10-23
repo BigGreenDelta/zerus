@@ -213,7 +213,7 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
             auto *list=previewDialog->findChild<QTreeWidget *>("batchCleanupList");QCOMPARE(list->topLevelItemCount(),1);QCOMPARE(list->topLevelItem(0)->data(0,Qt::UserRole).toJsonObject()["row"].toObject()["path"].toString(),QString("/linked"));
             auto *confirm=previewDialog->findChild<QPushButton *>("confirmBatchWorktreeRemoval");QVERIFY(!confirm->isEnabled());confirm->click();QVERIFY(!calls().contains("worktrees remove"));
             const auto preview=qEnvironmentVariable("HGS_WORKTREE_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(previewDialog->grab().save(preview+"/cleanup-preview.png"));}
-            QTRY_COMPARE(list->topLevelItem(0)->text(3),QString("Ready for confirmation"));
+            QTRY_COMPARE(list->topLevelItem(0)->text(3),QString("Review local files"));
             if(confirmed){previewDialog->findChild<QCheckBox *>("confirmIgnoredWorktreeFiles")->setChecked(true);QVERIFY(confirm->isEnabled());confirm->click();QTRY_VERIFY(previewDialog->findChild<QLabel *>("batchCleanupStatus")->text().contains("1 removed"));QCOMPARE(calls().count("worktrees remove"),1);QVERIFY(calls().contains("@mac worktrees remove --path /linked --common-dir /repo/.git --fingerprint /linked-print"));QVERIFY(calls().contains("--ignored-fingerprint ignored-print"));QVERIFY(!calls().contains("--force"));}
             else QVERIFY(!calls().contains("worktrees remove"));reviewed=true;previewDialog->reject();
         });remove->click();QVERIFY(reviewed);QCOMPARE(dialog.changed(),confirmed);if(confirmed)QTRY_VERIFY(calls().count("@mac worktrees --path /repo --json --refresh")>=2);
@@ -248,6 +248,39 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         auto *tree=dialog.findChild<QTreeWidget *>("worktreeOverviewList");auto *remove=dialog.findChild<QPushButton *>("reviewSelectedWorktrees");choose->click();QVERIFY(remove->isEnabled());
         auto data=review();auto rows=data["worktrees"].toArray();auto missing=rows.last().toObject();missing["fingerprint"]="changed-print";rows.replace(rows.size()-1,missing);data["worktrees"]=rows;QFile file(dir.filePath("review.json"));QVERIFY(file.open(QIODevice::WriteOnly));file.write(QJsonDocument(data).toJson());file.close();
         dialog.findChild<QPushButton *>("refreshWorktreeOverview")->click();QVERIFY(!remove->isEnabled());QTRY_VERIFY(choose->isEnabled());QCOMPARE(overviewRow(tree,"/missing")->checkState(0),Qt::Unchecked);QVERIFY(!remove->isEnabled());QVERIFY(!calls().contains("worktrees remove"));
+    }
+    void cleanupDecisionShowsIntegrationAndDataLossTogether(){
+        auto row=review()["worktrees"].toArray()[1].toObject();
+        row["integration"]=QJsonObject{{"kind","ancestor"},{"base","origin/main"}};row["changes"]=0;row["untracked"]=0;
+        QVERIFY(WorktreeReviewUi::summary(row).contains("Merged into origin/main"));
+        QVERIFY(WorktreeReviewUi::summary(row).contains("Local files outside Git"));
+        const auto decision=WorktreeReviewUi::decision(row).join('\n');
+        QVERIFY(decision.contains("no changed or untracked files"));QVERIFY(decision.contains("Git cannot restore them"));
+        QVERIFY(decision.contains("Automatic cleanup keeps folders"));QVERIFY(decision.contains("local Git refs"));
+        row.remove("changes");QVERIFY(!WorktreeReviewUi::decision(row).join('\n').contains("no changed or untracked files"));
+    }
+    void batchExplainsConsentAndOpensExactFolderInspection(){
+        auto data=review();auto rows=data["worktrees"].toArray();auto row=rows[1].toObject();
+        row["integration"]=QJsonObject{{"kind","ancestor"},{"base","origin/main"}};row["changes"]=0;row["untracked"]=0;rows.replace(1,row);data["worktrees"]=rows;
+        QFile file(dir.filePath("review.json"));QVERIFY(file.open(QIODevice::WriteOnly));file.write(QJsonDocument(data).toJson());file.close();
+        HgsClient client(FakeCli::program(script()));WorktreeBatchCleanupDialog dialog(&client,{{{"host","mac"},{"machine","mac"},{"common_dir","/repo/.git"},{"cleanup_reason","Ignored files remain"},{"row",row}}});dialog.show();
+        auto *list=dialog.findChild<QTreeWidget *>("batchCleanupList");QTRY_COMPARE(list->topLevelItem(0)->text(3),QString("Review local files"));
+        auto *details=dialog.findChild<QPlainTextEdit *>("worktreeCleanupDecision");QVERIFY(details);
+        const auto text=details->toPlainText();QVERIFY(text.contains("Why the folder stayed: Ignored files remain"));QVERIFY(text.contains("Merged into origin/main"));
+        QVERIFY(text.contains("conversations remain"));QVERIFY(text.contains("recreating its working folder"));QVERIFY(text.contains("target"));
+        auto *remove=dialog.findChild<QPushButton *>("confirmBatchWorktreeRemoval");QVERIFY(!remove->isEnabled());
+        auto *status=dialog.findChild<QLabel *>("batchCleanupStatus");QVERIFY(status->text().contains("inspect the local files"));
+        auto *inspect=dialog.findChild<QPushButton *>("inspectCleanupWorktree");QVERIFY(inspect->isEnabled());
+        bool inspected=false;
+        QTimer::singleShot(0,&dialog,[&]{auto *viewer=dialog.findChild<QDialog *>("cleanupFileInspection");QVERIFY(viewer);
+            QCOMPARE(viewer->findChild<QTabWidget *>("worktreeInspectionTabs")->currentIndex(),2);
+            QVERIFY(viewer->findChild<QLabel *>("worktreeOverviewDetails")->text().contains("/linked"));
+            QVERIFY(viewer->findChild<QLabel *>("worktreeBrief")->text().startsWith("mac"));inspected=true;viewer->reject();});
+        inspect->click();QVERIFY(inspected);QVERIFY(!remove->isEnabled());QVERIFY(!calls().contains("worktrees remove"));
+        dialog.findChild<QCheckBox *>("confirmIgnoredWorktreeFiles")->setChecked(true);QVERIFY(remove->isEnabled());
+        dialog.resize(640,600);QTest::qWait(20);QVERIFY(dialog.rect().contains(QRect(remove->mapTo(&dialog,QPoint()),remove->size())));
+        const auto raster=qEnvironmentVariable("HGS_WORKTREE_PREVIEW");if(!raster.isEmpty())QVERIFY(dialog.grab().save(raster+"/cleanup-decision.png"));
+        dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->click();QVERIFY(!calls().contains("worktrees remove"));
     }
     void batchCleanupKeepsExactComputerScopesAndNeverRetriesFailure(){
         const auto row=review()["worktrees"].toArray().last().toObject();QFile fail(dir.filePath("fail-remove"));QVERIFY(fail.open(QIODevice::WriteOnly));fail.write("/missing\n");fail.close();
@@ -461,6 +494,29 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         QTRY_COMPARE(state->text(),QString("No changed files."));QCOMPARE(calls().count("worktrees inspect"),2);
         WorktreeInspectionPanel reopened(&client);reopened.show();reopened.setContext("mac","Mac","/linked","/repo/.git",{{"fingerprint","changed"}}, {},true);
         QTRY_COMPARE(reopened.findChild<QLabel *>("worktreeChangedFilesState")->text(),QString("No changed files."));QCOMPARE(calls().count("worktrees inspect"),2);
+    }
+    void newCleanupInspectionRefreshesOldCacheInOnlyItsExactScope(){
+        HgsClient client(FakeCli::program(script()));QSignalSpy ready(&client,&HgsClient::worktreeInspectionFinished);
+        client.inspectWorktree("mac","/linked","/repo/.git");client.inspectWorktree({},"/linked","/repo/.git");
+        QTRY_COMPARE(ready.size(),2);QCOMPARE(calls().count("worktrees inspect"),2);
+        auto data=review();auto rows=data["worktrees"].toArray();auto row=rows[1].toObject();
+        row["fingerprint"]="fresh-P2";row["ignored_count"]=0;row["ignored"]=QJsonArray{};row["ignored_bytes"]=0;rows.replace(1,row);data["worktrees"]=rows;
+        QFile file(dir.filePath("review.json"));QVERIFY(file.open(QIODevice::WriteOnly));file.write(QJsonDocument(data).toJson());file.close();
+        QFile empty(dir.filePath("empty-inspect"));QVERIFY(empty.open(QIODevice::WriteOnly));empty.close();
+        WorktreeBatchCleanupDialog dialog(&client,{{{"host","mac"},{"machine","Mac"},{"common_dir","/repo/.git"},{"row",row}}});dialog.show();
+        auto *inspect=dialog.findChild<QPushButton *>("inspectCleanupWorktree");QTRY_VERIFY(inspect->isEnabled());
+        bool inspected=false;
+        QTimer::singleShot(0,&dialog,[&]{auto *viewer=dialog.findChild<QDialog *>("cleanupFileInspection");QVERIFY(viewer);
+            const auto close=qScopeGuard([&]{viewer->reject();});
+            QTRY_COMPARE(viewer->findChild<QLabel *>("worktreeChangedFilesState")->text(),QString("No changed files."));
+            QVERIFY(viewer->findChild<QLabel *>("worktreeLocalFilesState")->text().contains("No local files"));
+            QCOMPARE(calls().count("worktrees inspect"),3);QCOMPARE(ready.last()[4].toJsonObject()["review"].toObject()["fingerprint"].toString(),QString("fresh-P2"));inspected=true;
+        });
+        inspect->click();QVERIFY(inspected);
+        // Same path/common on another computer keeps its prior cached result.
+        const auto count=ready.size();client.inspectWorktree({},"/linked","/repo/.git");QTRY_COMPARE(ready.size(),count+1);
+        QCOMPARE(calls().count("worktrees inspect"),3);QCOMPARE(ready.last()[4].toJsonObject()["files"].toArray().size(),1);
+        QVERIFY(!calls().contains("worktrees remove"));
     }
     void inspectionNavigationKeepsOnlyOneMetadataReadActive(){
         QFile slow(dir.filePath("slow-inspect"));QVERIFY(slow.open(QIODevice::WriteOnly));slow.close();

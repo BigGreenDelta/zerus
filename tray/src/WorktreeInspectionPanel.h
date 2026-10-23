@@ -124,7 +124,7 @@ public:
         m_brief->setText(path.isEmpty()?QString():machine+" · "+(review["verdict"].toString().isEmpty()?review["context"].toString():WorktreeReviewUi::summary(review)));
         QStringList summary;
         if(!path.isEmpty()){summary<<WorktreeReviewUi::summary(review)<<path<<machine+" · "+review["branch"].toString()<<review["context"].toString()<<tr("Folder size: %1").arg(WorktreeReviewUi::size(review));}
-        for(const auto &value:review["notes"].toArray())summary<<value.toObject()["message"].toString();
+        if(!review["verdict"].toString().isEmpty())summary<<WorktreeReviewUi::decision(review);
         if(review["last_activity"].toDouble()>0)summary<<tr("Last activity: %1").arg(QLocale().toString(QDateTime::fromSecsSinceEpoch(qint64(review["last_activity"].toDouble())),QLocale::ShortFormat));
         if(review["sampled_at"].toDouble()>0)summary<<tr("Checked: %1").arg(QLocale().toString(QDateTime::fromSecsSinceEpoch(qint64(review["sampled_at"].toDouble())).time(),QLocale::ShortFormat));
         m_summary->setText(summary.join('\n'));m_summary->setToolTip(path);

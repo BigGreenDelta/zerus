@@ -2208,8 +2208,8 @@ not ownership evidence. Automatic cleanup has bounded checks and never changes
 a successful archive into a failed termination. A lost removal acknowledgement
 is reported as unconfirmed, with no automatic replay.
 
-The desktop reports successful automatic cleanup, or keeps **Review worktree:
-<folder>** after Terminate/Archive (**Check worktree:** when the outcome is
+The desktop reports successful automatic cleanup, or keeps **Folder kept:
+<folder>** after Terminate/Archive (**Cleanup unconfirmed:** when the outcome is
 unconfirmed). This global reminder names the retained checkout; its tooltip and
 accessible description identify the source session, computer, full folder and
 reason. It can remain while another session is selected and does not expire
@@ -2219,6 +2219,15 @@ confirmation before removal. Archives keep the exact branch/head needed to
 recreate an automatically removed checkout on explicit **Restore**; a changed
 branch or occupied destination is refused. Browsing and dry runs never recreate
 a folder. Plain Pause never cleans up.
+
+The cleanup review always shows integration evidence, even when local files
+remain. Git integration uses local refs, not a fresh remote check. The selected
+folder explains unsaved changes, local data loss and why automatic cleanup kept
+it. **Inspect files and commits…** opens the bounded file browser, including
+ignored files; a cache-like filename alone is not proof that data is disposable.
+**Keep folders** makes no removal. Local-data and unsaved-work deletion require
+separate consent. Manual removal keeps conversations and keeps branches by
+default; restoring an archive may require recreating its working folder.
 
 The CLI is `hgs [@host] worktrees review --path PATH
 [--worktree WORKTREE] --json` and `hgs [@host] worktrees remove --path WORKTREE
