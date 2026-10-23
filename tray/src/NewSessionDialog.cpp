@@ -142,6 +142,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     auto *heading=plainLabel(tr("New session"));heading->setObjectName("heading");layout->addWidget(heading);
     auto *form=new QFormLayout;m_form=form;form->setSpacing(12);form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     m_project=new QComboBox;m_project->setObjectName("launchProject");m_project->setAccessibleName(tr("Project"));
+    m_project->setMinimumContentsLength(10);m_project->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     const auto theme=QSettings().value("workspace/theme","system").toString();
     const bool dark=theme=="dark"||(theme!="light"&&palette().color(QPalette::Window).lightness()<128);
     const QColor iconColor(dark?"#a1adbb":"#647386");
@@ -150,7 +151,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_manage->setAutoRaise(true);m_manage->setIcon(workspaceIcon("settings",iconColor));m_manage->setIconSize(QSize(18,18));m_manage->setFixedSize(34,34);
     m_manage->setToolTip(tr("Manage this project's folders"));m_manage->setAccessibleName(m_manage->toolTip());
     auto *projectRow=new QHBoxLayout;projectRow->setSpacing(8);projectRow->addWidget(m_project,2);projectRow->addWidget(m_manage);
-    m_machine=new QComboBox;m_machine->setObjectName("launchComputer");m_machine->setAccessibleName(tr("Computer"));m_machine->setMinimumContentsLength(6);projectRow->addWidget(m_machine,1);
+    m_machine=new QComboBox;m_machine->setObjectName("launchComputer");m_machine->setAccessibleName(tr("Computer"));m_machine->setMinimumContentsLength(6);m_machine->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);projectRow->addWidget(m_machine,1);
     form->addRow(tr("Target"),projectRow);
     m_newProjectName=new QLineEdit;m_newProjectName->setObjectName("launchNewProjectName");m_newProjectName->setMaxLength(80);m_newProjectName->setPlaceholderText(tr("Project name"));form->addRow(tr("New project"),m_newProjectName);
     auto *sources=new QButtonGroup(this);auto *sourceRow=new QHBoxLayout;sourceRow->setSpacing(8);
@@ -567,6 +568,7 @@ void NewSessionDialog::browseFolder()
 void NewSessionDialog::setRepositorySource(bool enabled)
 {
     if(m_validation||m_creation||(m_repository&&m_repository->busy()))return;
+    m_prefillRequest=0;
     m_repositorySource=enabled;
     const auto newProject=m_project->findData(NewRepositoryProject);
     if(enabled&&newProject<0)m_project->addItem(tr("New project…"),NewRepositoryProject);
@@ -587,6 +589,7 @@ void NewSessionDialog::syncRepositoryComputer()
     if(!m_repository->fieldsLocked())m_repository->setSource(url,m_repository->parentFolder(),name);
     m_customDestination=false;
     {const QSignalBlocker urlBlock(m_repositoryUrl),pathBlock(m_repositoryDestination);m_repositoryUrl->setText(m_repository->url());m_repositoryDestination->setText(MachinePlatform::native(m_repository->destination(),style));}
+    if(!m_customProjectName){const QSignalBlocker project(m_newProjectName);m_newProjectName->setText(m_repository->folderName());}
     connect(m_repository,&RepositoryClone::changed,this,[this]{
         if(m_repository->fieldsLocked()){
             const QSignalBlocker url(m_repositoryUrl),destination(m_repositoryDestination);

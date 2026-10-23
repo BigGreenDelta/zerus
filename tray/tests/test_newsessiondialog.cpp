@@ -79,7 +79,7 @@ private slots:
         QSettings().clear();
         for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started","opencode-ids",
             "model-calls","favorite-calls","favorite-fails","models-stopped","old-hgs","favorites","slow-models","slow-favorite","favorite-started",
-            "hold-next-models","models-held","project-inference","canonical-directory","clone-calls","clone-worktree","clone-uncertain","clone-receipt"})flag(name,false);
+            "hold-next-models","models-held","project-inference","canonical-directory","clone-calls","clone-worktree","clone-uncertain","clone-receipt","prefill-linked"})flag(name,false);
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -214,7 +214,11 @@ elif a and a[0]=='dirs':
  if (root/'project-inference').exists():answer['project_inference']={'schema':1,'swarm_id':'swarm-fixture','project_id':(root/'project-inference').read_text()}
  print(json.dumps(answer))
 elif a and a[0]=='worktrees':
- if (root/'clone-worktree').exists() and (root/'clone-calls').exists():
+ if (root/'prefill-linked').exists():
+  path=a[a.index('--path')+1]
+  print(json.dumps({'state':'ok','path':path,'selected_root':path,'common_dir':'/workspace/example/.git',
+   'worktrees':[{'path':'/workspace/example','kind':'main','available':True},{'path':'/workspace/example-work-one','kind':'linked','available':True}]}))
+ elif (root/'clone-worktree').exists() and (root/'clone-calls').exists():
   def arg(k):return a[a.index(k)+1]
   if len(a)>1 and a[1]=='create':print(json.dumps({'status':'created','request_id':arg('--request-id'),'branch':arg('--branch'),'common_dir':arg('--common-dir'),'path':arg('--destination')}))
   else:print(json.dumps({'state':'ok','stale':False,'partial':False,'selected_root':'/workspace/fresh','common_dir':'/workspace/fresh/.git','worktrees':[{'path':'/workspace/fresh','kind':'main','available':True,'branch':'main'}]}))
@@ -291,9 +295,39 @@ elif a and a[0]=='worktrees':
         QCOMPARE(url->text(),QString("git@example.invalid:team/third.git"));QCOMPARE(destination->text(),QString("/workspace/custom"));
         QCOMPARE(dialog.findChild<QComboBox *>("launchProject")->currentData().toString(),project);QCOMPARE(sessionName->text(),QString("keep-this-session"));
         QVERIFY(dialog.findChild<QPushButton *>("launchWithoutWorktree")->isChecked());QVERIFY(!dialog.findChild<CloneRepositoryDialog *>());QVERIFY(lines("clone-calls").isEmpty());
+        QTRY_VERIFY(dialog.findChild<QPushButton *>("primary")->isEnabled());
         const auto preview=qEnvironmentVariable("ZERUS_PREVIEW_DIR");if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/new-session-repository.png"));
     }
+    void repositoryFormFitsWorkspace_data(){QTest::addColumn<QString>("theme");QTest::newRow("dark")<<QString("dark");QTest::newRow("light")<<QString("light");}
+    void repositoryFormFitsWorkspace(){
+        QFETCH(QString,theme);QSettings().setValue("workspace/theme",theme);
+        SessionOrganization projects;const auto project=projects.createGroup("Example repository with a long descriptive project name");projects.addFolder(project,"pc","/workspace/example");
+        SessionsWindow workspace(program());workspace.setFleet(fleet());
+        NewSessionDialog dialog(program(),fleet(),{},"codex",project,&workspace);dialog.setGroups(projects,project);dialog.resize(600,730);dialog.show();
+        dialog.findChild<QPushButton *>("launchRepositorySource")->click();dialog.findChild<QLineEdit *>("launchRepositoryUrl")->setText("https://github.com/example/repository.git");
+        dialog.findChild<QLineEdit *>("launchRepositoryDestination")->setText("~/Projects/repository");QTRY_VERIFY(dialog.findChild<QPushButton *>("primary")->isEnabled());
+        QVERIFY(dialog.width()<=660);QVERIFY(dialog.height()<=900);
+        for(const auto *name:{"launchProject","launchComputer","launchFolderSource","launchRepositorySource","launchRepositoryUrl","launchRepositoryDestination","browseRepositoryDestination","launchName","primary"}){
+            const auto *widget=dialog.findChild<QWidget *>(name);QVERIFY(widget);QVERIFY(widget->isVisible());QVERIFY(dialog.rect().contains(QRect(widget->mapTo(&dialog,QPoint()),widget->size())));
+        }
+        QVERIFY(!dialog.findChild<CloneRepositoryDialog *>());QVERIFY(lines("clone-calls").isEmpty());
+        const auto preview=qEnvironmentVariable("ZERUS_PREVIEW_DIR");if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/new-session-repository-"+theme+".png"));
+        dialog.findChild<QPushButton *>("launchFolderSource")->click();QVERIFY(dialog.findChild<QComboBox *>("launchProjectFolder")->isVisible());
+        if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/new-session-folder-"+theme+".png"));
+    }
     void inlineRecoveryReadsReceiptAndRequiresExplicitStart_data(){QTest::addColumn<QString>("host");QTest::newRow("local")<<QString();QTest::newRow("remote")<<QString("mac");}
+    void repositorySourceIgnoresLateFolderPrefill(){
+        flag("prefill-linked");SessionOrganization projects;const auto project=projects.createGroup("Example");projects.addFolder(project,"pc","/workspace/example");
+        NewSessionDialog dialog(program(),fleet(),{},"codex",project);dialog.setGroups(projects,project);dialog.show();
+        QSignalSpy loaded(dialog.findChild<HgsClient *>(),&HgsClient::worktreesReady);
+        dialog.prefillSessionFolder("/workspace/example-work-one");dialog.findChild<QPushButton *>("launchRepositorySource")->click();
+        dialog.findChild<QLineEdit *>("launchRepositoryUrl")->setText("git@example.invalid:team/fresh.git");
+        dialog.findChild<QLineEdit *>("launchRepositoryDestination")->setText("/workspace/keep-name");
+        const auto linkedReplies=[&]{int n=0;for(const auto &reply:loaded)if(reply[2].toString()=="/workspace/example-work-one")++n;return n;};
+        QTRY_COMPARE(linkedReplies(),2);QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/workspace/example-work-one"));
+        QCOMPARE(dialog.findChild<QLineEdit *>("launchRepositoryDestination")->text(),QString("/workspace/keep-name"));QVERIFY(lines("clone-calls").isEmpty());
+        dialog.findChild<QPushButton *>("launchFolderSource")->click();QCOMPARE(dialog.findChild<QLabel *>("launchFolderPath")->text(),QString("/workspace/example-work-one"));
+    }
     void inlineRecoveryReadsReceiptAndRequiresExplicitStart(){
         QFETCH(QString,host);flag("clone-uncertain");SessionOrganization projects;const auto project=projects.createGroup("Example");
         {
@@ -307,6 +341,8 @@ elif a and a[0]=='worktrees':
         QCOMPARE(mutations(),1);
         NewSessionDialog restored(program(),fleet(),host,"codex",project);restored.setGroups(projects,project);restored.show();restored.findChild<QPushButton *>("launchRepositorySource")->click();
         QCOMPARE(restored.findChild<QLineEdit *>("launchRepositoryDestination")->text(),QString("/workspace/fresh"));QVERIFY(!restored.findChild<QLineEdit *>("launchRepositoryUrl")->isEnabled());
+        auto *projectChoice=restored.findChild<QComboBox *>("launchProject");projectChoice->setCurrentIndex(projectChoice->count()-1);
+        QCOMPARE(restored.findChild<QLineEdit *>("launchNewProjectName")->text(),QString("fresh"));projectChoice->setCurrentIndex(projectChoice->findData(project));
         QSignalSpy launched(&restored,&NewSessionDialog::launchRequested);restored.findChild<QPushButton *>("launchRepositoryCheckResult")->click();
         auto *start=restored.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());QCOMPARE(start->text(),QString("Use checkout and start"));QCOMPARE(launched.size(),0);QCOMPARE(mutations(),1);
         start->click();QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][2].toString(),QString("/workspace/fresh"));QCOMPARE(mutations(),1);
