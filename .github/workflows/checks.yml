@@ -19,6 +19,12 @@ on:
       run_windows:
         type: boolean
         default: false
+      run_ios:
+        type: boolean
+        default: false
+      filter_pr_platforms:
+        type: boolean
+        default: false
       # Only the trusted main checks in ci.yml, whose token can write caches,
       # pass true. Every other caller restores caches and never saves them.
       save_caches:
@@ -41,29 +47,28 @@ jobs:
       run_arch: ${{ steps.revision.outputs.run_arch }}
       run_macos: ${{ steps.revision.outputs.run_macos }}
       run_windows: ${{ steps.revision.outputs.run_windows }}
+      run_ios: ${{ steps.revision.outputs.run_ios }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Record exact test commit and selected coverage
         id: revision
         env:
-          RUN_LINUX: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_linux }}
-          RUN_ARCH: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_arch }}
-          RUN_MACOS: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_macos }}
-          RUN_WINDOWS: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_windows }}
+          RUN_LINUX: ${{ inputs.run_linux }}
+          RUN_ARCH: ${{ inputs.run_arch }}
+          RUN_MACOS: ${{ inputs.run_macos }}
+          RUN_WINDOWS: ${{ inputs.run_windows }}
+          RUN_IOS: ${{ inputs.run_ios }}
+          FILTER_PR_PLATFORMS: ${{ inputs.filter_pr_platforms }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          commit=$(git rev-parse HEAD)
-          {
-            echo "commit=$commit"
-            echo "run_linux=$RUN_LINUX"
-            echo "run_arch=$RUN_ARCH"
-            echo "run_macos=$RUN_MACOS"
-            echo "run_windows=$RUN_WINDOWS"
-          } >> "$GITHUB_OUTPUT"
-          printf '### CI coverage\n\nCommit: %s\n\nQuick checks, Android unit tests and lint: always\n\nFull Linux CLI: %s\n\nArch desktop/package: %s\n\nmacOS CLI/desktop and iOS: %s\n\nWindows client/desktop/portable zip and real agents: %s\n' \
-            "$commit" "$RUN_LINUX" "$RUN_ARCH" "$RUN_MACOS" "$RUN_WINDOWS" >> "$GITHUB_STEP_SUMMARY"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          python3 scripts/ci/select-coverage.py
 
   quick:
     name: Quick checks (source and Rust 1.99)
@@ -410,7 +415,7 @@ jobs:
   ios:
     name: iOS core tests and simulator build
     needs: source
-    if: needs.source.outputs.run_macos == 'true'
+    if: needs.source.outputs.run_ios == 'true'
     runs-on: macos-15
     timeout-minutes: 40
     env:
@@ -1178,6 +1183,7 @@ jobs:
       RUN_ARCH: ${{ needs.source.outputs.run_arch == 'true' }}
       RUN_MACOS: ${{ needs.source.outputs.run_macos == 'true' }}
       RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}
+      RUN_IOS: ${{ needs.source.outputs.run_ios == 'true' }}
     steps:
       - run: |
           python3 - <<'PY'
@@ -1194,7 +1200,7 @@ jobs:
               'arch-package': json.loads(os.environ['RUN_ARCH']),
               'mac-desktop': json.loads(os.environ['RUN_MACOS']),
               'connector-macos': json.loads(os.environ['RUN_MACOS']),
-              'ios': json.loads(os.environ['RUN_MACOS']),
+              'ios': json.loads(os.environ['RUN_IOS']),
               'windows-desktop': json.loads(os.environ['RUN_WINDOWS']),
               'windows-host': json.loads(os.environ['RUN_WINDOWS']),
           }

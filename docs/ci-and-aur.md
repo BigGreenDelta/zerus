@@ -10,19 +10,19 @@ the control console.
 ## Continuous integration
 
 Hosted checks run automatically on pushes to `main` and pull requests targeting
-`main`, including Dependabot proposals. External fork workflows wait for a
-maintainer's **Approve and run** decision. Every automatic run selects source/MSRV,
-full Linux CLI, Arch desktop/package, both macOS suites and both Windows suites
-(client and desktop, and real agents through the session host). The owner enabled
-this policy on 2026-10-09 after making the repository public: standard Ubuntu,
-macOS and Windows GitHub-hosted runners are free for public repositories.
+`main`, including Dependabot proposals. External forks still require maintainer
+approval. Dev main checks shared Rust/protocol contracts, Linux CLI, Arch,
+macOS and Android. Windows and iOS run in the full nightly/stable matrix and on
+PRs affecting their code: desktop changes select Windows, iOS changes select
+iOS, and native/shared/build/workflow or unknown paths select both. An unknown
+PR inventory also selects both; a partial or unavailable diff never removes
+coverage. Android-only and documentation-only changes need no Windows/iOS jobs.
 
-Manual CI remains available and defaults to all suites. `ci.yml` chooses the cache
-trust boundary and calls the shared jobs in `checks.yml`. Reusable CI keeps explicit
-suite selection so another workflow cannot accidentally request unrelated jobs.
-A short first job resolves the exact commit and the selected suites; every other
-job checks out that commit. PR checks use the GitHub merge commit; a manual `ref`
-can select a PR head or another exact revision.
+Manual CI defaults to all platforms, with independent `run_ios` and `run_macos`
+flags. `ci.yml` selects the cache trust boundary and `checks.yml` respects the
+explicit coverage. The resolver records the exact test commit and selected
+suites. PR checks test the merge commit and use the base/head merge ancestry for
+conservative change selection, including both sides of renames.
 
 | Job | Automatic CI | Checks |
 | --- | --- | --- |
@@ -31,19 +31,20 @@ can select a PR head or another exact revision.
 | Rust relay | Always | Rust 1.99 format, clippy, and every storage contract (cross-worker ones included) on its own PostgreSQL database; every `services/mobile/tests` module, with the Rust relay fixtures on per-test PostgreSQL databases and no skips; the speech suites against the Python reference relay; the deployment image and its 256 MiB envelope |
 | Rust mobile connector | Always | Rust 1.99 format, clippy, vector, binary and journal handoff tests; the black-box suites against the Python and Rust connectors concurrently with differential traces compared against the reviewed allowlist, and a 300 s soak of the Rust build (`services/mobile/tests/BLACKBOX.md`) |
 | Rust mobile connector on macOS | Always | Cold Rust 1.99 build, unit, vector and binary tests, and the black-box modules that need no real `hgs`, journal handoffs with the Python connector included |
-| iOS core tests and simulator build | Always | `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
+| iOS core tests and simulator build | Affected PR; full nightly/stable | `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Arch desktop | Always | Qt build and all CTest suites |
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
 | macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
-| Windows client and desktop | Always | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
-| Windows real agents | Always | The pinned `win32-x64` Claude Code and Codex in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
+| Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
+| Windows real agents | Affected PR; full nightly/stable | The pinned `win32-x64` Claude Code and Codex in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
 Quick checks and the full suites start together once the commit is resolved, so
-a quick-check failure no longer holds back the other suites. New CI runs cancel
-obsolete runs for the same branch/PR and workflow. PR jobs have read-only
+a quick-check failure no longer holds back the other suites. New PR/manual runs cancel
+obsolete runs for the same branch/PR and workflow. Dev main finishes its active
+qualifying run while the newest pending main revision waits. PR jobs have read-only
 permissions and no publication credentials; fork PRs use `pull_request`, never
 `pull_request_target`. Publishing is confined to trusted upstream `main` and the
 branch-restricted `release` environment. Authenticated model-turn tests remain
@@ -57,21 +58,28 @@ plugins only turn that file into resources; tests and lint never contact
 Firebase, and the mapping upload follows R8, which these tasks do not run.
 
 On upstream `main` pushes with the [Dev channel](public-distribution.md#verified-main-dev-channel)
-enabled, `dev-android.yml` starts with the checks instead of after them. In the
-`release` environment and without cache access, it only assembles the signed
-release APK (`assembleRelease`), seals it and deletes the signing inputs. It
-then polls this run's jobs with a read-only Actions token and uploads
-`zerus-dev-android-a<attempt>` only after the `CI gate` job succeeds. While this
-attempt has no gate record, an earlier successful gate counts (a failed-job retry
-does not rerun it); an earlier failed or cancelled gate means waiting. Any
-other gate result, repeated API failures or a 135-minute wait fail the job without
-an upload; **Re-run failed jobs** then rebuilds the candidate. `dev.yml` assembles
-the desktop candidate and moves the `dev` tag only after the gate, this job
-and the enabled Mac candidate succeed. Main CI invokes `macos-cask.yml` after
-the gate with `channel: dev`; its full bundle/sign/notarize/install checks produce
-the same signed ZIP and DMG later sealed into the desktop candidate. Release builds skip the `lintVital` tasks: the gate requires the
-Android job, whose `lintRelease` covers those fatal checks for the same commit
-and variant.
+enabled, credential-free checks and `dev-macos-bundle` run in parallel. The latter
+uses pinned official Qt, tests the Release GUI, then packages that same tested
+app; there is no second GUI compilation with tests disabled. Signing remains
+in `macos-cask.yml` and starts only after both the trusted CI gate and that exact
+run's unsigned bundle succeed. Candidate source/version checks, Developer ID,
+notarization and disposable cask installation remain required.
+
+The short signed `dev-android.yml` build starts after the CI gate alongside Mac
+signing/installation. It builds `assembleRelease`, seals the APK/source and removes
+private inputs on every outcome, then uploads `zerus-dev-android-a<attempt>`.
+No runner polls the gate and no Actions token reaches this signing job. Its
+credential-free Android unit/lint check is required before signing; the signed
+build uses the same Firebase variant. Publication and the `dev` tag still wait
+for all selected candidates. With Mac enabled, the Android build overlaps its
+post-gate delivery work; with Mac disabled it adds its own short build duration.
+
+Nightly retains all Windows/iOS checks and uploads iOS Dev to TestFlight only
+after full verification. The upload retains the exact source's successful main
+CI number, not Nightly's smaller sequence. A bounded read-only App Store Connect
+preflight skips a known valid/processing existing build and refuses failed,
+expired or unknown records/API results before archiving. Stable iOS uploads run
+full verification too. These uploads remain separate from the desktop catalog.
 
 ### Incoming PRs and publication trust
 
@@ -91,6 +99,9 @@ configuration and authenticated model sessions do not belong in CI caches/artifa
 PR checks and every manual CI run receive **read-only cache tokens**, including a
 manual run of `refs/pull/NUMBER/head` from the upstream workflow. Only upstream
 `main` pushes and scheduled checks of that exact `main` commit can populate caches.
+Scheduled upstream-main Nightly checks also refresh these families, including
+Windows now absent from Dev. Manual Nightly uses a separate read-only call; its
+verification gate requires exactly one full matrix to pass.
 This restriction is enforced by GitHub's fixed `cache-mode` on the reusable call,
 so checked-out build code cannot bypass it by invoking the cache API itself.
 Publishers use `cache-mode: none` and execute trusted upstream publication scripts.
@@ -178,7 +189,7 @@ gh workflow run ci.yml --ref main
 # Full coverage of a PR head with the current upstream workflow:
 gh workflow run ci.yml --ref main -f ref=refs/pull/123/head
 # Source/MSRV checks plus the aggregate gate only:
-gh workflow run ci.yml --ref main -f run_linux=false -f run_arch=false -f run_macos=false -f run_windows=false
+gh workflow run ci.yml --ref main -f run_linux=false -f run_arch=false -f run_macos=false -f run_windows=false -f run_ios=false
 ```
 
 An explicit test `ref` changes the checked-out commit, not GitHub's workflow run

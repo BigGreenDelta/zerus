@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       run_macos:
-        description: Also run macOS CLI and desktop checks
+        description: Full stable qualification requires macOS checks (must remain true)
         type: boolean
         default: true
       macos_cask:
@@ -46,7 +46,7 @@ jobs:
           version = os.environ['REQUESTED_VERSION']
           assert re.fullmatch(r'\d+\.\d+\.\d+', version), 'Use a stable semantic version.'
           assert version == pathlib.Path('VERSION').read_text().strip(), 'Update VERSION first.'
-          assert os.environ['MACOS_CASK'] != 'true' or os.environ['RUN_MACOS'] == 'true', 'The macOS cask needs macOS checks.'
+          assert os.environ['RUN_MACOS'] == 'true', 'Stable candidates require full macOS qualification.'
           PY
   verify:
     needs: version
@@ -56,9 +56,10 @@ jobs:
       ref: ${{ github.sha }}
       run_linux: true
       run_arch: true
-      run_macos: ${{ inputs.run_macos }}
+      run_macos: true
       # Stable releases carry the tested portable zip, as nightlies do.
       run_windows: true
+      run_ios: true
   macos:
     # Homebrew casks start once the macos-signing environment is provisioned; see
     # docs/macos-distribution.md. macos_cask=false skips the cask for one release.

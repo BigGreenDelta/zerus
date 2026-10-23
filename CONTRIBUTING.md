@@ -113,9 +113,10 @@ backend classes when a behaviour must hold for both.
 On Arch, `bash scripts/ci/arch.sh` also builds and validates the pacman package
 as an unprivileged user. It substitutes a local Git source only in its disposable
 build directory; it never installs the package or enables services.
-Hosted CI runs full Linux CLI, Arch desktop/package, macOS and Windows checks
-automatically on pushes to main and PRs targeting main. Manual runs default to full
-coverage; explicit suite inputs can narrow a manual/reusable run. Validate workflow
+Hosted Dev CI runs shared Rust/protocol checks, Linux CLI, Arch desktop/package,
+macOS and Android on main. PRs retain Windows/iOS for affected or unknown paths;
+Nightly and Stable require the full matrix. Manual runs default to all platforms,
+with independent macOS-desktop and iOS flags. Validate workflow
 edits locally before pushing. Daily nightlies publish a verified binary to GitHub and
 AUR, and the Windows portable zip to GitHub, only after every check passes; stable
 releases, which carry the zip their own candidate run tested, remain manually published.

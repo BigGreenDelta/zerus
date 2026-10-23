@@ -77,7 +77,7 @@ def install(source, destination, mode=0o644):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--qt", type=Path, required=True, help="Qt prefix created by install-qt-macos.py")
-    parser.add_argument("--app", type=Path, required=True, help="production hgs-tray.app (BUILD_TESTING=OFF)")
+    parser.add_argument("--app", type=Path, required=True, help="Release hgs-tray.app tested with the pinned Qt")
     parser.add_argument("--cli", type=Path, required=True, help="release hgs executable")
     parser.add_argument("--connector", type=Path, required=True,
                         help="release zerus-mobile-connector executable (services/mobile/connector)")

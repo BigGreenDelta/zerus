@@ -116,8 +116,11 @@ audit record durably before delivery, and retain exact run/conversation/question
 identity. Unknown delivery never authorizes replay. Ordinary questions, startup
 trust and broader persistent permission changes remain manual.
 
-Hosted CI runs the complete Linux/Arch/macOS/Windows matrix automatically on
-pushes to main and pull requests targeting main. Manual checks remain available. Public
+Hosted Dev CI checks shared Rust/protocol contracts, Linux CLI, Arch, macOS and
+Android on main. PRs add Windows/iOS for affected desktop, native or shared paths;
+unknown change inventories retain both. Nightly and Stable run the full matrix.
+iOS TestFlight Dev uploads follow successful Nightly verification, using the exact
+source's main CI sequence. Manual checks remain available. Public
 standard GitHub runners are free; do not introduce paid larger runners or raise
 the 10 GiB cache limit without owner authorization. Authenticated model tests stay
 opt-in. Validate workflow edits locally before pushing. See `docs/ci-and-aur.md`.
