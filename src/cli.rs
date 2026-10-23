@@ -122,6 +122,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] repository check|clone --url URL --parent PATH --name NAME --json
        hgs [@host] repository status --request-id UUID --json
        Repository acquisition ABI: repository-clone-v1
+       Mobile repository acquisition ABI: repository-acquisition-v1
        Mobile Git status ABI: git-status-v1
        Mobile project assignment ABI: session-project-v1
        Mobile clear-context ABI: dismiss-prompt-v1

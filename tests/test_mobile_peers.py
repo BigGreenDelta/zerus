@@ -56,6 +56,8 @@ if args[:2] == ['swarm', '__mobile-peer-local']:
             (root / 'ssh-child-pid').write_text(str(child.pid))
         (root / 'hanging-pids').write_text(json.dumps([os.getpid(), os.getppid()]))
         time.sleep(30); sys.exit(0)
+    if (root / 'repository-probe').exists():
+        print('transport accepted'); sys.stderr.write('fixture'); sys.exit(7)
     if (root / 'binary').exists():
         sys.stdout.buffer.write(bytes([0, 255, 128, 10, 13, 42]))
         sys.stderr.write('fixture'); sys.exit(7)
@@ -522,6 +524,59 @@ time.sleep(10)
         self.assert_owned_transports_exit(pids)
         # Concurrent workers never hand one transport another's pipe ends.
         self.assertEqual([receipt['inherited'] for receipt in receipts], [[]] * len(receipts))
+
+    def repository_clone_argv(self, name="checkout"):
+        return ['repository', 'clone', '--json', '--url', 'https://example.invalid/team/source.git',
+                '--parent', str(self.root), '--name', name, '--request-id', str(uuid.uuid4())]
+
+    def test_repository_clone_crosses_both_transport_deadline_guards(self):
+        source = self.root / 'source'
+        env = dict(self.env, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=str(self.root / 'gitconfig'))
+        self.env.update(GIT_CONFIG_NOSYSTEM=env['GIT_CONFIG_NOSYSTEM'], GIT_CONFIG_GLOBAL=env['GIT_CONFIG_GLOBAL'])
+        def git(*argv):
+            subprocess.run(['git', *argv], env=env, check=True, capture_output=True, timeout=10)
+        git('init', '-q', '-b', 'main', str(source))
+        (source / 'content').write_text('retained source\n')
+        git('-C', str(source), 'add', '.')
+        git('-C', str(source), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture')
+        git('config', '--global', 'url.' + source.as_uri() + '.insteadOf', 'https://example.invalid/team/source.git')
+        argv = self.repository_clone_argv()
+        receipt = self.call('a', 'mobile-peer', '--json', data=self.request(argv)).json()
+        self.assertEqual(receipt['status'], 'cloned')
+        self.assertEqual((self.root / 'checkout/content').read_text(), 'retained source\n')
+        self.assertEqual(self.call('a', 'mobile-peer', '--json', data=self.request(argv)).json(), receipt)
+        self.assertFalse((self.root / 'native-called').exists())
+
+    def transport_envelope(self, helper, request, budget=77000):
+        return dict(schema=1, via='b', helper=helper, request=request, parent_pid=os.getpid(),
+                    deadline_ms=int(time.monotonic()*1000)+budget)
+
+    def test_supervisor_extended_deadline_accepts_valid_local_clone(self):
+        (self.root / 'repository-probe').touch()
+        local = self.request(self.repository_clone_argv())
+        del local['via']
+        valid = self.transport_envelope('local', local)
+        result = self.call('a', 'swarm', '__mobile-peer-transport', '--json', data=valid, ok=False)
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stderr, 'fixture')
+        self.assertTrue(self.calls())
+
+    def test_supervisor_extended_deadline_refuses_other_helpers_and_malformed_clone(self):
+        (self.root / 'repository-probe').touch()
+        local = self.request(self.repository_clone_argv())
+        del local['via']
+        envelope = self.transport_envelope
+        before = self.calls()
+        for helper in ['help', 'identity', 'own_identity']:
+            self.call('a', 'swarm', '__mobile-peer-transport', '--json', data=envelope(helper, None), ok=False)
+        for request in [None, dict(local, payload={}), dict(local, argv=['--help']),
+                        dict(local, argv=local['argv'][:-2]), dict(local, target_machine_id='unknown')]:
+            self.call('a', 'swarm', '__mobile-peer-transport', '--json', data=envelope('local', request), ok=False)
+        self.call('a', 'swarm', '__mobile-peer-transport', '--json', data=envelope('local', local, 81000), ok=False)
+        self.assertEqual(self.calls(), before)
+        # The ordinary Help transport remains usable at its original short budget.
+        self.call('a', 'swarm', '__mobile-peer-transport', '--json', data=envelope('help', None, 2000))
+        self.assertGreater(len(self.calls()), len(before))
 
     def test_supervisor_rejects_arbitrary_helpers_and_deadline_overrides(self):
         original = dict(schema=1, via='b', helper='help', request=None, parent_pid=os.getpid(), deadline_ms=int(time.monotonic()*1000)+2000)

@@ -56,27 +56,7 @@ import kotlinx.coroutines.delay
 private val Amber = Color(0xFFFFCB7D)
 
 @Composable internal fun NewSessionButton(model: ZerusViewModel) {
-    var choosing by remember { mutableStateOf(false) }
-    IconButton(onClick = { choosing = true },enabled = !model.demo && model.connections.isNotEmpty()) { Icon(Icons.Default.Add,"New session") }
-    if(choosing) {
-        ObscureConversation()
-        ZerusAlertDialog(onDismissRequest = { choosing = false },title = { Text("New session on which machine?") },text = {
-            Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()),verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                model.machines.forEach { machine ->
-                    val key = MachineKey(machine.connectionId,machine.id)
-                    val reason = model.launchReason(key)
-                    TextButton(onClick = { choosing = false;model.prepareLaunch(key) },enabled = reason.isBlank(),modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.fillMaxWidth()) {
-                            MachineLabel(machine.name,colorHex = model.machineColor(key))
-                            if(model.connections.size > 1) Text(model.connections.find { it.id == machine.connectionId }?.displayName.orEmpty(),style = MaterialTheme.typography.labelSmall)
-                            if(reason.isNotBlank()) Text(reason,style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-                if(model.machines.isEmpty()) Text("Refresh your connected machines first.")
-            }
-        },confirmButton = { TextButton(onClick = { choosing = false }) { Text("Cancel") } })
-    }
+    IconButton(onClick = model::openLaunch,enabled = !model.demo && model.connections.isNotEmpty()) { Icon(Icons.Default.Add,"New session") }
 }
 
 /**
@@ -86,29 +66,51 @@ private val Amber = Color(0xFFFFCB7D)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun LaunchSessionDialog(model: ZerusViewModel) {
     if(!model.launchVisible) return
-    val machine = model.launchMachine ?: return
+    val machine = model.launchMachine
+    if(machine==null) {
+        ZerusAlertDialog(onDismissRequest=model::closeLaunch,title={ Text("New session") },text={ Text("Refresh your connected computers first.") },confirmButton={ TextButton(onClick=model::closeLaunch) { Text("Close") } })
+        return
+    }
     val form = model.launchFormId
     ObscureConversation()
-    var provider by rememberSaveable(form) { mutableStateOf("") }
-    var account by rememberSaveable(form) { mutableStateOf("") }
-    var selectedModel by rememberSaveable(form) { mutableStateOf("") }
-    var selectedEffort by rememberSaveable(form) { mutableStateOf("") }
+    var repositorySource by rememberSaveable(form) { mutableStateOf(false) }
+    var repositoryUrl by rememberSaveable(form) { mutableStateOf("") }
+    var repositoryPath by rememberSaveable(form,machine) { mutableStateOf("") }
+    var repositoryManual by rememberSaveable(form,machine) { mutableStateOf(false) }
+    var choosingMachine by remember(form) { mutableStateOf(false) }
+    var checkoutCursor by remember(form,machine,repositoryPath) { mutableStateOf("") }
+    LaunchedEffect(repositoryUrl,model.launchDirectoryState) {
+        if(!repositoryManual) {
+            val parent=repositoryPath.substringBeforeLast('/',"").ifEmpty { model.launchDirectoryState?.string("path").orEmpty() }
+            val name=RepositoryAcquisition.suggestedName(repositoryUrl)
+            if(parent.isNotEmpty() && name.isNotEmpty()) repositoryPath=RepositoryAcquisition.destination(parent,name)
+        }
+    }
+    var provider by rememberSaveable(form,machine) { mutableStateOf("") }
+    var account by rememberSaveable(form,machine) { mutableStateOf("") }
+    var selectedModel by rememberSaveable(form,machine) { mutableStateOf("") }
+    var selectedEffort by rememberSaveable(form,machine) { mutableStateOf("") }
     var choosingModel by remember(form) { mutableStateOf(false) }
     var projectId by rememberSaveable(form) { mutableStateOf("") }
     var projectExplicit by rememberSaveable(form) { mutableStateOf(false) }
-    var folder by rememberSaveable(form) { mutableStateOf("") }
-    var browsedFolder by rememberSaveable(form) { mutableStateOf("") }
+    var projectConnection by rememberSaveable(form) { mutableStateOf("") }
+    var projectSwarm by rememberSaveable(form) { mutableStateOf("") }
+    var folder by rememberSaveable(form,machine) { mutableStateOf("") }
+    var browsedFolder by rememberSaveable(form,machine) { mutableStateOf("") }
     var tag by rememberSaveable(form) { mutableStateOf(model.launchGeneratedName) }
-    var autoPreferred by rememberSaveable(form) { mutableStateOf(true) }
+    var autoPreferred by rememberSaveable(form,machine) { mutableStateOf(true) }
     var edited by rememberSaveable(form) { mutableStateOf(false) }
-    var appliedWorktree by rememberSaveable(form) { mutableStateOf("") }
-    var choosingProject by rememberSaveable(form) { mutableStateOf(false) }
-    var choosingWorktree by rememberSaveable(form) { mutableStateOf(false) }
-    var creatingWorktree by rememberSaveable(form) { mutableStateOf(false) }
-    var browsing by rememberSaveable(form) { mutableStateOf(false) }
+    LaunchedEffect(model.launchRepositoryCheckId) {
+        if(model.launchRepositoryCheckId.isNotEmpty()) { repositoryPath=model.launchRepositoryPath;repositoryManual=true;edited=true }
+    }
+    var appliedWorktree by rememberSaveable(form,machine) { mutableStateOf("") }
+    var choosingProject by rememberSaveable(form,machine) { mutableStateOf(false) }
+    var choosingWorktree by rememberSaveable(form,machine) { mutableStateOf(false) }
+    var creatingWorktree by rememberSaveable(form,machine) { mutableStateOf(false) }
+    var browsing by rememberSaveable(form,machine) { mutableStateOf(false) }
     var discarding by rememberSaveable(form) { mutableStateOf(false) }
     var worktreeMenu by remember(form) { mutableStateOf(false) }
-    var allowedCatalog by remember(form) { mutableStateOf("") }
+    var allowedCatalog by remember(form,machine) { mutableStateOf("") }
     val signature = model.launchCatalogSignature()
     LaunchedEffect(signature) { if(allowedCatalog.isBlank() && signature.isNotBlank()) allowedCatalog = signature }
     val catalog = model.launchCatalogState
@@ -129,17 +131,20 @@ private val Amber = Color(0xFFFFCB7D)
     val projectDetectionNote = "A matching project is detected automatically. Otherwise this session stays in Inbox."
     LaunchedEffect(providers) { if(provider !in providers) provider = providers.firstOrNull().orEmpty() }
     LaunchedEffect(accounts) { account = LaunchPresentation.defaultAccount(accounts,account) }
-    LaunchedEffect(projects) {
-        if(projects.none { it.id == projectId }) {
+    LaunchedEffect(projects,machine) {
+        if(catalog==null) return@LaunchedEffect
+        val sameScope=projectConnection==machine.connectionId && projectSwarm==catalog.string("swarm_id")
+        if(!sameScope || projects.none { it.id == projectId }) {
             val scoped = model.selectedProject?.key?.takeIf { it.connectionId == machine.connectionId && it.swarmId == catalog?.string("swarm_id") }?.id
             val preferred = scoped ?: catalog?.string("default_project")
-            if(scoped!=null) projectExplicit = true
+            projectExplicit = scoped!=null
             projectId = projects.find { it.id == preferred }?.id ?: projects.firstOrNull()?.id.orEmpty()
             folder = browsedFolder
         }
+        projectConnection=machine.connectionId;projectSwarm=catalog.string("swarm_id")
     }
-    LaunchedEffect(projectId,model.launchDirectoryLoading) {
-        if(folder.isBlank() && !model.launchDirectoryLoading) project?.folders?.firstOrNull()?.let {
+    LaunchedEffect(projectId,model.launchDirectoryLoading,repositorySource) {
+        if(!repositorySource && folder.isBlank() && !model.launchDirectoryLoading) project?.folders?.firstOrNull()?.let {
             folder = it.path;model.browseLaunchDirectory(machine,it.path)
         }
     }
@@ -159,13 +164,11 @@ private val Amber = Color(0xFFFFCB7D)
     val inProject = project?.folders?.any { it.path == folder } == true
     val related = project != null && !inProject && WorktreePresentation.anchor(placement,project,folder) != null
     val autoPossible = supported && WorktreePresentation.automaticAvailable(evidence,folder)
-    val automatic = autoPreferred && autoPossible
+    val automatic = !repositorySource && autoPreferred && autoPossible
     val branch = model.launchGeneratedName
     val plannedPath = if(automatic) WorktreePresentation.automaticPath(evidence,branch) else ""
-    val plannedAdded = automatic && project != null && evidence != null &&
-        WorktreePresentation.anchor(WorktreePresentation.withCreated(evidence,plannedPath),project,plannedPath) == null
     val inferredProject = LaunchPresentation.inferredProject(catalog,projectId,projectExplicit,folder,model.launchDirectoryState,evidence)
-    LaunchedEffect(inferredProject) { if(inferredProject!=projectId) projectId=inferredProject }
+    LaunchedEffect(inferredProject,repositorySource) { if(!repositorySource && inferredProject!=projectId) projectId=inferredProject }
     val folderValid = LaunchPresentation.selectedFolder(model.launchDirectoryState,folder)
     val changed = allowedCatalog.isNotBlank() && signature != allowedCatalog
     val machineActions = model.sessionActions.filter { it.target.connectionId == machine.connectionId && it.target.computerId == machine.computerId }
@@ -176,14 +179,22 @@ private val Amber = Color(0xFFFFCB7D)
     val createdWorktree = machineActions.lastOrNull { it.operation == "worktree_create" && it.status == "completed" && it.resultPath.isNotBlank() && inForm(it) }
     val pendingLaunch = machineActions.lastOrNull { it.operation == "launch" && it.blocksSending }?.takeIf { !model.launchSubmitting }
     val confirmed = machineActions.lastOrNull { it.operation == "launch" && it.status == "completed" && it.resultTarget != null && inForm(it) }
+    val checkoutPage=RepositoryAcquisition.recovery(machineActions,machine,repositoryPath,checkoutCursor)
+    val checkouts=listOfNotNull(checkoutPage.selected)+checkoutPage.others
     val nameError = LaunchPresentation.nameError(tag)
-    val reason = LaunchPresentation.disabledReason(LaunchReadiness(machineReason = model.launchReason(machine),
+    val formReason = LaunchPresentation.disabledReason(LaunchReadiness(machineReason = model.launchReason(machine),
         catalogLoading = model.launchCatalogLoading,catalogAvailable = catalog != null && allowedCatalog.isNotBlank(),catalogChanged = changed,
         projectRequired = projectSupported,projectChosen = project != null,projectHasFolder = project?.folders?.isNotEmpty() ?: true,
-        folderChosen = folder.isNotBlank(),folderLoading = model.launchDirectoryLoading,folderVerified = folderValid,repositoryLoading = model.launchWorktreeLoading,
+        folderChosen = repositorySource || folder.isNotBlank(),folderLoading = !repositorySource && model.launchDirectoryLoading,folderVerified = repositorySource || folderValid,repositoryLoading = !repositorySource && model.launchWorktreeLoading,
         providers = providers.size,providerChosen = provider in providers,accounts = accounts.size,accountChosen = accounts.any { it.id == account },
         nameError = nameError,automatic = automatic,automaticFailed = model.launchAutomaticFailed,automaticUsed = model.launchCreatedWorktree.isNotBlank(),worktreeReason = model.worktreeReason(machine),confirmed = confirmed != null))
+    val repositoryProblem = if(repositorySource) model.repositoryReason(machine,repositoryPath).ifBlank {
+        runCatching { RepositoryAcquisition.arguments(model.machines.find { it.connectionId==machine.connectionId && it.id==machine.computerId }?.machineId.orEmpty(),repositoryUrl,repositoryPath); "" }
+            .getOrElse { it.message.orEmpty() }
+    } else ""
+    val reason=formReason.ifBlank { repositoryProblem }
     val progress = when {
+        model.launchStage == "cloning" -> "Cloning repository…"
         model.launchStage == "checking" -> "Checking folder…"
         model.launchStage == "launching" || model.launchSubmitting -> "Creating session…"
         model.launchStage == "creating" || model.worktreeSubmitting -> "Creating worktree…"
@@ -194,7 +205,8 @@ private val Amber = Color(0xFFFFCB7D)
     fun create() {
         if(busy || reason.isNotBlank()) return
         val implicitInbox=!projectExplicit && projectId=="ungrouped"
-        if(automatic) model.launchWithWorktree(machine,provider,folder,tag,account,allowedCatalog,projectId,selectedModel,effort,implicitInbox)
+        if(repositorySource) model.cloneAndLaunch(machine,repositoryUrl,repositoryPath,provider,tag,account,allowedCatalog,projectId,selectedModel,effort,implicitInbox)
+        else if(automatic) model.launchWithWorktree(machine,provider,folder,tag,account,allowedCatalog,projectId,selectedModel,effort,implicitInbox)
         else model.launchSession(machine,provider,folder,tag,account,allowedCatalog,projectId,placement,selectedModel,effort,implicitInbox)
     }
     fun selectFolder(path: String) { folder = path;browsedFolder = "";edited = true;model.browseLaunchDirectory(machine,path) }
@@ -212,10 +224,42 @@ private val Amber = Color(0xFFFFCB7D)
                 },navigationIcon = { IconButton(onClick = ::requestClose,enabled = !busy) { Icon(Icons.Default.Close,"Close") } },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
             },bottomBar = {
-                LaunchActionBar(progress,if(busy) "" else model.launchError,if(busy) "" else reason,busy,::create)
+                LaunchActionBar(progress,if(busy) "" else model.launchError,if(busy) "" else reason,busy,::create,if(repositorySource) "Clone and start" else "Create session")
             }) { padding ->
                 Column(Modifier.padding(padding).consumeWindowInsets(padding).fillMaxSize().verticalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp,vertical = 8.dp),verticalArrangement = Arrangement.spacedBy(22.dp)) {
+                    LaunchSection("Computer") {
+                        LaunchField("Computer",computer,!busy,{ choosingMachine=true },supporting=model.connections.find { it.id==machine.connectionId }?.displayName)
+                    }
+                    LaunchSection("Source") {
+                        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                            SegmentedButton(selected=!repositorySource,onClick={ repositorySource=false;edited=true },shape=SegmentedButtonDefaults.itemShape(0,2),enabled=!busy) { Text("Working folder") }
+                            SegmentedButton(selected=repositorySource,onClick={ repositorySource=true;edited=true },shape=SegmentedButtonDefaults.itemShape(1,2),enabled=!busy) { Text("Git repository") }
+                        }
+                        if(repositorySource) {
+                            OutlinedTextField(repositoryUrl,{ repositoryUrl=it;edited=true },label={ Text("Repository URL") },placeholder={ Text("https://github.com/owner/repo.git") },singleLine=true,enabled=!busy,modifier=Modifier.fillMaxWidth())
+                            Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(repositoryPath,{ repositoryPath=it;repositoryManual=true;edited=true },label={ Text("Clone to") },singleLine=true,enabled=!busy,modifier=Modifier.weight(1f))
+                                OutlinedButton(onClick={ browsing=true },enabled=!busy) { Text("Browse") }
+                            }
+                        }
+                    }
+                    if(repositorySource) checkouts.forEach { checkout -> LaunchNotice(if(checkout.status=="completed") null else Amber) {
+                        Text(if(checkout.status=="completed") "Checkout ready" else checkout.error.ifBlank { RepositoryAcquisition.uncertain })
+                        val checkoutPath=checkout.resultPath.ifBlank { runCatching { JSONObject(checkout.arguments).let { RepositoryAcquisition.destination(it.getString("parent"),it.getString("name")) } }.getOrDefault("") }
+                        if(checkoutPath.isNotEmpty()) Text(checkoutPath,style=MaterialTheme.typography.bodySmall)
+                        if(checkout.blocksSending && DirectoryCreation.pathError(checkoutPath).isBlank()) TextButton(onClick={
+                            repositorySource=false;autoPreferred=false;selectFolder(checkoutPath)
+                        },enabled=!busy) { Text("Inspect folder") }
+                        if(checkout.blocksSending) TextButton(onClick={ model.checkRepositoryResult(checkout) },enabled=!busy) { Text("Check original result") }
+                        if(checkout.status=="completed" && checkout.resultPath.isNotEmpty()) TextButton(onClick={
+                            repositorySource=false;autoPreferred=false;selectFolder(checkout.resultPath)
+                        },enabled=!busy) { Text("Use checkout") }
+                    } }
+                    if(repositorySource && (checkoutPage.next!=null || checkoutCursor.isNotEmpty())) Row {
+                        if(checkoutCursor.isNotEmpty()) TextButton(onClick={ checkoutCursor="" },enabled=!busy) { Text("First checkouts") }
+                        checkoutPage.next?.let { next -> TextButton(onClick={ checkoutCursor=next },enabled=!busy) { Text("More unfinished checkouts") } }
+                    }
                     if(model.launchCatalogLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
                     pendingWorktree?.let { action -> LaunchNotice(Amber) {
                         Text("Worktree creation is unconfirmed. Check the original result before creating another.",style = MaterialTheme.typography.bodyMedium)
@@ -260,7 +304,7 @@ private val Amber = Color(0xFFFFCB7D)
                         if(!projectSupported && !model.launchCatalogLoading && catalog != null)
                             LaunchHint("Project assignment is unavailable on this computer. Update its connector and native CLI to choose a project.")
                     }
-                    LaunchSection("Folder") {
+                    if(!repositorySource) LaunchSection("Working folder") {
                         val projectFolders = project?.folders.orEmpty()
                         if(project != null && projectFolders.isEmpty() && folder.isBlank())
                             LaunchNotice(Amber) { Text(if(implicitProject) "Browse to choose a folder. $projectDetectionNote" else "${project.name} has no folder on $computer. Browse to choose one; it will be added to this project.",style = MaterialTheme.typography.bodyMedium) }
@@ -284,11 +328,10 @@ private val Amber = Color(0xFFFFCB7D)
                         }
                         if(!automatic && project != null && folder.isNotBlank()) {
                             if(implicitProject) LaunchHint(projectDetectionNote)
-                            else if(related) LaunchHint("Verified worktree of ${project.name}. No project folder will be added.")
-                            else if(!inProject) LaunchHint("This folder is outside ${project.name}. Starting here adds it to the project.",color = Amber)
+                            else if(!inProject && !related) LaunchHint("This folder is outside ${project.name}. Starting here adds it to the project.",color = Amber)
                         }
                     }
-                    LaunchSection("Worktree") {
+                    if(!repositorySource) LaunchSection("Worktree") {
                         Row(verticalAlignment = Alignment.CenterVertically,horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             val colors = SegmentedButtonDefaults.colors(activeContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = .14f),
                                 activeContentColor = MaterialTheme.colorScheme.primary,activeBorderColor = MaterialTheme.colorScheme.primary,
@@ -313,12 +356,7 @@ private val Amber = Color(0xFFFFCB7D)
                         if(automatic) Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text("New worktree",style = MaterialTheme.typography.labelMedium,color = MaterialTheme.colorScheme.onSurfaceVariant)
                             SelectionContainer { Text(plannedPath,style = MaterialTheme.typography.bodySmall) }
-                            Text("New branch $branch from HEAD, created when the session starts.",style = MaterialTheme.typography.bodySmall,color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            if(implicitProject) LaunchHint(projectDetectionNote)
-                            else if(plannedAdded) LaunchHint("The new worktree will be added to ${project?.name}.",color = Amber)
-                        } else if(autoPossible) LaunchHint("The session starts directly in the selected folder.")
-                        else WorktreePresentation.automaticNote(model.launchWorktreeState,folder,supported,model.launchWorktreeLoading)
-                            .takeIf { it.isNotBlank() }?.let { LaunchHint(it) }
+                        } else if(model.launchWorktreeLoading) LaunchHint("Checking repository…")
                     }
                     LaunchSection("Account and agent") {
                         LaunchAccountList(accountChoices,provider,account,!busy) { chosen ->
@@ -347,6 +385,21 @@ private val Amber = Color(0xFFFFCB7D)
             }
         }
     }
+    if(choosingMachine) ModalBottomSheet(onDismissRequest={ choosingMachine=false }) {
+        Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+            Text("Computer",style=MaterialTheme.typography.titleLarge)
+            model.machines.forEach { candidate ->
+                val key=MachineKey(candidate.connectionId,candidate.id)
+                TextButton(onClick={ choosingMachine=false;model.prepareLaunch(key) },enabled=!busy,modifier=Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth()) {
+                        MachineLabel(candidate.name,colorHex=model.machineColor(key))
+                        if(model.connections.size>1) Text(model.connections.find { it.id==key.connectionId }?.displayName.orEmpty(),style=MaterialTheme.typography.bodySmall)
+                        model.launchReason(key).takeIf(String::isNotBlank)?.let { Text(it,style=MaterialTheme.typography.bodySmall) }
+                    }
+                }
+            }
+        }
+    }
     if(choosingModel) ModalBottomSheet(onDismissRequest={ choosingModel=false }) {
         val options=modelOptions.map { OpenCodeModel(it.value,it.label,it.provider,it.providerLabel,it.free,it.favorite,it.isDefault,
             it.efforts.map { effort -> NativeEffort(effort.value,effort.label) }) }
@@ -362,10 +415,16 @@ private val Amber = Color(0xFFFFCB7D)
     }) { choosingWorktree = false }
     if(creatingWorktree && evidence != null) CreateWorktreeDialog(model,machine,evidence,
         tag.trim().replace(Regex("\\s+"),"-").ifBlank { branch }) { if(!model.worktreeSubmitting) creatingWorktree = false }
-    if(browsing) LaunchFolderDialog(model,machine,{ selected -> folder = selected;browsedFolder = selected;browsing = false;edited = true }) {
+    if(browsing) LaunchFolderDialog(model,machine,{ selected ->
+        if(repositorySource) {
+            val leaf=repositoryPath.substringAfterLast('/').ifBlank { RepositoryAcquisition.suggestedName(repositoryUrl) }
+            repositoryPath=RepositoryAcquisition.destination(selected,leaf)
+        } else { folder=selected;browsedFolder=selected }
+        browsing=false;edited=true
+    }) {
         browsing = false
         // Navigation replaced the verified folder; check the kept selection again so it stays usable.
-        if(folder.isNotBlank() && !LaunchPresentation.selectedFolder(model.launchDirectoryState,folder)) model.browseLaunchDirectory(machine,folder)
+        if(!repositorySource && folder.isNotBlank() && !LaunchPresentation.selectedFolder(model.launchDirectoryState,folder)) model.browseLaunchDirectory(machine,folder)
     }
     if(discarding) ZerusAlertDialog(onDismissRequest = { discarding = false },title = { Text("Discard new session?") },text = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -376,7 +435,7 @@ private val Amber = Color(0xFFFFCB7D)
         dismissButton = { TextButton(onClick = { discarding = false }) { Text("Keep editing") } })
 }
 
-@Composable private fun LaunchActionBar(progress: String,error: String,reason: String,busy: Boolean,onCreate: () -> Unit) {
+@Composable private fun LaunchActionBar(progress: String,error: String,reason: String,busy: Boolean,onCreate: () -> Unit,label:String="Create session") {
     Surface(color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime).only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outline)
@@ -386,7 +445,7 @@ private val Amber = Color(0xFFFFCB7D)
                 Button(onClick = onCreate,enabled = !busy && reason.isBlank(),modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)
                     .semantics { if(busy) liveRegion = LiveRegionMode.Polite }) {
                     if(busy) { CircularProgressIndicator(Modifier.size(18.dp),strokeWidth = 2.dp,color = LocalContentColor.current);Spacer(Modifier.width(10.dp)) }
-                    Text(if(busy) progress.ifBlank { "Working…" } else "Create session")
+                    Text(if(busy) progress.ifBlank { "Working…" } else label)
                 }
             }
         }

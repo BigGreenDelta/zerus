@@ -1,8 +1,34 @@
 {
   "description": "Relay operations that only the Rust connector executes; the Python connector, whose tables the golden vectors freeze, never lists or advertises them. Each row names the operation, the native help marker that gates it and its class (read or mutation, as the relay's READS decide). A marker that operations.json does not know needs its help line under markers. The connector's capabilities::CONNECTOR_ONLY must equal this table; the relay tests, the black-box harness (session_harness.py) and differential.py read it.",
   "operations": [
-    {"operation": "remove_queued", "marker": "lifecycle", "class": "mutation"},
-    {"operation": "git_status", "marker": "git_status", "class": "read"}
+    {
+      "operation": "remove_queued",
+      "marker": "lifecycle",
+      "class": "mutation"
+    },
+    {
+      "operation": "git_status",
+      "marker": "git_status",
+      "class": "read"
+    },
+    {
+      "operation": "repository_check",
+      "marker": "repository",
+      "class": "read"
+    },
+    {
+      "operation": "repository_clone",
+      "marker": "repository",
+      "class": "mutation"
+    },
+    {
+      "operation": "repository_status",
+      "marker": "repository",
+      "class": "read"
+    }
   ],
-  "markers": {"git_status": "Mobile Git status ABI: git-status-v1"}
+  "markers": {
+    "git_status": "Mobile Git status ABI: git-status-v1",
+    "repository": "Mobile repository acquisition ABI: repository-acquisition-v1"
+  }
 }

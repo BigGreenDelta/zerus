@@ -159,7 +159,8 @@ impl<N: Native + 'static> Connector<N> {
             Value::Object(request) => request,
             _ => unreachable!(),
         };
-        let routed = if crate::session_projects::OPERATIONS.contains(&journal_operation.as_str())
+        let routed = if (crate::session_projects::OPERATIONS.contains(&journal_operation.as_str())
+            || zerus_relay::repositories::OPERATIONS.contains(&journal_operation.as_str()))
             && request.contains_key("gateway_route")
         {
             let route = &request["gateway_route"];
@@ -176,7 +177,11 @@ impl<N: Native + 'static> Connector<N> {
                 self.resolve(route).await
             } else {
                 Err(Failure::text(
-                    "project assignment computer does not match its immutable route",
+                    if zerus_relay::repositories::OPERATIONS.contains(&journal_operation.as_str()) {
+                        "The selected computer changed. Refresh computers before cloning."
+                    } else {
+                        "project assignment computer does not match its immutable route"
+                    },
                 ))
             }
         } else if journal_operation == "directory_create" && request.contains_key("gateway_route") {
@@ -196,7 +201,18 @@ impl<N: Native + 'static> Connector<N> {
         } else if let Some(route) = request.get("gateway_route") {
             self.resolve(route).await
         } else {
-            Ok(Target::Here(None))
+            if zerus_relay::repositories::OPERATIONS.contains(&journal_operation.as_str()) {
+                match validate::checked_uuid(
+                    request
+                        .get("payload")
+                        .and_then(|p| p.get("expected_machine_id")),
+                ) {
+                    Ok(machine) => Ok(Target::Here(Some(machine))),
+                    Err(error) => Err(Failure::Connector(error)),
+                }
+            } else {
+                Ok(Target::Here(None))
+            }
         };
         let target = match routed {
             Ok(target) => target,
@@ -547,6 +563,9 @@ impl<N: Native + 'static> Connector<N> {
                 "native clear-context dismiss ABI is unavailable",
             ));
         }
+        if zerus_relay::repositories::OPERATIONS.contains(&operation) && !flags.repository {
+            return Err(Failure::text(crate::repositories::UNAVAILABLE));
+        }
         if operation == crate::git_status::OPERATION && !flags.git_status {
             return Err(Failure::text(crate::git_status::UNAVAILABLE));
         }
@@ -601,6 +620,16 @@ impl<N: Native + 'static> Connector<N> {
         let session = validated.session.as_str();
         let payload = validated.payload.as_ref();
         match validated.operation.as_str() {
+            operation if zerus_relay::repositories::OPERATIONS.contains(&operation) => {
+                let payload = payload.expect("validated");
+                if operation == "repository_clone" {
+                    mutation_started.set(true);
+                }
+                let result = self
+                    .call(crate::repositories::call(operation, payload))
+                    .await?;
+                crate::repositories::project(operation, payload, &result).map_err(Failure::text)
+            }
             crate::git_status::OPERATION => {
                 let payload = payload.expect("validated");
                 let result = self.call(crate::git_status::call(payload)).await?;

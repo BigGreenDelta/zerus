@@ -357,6 +357,79 @@ fn validate(request: &LocalRequest) -> Result<()> {
             }
             no_payload()?;
         }
+        "repository" => {
+            no_payload()?;
+            let command = rest.first().context("repository action required")?;
+            ensure!(
+                ["check", "clone", "status"].contains(&command.as_str()),
+                "invalid repository action"
+            );
+            // These are values of fixed native options, including literal folder
+            // names beginning with '-' or '@'; they never become routing tokens.
+            let mut values = BTreeMap::new();
+            let mut tokens = rest[1..].iter();
+            while let Some(flag) = tokens.next() {
+                ensure!(
+                    !values.contains_key(flag.as_str()),
+                    "duplicate repository option"
+                );
+                let value = if flag == "--json" {
+                    ""
+                } else {
+                    ensure!(
+                        ["--url", "--parent", "--name", "--request-id"].contains(&flag.as_str()),
+                        "repository option is not allowed"
+                    );
+                    let value = tokens.next().context("repository option value required")?;
+                    ensure!(text(value, 4096, false), "invalid repository option value");
+                    value.as_str()
+                };
+                values.insert(flag.as_str(), value);
+            }
+            ensure!(
+                values.contains_key("--json")
+                    && values.len()
+                        == match command.as_str() {
+                            "check" => 4,
+                            "clone" => 5,
+                            _ => 2,
+                        },
+                "incomplete repository request"
+            );
+            if command != "check" {
+                ensure!(
+                    values.get("--request-id").is_some_and(|v| uuid(v)),
+                    "repository requires an exact request UUID"
+                );
+            }
+            if command != "status" {
+                for key in ["--url", "--parent", "--name"] {
+                    ensure!(values.contains_key(key), "incomplete repository request");
+                }
+                let parent = values["--parent"];
+                ensure!(
+                    parent == "~" && command == "check"
+                        || parent.starts_with('/') && !parent.starts_with("//"),
+                    "repository parent must be absolute"
+                );
+                let name = values["--name"];
+                ensure!(
+                    text(name, 240, false)
+                        && !matches!(name, "." | "..")
+                        && !name.contains(['/', '\\']),
+                    "invalid repository folder name"
+                );
+                ensure!(
+                    !values.contains_key("--request-id") || command == "clone",
+                    "unexpected repository request UUID"
+                );
+            } else {
+                ensure!(
+                    values.contains_key("--request-id"),
+                    "repository status requires its original UUID"
+                );
+            }
+        }
         "git-status" => {
             no_payload()?;
             let values = options(rest, &["--json"], &["--path"])?;
@@ -755,7 +828,7 @@ fn transport(
         .saturating_duration_since(Instant::now())
         .as_millis();
     ensure!(
-        remaining > 0 && remaining <= 30_000,
+        remaining > 0 && remaining <= transport_budget(helper, request.as_ref()).as_millis(),
         "invalid mobile transport deadline"
     );
     let envelope = TransportRequest {
@@ -792,7 +865,9 @@ fn supervise() -> Result<i32> {
         "mobile transport parent changed"
     );
     ensure!(
-        envelope.deadline_ms > now && envelope.deadline_ms - now <= 30_000,
+        envelope.deadline_ms > now
+            && u128::from(envelope.deadline_ms - now)
+                <= transport_budget(envelope.helper, envelope.request.as_ref()).as_millis(),
         "invalid mobile transport deadline"
     );
     let config = Config::load()?;
@@ -1099,6 +1174,21 @@ fn local(config: &Config, request: LocalRequest) -> Result<i32> {
     cli::dispatch(request.argv).map_err(anyhow::Error::new)
 }
 
+fn peer_budget(argv: &[String]) -> Duration {
+    let acquisition = argv.first().is_some_and(|op| op == "repository")
+        && argv.get(1).is_some_and(|op| op == "clone");
+    Duration::from_secs(if acquisition { 80 } else { 30 })
+}
+
+fn transport_budget(helper: Helper, request: Option<&LocalRequest>) -> Duration {
+    if matches!(helper, Helper::Local) {
+        if let Some(request) = request.filter(|request| validate(request).is_ok()) {
+            return peer_budget(&request.argv);
+        }
+    }
+    Duration::from_secs(30)
+}
+
 fn execute(config: &Config, args: &[String]) -> Result<i32> {
     ensure!(
         args.len() == 2 && args[1] == "--json",
@@ -1129,7 +1219,9 @@ fn execute(config: &Config, args: &[String]) -> Result<i32> {
                 payload: request.payload,
             };
             validate(&local)?;
-            let deadline = Instant::now() + Duration::from_secs(30);
+            // Only acquisition uses the extended bounded route. Its connector
+            // wrapper ends at 75 seconds, before the ordinary 90-second stop.
+            let deadline = Instant::now() + peer_budget(&local.argv);
             supported(&request.via, deadline)?;
             // A capability probe may take seconds; a disabled/reconfigured route
             // must not be authorized by the earlier snapshot of local settings.
@@ -1164,6 +1256,73 @@ pub(crate) fn dispatch(config: &Config, args: &[String]) -> cli::Result<i32> {
 mod tests {
     use super::*;
     const ID: &str = "11111111-1111-4111-8111-111111111111";
+
+    #[test]
+    fn repository_acquisition_only_admits_exact_native_actions() {
+        let check = [
+            "repository",
+            "check",
+            "--json",
+            "--url",
+            "git@forge:repo.git",
+            "--parent",
+            "/fixture",
+            "--name",
+            "new checkout",
+        ];
+        validate(&request(&check, None)).unwrap();
+        assert_eq!(
+            peer_budget(&request(&check, None).argv),
+            Duration::from_secs(30)
+        );
+        for leaf in ["-literal", "@literal"] {
+            let mut literal = check;
+            literal[8] = leaf;
+            validate(&request(&literal, None)).unwrap();
+        }
+        let mut clone = check.to_vec();
+        clone[1] = "clone";
+        clone.extend(["--request-id", ID]);
+        validate(&request(&clone, None)).unwrap();
+        assert_eq!(
+            peer_budget(&request(&clone, None).argv),
+            Duration::from_secs(80)
+        );
+        for argv in [
+            ["worktrees", "create"],
+            ["repository", "status"],
+            ["repository-extra", "clone"],
+        ] {
+            assert_eq!(
+                peer_budget(&request(&argv, None).argv),
+                Duration::from_secs(30)
+            );
+        }
+        validate(&request(
+            &["repository", "status", "--json", "--request-id", ID],
+            None,
+        ))
+        .unwrap();
+        for bad in [
+            vec!["repository", "status", "--json"],
+            vec!["repository", "clone", "--json"],
+            vec!["repository", "worker", "--json"],
+            vec!["repository", "status", "--json", "--request-id", "not-uuid"],
+        ] {
+            assert!(validate(&request(&bad, None)).is_err());
+        }
+        for extra in [
+            vec!["--request-id", ID],
+            vec!["--url", "git@forge:other"],
+            vec!["--force"],
+            vec!["--depth", "1"],
+        ] {
+            let mut bad = check.to_vec();
+            bad.extend(extra);
+            assert!(validate(&request(&bad, None)).is_err());
+        }
+        assert!(validate(&request(&check, Some(json!({"command":"arbitrary"})))).is_err());
+    }
 
     fn request(argv: &[&str], payload: Option<Value>) -> LocalRequest {
         LocalRequest {

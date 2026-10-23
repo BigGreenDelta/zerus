@@ -1162,6 +1162,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var launchFormId by mutableLongStateOf(0L);private set
     /** Generated once per form: the default session name and Auto's new branch. */
     var launchGeneratedName by mutableStateOf("");private set
+    var launchRepositoryPath by mutableStateOf("");private set
+    var launchRepositoryCheckId by mutableStateOf("");private set
     /** Launch and worktree receipt statuses when the form opened; later changes belong to this form. */
     var launchBaseline by mutableStateOf<Map<String,String>>(emptyMap());private set
     /** Auto worktree launch progress: creating, checking or launching. */
@@ -1179,14 +1181,107 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(sessionActions.any { it.operation == "launch" && it.target.connectionId == machine.connectionId && it.target.computerId == machine.computerId && it.blocksSending }) return "Check the previous launch receipt before creating another session."
         return ""
     }
+    fun openLaunch() {
+        val candidates=machines.sortedBy { if(MachineKey(it.connectionId,it.id) in selectedMachines) 0 else 1 }
+        val chosen=candidates.firstOrNull { launchReason(MachineKey(it.connectionId,it.id)).isBlank() } ?: candidates.firstOrNull()
+        if(chosen!=null) prepareLaunch(MachineKey(chosen.connectionId,chosen.id))
+        else { launchVisible=true;launchError="Refresh your connected computers first." }
+    }
+    fun repositoryReason(machine:MachineKey,path:String?=null):String {
+        if((RepositoryAcquisition.operations+"worktrees").any { it !in relayOperations[machine.connectionId].orEmpty() || it !in machineOperations[machine].orEmpty() })
+            return "Update the gateway and Zerus on this computer to clone repositories."
+        if(machines.find { it.connectionId==machine.connectionId && it.id==machine.computerId }?.machineId.isNullOrBlank()) return "Refresh this computer's identity."
+        if(RepositoryAcquisition.pending(sessionActions,machine,path)!=null) return "This destination has an unconfirmed checkout. Check its result or choose another destination."
+        return launchReason(machine)
+    }
+    fun checkRepositoryResult(action:SessionAction) {
+        val machine=MachineKey(action.target.connectionId,action.target.computerId)
+        val stored=sessionActions.find { it.requestId==action.requestId && it.operation==RepositoryAcquisition.clone } ?: return
+        if(launchBusy || !launchVisible || launchMachine!=machine || stored.requestId in actionFlights) return
+        val connection=connections.find { it.id==machine.connectionId } ?: return
+        actionFlights+=stored.requestId;launchStage="checking"
+        viewModelScope.launch {
+            try {
+                val id=UUID.randomUUID().toString()
+                val payload=RepositoryAcquisition.statusPayload(stored,id)
+                val receipt=api.await(connection,api.submit(connection,stored.target,"repository_status",payload,id))
+                val settled=RepositoryAcquisition.result(stored,receipt,id)
+                durable({ state -> state.action(settled) })
+                launchError=settled.error
+            } catch(e:Exception) { if(e is CancellationException) throw e;launchError=RepositoryAcquisition.uncertain }
+            finally { launchStage="";actionFlights-=stored.requestId }
+        }
+    }
+    fun cloneAndLaunch(machine:MachineKey,url:String,path:String,agent:String,tag:String,accountId:String,expectedCatalog:String,projectId:String,model:String,effort:String,implicitInbox:Boolean) {
+        if(launchBusy || !launchVisible || launchMachine!=machine || launchCatalogEvidence!=expectedCatalog) return
+        val problem=repositoryReason(machine,path);if(problem.isNotBlank()) { launchError=problem;return }
+        val identity=machines.find { it.connectionId==machine.connectionId && it.id==machine.computerId }?.machineId.orEmpty()
+        val args=try { RepositoryAcquisition.arguments(identity,url,path) } catch(e:Exception) { launchError=e.message.orEmpty();return }
+        val connection=connections.find { it.id==machine.connectionId } ?: return
+        val generation=launchGeneration;val target=Target(machine.computerId,"","","",machine.connectionId)
+        val catalog=launchCatalogState ?: return
+        launchStage="checking";launchError=""
+        viewModelScope.launch {
+            var action:SessionAction?=null;var attempted=false;var rejected=false
+            try {
+                val checkId=UUID.randomUUID().toString()
+                val checked=api.await(connection,api.submit(connection,target,"repository_check",JSONObject(args.toString()).put("request_id",checkId),checkId))
+                val destination=RepositoryAcquisition.checkedDestination(args,checked,checkId)
+                check(launchVisible && launchMachine==machine && launchGeneration==generation && launchCatalogEvidence==expectedCatalog) { "The selected computer or form changed." }
+                if(destination.needsConfirmation) {
+                    launchRepositoryPath=destination.path;launchRepositoryCheckId=checkId
+                    launchError="Destination resolved. Review Clone to, then choose Clone and start."
+                    return@launch
+                }
+                // Validate every launch choice before reserving or creating any checkout.
+                val launchArgs=LaunchPresentation.arguments(catalog,agent,path,tag,accountId,projectId,null,model,effort,launchEffortSupported(machine),implicitInbox)
+                check(launchVisible && launchMachine==machine && launchGeneration==generation && launchCatalogEvidence==expectedCatalog && repositoryReason(machine,path).isBlank()) { "The selected computer or form changed." }
+                val creation=SessionAction(UUID.randomUUID().toString(),target,RepositoryAcquisition.clone,args.toString());action=creation;actionFlights+=creation.requestId
+                durable({ state -> check(RepositoryAcquisition.pending(state.sessionActions,machine,path)==null);state.action(creation) },
+                    { current,written -> current.action(written.sessionActions.first { it.requestId==creation.requestId }) })
+                check(launchVisible && launchGeneration==generation && launchMachine==machine && launchCatalogEvidence==expectedCatalog && connections.any { it==connection } &&
+                    machines.any { it.connectionId==machine.connectionId && it.id==machine.computerId && it.machineId==identity && it.online && !it.lastKnown }) { "The selected computer changed before checkout." }
+                launchStage="cloning";attempted=true
+                val initial=try { api.submit(connection,target,creation.operation,JSONObject(args.toString()).put("request_id",creation.requestId),creation.requestId) }
+                    catch(e:RelayException) { rejected=e.status in listOf(400,401,403,404,409,413,429);throw e }
+                settleSessionAction(creation,api.await(connection,initial,maxPolls=100))
+                val settled=messageState.sessionActions.first { it.requestId==creation.requestId }
+                check(settled.status=="completed" && settled.resultPath==path) { settled.error.ifEmpty { RepositoryAcquisition.uncertain } }
+                // Only this fresh, definite clone result continues. Receipt recovery never reaches launch.
+                check(launchVisible && launchGeneration==generation && launchMachine==machine && launchCatalogEvidence==expectedCatalog && launchReason(machine).isBlank()) { "Checkout created. Review the current session choices." }
+                launchStage="checking"
+                launchDirectoryJob?.cancel();launchWorktreeJob?.cancel();launchDirectoryLoading=false;launchWorktreeLoading=false
+                val browser=readLaunchDirectory(connection,machine,path)
+                check(LaunchPresentation.selectedFolder(browser,path)) { "Checkout created; check its folder before starting." }
+                val checkout=readLaunchWorktrees(connection,machine,path,path)
+                check(RepositoryAcquisition.verifiedCheckout(checkout,path)) { "Checkout created; its Git folder could not be confirmed. Use checkout to review it." }
+                launchDirectoryState=browser;launchWorktreeState=checkout
+                val launch=SessionAction(UUID.randomUUID().toString(),target,"launch",launchArgs.toString())
+                launchStage="launching";launchSubmitting=true;actionFlights+=launch.requestId
+                submitLaunch(machine,connection,launch,agent,path,expectedCatalog,generation)
+            } catch(e:Exception) {
+                action?.let { original ->
+                    try { durable({ state -> state.sessionActions.find { it.requestId==original.requestId }?.let { current ->
+                        if(current.blocksSending) state.action(current.copy(status=if(!attempted || rejected) "failed" else "uncertain",
+                            error=if(!attempted || rejected) e.message.orEmpty() else RepositoryAcquisition.uncertain)) else state
+                    } ?: state }) } catch(_:Exception) { launchError="Could not save checkout outcome. Check the original result." }
+                }
+                if(e is CancellationException) throw e
+                launchError=e.message.orEmpty()
+            } finally { launchStage="";action?.let { actionFlights-=it.requestId } }
+        }
+    }
     fun prepareLaunch(machine:MachineKey) {
         if(launchBusy) return
-        val reason=launchReason(machine);if(reason.isNotBlank()) { launchError=reason;return }
+        val reason=launchReason(machine)
+        val opening=!launchVisible
+        launchRepositoryPath="";launchRepositoryCheckId=""
         launchGeneration++;launchMachine=machine;launchVisible=true;launchCatalogState=null;launchDirectoryState=null;launchWorktreeState=null;launchError="";launchCatalogEvidence=""
-        launchFormId=launchGeneration;launchGeneratedName=LaunchPresentation.generatedName();launchStage="";launchCreatedWorktree="";launchCreatedEvidence=null;launchAutomaticFailed=false
+        if(opening) { launchFormId=launchGeneration;launchGeneratedName=LaunchPresentation.generatedName() };launchStage="";launchCreatedWorktree="";launchCreatedEvidence=null;launchAutomaticFailed=false
         launchCreatedDirectory=""
         launchBaseline=sessionActions.filter { it.operation in setOf("launch","worktree_create","directory_create") }.associate { it.requestId to it.status }
         launchCatalogJob?.cancel();launchDirectoryJob?.cancel();launchWorktreeJob?.cancel();launchWorktreeLoading=false;launchDirectoryLoading=false
+        if(reason.isNotBlank()) { launchError=reason;launchCatalogLoading=false;return }
         val connection=connections.find { it.id == machine.connectionId } ?: return
         val generation=launchGeneration;launchCatalogLoading=true
         launchCatalogJob=viewModelScope.launch {

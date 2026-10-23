@@ -10,6 +10,8 @@ use uuid::Uuid;
 pub const MIB: usize = 1024 * 1024;
 pub const REQUEST_MAX: usize = 29 * MIB;
 pub const READS: &[&str] = &[
+    "repository_check",
+    "repository_status",
     "analytics_read",
     "archive_list",
     "speech_config",
@@ -73,6 +75,9 @@ pub const MOBILE_DELIVERY: &[&str] = &[
     "away_30",
 ];
 pub const OPERATIONS: &[&str] = &[
+    "repository_check",
+    "repository_clone",
+    "repository_status",
     "analytics_read",
     "archive_list",
     "speech_config",
@@ -445,13 +450,19 @@ pub fn request(v: &Value) -> Result<()> {
         &v["session"],
         1024,
         op == "git_status"
+            || crate::repositories::OPERATIONS.contains(&op)
             || op == "analytics_read"
             || op == "archive_list"
             || LAUNCH.contains(&op)
             || COMPUTER.contains(&op)
             || SPEECH.contains(&op),
     )?;
-    if op == "git_status" {
+    if crate::repositories::OPERATIONS.contains(&op) {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        crate::repositories::validate(op, p, id)?;
+    } else if op == "git_status" {
         if v["session"] != "" {
             return Err(Error::BAD);
         }

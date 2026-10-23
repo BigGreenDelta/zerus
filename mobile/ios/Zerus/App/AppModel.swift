@@ -53,8 +53,6 @@ final class AppModel {
     var conversationRequest: Target?
     /// A short confirmation shown at the bottom of the screen.
     var notice = ""
-    /// The New session machine chooser is open.
-    var choosingLaunchMachine = false
 
     // MARK: Sessions view state
 
