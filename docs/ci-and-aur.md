@@ -69,9 +69,15 @@ artifact ID and manifest digest, including its original attempt on a partial
 rerun; there is no live-producer polling or name/latest fallback. The CLI consumer
 selects the producer's exact Rust release and verifies the compiler identity.
 The public `CLI (macos-15)` result and `Suite results` require every selected
-component. The producer restores Rust caches without saving; only the integration
-and release consumer retains the previous complete-build save opportunity. The
-native consumer has no cache access. Linux retains the default complete CLI path.
+component. The producer saves tested unit/debug dependencies under a `debug`
+content key; the integration/release consumer uses a distinct `complete` key.
+Both keep the legacy registry, Git and target paths and inherit the caller's
+cache authority: only requested trusted-main saves run after successful work and
+an exact-key miss. A cold core first restores the completed debug cache; a cold
+producer first tries the complete cache, then both accept legacy lock/family
+entries. The profile suffix stays inside the final key segment, so housekeeping
+still retains only two total entries in that existing compiler/month family.
+The native consumer has no cache access. Linux retains the default complete CLI path.
 Separate runner setup, dependency restoration and artifact transfer add overhead;
 this split does not establish an observed speedup without hosted evidence.
 

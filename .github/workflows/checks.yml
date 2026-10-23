@@ -616,7 +616,6 @@ jobs:
     if: needs.source.outputs.run_macos == 'true'
     runs-on: macos-15
     timeout-minutes: 35
-    cache-mode: read
     outputs:
       artifact_id: ${{ steps.debug-upload.outputs.artifact-id }}
       manifest_sha256: ${{ steps.seal.outputs.manifest_sha256 }}
@@ -650,8 +649,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+          key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}debug
+          restore-keys: |
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}complete
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - name: Complete original unit, debug and fake-agent builds
         run: bash scripts/ci/cli.sh debug
       - name: Seal the tested debug executables and their provenance
@@ -668,6 +670,17 @@ jobs:
             artifacts/mac-cli-debug/manifest.json
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
+      # Save tested unit/debug fingerprints under a separate immutable key;
+      # the core consumer saves its complete build without racing this writer.
+      - name: Save Rust debug cache
+        if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Retain test logs
         if: always() && (github.event_name != 'schedule' || failure())
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -726,8 +739,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+          key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}complete
+          restore-keys: |
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}debug
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - name: Verify and publish the exact debug executables
         run: |
           python3 scripts/ci/macos-debug-artifact.py install --directory "$RUNNER_TEMP/mac-cli-debug" \

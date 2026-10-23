@@ -1,9 +1,11 @@
 """Pure debug-handoff controls; no compiler, uploaded binary or native agent runs."""
 import copy
+import datetime
 import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -197,8 +199,8 @@ class WorkflowContracts(unittest.TestCase):
         job,field=security.job,security.field
         producer=job(self.checks,'cli-macos-debug')
         self.assertEqual(field(producer,'needs'),'source')
-        self.assertEqual(field(producer,'cache-mode'),'read')
-        self.assertNotIn('actions/cache/save@',producer)
+        self.assertNotRegex(producer, r'(?m)^    cache-mode:')
+        self.assertLess(producer.index('id: debug-upload'),producer.index('name: Save Rust debug cache'))
         self.assertLess(producer.index('scripts/ci/cli.sh debug'),producer.index('id: seal'))
         self.assertLess(producer.index('id: seal'),producer.index('id: debug-upload'))
         self.assertNotIn('cli.sh remaining',producer)
@@ -223,6 +225,109 @@ class WorkflowContracts(unittest.TestCase):
         self.assertNotIn('rustup',native)
         self.assertEqual(field(job(self.checks,'cli-macos'),'name'),'CLI (macos-15)')
         self.assertIn('run: bash scripts/ci/cli.sh\n',job(self.checks,'cli'))
+
+    def cache_keys(self, name):
+        body=security.job(self.checks,name)
+        restore=next(step for step in security.steps(body) if 'uses: actions/cache/restore@' in step)
+        key=re.search(r'(?m)^          key: (.+)$',restore)[1]
+        fallback_field=re.search(r'(?m)^          restore-keys: (.+)$',restore)[1]
+        fallbacks=(re.search(r'(?m)^          restore-keys: \|\n((?:            .+\n)+)',restore)[1]
+                   if fallback_field=='|' else fallback_field)
+        paths=re.search(r'(?m)^          path: \|\n((?:            .+\n)+)',restore)[1]
+        substitutions={"${{ runner.os }}":'macOS',"${{ runner.arch }}":'ARM64',
+                       "${{ steps.rust.outputs.rustc }}":'a1b2c3',"${{ steps.rust.outputs.epoch }}":'2026-10',
+                       "${{ hashFiles('Cargo.lock') }}":'d'*64}
+        def render(value):
+            for old,new in substitutions.items():value=value.replace(old,new)
+            self.assertNotIn('${{',value)
+            return value
+        return render(key),[render(value.strip()) for value in fallbacks.splitlines()],paths
+
+    def test_profile_keys_share_legacy_version_paths_and_one_trim_family(self):
+        debug,debug_fallback,debug_paths=self.cache_keys('cli-macos-debug')
+        complete,core_fallback,core_paths=self.cache_keys('cli-macos-core')
+        legacy=debug.removesuffix('debug');family=legacy[:-64]
+        self.assertNotEqual(debug,complete)
+        self.assertEqual(complete,legacy+'complete')
+        self.assertEqual(debug_fallback,[complete,legacy,family])
+        self.assertEqual(core_fallback,[debug,legacy,family])
+        self.assertEqual(debug.rsplit('-',1)[0],complete.rsplit('-',1)[0])
+        self.assertEqual(debug.rsplit('-',1)[0],legacy.rsplit('-',1)[0])
+        self.assertEqual(debug_paths,core_paths)
+        self.assertEqual([value.strip() for value in debug_paths.splitlines()],
+                         ['~/.cargo/registry','~/.cargo/git','target'])
+
+    def test_cold_producer_saves_unit_fingerprints_for_core_then_each_warm_exact_key_wins(self):
+        debug,debug_fallback,_=self.cache_keys('cli-macos-debug')
+        complete,core_fallback,_=self.cache_keys('cli-macos-core')
+        # Model the action's exact match then newest prefix match for each
+        # ordered restore key. Values represent the cached build fingerprints.
+        caches={}
+        def restore(key,fallback):
+            for candidate in [key,*fallback]:
+                if candidate in caches:return candidate,caches[candidate]
+                found=[value for value in caches if value.startswith(candidate)]
+                if found:
+                    newest=found[-1];return newest,caches[newest]
+            return None
+        self.assertIsNone(restore(debug,debug_fallback))
+        caches[debug]={'unit-dependencies','debug-dependencies'}
+        self.assertEqual(restore(complete,core_fallback),(debug,caches[debug]))
+        caches[complete]=caches[debug]|{'smoke','python','release-dependencies'}
+        self.assertEqual(restore(debug,debug_fallback),(debug,caches[debug]))
+        self.assertEqual(restore(complete,core_fallback),(complete,caches[complete]))
+        # A complete cache remains the producer's first fallback after a
+        # missing/evicted debug entry, without a shared primary-key writer.
+        del caches[debug]
+        self.assertEqual(restore(debug,debug_fallback),(complete,caches[complete]))
+
+    def test_legacy_lock_and_previous_lock_family_remain_ordered_migration_fallbacks(self):
+        for name in ('cli-macos-debug','cli-macos-core'):
+            primary,fallback,_=self.cache_keys(name)
+            other,legacy,family=fallback
+            with self.subTest(job=name):
+                self.assertEqual([key for key in fallback if legacy==key],[legacy])
+                self.assertTrue(primary.startswith(legacy) and other.startswith(legacy))
+                previous=family+'c'*64
+                self.assertFalse(previous.startswith(legacy))
+                self.assertTrue(previous.startswith(fallback[-1]))
+                self.assertEqual(fallback.index(legacy),1)
+                self.assertEqual(fallback.index(family),2)
+
+    def test_existing_trim_keeps_only_two_total_debug_complete_and_legacy_entries(self):
+        ci=(ROOT/'.github/workflows/ci.yml').read_text();namespace={}
+        exec(compile(security.inline_python(security.job(ci,'cache-trim')),'existing-trim-policy','exec'),namespace)
+        debug,_,_=self.cache_keys('cli-macos-debug');complete,_,_=self.cache_keys('cli-macos-core')
+        legacy=debug.removesuffix('debug')
+        entries=[dict(id=index,key=key,ref='refs/heads/main',created_at=f'2026-10-23T10:00:0{index}Z')
+                 for index,key in enumerate((legacy,debug,complete),1)]
+        now=datetime.datetime(2026,10,23,12,tzinfo=datetime.timezone.utc)
+        self.assertEqual([entry['key'] for entry in namespace['stale'](entries,now)],[legacy])
+        old_lock=legacy[:-64]+'c'*64
+        entries.append(dict(id=4,key=old_lock,ref='refs/heads/main',created_at='2026-10-23T09:00:00Z'))
+        self.assertEqual(set(entry['key'] for entry in namespace['stale'](entries,now)),{legacy,old_lock})
+
+    def test_both_saves_inherit_caller_authority_and_need_successful_work_plus_exact_key_miss(self):
+        for name,required in (('cli-macos-debug',('cli.sh debug','id: seal','id: debug-upload')),
+                              ('cli-macos-core',('macos-debug-artifact.py install','cli.sh remaining'))):
+            body=security.job(self.checks,name)
+            self.assertNotRegex(body,r'(?m)^    cache-mode:')
+            save=next(step for step in security.steps(body) if 'uses: actions/cache/save@' in step)
+            condition=re.search(r'(?m)^        if: (.+)$',save)[1]
+            self.assertEqual(condition,"inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'")
+            self.assertNotIn('always()',condition)
+            for command in required:self.assertLess(body.index(command),body.index(save))
+            for requested,hit,previous_success in itertools.product((False,True),('true','false',''),(False,True)):
+                expression=condition.replace('inputs.save_caches',repr(requested)).replace(
+                    'steps.rust-cache.outputs.cache-hit',repr(hit)).replace('&&',' and ')
+                # No status override: Actions requires prior success as well.
+                selected=previous_success and eval(expression,{'__builtins__':{}})
+                self.assertEqual(selected,requested and hit!='true' and previous_success)
+        for name in ('cli-macos-native','cli-macos'):
+            self.assertEqual(security.field(security.job(self.checks,name),'cache-mode'),'none')
+        # The called workflow keeps false as its public default. Current
+        # caller trust tests separately exercise main versus PR/manual tokens.
+        self.assertRegex(self.checks,r'(?s)      save_caches:.*?        default: false')
 
     def test_public_macos_aggregate_rejects_every_incomplete_dependency(self):
         body=security.job(self.checks,'cli-macos')

@@ -271,8 +271,9 @@ class WorkflowSecurityTests(unittest.TestCase):
         # A callee cannot request broader permissions than its caller's limit.
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         self.assertEqual({name: field(job(checks, name), 'cache-mode') for name in
-                          ('cli-macos-debug', 'cli-macos-native', 'cli-macos')},
-                         {'cli-macos-debug': 'read', 'cli-macos-native': 'none', 'cli-macos': 'none'})
+                          ('cli-macos-native', 'cli-macos')},
+                         {'cli-macos-native': 'none', 'cli-macos': 'none'})
+        self.assertNotRegex(job(checks, 'cli-macos-debug'), r'(?m)^    cache-mode:')
         self.assertNotRegex(checks, r"(?m)^\s*cache-mode: write$")
 
     def test_final_gate_rejects_failure_cancellation_and_all_skipped(self):
@@ -793,7 +794,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         names = re.findall(r"(?m)^  ([a-z][\w-]*):\n", checks.split("\njobs:\n", 1)[1])
         # windows-host restores the Rust cache that windows-desktop saves, and
         # never saves it: two jobs saving one key would race.
-        read_only = {"windows-host": {"rust-cache"}, "cli-macos-debug": {"rust-cache"}}
+        read_only = {"windows-host": {"rust-cache"}}
         saves = 0
         for name in names:
             restores, saved = {}, []
@@ -865,14 +866,20 @@ class WorkflowSecurityTests(unittest.TestCase):
                 restore = self.checks_step(name, "rust-cache")
                 # Each cache follows the lock of what it builds.
                 lock = "services/mobile/connector/Cargo.lock" if name == "connector" else "Cargo.lock"
-                self.assertIn(f"          key: {family}{identity}${{{{ hashFiles('{lock}') }}}}\n"
-                              f"          restore-keys: {family}{identity}\n", restore)
+                if name in ('cli-macos-debug', 'cli-macos-core'):
+                    profile, other = ('debug', 'complete') if name.endswith('debug') else ('complete', 'debug')
+                    prefix = f"{family}{identity}${{{{ hashFiles('{lock}') }}}}"
+                    self.assertIn(f"          key: {prefix}{profile}\n          restore-keys: |\n"
+                                  f"            {prefix}{other}\n            {prefix}\n            {family}{identity}\n", restore)
+                else:
+                    self.assertIn(f"          key: {family}{identity}${{{{ hashFiles('{lock}') }}}}\n"
+                                  f"          restore-keys: {family}{identity}\n", restore)
         cargo = self.checks_step("arch-package", "cargo-cache")
         # The package also builds the mobile connector, which has its own lock.
         self.assertIn("          key: arch-cargo-v1-${{ steps.epoch.outputs.month }}-"
                       "${{ hashFiles('Cargo.lock', 'services/mobile/connector/Cargo.lock') }}\n"
                       "          restore-keys: arch-cargo-v1-${{ steps.epoch.outputs.month }}-\n", cargo)
-        for name, step_id in (("quick", "rust-cache"), ("cli", "rust-cache"), ("cli-macos-core", "rust-cache"), ("windows-desktop", "rust-cache"),
+        for name, step_id in (("quick", "rust-cache"), ("cli", "rust-cache"), ("cli-macos-debug", "rust-cache"), ("cli-macos-core", "rust-cache"), ("windows-desktop", "rust-cache"),
                               ("connector", "rust-cache"), ("arch-package", "cargo-cache"),
                               ("windows-desktop", "qt-cache"), ("android", "gradle-cache")):
             with self.subTest(job=name, cache=step_id):
