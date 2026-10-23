@@ -98,6 +98,7 @@ struct LaunchForm: View {
         let effortOptions = LaunchPresentation.efforts(catalog, provider: provider, accountId: account, model: selectedModel,
                                                        supported: launch.effortSupported(machine))
         let projects = LaunchPresentation.projects(catalog)
+        let project = projects.first { $0.id == projectId }
         let evidence = WorktreePresentation.forFolder(launch.worktrees, folder)
         let inferredProject = LaunchPresentation.inferredProject(catalog, selected: projectId, explicit: projectExplicit, directory: folder,
                                                                  browser: launch.directory, worktrees: evidence)
