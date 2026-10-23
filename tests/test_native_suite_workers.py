@@ -118,10 +118,11 @@ class NativeSuiteWorkers(unittest.TestCase):
             # neither tmux nor a provider nor any descendant process to drain.
             self.addCleanup(shutil.rmtree, root)
 
-    def simulate(self, modes=('pass', 'pass'), *, clock=None, timeout=30):
+    def simulate(self, modes=('pass', 'pass'), *, clock=None, timeout=30, names=None, inventory=None):
         clock = clock or Clock()
         processes = []
-        inventory = [['first.case', 'duplicate.clear'], ['second.case'], ['duplicate.clear']]
+        names = names if names is not None else ['first', 'second', 'third']
+        inventory = inventory if inventory is not None else [['first.case', 'duplicate.clear'], ['second.case'], ['duplicate.clear']]
 
         def launch(argv, **options):
             mode = modes[len(processes)]
@@ -136,7 +137,7 @@ class NativeSuiteWorkers(unittest.TestCase):
                     patch.object(workers.time, 'monotonic', side_effect=clock.monotonic), \
                     patch.object(workers.time, 'sleep', side_effect=clock.sleep), \
                     patch('sys.stdout', io.StringIO()):
-                status, stdout = workers.run_suites(['first', 'second', 'third'], self.env, timeout, self.root, self.log)
+                status, stdout = workers.run_suites(names, self.env, timeout, self.root, self.log)
         finally:
             self.remember_worker_root()
         return status, stdout, json.loads(self.log.with_suffix('.workers.json').read_text()), processes
@@ -153,6 +154,58 @@ class NativeSuiteWorkers(unittest.TestCase):
         for invalid in ([], [[]], [['one']], [['one'], []], [[None], ['other']]):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 workers.partition(invalid)
+
+    def claude_inventory(self):
+        # PR310's observed group sizes, with synthetic method IDs. No native
+        # module is imported or executed by these scheduler controls.
+        counts = [2, 37, 24, 14, 2, 2, 6, 1, 2, 3, 2, 3]
+        inventory = [[f'{name}.synthetic_{i}' for i in range(count)]
+                     for name, count in zip(workers.MACOS_CLAUDE_SUITES, counts)]
+        duplicate = 'test_clear_context_native.NativeClearContext.test_native_clear_confirms_new_conversation_without_restarting_process'
+        inventory[7][0] = inventory[8][0] = duplicate
+        return inventory
+
+    def test_reviewed_claude_plan_keeps_all_whole_suites_and_duplicate_occurrences(self):
+        inventory = self.claude_inventory()
+        status, stdout, record, processes = self.simulate(names=list(workers.MACOS_CLAUDE_SUITES), inventory=inventory, timeout=900)
+        self.assertEqual(status, 0, record['problems'])
+        self.assertEqual(record['assignments'], [[1], [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]])
+        original = [name for group in inventory for name in group]
+        completed = [name for row in record['workers'] for name in row['result']['completed']]
+        self.assertEqual(collections.Counter(completed), collections.Counter(original))
+        self.assertEqual((len(completed), len(set(completed))), (98, 97))
+        self.assertEqual([row['result']['tests'] for row in record['workers']], [37, 61])
+        self.assertEqual(json.loads(stdout.split('=', 1)[1]), dict(tests=98, skipped=0, workers=2, qualified=True))
+        self.assertEqual([process.argv[6] for process in processes], [str(record['deadline'])] * 2)
+        self.assertEqual((record['timeout'], record['deadline'] - record['work_deadline']), (900, 10))
+        self.assertTrue(all(len(process.plans) == 1 for process in processes))
+
+    def test_unrelated_or_reordered_suite_names_retain_count_balancing(self):
+        inventory = self.claude_inventory()
+        previous = workers.partition(inventory)
+        self.assertEqual(previous, [[0, 1, 5, 6, 10], [2, 3, 4, 7, 8, 9, 11]])
+        for names in (list(reversed(workers.MACOS_CLAUDE_SUITES)),
+                      [name + '.other' for name in workers.MACOS_CLAUDE_SUITES]):
+            self.assertEqual(workers.partition(inventory, names), previous)
+        with self.assertRaises(ValueError):
+            workers.partition(inventory, ['missing named groups'])
+        changed = inventory.copy(); changed[1] = []
+        with self.assertRaises(ValueError):
+            workers.partition(changed, workers.MACOS_CLAUDE_SUITES)
+
+    def test_reviewed_claude_plan_still_refuses_partial_discovery_and_unhealthy_workers(self):
+        for mode in ('different-discovery', 'wrong-result', 'skip', 'leftover', 'missing-marker'):
+            with self.subTest(mode=mode):
+                self.log = self.root / (mode + '.log')
+                status, stdout, record, processes = self.simulate(('pass', mode),
+                    names=list(workers.MACOS_CLAUDE_SUITES), inventory=self.claude_inventory())
+                self.assertEqual(status, 1)
+                self.assertFalse(json.loads(stdout.split('=', 1)[1])['qualified'])
+                self.assertTrue(record['problems'])
+                self.assertEqual(len(processes), 2)
+                self.assertTrue(all(len(process.plans) <= 1 for process in processes))
+                if mode == 'different-discovery':
+                    self.assertTrue(all(process.plans == [] for process in processes))
 
     def test_private_environment_precedes_imports_and_does_not_redirect_case_claude_config(self):
         # Match run_suites' short root even when macOS supplies a long TMPDIR.
@@ -241,6 +294,8 @@ class NativeSuiteWorkers(unittest.TestCase):
                               ('claude', 'win32-x64'), ('codex', 'linux-x64'), ('opencode', 'darwin-arm64')):
             with self.subTest(agent=agent, target=target):
                 settings = compat.target_spec(agent, target)
+                if (agent, target) == ('claude', 'darwin-arm64'):
+                    self.assertEqual(tuple(settings['suites']), workers.MACOS_CLAUDE_SUITES)
                 version = '1.2.3'
                 package = dict(target=target, version=version, integrity='stand-in-only',
                                url=compat.AGENTS[agent]['tarball'].format(version=version, target=target))
@@ -329,6 +384,30 @@ class First(unittest.TestCase):
         self.assertEqual(json.loads(stdout.split('=', 1)[1])['tests'], 2)
         self.assertEqual(sorted(row['result']['completed'] for row in record['workers']),
                          [['first.First.test_private_worker']] * 2)
+        self.assertFalse((self.root / '__pycache__').exists())
+
+    def test_real_stdlib_workers_independently_admit_the_reviewed_named_plan(self):
+        # Shadow only these fixed fixture names in the private PYTHONPATH.
+        # Every generated module is stdlib unittest code, never an agent fixture.
+        source = 'import unittest\nclass Fixture(unittest.TestCase):\n    def test_control(self): self.assertTrue(True)\n'
+        for name in workers.MACOS_CLAUDE_SUITES:
+            module = name.split('.')[0]
+            body = source.replace('class Fixture', 'class NativeClearContext') if '.' in name else source
+            if module == 'test_compact_context_native':
+                body += 'from test_clear_context_native import NativeClearContext\n'
+            (self.root / (module + '.py')).write_text(body)
+        try:
+            with patch('sys.stdout', io.StringIO()):
+                status, stdout = workers.run_suites(list(workers.MACOS_CLAUDE_SUITES), self.env, 30, self.root, self.log)
+        finally:
+            self.remember_worker_root()
+        record = json.loads(self.log.with_suffix('.workers.json').read_text())
+        self.assertEqual(status, 0, record['problems'])
+        self.assertEqual(record['assignments'], [[1], [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]])
+        completed = [name for row in record['workers'] for name in row['result']['completed']]
+        self.assertEqual((len(completed), len(set(completed))), (13, 12))
+        self.assertEqual(json.loads(stdout.split('=', 1)[1])['tests'], 13)
+        self.assertTrue(all(row['returncode'] == 0 and row['result']['skipped'] == 0 for row in record['workers']))
         self.assertFalse((self.root / '__pycache__').exists())
 
 

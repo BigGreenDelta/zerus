@@ -24,6 +24,16 @@ CLEANUP_SECONDS = 10
 KILL_RESERVE_SECONDS = 1
 MAX_REPORT_BYTES = 1024 * 1024
 MAX_BINARY_BYTES = 512 * 1024 * 1024
+# PR310's latest-only timing evidence shows the whole question suite dominates
+# one count-balanced worker. Keep it whole; this is not per-case sharding.
+MACOS_CLAUDE_SUITES = (
+    'test_claude_input_native', 'test_claude_questions_native',
+    'test_claude_approval_native', 'test_claude_safety_native',
+    'test_claude_trust_native', 'test_claude_resume_native',
+    'test_claude_usage_limit_native', 'test_clear_context_native.NativeClearContext',
+    'test_compact_context_native', 'test_claude_settings_native',
+    'test_claude_statusline_native', 'test_claude_permission_native',
+)
 
 
 def case_ids(suite):
@@ -32,7 +42,7 @@ def case_ids(suite):
     return [suite.id()]
 
 
-def partition(inventory):
+def partition(inventory, names=None):
     """Keep each original named suite intact and every occurrence, including duplicates."""
     if not 2 <= len(inventory) <= 128 or any(
             not rows or any(not isinstance(name, str) or not name or len(name) > 4096 for name in rows)
@@ -40,6 +50,13 @@ def partition(inventory):
         raise ValueError('Expected at least two nonempty native suite inventories')
     if sum(map(len, inventory)) > 10000:
         raise ValueError('Native suite inventory is too large')
+    if names is not None:
+        if len(names) != len(inventory):
+            raise ValueError('Named native suites disagree with their discovered inventory')
+        if tuple(names) == MACOS_CLAUDE_SUITES:
+            question = names.index('test_claude_questions_native')
+            return [[question], [index for index in range(len(inventory)) if index != question]]
+    # Unrelated inventories retain the existing deterministic count balance.
     assignments, loads = [[], []], [0, 0]
     for index in sorted(range(len(inventory)), key=lambda value: (-len(inventory[value]), value)):
         worker = min(range(2), key=lambda value: (loads[value], value))
@@ -170,7 +187,7 @@ def worker_main(root, inventory_path, result_path, end, names):
         suite = unittest.defaultTestLoader.loadTestsFromNames(names)
         groups = list(suite)
         inventory = [case_ids(group) for group in groups]
-        partition(inventory)  # Refuse empty/import-error discovery before the barrier.
+        partition(inventory, names)  # Refuse empty/import-error discovery before the barrier.
         if unittest.defaultTestLoader.errors:
             raise ValueError('Native suite discovery failed: ' + repr(unittest.defaultTestLoader.errors))
         write_json(inventory_path, dict(names=names, suites=inventory))
@@ -179,7 +196,7 @@ def worker_main(root, inventory_path, result_path, end, names):
             raise ValueError('Native worker assignment is late or too large')
         plan = json.loads(line)
         index = plan['worker']
-        if type(index) is not int or index not in (0, 1) or plan['suites'] != partition(inventory)[index]:
+        if type(index) is not int or index not in (0, 1) or plan['suites'] != partition(inventory, names)[index]:
             raise ValueError('Native worker assignment disagrees with discovered occurrences')
         indexes = plan['suites']
         assigned = [name for group in indexes for name in inventory[group]]
@@ -305,7 +322,7 @@ def run_suites(suites, env, timeout, scratch, log):
         if inventories[0] != inventories[1] or inventories[0]['names'] != suites:
             raise ValueError('Native workers disagree about original suite discovery')
         inventory = inventories[0]['suites']
-        assignments = partition(inventory)
+        assignments = partition(inventory, suites)
         record.update(inventory=inventory, assignments=assignments)
         for worker in workers:
             if time.monotonic() >= work_end:

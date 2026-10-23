@@ -844,6 +844,11 @@ carrying its private root outlived it.
 The macOS Claude matrix schedules its unchanged named unittest suites across two
 private Python workers under the same original 900-second wall end, including
 discovery, both starts, collection and a ten-second cleanup reserve. Each worker
+receives whole named suites. For the reviewed twelve-suite Claude inventory, the
+question suite runs alone and the other eleven keep their original order on the
+second worker; unrelated inventories retain count balancing. This assignment is
+based on recorded latest-only durations, not a guaranteed wall-clock improvement.
+Each worker
 gets short private HOME/XDG/TMP/state/config paths before importing fixtures and
 cannot write shared source bytecode. The workers read same-byte, mode-0500 copies
 of the already reviewed CLI and Claude image; neither caller binary is chmodded.
