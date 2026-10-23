@@ -387,7 +387,7 @@ fn usage_text(tmux: bool) -> Cow<'static, str> {
         .into()
 }
 
-pub fn dispatch(args: Vec<String>) -> Result<i32> {
+pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
     // Private: the screen model behind the differential tmux capture test.
     if args.first().is_some_and(|a| a == "__screen-capture") {
         return crate::screen::cli(&args[1..]).map_err(|e| Error::new(2, e));
@@ -407,6 +407,26 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         return state::dispatch(&args[1..]).map_err(|e| Error::new(1, e));
     }
     let config = Config::load()?;
+    // An encrypted gateway binds every local native call to the physical
+    // machine it advertised. This check also works on Windows, without a
+    // shell, stdin rewriting or a second native process.
+    if args.first().is_some_and(|a| a == "--expect-machine") {
+        let expected = args.get(1).ok_or_else(|| Error::new(2, "Missing expected machine identity"))?;
+        if uuid::Uuid::parse_str(expected).ok().is_none_or(|id| id.to_string() != *expected)
+            || crate::swarm::local_node_id(&config).map_err(|_| Error::new(1,"Native machine identity is unavailable"))? != *expected
+        {
+            return Err(Error::new(1,"Mobile target identity changed; refresh computers"));
+        }
+        args.drain(..2);
+        if args.first().is_none_or(|a| a.starts_with('@')
+            || (a.starts_with('-') && !(args.len()==1 && matches!(a.as_str(),"--help"|"-h"|"--version")))) {
+            return Err(Error::new(2,"A guarded mobile call requires a local command"));
+        }
+        if args.first().is_some_and(|a| a == "__state") {
+            session_process()?;
+            return state::dispatch(&args[1..]).map_err(|e| Error::new(1,e));
+        }
+    }
     // The existing swarm namespace fails closed on unknown operations in older
     // installations, so transport helpers cannot fall through to agent launch.
     if args.first().is_some_and(|a| a == "swarm")
@@ -469,6 +489,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
                 return remote(&config, &target, "--help", args, dry);
             }
             print!("{}", usage_text(cfg!(unix)));
+            println!("Encrypted workspace ABI: guarded-local-v1");
             #[cfg(windows)]
             print!("{}\nMobile gateway ABI: windows-local-v1\n", crate::host::admin::HELP);
             return Ok(0);

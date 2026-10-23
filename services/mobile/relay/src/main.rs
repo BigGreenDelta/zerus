@@ -7,7 +7,7 @@ use zerus_relay::{
     error::Result,
     http::{serve, App},
     protocol,
-    store::{Role, Store},
+    store::{Role, ServiceClass, Store},
 };
 
 #[derive(Parser)]
@@ -55,6 +55,13 @@ enum Command {
     RevokeComputer {
         #[arg(long)]
         id: String,
+    },
+    /// Assign service priority by local operator policy; clients cannot set it.
+    ServiceClass {
+        #[arg(long)]
+        workspace: String,
+        #[arg(long)]
+        class: String,
     },
     /// Verify the configured backend can be opened without exposing credentials.
     Check,
@@ -148,6 +155,12 @@ async fn run(cli: Cli) -> Result<()> {
                     }
                 })?;
                 serde_json::json!({"revoked":true})
+            }
+            Command::ServiceClass { workspace, class } => {
+                store
+                    .set_service_class(&workspace, ServiceClass::parse(&class)?)
+                    .await?;
+                serde_json::json!({"workspace_id":workspace,"service_class":class})
             }
             Command::Healthcheck { .. } => unreachable!(),
             Command::Check => serde_json::json!({"ok":true,"protocol_version":1}),

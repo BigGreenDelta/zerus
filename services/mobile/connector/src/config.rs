@@ -27,6 +27,9 @@ pub struct Config {
     pub state_dir: PathBuf,
     /// `sha256(identity_url + "\0" + node_token)` in hex.
     pub binding: String,
+    /// Present only for endpoint-encrypted workspaces. The bearer lives in
+    /// this private profile, never in a legacy-readable connector config.
+    pub encrypted_workspace: Option<PathBuf>,
 }
 
 /// The node token is never logged, so it never reaches `{:?}` either.
@@ -41,6 +44,7 @@ impl std::fmt::Debug for Config {
             .field("poll_interval", &self.poll_interval)
             .field("state_dir", &self.state_dir)
             .field("binding", &self.binding)
+            .field("encrypted_workspace", &self.encrypted_workspace.is_some())
             .finish()
     }
 }
@@ -171,9 +175,32 @@ pub fn validate(
     let server_url = url::transport(&stored);
     let transport = Transport::new(&server_url)?;
 
-    let token = string(config.get("node_token"))
-        .filter(|token| !token.is_empty() && token.bytes().all(|b| (33..=126).contains(&b)))
-        .ok_or_else(|| ConnectorError::new(INVALID_TOKEN))?;
+    let encrypted_workspace = match config.get("encrypted_workspace") {
+        None => None,
+        Some(marker) => {
+            let path = string(marker.get("state_dir"))
+                .filter(|path| !path.is_empty() && !path.contains('\0'))
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute());
+            if !matches!(marker,Value::Object(fields) if fields.len()==2)
+                || marker.get("version") != Some(&Value::Int("1".into()))
+                || path.is_none()
+                || config.get("node_token").is_some()
+            {
+                return Err(ConnectorError::new(
+                    "Invalid encrypted workspace configuration",
+                ));
+            }
+            path
+        }
+    };
+    let token = if encrypted_workspace.is_some() {
+        String::new()
+    } else {
+        string(config.get("node_token"))
+            .filter(|token| !token.is_empty() && token.bytes().all(|b| (33..=126).contains(&b)))
+            .ok_or_else(|| ConnectorError::new(INVALID_TOKEN))?
+    };
     let hgs_path = match config.get("hgs_path") {
         None => "hgs".to_owned(),
         value => string(value)
@@ -214,7 +241,33 @@ pub fn validate(
         poll_interval,
         state_dir,
         binding,
+        encrypted_workspace,
     })
+}
+
+/// Resolve a protected bearer only after the configuration marker is fully
+/// validated. Shared by startup and the strictly read-only support report.
+pub fn bind_workspace(config: &mut Config, path: &Path) -> Result<()> {
+    let Some(private_dir) = &config.encrypted_workspace else {
+        return Ok(());
+    };
+    if path.parent().map(|p| p.join("workspace-private")).as_ref() != Some(private_dir) {
+        return Err(ConnectorError::new(
+            "Invalid encrypted workspace configuration",
+        ));
+    }
+    let profile = crate::workspace::load_active(private_dir)?;
+    if profile.server_url != config.server_url || profile.state_dir != config.state_dir {
+        return Err(ConnectorError::new(
+            "Encrypted workspace configuration changed",
+        ));
+    }
+    config.token = profile.node_token;
+    config.binding = zerus_relay::json::digest(format!(
+        "encrypted-workspace-v1\0{}\0{}\0{}",
+        config.identity_url, profile.membership.workspace_id, profile.identity.device.device_id
+    ));
+    Ok(())
 }
 
 /// `config.get("state_dir") or <default>`, then `Path(state).expanduser()`.

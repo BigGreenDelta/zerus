@@ -276,7 +276,7 @@ impl Push {
             provider != "fcm" && !APNS_PROVIDERS.contains(&provider),
         ))
     }
-    async fn one(&self, job: Value) -> Result<()> {
+    async fn one(&self, job: Value, _budget: Option<crate::store::ServiceLease>) -> Result<()> {
         let registration = self.store.push_registration(s(&job, "device_id")).await?;
         let (delivered, invalid) = if let Some(reg) = &registration {
             let payload: Value = serde_json::from_str(s(&job, "payload"))?;
@@ -291,8 +291,11 @@ impl Push {
             .await
     }
     pub async fn once(&self) -> Result<()> {
-        let jobs = self.store.claim_push_jobs().await?;
-        let results = futures_util::future::join_all(jobs.into_iter().map(|j| self.one(j))).await;
+        let jobs = self.store.claim_push_jobs_budgeted().await?;
+        let results = futures_util::future::join_all(
+            jobs.into_iter().map(|(job, budget)| self.one(job, budget)),
+        )
+        .await;
         for r in results {
             r?;
         }

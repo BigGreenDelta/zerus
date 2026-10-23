@@ -2,8 +2,10 @@
 
 CREATE TABLE IF NOT EXISTS relay_schema(version integer PRIMARY KEY);
 INSERT INTO relay_schema VALUES(1) ON CONFLICT DO NOTHING;
-CREATE TABLE IF NOT EXISTS workspaces(id text PRIMARY KEY,name text NOT NULL);
+CREATE TABLE IF NOT EXISTS workspaces(id text PRIMARY KEY,name text NOT NULL,service_class text NOT NULL DEFAULT 'standard');
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS service_class text NOT NULL DEFAULT 'standard';
 CREATE TABLE IF NOT EXISTS nodes(id text PRIMARY KEY,workspace_id text NOT NULL REFERENCES workspaces(id),name text NOT NULL,token_hash text UNIQUE NOT NULL,revoked integer NOT NULL DEFAULT 0,last_seen double precision,snapshot text,snapshot_hash text);
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS retirement_request_id TEXT;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS snapshot_hash text;
 CREATE INDEX IF NOT EXISTS node_workspace ON nodes(workspace_id,name,id) WHERE revoked=0;
 CREATE TABLE IF NOT EXISTS devices(id text PRIMARY KEY,workspace_id text NOT NULL REFERENCES workspaces(id),name text NOT NULL,token_hash text UNIQUE NOT NULL,revoked integer NOT NULL DEFAULT 0);
@@ -107,3 +109,49 @@ CREATE INDEX IF NOT EXISTS history_projection_reads_v1 ON requests(updated,id) W
 CREATE INDEX IF NOT EXISTS project_assignment_history_v1 ON requests(updated,id) WHERE operation='project_assignment' AND state IN ('completed','failed','uncertain');
 
 CREATE INDEX IF NOT EXISTS repository_reads_v1 ON requests(updated,id) WHERE operation IN ('repository_check','repository_status') AND state IN ('completed','failed','uncertain');
+
+-- Public service admission: configuration is pinned across all workers.
+CREATE TABLE IF NOT EXISTS service_resources(lane TEXT PRIMARY KEY,total BIGINT NOT NULL,standard BIGINT NOT NULL,used_total BIGINT NOT NULL DEFAULT 0,used_standard BIGINT NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS service_leases(id TEXT PRIMARY KEY,lane TEXT NOT NULL REFERENCES service_resources(lane),service_class TEXT NOT NULL,units BIGINT NOT NULL,expires DOUBLE PRECISION NOT NULL);
+CREATE INDEX IF NOT EXISTS service_lease_expiry ON service_leases(lane,expires,id);
+
+-- Encrypted service records contain only public membership and routing data.
+CREATE TABLE IF NOT EXISTS encrypted_workspaces(workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id),membership_head TEXT NOT NULL,membership_revision BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS encrypted_members(workspace_id TEXT NOT NULL REFERENCES workspaces(id),device_id TEXT NOT NULL,role TEXT NOT NULL,public_record TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,revoked_revision BIGINT,PRIMARY KEY(workspace_id,device_id));
+CREATE INDEX IF NOT EXISTS encrypted_member_device ON encrypted_members(device_id,workspace_id);
+CREATE TABLE IF NOT EXISTS membership_changes(workspace_id TEXT NOT NULL REFERENCES workspaces(id),revision BIGINT NOT NULL,change_id TEXT NOT NULL,head TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(workspace_id,revision),UNIQUE(workspace_id,change_id));
+CREATE TABLE IF NOT EXISTS enrollment_invitations(invitation_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),issuer_device_id TEXT NOT NULL,purpose TEXT NOT NULL,expires DOUBLE PRECISION NOT NULL,used INTEGER NOT NULL DEFAULT 0,membership_head TEXT NOT NULL,membership_revision BIGINT NOT NULL,bootstrap TEXT NOT NULL,metadata_bytes BIGINT NOT NULL);
+CREATE INDEX IF NOT EXISTS enrollment_invitation_workspace ON enrollment_invitations(workspace_id,expires,invitation_id);
+CREATE TABLE IF NOT EXISTS enrollment_candidates(device_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),invitation_id TEXT NOT NULL REFERENCES enrollment_invitations(invitation_id),candidate TEXT NOT NULL,candidate_hash TEXT NOT NULL,token_hash TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',created DOUBLE PRECISION NOT NULL,approval TEXT,metadata_bytes BIGINT NOT NULL);
+CREATE INDEX IF NOT EXISTS enrollment_pending ON enrollment_candidates(workspace_id,state,device_id);
+CREATE INDEX IF NOT EXISTS enrollment_invitation_candidates ON enrollment_candidates(invitation_id,state,device_id);
+CREATE TABLE IF NOT EXISTS public_registration(id INTEGER PRIMARY KEY,workspaces BIGINT NOT NULL DEFAULT 0);
+INSERT INTO public_registration(id) VALUES(1) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS encrypted_requests(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id),device_id TEXT NOT NULL REFERENCES devices(id),node_id TEXT NOT NULL REFERENCES nodes(id),route_id TEXT NOT NULL,body_hash TEXT NOT NULL,body TEXT NOT NULL,body_bytes BIGINT NOT NULL,state TEXT NOT NULL,result TEXT,result_hash TEXT,result_bytes BIGINT NOT NULL DEFAULT 0,reserved_bytes BIGINT NOT NULL DEFAULT 0,created DOUBLE PRECISION NOT NULL,claimed DOUBLE PRECISION,updated DOUBLE PRECISION NOT NULL,expires DOUBLE PRECISION NOT NULL,metadata_bytes BIGINT NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS encrypted_request_queue ON encrypted_requests(node_id,state,created,id);
+CREATE INDEX IF NOT EXISTS encrypted_request_expiry ON encrypted_requests(expires,id) WHERE body_bytes>0 OR result_bytes>0 OR reserved_bytes>0;
+CREATE INDEX IF NOT EXISTS encrypted_request_active ON encrypted_requests(workspace_id,state);
+CREATE INDEX IF NOT EXISTS encrypted_request_device ON encrypted_requests(workspace_id,device_id,state);
+CREATE TABLE IF NOT EXISTS encrypted_route_bindings(node_id TEXT NOT NULL REFERENCES nodes(id),route_id TEXT NOT NULL,computer_id TEXT NOT NULL,workspace_id TEXT NOT NULL REFERENCES workspaces(id),metadata_bytes BIGINT NOT NULL DEFAULT 0,PRIMARY KEY(node_id,route_id));
+CREATE TABLE IF NOT EXISTS encrypted_routes(node_id TEXT NOT NULL REFERENCES nodes(id),route_id TEXT NOT NULL,computer_id TEXT NOT NULL,workspace_id TEXT NOT NULL REFERENCES workspaces(id),last_seen DOUBLE PRECISION,presence_at DOUBLE PRECISION,presence_until DOUBLE PRECISION,PRIMARY KEY(node_id,route_id));
+CREATE INDEX IF NOT EXISTS encrypted_route_catalog ON encrypted_routes(workspace_id,computer_id,node_id,route_id);
+CREATE TABLE IF NOT EXISTS encrypted_snapshots(node_id TEXT NOT NULL REFERENCES nodes(id),route_id TEXT NOT NULL,device_id TEXT NOT NULL REFERENCES devices(id),workspace_id TEXT NOT NULL REFERENCES workspaces(id),body TEXT NOT NULL,body_bytes BIGINT NOT NULL,updated DOUBLE PRECISION NOT NULL,PRIMARY KEY(node_id,route_id,device_id));
+CREATE INDEX IF NOT EXISTS encrypted_snapshot_workspace ON encrypted_snapshots(workspace_id,node_id,route_id,device_id);
+
+CREATE TABLE IF NOT EXISTS opaque_signals(workspace_id TEXT NOT NULL REFERENCES workspaces(id),node_id TEXT NOT NULL REFERENCES nodes(id),scope_id TEXT NOT NULL,kind TEXT NOT NULL,route_id TEXT NOT NULL,computer_id TEXT NOT NULL,change_id TEXT NOT NULL,active INTEGER NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,created DOUBLE PRECISION NOT NULL,next_at DOUBLE PRECISION NOT NULL,metadata_bytes BIGINT NOT NULL DEFAULT 0,PRIMARY KEY(workspace_id,node_id,scope_id,kind));
+CREATE INDEX IF NOT EXISTS opaque_signal_due ON opaque_signals(next_at,workspace_id,node_id,scope_id,kind) WHERE active=1 AND delivered=0;
+
+CREATE INDEX IF NOT EXISTS workspace_service_class ON workspaces(service_class,id);
+CREATE INDEX IF NOT EXISTS node_service_auth ON nodes(workspace_id,token_hash) WHERE revoked=0;
+CREATE INDEX IF NOT EXISTS device_service_auth ON devices(workspace_id,token_hash) WHERE revoked=0;
+
+CREATE INDEX IF NOT EXISTS enrollment_invitation_expiry ON enrollment_invitations(expires,invitation_id) WHERE used=0;
+
+CREATE TABLE IF NOT EXISTS encrypted_request_chunks(request_id TEXT NOT NULL REFERENCES encrypted_requests(id),sequence BIGINT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(request_id,sequence));
+
+ALTER TABLE encrypted_requests ADD COLUMN IF NOT EXISTS metadata_bytes BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE encrypted_route_bindings ADD COLUMN IF NOT EXISTS metadata_bytes BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS encrypted_request_unaccounted ON encrypted_requests(workspace_id,id) WHERE metadata_bytes=0;
+CREATE INDEX IF NOT EXISTS encrypted_binding_unaccounted ON encrypted_route_bindings(workspace_id,node_id,route_id) WHERE metadata_bytes=0;
+ALTER TABLE opaque_signals ADD COLUMN IF NOT EXISTS metadata_bytes BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS opaque_signal_unaccounted ON opaque_signals(workspace_id,node_id,scope_id,kind) WHERE metadata_bytes=0;

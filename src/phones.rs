@@ -21,6 +21,12 @@ const MAX_CONFIG_BYTES: u64 = 65_536;
 const MAX_RESPONSE_BYTES: u64 = 1_048_576;
 
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
+    if args == ["identity", "--json"] && !dry {
+        let machine = crate::swarm::local_node_id(config)
+            .map_err(|_| Error::new(1,"Native machine identity is unavailable"))?;
+        println!("{}",json!({"schema":1,"machine_id":machine}));
+        return Ok(0);
+    }
     let (action, rest) = match args {
         [action, rest @ ..] if action == "phones" => (Action::Phones, rest),
         [action, rest @ ..] if action == "invite" => (Action::Invite, rest),
@@ -69,6 +75,10 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         return Err(Error::new(1, CHANGED_RELAY));
     }
     let workspace = pin.map(|(workspace, _)| workspace);
+    if connection.protected {
+        println!("{}", protected_action(&connection,action,workspace.as_deref())?);
+        return Ok(0);
+    }
     let output = match action {
         Action::Phones => {
             let mut value = connection.call("GET", "/v1/node/devices", None, false)?;
@@ -141,6 +151,8 @@ struct Connection {
     server: String,
     token: String,
     insecure: bool,
+    protected: bool,
+    config_path: std::path::PathBuf,
 }
 
 fn connection(config: &Config) -> Result<Option<Connection>> {
@@ -176,8 +188,9 @@ fn connection(config: &Config) -> Result<Option<Connection>> {
         .as_str()
         .unwrap_or("")
         .trim_end_matches('/');
+    let protected=settings.get("encrypted_workspace").is_some();
     let token = settings["node_token"].as_str().unwrap_or("");
-    if token.is_empty() || token.len() > 8192 || !token.bytes().all(|b| (33..=126).contains(&b)) {
+    if !protected && (token.is_empty() || token.len() > 8192 || !token.bytes().all(|b| (33..=126).contains(&b))) {
         return Err(Error::new(
             1,
             "The mobile connection has no valid computer credential",
@@ -207,7 +220,64 @@ fn connection(config: &Config) -> Result<Option<Connection>> {
         server: server.to_owned(),
         token: token.to_owned(),
         insecure,
+        protected,
+        config_path:path,
     }))
+}
+
+/// The connector owns protected keys, roster verification and signed changes.
+/// The native CLI forwards only bounded management JSON over private pipes.
+fn protected_call(connection:&Connection,action:&str,input:&Value)->Result<Value> {
+    let executable=std::env::current_exe()?;
+    let name=if cfg!(windows){"zerus-mobile-connector.exe"}else{"zerus-mobile-connector"};
+    let sibling=executable.parent().map(|p|p.join(name));
+    let program=sibling.filter(|p|p.is_file()).unwrap_or_else(||name.into());
+    let mut child=Command::new(program).args(["--workspace",action,"--config"]).arg(&connection.config_path)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+        .map_err(|_|Error::new(1,"Update the mobile connector to manage this encrypted workspace"))?;
+    if let Some(mut stdin)=child.stdin.take(){stdin.write_all(input.to_string().as_bytes())?;}
+    let mut bytes=Vec::new();child.stdout.take().ok_or_else(||Error::new(1,"Workspace response is unavailable"))?.take(MAX_RESPONSE_BYTES+1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64>MAX_RESPONSE_BYTES{let _=child.kill();let _=child.wait();return Err(Error::new(1,"Workspace response exceeded its limit"))}
+    let status=child.wait()?;
+    let result:Value=serde_json::from_slice(&bytes).map_err(|_|Error::new(1,"Invalid workspace management response"))?;
+    if !status.success() || result["ok"]==false {
+        let message=result["error"].as_str().filter(|s|s.len()<=1024&&!s.chars().any(char::is_control)).unwrap_or("Workspace operation was not confirmed; refresh before retrying");
+        return Err(Error::new(1,message));
+    }
+    Ok(result)
+}
+fn protected_action(connection:&Connection,action:Action,pin:Option<&str>)->Result<Value> {
+    let status=protected_call(connection,"status",&json!({}))?;
+    if status["state"]!="active" || status["encrypted"]!=true || status["server_url"]!=connection.server {
+        return Err(Error::new(1,"Encrypted workspace state is unavailable; plaintext fallback is disabled"));
+    }
+    if pin.is_some_and(|id|status["workspace_id"]!=id){return Err(Error::new(1,CHANGED_WORKSPACE))}
+    let mut input=json!({"expected_revision":status["config_revision"]});
+    match action {
+        Action::Phones=>{
+            let roster=protected_call(connection,"list-devices",&input)?;
+            let devices=roster["devices"].as_array().ok_or_else(||Error::new(1,"Invalid verified workspace roster"))?.iter().filter(|d|d["role"]=="phone").map(|device|{
+                let id=device["device_id"].as_str().unwrap_or("");
+                json!({"id":id,"name":format!("Phone {}",id.chars().take(8).collect::<String>()),"platform":"phone","paired_at":null,"last_seen_at":null,"added_by":null})
+            }).collect::<Vec<_>>();
+            Ok(json!({"configured":true,"encrypted":true,"server_url":connection.server,"workspace_id":status["workspace_id"],"workspace_name":status["workspace_name"],"devices":devices}))
+        },
+        Action::Invite=>{
+            let mut value=protected_call(connection,"invite-phone",&input)?;
+            let code=value["code"].as_str().filter(|c|c.starts_with("ze1.")&&c.len()<=4096).ok_or_else(||Error::new(1,"Invalid protected phone invitation"))?.to_owned();
+            value["pair_code"]=json!(code);value["workspace_id"]=status["workspace_id"].clone();value["workspace_name"]=status["workspace_name"].clone();
+            value["pair_url"]=json!(format!("zerus://pair?server={}&code={}",encode(&connection.server),encode(&code)));
+            value["encrypted"]=json!(true);Ok(value)
+        },
+        Action::Revoke(id)=>{
+            let roster=protected_call(connection,"list-devices",&input)?;
+            if !roster["devices"].as_array().is_some_and(|rows|rows.iter().any(|d|d["device_id"]==id&&d["role"]=="phone")){
+                return Err(Error::new(1,"That phone is not active in this verified workspace"));
+            }
+            input["device_id"]=json!(id);protected_call(connection,"revoke-device",&input)?;
+            Ok(json!({"revoked":true,"device_id":id,"encrypted":true}))
+        }
+    }
 }
 
 impl Connection {

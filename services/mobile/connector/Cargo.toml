@@ -18,6 +18,9 @@ test-hooks = []
 # Only the protocol library: codec, envelope validation, operation sets and
 # limits, without the relay's HTTP server, database or TLS stack.
 zerus-relay = { path = "../relay", default-features = false }
+zerus-mobile-crypto = { path = "../crypto" }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
 # The journal stays the SQLite file the Python connector writes; bundled like hgs.
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Effective uid, flock(2) and O_NOFOLLOW through safe calls (no libc on Linux).

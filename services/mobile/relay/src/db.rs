@@ -10,14 +10,29 @@ use sqlx::{
     any::{AnyConnectOptions, AnyPoolOptions, AnyTypeInfoKind},
     Any, AnyPool, Column, ConnectOptions, Connection, Row, Transaction, ValueRef,
 };
-use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    path::Path,
+    str::FromStr,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+tokio::task_local! { static ORDINARY_CONTROL:bool; }
+/// Housekeeping cannot consume reserved payload or highest-class auth pools.
+pub async fn ordinary_control<T>(future: impl std::future::Future<Output = T>) -> T {
+    ORDINARY_CONTROL.scope(true, future).await
+}
 pub type RowValue = Value;
 #[derive(Clone)]
 pub struct Db {
     pub pool: AnyPool,
+    auth_standard: Option<AnyPool>,
+    auth_team: Option<AnyPool>,
+    team_hashes: Arc<RwLock<HashSet<String>>>,
+    control_slots: [Arc<Semaphore>; 2],
     pub postgres: bool,
     pub cfg: Arc<Config>,
     pub wake: broadcast::Sender<String>,
@@ -32,6 +47,8 @@ pub struct Tx {
     pub postgres: bool,
     _permit: OwnedSemaphorePermit,
 }
+/// Permanent v2 receipt/binding metadata remains charged after payload removal.
+pub(crate) const ENCRYPTED_METADATA_BYTES: i64 = 1024;
 #[derive(Clone)]
 pub enum Arg<'a> {
     Text(&'a str),
@@ -187,6 +204,44 @@ impl Tx {
         Ok(())
     }
 }
+fn pool_options(pg: bool, min: u32, max: u32) -> AnyPoolOptions {
+    AnyPoolOptions::new()
+        .min_connections(min)
+        .max_connections(max)
+        .acquire_timeout(Duration::from_secs(5))
+        .after_release(|connection, _| {
+            // PostgreSQL otherwise retains the largest read/write buffer
+            // on every pooled socket after a maximum attachment transfer.
+            connection.shrink_buffers();
+            Box::pin(async { Ok(true) })
+        })
+        .after_connect(move |c, _| {
+            Box::pin(async move {
+                if pg {
+                    for statement in [
+                        "SET statement_timeout='15s'",
+                        "SET lock_timeout='5s'",
+                        "SET idle_in_transaction_session_timeout='20s'",
+                        "SET application_name='zerus-mobile:rust'",
+                    ] {
+                        sqlx::query(statement).execute(&mut *c).await?;
+                    }
+                } else {
+                    for statement in [
+                        "PRAGMA foreign_keys=ON",
+                        "PRAGMA journal_mode=DELETE",
+                        "PRAGMA synchronous=FULL",
+                        "PRAGMA secure_delete=ON",
+                        "PRAGMA busy_timeout=5000",
+                        "PRAGMA cache_size=-2048",
+                    ] {
+                        sqlx::query(statement).execute(&mut *c).await?;
+                    }
+                }
+                Ok(())
+            })
+        })
+}
 impl Db {
     pub async fn open(path: &Path, cfg: Arc<Config>) -> Result<Self> {
         sqlx::any::install_default_drivers();
@@ -201,47 +256,33 @@ impl Db {
             .clone()
             .unwrap_or_else(|| format!("sqlite://{}?mode=rw", path.display()));
         let options = AnyConnectOptions::from_str(&url)?.disable_statement_logging();
-        let pool = AnyPoolOptions::new()
-            .min_connections(if pg { cfg.pool_min } else { 1 })
-            .max_connections(if pg { cfg.pool_max } else { 1 })
-            .acquire_timeout(Duration::from_secs(5))
-            .after_release(|connection, _| {
-                // PostgreSQL otherwise retains the largest read/write buffer
-                // on every pooled socket after a maximum attachment transfer.
-                connection.shrink_buffers();
-                Box::pin(async { Ok(true) })
-            })
-            .after_connect(move |c, _| {
-                Box::pin(async move {
-                    if pg {
-                        for statement in [
-                            "SET statement_timeout='15s'",
-                            "SET lock_timeout='5s'",
-                            "SET idle_in_transaction_session_timeout='20s'",
-                            "SET application_name='zerus-mobile:rust'",
-                        ] {
-                            sqlx::query(statement).execute(&mut *c).await?;
-                        }
-                    } else {
-                        for statement in [
-                            "PRAGMA foreign_keys=ON",
-                            "PRAGMA journal_mode=DELETE",
-                            "PRAGMA synchronous=FULL",
-                            "PRAGMA secure_delete=ON",
-                            "PRAGMA busy_timeout=5000",
-                            "PRAGMA cache_size=-2048",
-                        ] {
-                            sqlx::query(statement).execute(&mut *c).await?;
-                        }
-                    }
-                    Ok(())
-                })
-            })
-            .connect_with(options)
-            .await?;
+        let payload_max = if pg { cfg.payload_pool_max() } else { 1 };
+        let pool = pool_options(
+            pg,
+            if pg { cfg.pool_min.min(payload_max) } else { 1 },
+            payload_max,
+        )
+        .connect_with(options.clone())
+        .await?;
+        let (auth_standard, auth_team) = if pg && cfg.public_enrollment {
+            (
+                Some(
+                    pool_options(true, 1, 2)
+                        .connect_with(options.clone())
+                        .await?,
+                ),
+                Some(pool_options(true, 1, 2).connect_with(options).await?),
+            )
+        } else {
+            (None, None)
+        };
         let (wake, _) = broadcast::channel(1024);
         let db = Self {
             pool,
+            auth_standard,
+            auth_team,
+            team_hashes: Arc::new(RwLock::new(HashSet::new())),
+            control_slots: [Arc::new(Semaphore::new(66)), Arc::new(Semaphore::new(66))],
             postgres: pg,
             cfg: cfg.clone(),
             wake,
@@ -254,12 +295,102 @@ impl Db {
             _lock: lock,
         };
         db.initialize().await?;
+        if cfg.public_enrollment {
+            db.adopt_encrypted_metadata().await?;
+        }
         if pg {
             db.start_listener().await?;
         }
+        if cfg.public_enrollment {
+            db.refresh_team_auth().await?;
+            let worker = db.clone();
+            db.tasks.spawn(async move {
+                loop {tokio::select!{_=worker.stop.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{
+                    if worker.refresh_team_auth().await.is_err(){eprintln!("relay service authentication cache refresh deferred");}
+                }}}
+            });
+        }
         Ok(db)
     }
+    pub fn auth_class(&self, secret: &str) -> crate::store::ServiceClass {
+        if self.cfg.public_enrollment
+            && self
+                .team_hashes
+                .read()
+                .expect("team hashes")
+                .contains(&digest(secret))
+        {
+            crate::store::ServiceClass::Team
+        } else {
+            crate::store::ServiceClass::Standard
+        }
+    }
+    pub async fn control(&self, class: crate::store::ServiceClass) -> Result<Tx> {
+        let pool = if class == crate::store::ServiceClass::Team {
+            self.auth_team.as_ref()
+        } else {
+            self.auth_standard.as_ref()
+        }
+        .unwrap_or(&self.pool);
+        let permits = if self.cfg.public_enrollment {
+            &self.control_slots[usize::from(class == crate::store::ServiceClass::Team)]
+        } else {
+            &self.slots
+        };
+        let permit = permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::BUSY)?;
+        let inner = pool
+            .begin_with(if self.postgres {
+                "BEGIN"
+            } else {
+                "BEGIN IMMEDIATE"
+            })
+            .await?;
+        Ok(Tx {
+            inner,
+            postgres: self.postgres,
+            _permit: permit,
+        })
+    }
+    pub async fn control_one(
+        &self,
+        class: crate::store::ServiceClass,
+        sql: &str,
+        arguments: &[Arg<'_>],
+    ) -> Result<Option<RowValue>> {
+        let mut t = self.control(class).await?;
+        let value = t.one(sql, arguments).await?;
+        t.commit().await?;
+        Ok(value)
+    }
+    pub async fn refresh_team_auth(&self) -> Result<()> {
+        let mut hashes = HashSet::new();
+        let mut after = String::new();
+        loop {
+            let mut t = self.control(crate::store::ServiceClass::Team).await?;
+            let rows=t.all("WITH node_page AS (SELECT n.token_hash FROM nodes n JOIN workspaces w ON w.id=n.workspace_id WHERE n.revoked=0 AND w.service_class='team' AND n.token_hash>? ORDER BY n.token_hash LIMIT 256), device_page AS (SELECT d.token_hash FROM devices d JOIN workspaces w ON w.id=d.workspace_id WHERE d.revoked=0 AND w.service_class='team' AND d.token_hash>? ORDER BY d.token_hash LIMIT 256) SELECT token_hash FROM (SELECT token_hash FROM node_page UNION SELECT token_hash FROM device_page) members ORDER BY token_hash LIMIT 256",args![&after,&after]).await?;
+            t.commit().await?;
+            let count = rows.len();
+            for row in rows {
+                after = s(&row, "token_hash").to_owned();
+                hashes.insert(after.clone());
+                if hashes.len() > 4096 {
+                    return Err(Error::BUSY);
+                }
+            }
+            if count < 256 {
+                break;
+            }
+        }
+        *self.team_hashes.write().expect("team hashes") = hashes;
+        Ok(())
+    }
     pub async fn begin(&self) -> Result<Tx> {
+        if self.cfg.public_enrollment && ORDINARY_CONTROL.try_with(|v| *v).unwrap_or(false) {
+            return self.control(crate::store::ServiceClass::Standard).await;
+        }
         self.transaction(false).await
     }
     pub async fn cleanup(&self) -> Result<Tx> {
@@ -296,6 +427,31 @@ impl Db {
         t.commit().await?;
         Ok(r)
     }
+    /// Reserve disk capacity at each real accounting shard as well as HTTP
+    /// lanes. Standard traffic cannot fill the team's retained-payload reserve.
+    pub async fn payload_capacity(&self, t: &mut Tx, w: &str) -> Result<i64> {
+        let capacity = self.control_payload_capacity(t, w).await?;
+        Ok(if self.cfg.public_enrollment {
+            capacity - 1024 * 1024
+        } else {
+            capacity
+        })
+    }
+    pub async fn control_payload_capacity(&self, t: &mut Tx, w: &str) -> Result<i64> {
+        let total = self.cfg.global_max_bytes / self.cfg.quota_shards;
+        if !self.cfg.public_enrollment {
+            return Ok(total);
+        }
+        let row = t
+            .one("SELECT service_class FROM workspaces WHERE id=?", args![w])
+            .await?
+            .ok_or(Error::NOT_FOUND)?;
+        Ok(if row["service_class"] == "team" {
+            total
+        } else {
+            self.cfg.standard_capacity(total as usize) as i64
+        })
+    }
     pub fn shard(&self, w: &str) -> i64 {
         let h = digest(w);
         let n = u64::from_str_radix(&h[..16], 16).expect("SHA256 hex");
@@ -330,6 +486,20 @@ impl Db {
         .await?;
         Ok(())
     }
+    pub(crate) async fn retain_encrypted_metadata(&self, t: &mut Tx, w: &str) -> Result<()> {
+        let usage = self.payload_usage(t, w).await?;
+        let capacity = self.payload_capacity(t, w).await?;
+        if i(&usage, "payload_bytes") + ENCRYPTED_METADATA_BYTES > self.cfg.max_queue_bytes {
+            return Err(Error::BUSY);
+        }
+        if t.exec("UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=? AND payload_bytes+?<=?",args![ENCRYPTED_METADATA_BYTES,self.shard(w),ENCRYPTED_METADATA_BYTES,capacity]).await?==0{return Err(Error::BUSY);}
+        t.exec(
+            "UPDATE workspace_usage SET payload_bytes=payload_bytes+? WHERE workspace_id=?",
+            args![ENCRYPTED_METADATA_BYTES, w],
+        )
+        .await?;
+        Ok(())
+    }
     pub fn signal(&self, topic: String) {
         let _ = self.wake.send(topic);
     }
@@ -356,6 +526,10 @@ impl Db {
             // Upgrade current Python SQLite databases in place without changing identities.
             for (table, columns) in [
                 (
+                    "workspaces",
+                    vec![("service_class", "TEXT NOT NULL DEFAULT 'standard'")],
+                ),
+                (
                     "nodes",
                     vec![
                         ("computer_id", "TEXT"),
@@ -365,6 +539,7 @@ impl Db {
                         ("presence_at", "DOUBLE PRECISION"),
                         ("presence_until", "DOUBLE PRECISION"),
                         ("mobile_delivery", "TEXT"),
+                        ("retirement_request_id", "TEXT"),
                     ],
                 ),
                 (
@@ -402,6 +577,18 @@ impl Db {
                 ),
                 ("invitations", vec![("added_by", "TEXT")]),
                 (
+                    "encrypted_requests",
+                    vec![("metadata_bytes", "BIGINT NOT NULL DEFAULT 0")],
+                ),
+                (
+                    "encrypted_route_bindings",
+                    vec![("metadata_bytes", "BIGINT NOT NULL DEFAULT 0")],
+                ),
+                (
+                    "opaque_signals",
+                    vec![("metadata_bytes", "BIGINT NOT NULL DEFAULT 0")],
+                ),
+                (
                     "computer_routes",
                     vec![
                         ("presence_at", "DOUBLE PRECISION"),
@@ -427,7 +614,7 @@ impl Db {
         };
         // SQLite new tables need route columns before the common registry backfill.
         let schema = if !self.postgres {
-            schema.replace("snapshot_hash text)","snapshot_hash text,computer_id TEXT,machine_id TEXT,manifest_hash TEXT,presence_at DOUBLE PRECISION,presence_until DOUBLE PRECISION,mobile_delivery TEXT)").replace("reserved_bytes INTEGER NOT NULL DEFAULT 0)","reserved_bytes INTEGER NOT NULL DEFAULT 0,target_computer_id TEXT,target_machine_id TEXT,route_id TEXT)")
+            schema.replace("snapshot_hash text)","snapshot_hash text,computer_id TEXT,machine_id TEXT,manifest_hash TEXT,presence_at DOUBLE PRECISION,presence_until DOUBLE PRECISION,mobile_delivery TEXT,retirement_request_id TEXT)").replace("reserved_bytes INTEGER NOT NULL DEFAULT 0)","reserved_bytes INTEGER NOT NULL DEFAULT 0,target_computer_id TEXT,target_machine_id TEXT,route_id TEXT)")
         } else {
             schema.into()
         };
@@ -451,6 +638,40 @@ impl Db {
             || a["quota_shards"] != self.cfg.quota_shards
         {
             return Err(Error::CONFLICT);
+        }
+        if !self.cfg.public_enrollment
+            && t.one("SELECT lane FROM service_resources LIMIT 1", &[])
+                .await?
+                .is_some()
+        {
+            return Err(Error::CONFLICT);
+        }
+        if self.cfg.public_enrollment {
+            t.exec("INSERT INTO service_resources(lane,total,standard) VALUES('registration',?,?) ON CONFLICT DO NOTHING",args![self.cfg.max_public_workspaces,self.cfg.max_public_workspaces]).await?;
+            let policy = t
+                .one(
+                    "SELECT total FROM service_resources WHERE lane='registration'",
+                    &[],
+                )
+                .await?
+                .ok_or(Error::BAD)?;
+            if policy["total"] != self.cfg.max_public_workspaces {
+                return Err(Error::CONFLICT);
+            }
+            for (lane, total) in self.cfg.service_lanes() {
+                let standard = self.cfg.standard_capacity(total);
+                t.exec("INSERT INTO service_resources(lane,total,standard) VALUES(?,?,?) ON CONFLICT DO NOTHING", args![lane,total,standard]).await?;
+                let row = t
+                    .one(
+                        "SELECT total,standard FROM service_resources WHERE lane=?",
+                        args![lane],
+                    )
+                    .await?
+                    .ok_or(Error::BAD)?;
+                if i(&row, "total") != total as i64 || i(&row, "standard") != standard as i64 {
+                    return Err(Error::CONFLICT);
+                }
+            }
         }
         for id in 0..self.cfg.quota_shards {
             t.exec(
@@ -485,6 +706,38 @@ impl Db {
         }
         t.commit().await
     }
+    async fn adopt_encrypted_metadata(&self) -> Result<()> {
+        for (table, keys) in [
+            ("encrypted_requests", "id"),
+            ("encrypted_route_bindings", "node_id,route_id"),
+            ("opaque_signals", "workspace_id,node_id,scope_id,kind"),
+        ] {
+            loop {
+                let mut t = self.begin().await?;
+                let pending=t.one(&format!("SELECT workspace_id FROM {table} WHERE metadata_bytes=0 ORDER BY workspace_id LIMIT 1"),&[]).await?;
+                let Some(pending) = pending else {
+                    t.commit().await?;
+                    break;
+                };
+                let w = s(&pending, "workspace_id");
+                t.one(
+                    "SELECT workspace_id FROM encrypted_workspaces WHERE workspace_id=? FOR UPDATE",
+                    args![w],
+                )
+                .await?
+                .ok_or(Error::BAD)?;
+                self.payload_usage(&mut t, w).await?;
+                let adopted=t.exec(&format!("UPDATE {table} SET metadata_bytes=? WHERE ({keys}) IN (SELECT {keys} FROM {table} WHERE workspace_id=? AND metadata_bytes=0 ORDER BY {keys} LIMIT 256) AND metadata_bytes=0"),args![ENCRYPTED_METADATA_BYTES,w]).await?;
+                // Historical retained data is real usage even if it already
+                // exceeds a quota. Never delete identities or raise limits to
+                // adopt it; subsequent admissions observe the charged total.
+                self.bytes(&mut t, w, adopted as i64 * ENCRYPTED_METADATA_BYTES)
+                    .await?;
+                t.commit().await?;
+            }
+        }
+        Ok(())
+    }
     pub async fn close(&self) {
         self.stop.cancel();
         self.tasks.close();
@@ -493,6 +746,12 @@ impl Db {
         let _ = tokio::time::timeout(Duration::from_secs(5), async {
             self.tasks.wait().await;
             self.pool.close().await;
+            if let Some(pool) = &self.auth_standard {
+                pool.close().await;
+            }
+            if let Some(pool) = &self.auth_team {
+                pool.close().await;
+            }
         })
         .await;
     }

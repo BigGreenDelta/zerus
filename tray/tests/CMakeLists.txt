@@ -621,6 +621,12 @@ target_link_libraries(test_relaysettings PRIVATE Qt6::Test Qt6::Widgets)
 zerus_add_test(relaysettings test_relaysettings)
 set_tests_properties(relaysettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_workspacesettings test_workspacesettings.cpp)
+target_include_directories(test_workspacesettings PRIVATE ../src)
+target_link_libraries(test_workspacesettings PRIVATE Qt6::Test Qt6::Widgets)
+zerus_add_test(workspacesettings test_workspacesettings)
+set_tests_properties(workspacesettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_desktoppresence test_desktoppresence.cpp)
 target_include_directories(test_desktoppresence PRIVATE ../src)
 target_link_libraries(test_desktoppresence PRIVATE Qt6::Test Qt6::Core hgs-tray-core)

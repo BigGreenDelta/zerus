@@ -6,7 +6,50 @@ use zerus_mobile_connector::runtime::log;
 use zerus_mobile_connector::{check, cli, config, start, STARTUP_FAILURE};
 
 fn main() -> ExitCode {
-    #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--workspace")) {
+        use std::io::Read;
+        let args: Vec<_> = std::env::args_os().collect();
+        let result = (|| -> Result<serde_json::Value, String> {
+            if args.len() != 5 || args[3] != "--config" {
+                return Err("expected --workspace ACTION --config PATH".into());
+            }
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .take(65_537)
+                .read_to_end(&mut bytes)
+                .map_err(|_| "Workspace input is unavailable")?;
+            if bytes.len() > 65_536 {
+                return Err("Workspace input exceeds its limit".into());
+            }
+            let input = if bytes.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_slice(&bytes).map_err(|_| "Invalid workspace input")?
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| "Workspace operation could not start")?;
+            runtime
+                .block_on(zerus_mobile_connector::workspace::manage(
+                    &args[2].to_string_lossy(),
+                    std::path::Path::new(&args[4]),
+                    input,
+                    false,
+                ))
+                .map_err(|error| error.message().to_owned())
+        })();
+        return match result {
+            Ok(value) => {
+                println!("{value}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                println!("{}", serde_json::json!({"ok":false,"error":error}));
+                ExitCode::from(1)
+            }
+        };
+    }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--admit-revision")) {
         let args: Vec<_> = std::env::args_os().collect();
         let admitted = (|| {

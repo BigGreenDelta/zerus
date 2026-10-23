@@ -9,7 +9,7 @@ let package = Package(
     platforms: [.iOS(.v18), .macOS(.v15)],
     products: [.library(name: "ZerusKit", targets: ["ZerusKit"])],
     targets: [
-        .target(name: "ZerusKit"),
+        .target(name: "ZerusKit", linkerSettings: [.linkedLibrary("sqlite3")]),
         .testTarget(name: "ZerusKitTests", dependencies: ["ZerusKit"]),
     ]
 )

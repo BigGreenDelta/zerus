@@ -166,7 +166,9 @@ void Dialog::showInvitation(const QJsonObject &invitation) {
     m_code->setText(m_link);
     m_server->setText(invitation.value("server_url").toString());
     m_pairCode->setText(m_codeText);
-    m_status->setText(tr("Workspace: %1").arg(invitation.value("workspace_name").toString()));
+    m_status->setText(invitation.value("encrypted").toBool()
+        ? tr("Workspace: %1 · End-to-end encrypted. Keep this computer online until the phone confirms pairing.").arg(invitation.value("workspace_name").toString())
+        : tr("Workspace: %1").arg(invitation.value("workspace_name").toString()));
     m_copyCode->setEnabled(true); m_copyLink->setEnabled(true);
     tick(); m_timer->start();
 }
@@ -286,7 +288,9 @@ void Panel::render() {
             auto *item = new QTreeWidgetItem(top, {device.value("name").toString(), platform(device.value("platform").toString()),
                 when(device.value("paired_at")), when(device.value("last_seen_at")),
                 added.isEmpty() ? QStringLiteral("—") : added.value("name").toString()});
-            if (added.isEmpty()) item->setToolTip(4, tr("Paired with an administrator invitation, or before Zerus recorded it"));
+            if (added.isEmpty()) item->setToolTip(4, list.value("encrypted").toBool()
+                ? tr("Verified device membership. Private device names are not stored by the relay.")
+                : tr("Paired with an administrator invitation, or before Zerus recorded it"));
             item->setData(0, KindRole, "phone"); item->setData(0, IdRole, device.value("id").toString());
             item->setData(0, HostRole, host); item->setData(0, WorkspaceRole, workspace); item->setData(0, TargetRole, index);
             item->setData(0, WorkspaceIdRole, list.value("workspace_id").toString()); item->setData(0, ServerRole, list.value("server_url").toString());
@@ -299,7 +303,7 @@ void Panel::render() {
     if (!m_notice.isEmpty()) lines << m_notice;
     if (m_targets.isEmpty()) {
 #ifdef Q_OS_WIN
-        lines << tr("No mobile connection is configured. Open Settings → Mobile connection on this Windows PC, save its relay configuration and start the connector. Then refresh Phones.");
+        lines << tr("Open Settings → Mobile connection to create a workspace or join one by code, then start the connector and refresh Phones.");
 #else
         lines << tr("No computer here has a mobile connection. Set one up in Settings → Mobile connection on a computer with local sessions enabled, then refresh Phones.");
 #endif

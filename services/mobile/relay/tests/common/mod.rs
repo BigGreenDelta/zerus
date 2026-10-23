@@ -119,16 +119,20 @@ impl Backend {
         Store::new(Db::open(&self.sqlite(), self.cfg.clone()).await.unwrap())
     }
     /// Offline administration through the real `zerus-relay` command line.
+    #[allow(clippy::option_env_unwrap)] // Also reused by connector tests without a relay binary target.
     pub fn cli(&self, arguments: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_zerus-relay"))
-            // Never fall back to the default database under HOME.
-            .arg("--database")
-            .arg(self.sqlite())
-            .arg("--config")
-            .arg(self.dir.path().join("relay.json"))
-            .args(arguments)
-            .output()
-            .unwrap()
+        Command::new(
+            option_env!("CARGO_BIN_EXE_zerus-relay")
+                .expect("relay CLI required for administration contracts"),
+        )
+        // Never fall back to the default database under HOME.
+        .arg("--database")
+        .arg(self.sqlite())
+        .arg("--config")
+        .arg(self.dir.path().join("relay.json"))
+        .args(arguments)
+        .output()
+        .unwrap()
     }
 }
 

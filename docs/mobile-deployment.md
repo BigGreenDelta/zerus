@@ -6,6 +6,13 @@ before choosing a server. Source components are under `mobile/android/` and
 `services/mobile/`. The repository's MIT license applies except for the
 attributed Apache-2.0 MuxPod terminal adaptations bundled with Android.
 
+For opt-in public encrypted API v2, use the
+[encrypted workspace setup and trust model](encrypted-workspaces.md) and the
+[relay public-mode requirements](../services/mobile/relay/README.md#opt-in-public-encrypted-workspaces).
+This source change does not enable or migrate an existing deployment. The
+administrator-provisioned credentials described below remain the legacy API v1
+setup.
+
 ## Build and install Android
 
 Use JDK 17 or 21 and an Android SDK with platform 36 and build tools. The checked-in
@@ -32,10 +39,13 @@ See [Android build details](../mobile/android/README.md) for optional FCM setup.
 
 Use a portable bundle that includes `zerus-mobile-connector.exe` beside
 `hgs.exe` and `hgs-tray.exe`. In Machines, enable local sessions if needed.
-In Settings → Mobile connection, enter an HTTPS relay and the **computer**
-credential issued by that relay, save and choose **Start connector**. Refresh
-Phones below and pair the phone with the generated QR invitation. Windows is
-its own outbound gateway; a Linux/macOS computer is not required.
+In Settings → Mobile connection, choose **Create workspace** on an HTTPS relay
+with public enrollment enabled, or **Join by code** using a computer invitation
+from an existing trusted computer. Choose **Start connector**, then generate a
+separate phone invitation in Phones and scan its QR code. Windows is its own
+outbound gateway; a Linux/macOS computer is not required. Existing legacy API v1
+configurations continue using their administrator-issued computer credential;
+changing to an encrypted workspace uses the explicit migration flow.
 
 Configuration lives at `%USERPROFILE%\.config\hgs\mobile\connector.json`
 (or the explicit `HGS_CONFIG_DIR`), with private receipt directories beside it.
@@ -515,9 +525,11 @@ restoration are available when the gateway, connector and native adapter
 advertise the corresponding operations. Archive content stays read-only;
 restore, rename, fork and forget operate on its exact saved identity.
 
-Disconnecting a workspace revokes that phone's credential and push registration.
-Saved drafts remain private on the phone. An administrator can also revoke a
-phone or computer through the relay CLI.
+For legacy API v1, disconnecting a workspace revokes that phone's credential and
+push registration; an administrator can also revoke a phone or computer through
+the relay CLI. For encrypted API v2, forgetting a connection erases its local
+wrapping key; global removal requires a trusted computer's signed device
+revocation. Previously received plaintext cannot be erased remotely.
 
 ## Enable notifications
 

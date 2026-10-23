@@ -28,7 +28,7 @@ data class NotificationSlot(val connection: String, val computer: String, val se
     val tag get() = "zerus:session:v2:$key"
 }
 data class NotificationEvent(val id: Long, val computer: String, val session: String, val kind: String, val at: Double,
-    val alertKind: String? = null) {
+    val alertKind: String? = null, val nativeReplyId:String? = null) {
     /** The transition this row announces; relay alert rows carry it in alert_kind. */
     val signal get() = if (kind == "alert") alertKind.orEmpty() else kind
     val isAlert get() = kind == "alert" && alertKind != null
@@ -161,7 +161,7 @@ object NotificationPolicy {
                     session.target.isNotBlank() && previous.target == session.target && event.at > previous.observedAt) {
                     kind = SessionAlertKind.Finished
                     freshCompletion = true
-                    identity = fingerprint(JSONArray(listOf(session.target, "Finished", event.id)).toString())
+                    identity = fingerprint(JSONArray(listOf(session.target, "Finished", event.nativeReplyId ?: event.id)).toString())
                 } else if (previous != null && previous.candidateFingerprint.isNotBlank() &&
                     previous.candidateTarget == session.target && previous.candidateEventAt in (now - 120)..now) {
                     kind = SessionAlertKind.Finished
@@ -249,7 +249,7 @@ object NotificationStateCodec {
         .put("bootstrap", state.bootstrap).put("draining", state.draining).put("batch", state.batchActive)
         .put("batch_sound", state.batchSoundUsed).put("sound_elapsed", state.lastSoundElapsed).put("settings", state.settingsGeneration)
         .put("pending", JSONArray(state.pending.map { JSONObject().put("id", it.id).put("computer", it.computer)
-            .put("session", it.session).put("kind", it.kind).put("at", it.at).put("alert_kind", it.alertKind) }))
+            .put("session", it.session).put("kind", it.kind).put("at", it.at).put("alert_kind", it.alertKind).put("native_reply_id",it.nativeReplyId) }))
         .put("records", JSONArray(state.records.map { JSONObject().put("slot", JSONArray(listOf(it.slot.connection, it.slot.computer, it.slot.session)))
             .put("target", it.target).put("observed", it.observedAt).put("fingerprint", it.observedFingerprint)
             .put("posted", it.postedFingerprint).put("kind", it.postedKind?.name).put("posted_target", it.postedTarget)
@@ -266,7 +266,7 @@ object NotificationStateCodec {
         require(pending.size <= NotificationPolicy.maxPending && records.size <= NotificationPolicy.maxRecords && posting.length() <= 24)
         return NotificationState(raw.optLong("cursor").coerceAtLeast(0), raw.optBoolean("bootstrap", true), raw.optBoolean("draining"),
             raw.optBoolean("batch"), raw.optBoolean("batch_sound"), raw.optLong("sound_elapsed", -1), raw.optLong("settings", -1),
-            pending.map { NotificationEvent(it.getLong("id"), it.getString("computer"), it.getString("session"), it.getString("kind"), it.getDouble("at"), it.string("alert_kind").ifEmpty { null }) },
+            pending.map { NotificationEvent(it.getLong("id"), it.getString("computer"), it.getString("session"), it.getString("kind"), it.getDouble("at"), it.string("alert_kind").ifEmpty { null },it.string("native_reply_id").ifEmpty { null }) },
             records.map { row -> val slot = row.getJSONArray("slot")
                 NotificationRecord(NotificationSlot(slot.getString(0), slot.getString(1), slot.getString(2)), row.getString("target"),
                     row.getDouble("observed"), row.string("fingerprint"), row.string("posted"),

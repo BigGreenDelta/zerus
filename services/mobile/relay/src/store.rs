@@ -2,8 +2,14 @@
 mod background;
 mod candidates;
 mod requests;
+mod retirement;
 pub use requests::Submission;
+mod service;
 mod snapshots;
+pub use service::{ServiceClass, ServiceLease};
+mod encrypted;
+mod enrollment;
+mod signals;
 use crate::{
     args,
     db::{i, now, s, Db},
@@ -12,6 +18,7 @@ use crate::{
     registry,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+pub use encrypted::{EncryptedSubmission, ENCRYPTED_REQUEST_MAX, ENCRYPTED_SMALL_MAX};
 use rand::RngCore;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -169,39 +176,41 @@ impl Store {
         )
     }
     pub async fn authenticate(&self, secret: &str, role: Role) -> Result<Credential> {
+        self.authenticate_class(secret, role)
+            .await
+            .map(|(credential, _)| credential)
+    }
+    pub async fn authenticate_class(
+        &self,
+        secret: &str,
+        role: Role,
+    ) -> Result<(Credential, ServiceClass)> {
+        let class = self.db.auth_class(secret);
         let device = role == Role::Device;
-        let r = self
-            .db
-            .one(
-                &format!(
-                    "SELECT id,workspace_id{} FROM {} WHERE token_hash=? AND revoked=0",
-                    if device { ",last_seen" } else { "" },
-                    role.table()
-                ),
-                args![&digest(secret)],
-            )
-            .await?
-            .ok_or(Error::UNAUTHORIZED)?;
-        // The phone list's last activity, written at most every five minutes so
-        // long polls do not write on every request.
+        let mut t = self.db.control(class).await?;
+        let row=t.one(&format!("SELECT c.id,c.workspace_id,w.service_class{} FROM {} c JOIN workspaces w ON w.id=c.workspace_id WHERE c.token_hash=? AND c.revoked=0",if device{",c.last_seen"}else{""},role.table()),args![&digest(secret)]).await?.ok_or(Error::UNAUTHORIZED)?;
+        let actual = ServiceClass::parse(s(&row, "service_class"))?;
         let at = now();
         if device
-            && r["last_seen"]
+            && row["last_seen"]
                 .as_f64()
                 .is_none_or(|seen| seen < at - LAST_SEEN_INTERVAL)
         {
-            self.db
-                .exec(
-                    "UPDATE devices SET last_seen=? WHERE id=?",
-                    args![at, s(&r, "id")],
-                )
-                .await?;
+            t.exec(
+                "UPDATE devices SET last_seen=? WHERE id=?",
+                args![at, s(&row, "id")],
+            )
+            .await?;
         }
-        Ok(Credential {
-            id: s(&r, "id").into(),
-            workspace: s(&r, "workspace_id").into(),
-            role,
-        })
+        t.commit().await?;
+        Ok((
+            Credential {
+                id: s(&row, "id").into(),
+                workspace: s(&row, "workspace_id").into(),
+                role,
+            },
+            actual,
+        ))
     }
     pub async fn authorized(&self, c: &Credential) -> Result<()> {
         self.db

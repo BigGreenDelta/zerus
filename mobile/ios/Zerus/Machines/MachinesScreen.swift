@@ -42,8 +42,11 @@ struct MachinesScreen: View {
                 ForEach(model.connections) { connection in
                     Section {
                         MachineTree(connectionId: connection.id, naming: $naming, coloring: $coloring)
+                        if model.pendingEncryptedPairings.contains(connection.id) {
+                            Button("Resume pairing") { Task { await model.resumeEncryptedPair(connection) } }.disabled(model.busy)
+                        }
                         Button(role: .destructive) { disconnecting = connection } label: {
-                            Label("Disconnect workspace", systemImage: "link.badge.minus")
+                            Label(connection.protocolVersion == 2 ? "Forget encrypted connection" : "Disconnect workspace", systemImage: "link.badge.minus")
                         }
                         .disabled(model.busy)
                     } header: {
@@ -51,6 +54,7 @@ struct MachinesScreen: View {
                     } footer: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(connection.endpoint).textSelection(.enabled)
+                            Text(connection.protocolVersion == 2 ? "Encrypted workspace. Refresh to check enrollment and connected computers." : "Legacy connection. This relay can read relayed content.")
                             if let status = model.notifications.pushStatus[connection.id] { Text(status) }
                         }
                     }
@@ -72,12 +76,12 @@ struct MachinesScreen: View {
             .overlay(alignment: .top) {
                 if model.catalogProgress || model.busy { ProgressView().progressViewStyle(.linear).tint(Theme.mint) }
             }
-            .confirmationDialog(disconnecting.map { "Disconnect \($0.displayName)?" } ?? "",
+            .confirmationDialog(disconnecting.map { "\($0.protocolVersion == 2 ? "Forget" : "Disconnect") \($0.displayName)?" } ?? "",
                                 isPresented: Binding(get: { disconnecting != nil }, set: { if !$0 { disconnecting = nil } }),
                                 titleVisibility: .visible, presenting: disconnecting) { connection in
-                Button("Disconnect", role: .destructive) { Task { await model.disconnect(connection) } }
-            } message: { _ in
-                Text("This removes the gateway credential from this phone. Saved drafts remain available.")
+                Button(connection.protocolVersion == 2 ? "Forget connection" : "Disconnect", role: .destructive) { Task { await model.disconnect(connection) } }
+            } message: { connection in
+                Text(connection.protocolVersion == 2 ? "This erases this phone's connection keys. Saved drafts remain available. To revoke this phone across the workspace, remove it from an enrolled computer." : "This removes the gateway credential from this phone. Saved drafts remain available.")
             }
             .sheet(item: $naming) { machine in MachineNameSheet(machine: machine) }
             .sheet(item: $coloring) { machine in MachineColorSheet(machine: machine) }

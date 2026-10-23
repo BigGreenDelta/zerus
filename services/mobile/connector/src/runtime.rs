@@ -167,6 +167,7 @@ tokio::task_local! {
     /// `LOCAL_MACHINE_GUARD`: while a request routed to this computer runs,
     /// its native calls go through the guarded local entry point.
     static LOCAL_MACHINE: String;
+    static ENCRYPTED_LOCAL_MACHINE: String;
 }
 
 /// Why one iteration of the request loop stopped.
@@ -276,6 +277,7 @@ impl<N: Native + 'static> Connector<N> {
         if self.peer {
             return self.native.call(call).await;
         }
+        let encrypted_machine = ENCRYPTED_LOCAL_MACHINE.try_with(Clone::clone).ok();
         if let Ok(machine) = LOCAL_MACHINE.try_with(Clone::clone) {
             let envelope = json!({"schema": 1, "target_machine_id": machine,
                                   "argv": call.argv, "payload": call.payload.take()});
@@ -285,12 +287,20 @@ impl<N: Native + 'static> Connector<N> {
             call.payload = Some(envelope);
         }
         call.argv = native_argv(call.argv);
+        if let Some(machine) = encrypted_machine {
+            call.argv
+                .splice(0..0, ["--expect-machine".to_owned(), machine]);
+        }
         self.native.call(call).await
     }
 
     /// Runs `future` with this computer's guarded native entry point.
     pub async fn guarded<T>(machine: String, future: impl Future<Output = T>) -> T {
         LOCAL_MACHINE.scope(machine, future).await
+    }
+
+    pub async fn encrypted_guarded<T>(machine: String, future: impl Future<Output = T>) -> T {
+        ENCRYPTED_LOCAL_MACHINE.scope(machine, future).await
     }
 
     pub fn context(&self) -> Context {
@@ -636,7 +646,17 @@ impl<N: Native + 'static> Connector<N> {
         let refresh = self.state.borrow_mut().accounts.next_refresh(self.clock());
         if let Some(refresh) = refresh {
             let connector = Rc::clone(self);
-            tokio::task::spawn_local(async move { connector.refresh_account(refresh).await });
+            // Tokio task locals are not inherited by spawned tasks. Capture
+            // this observation's immutable binding before its scope ends;
+            // legacy observations keep their existing unguarded native argv.
+            let machine = ENCRYPTED_LOCAL_MACHINE.try_with(Clone::clone).ok();
+            tokio::task::spawn_local(async move {
+                let refresh = connector.refresh_account(refresh);
+                match machine {
+                    Some(machine) => Self::encrypted_guarded(machine, refresh).await,
+                    None => refresh.await,
+                }
+            });
         }
         let wall = self.wall();
         self.state.borrow().accounts.view(wall)
@@ -1144,6 +1164,189 @@ fn attention_cards(detail: &Value, key: &(String, String, String)) -> Option<Val
             })
             .collect(),
     ))
+}
+
+#[cfg(test)]
+mod encrypted_machine_tests {
+    use super::*;
+
+    const MACHINE: &str = "00000000-0000-4000-8000-000000000020";
+    const OTHER_MACHINE: &str = "00000000-0000-4000-8000-000000000021";
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    struct NativeFixture {
+        machine: RefCell<String>,
+        calls: RefCell<Vec<Vec<String>>>,
+        inspected: Cell<usize>,
+    }
+    impl Native for NativeFixture {
+        async fn call(&self, call: Call) -> NativeResult {
+            self.calls.borrow_mut().push(call.argv.clone());
+            let argv = if call.argv.first().map(String::as_str) == Some("--expect-machine") {
+                if call.argv.get(1) != Some(&*self.machine.borrow()) {
+                    return Err(NativeError::Failed(crate::fleet::LOCAL_CHANGED));
+                }
+                &call.argv[2..]
+            } else {
+                &call.argv[..]
+            };
+            match argv
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                ["account", "ls"] => Ok(Output::Json(json!({"profiles": [{
+                    "id": "native-codex", "provider": "codex", "label": "Fixture",
+                    "installed": true, "account_status": {"status": "ok", "checked_at": 800}
+                }]}))),
+                ["account", "inspect", "native-codex"] => {
+                    self.inspected.set(self.inspected.get() + 1);
+                    Ok(Output::Json(
+                        json!({"id": "native-codex", "provider": "codex",
+                        "status": "ok", "checked_at": 1000}),
+                    ))
+                }
+                _ => Err(NativeError::Failed(crate::native::FAILED)),
+            }
+        }
+    }
+
+    struct Fixture {
+        connector: Rc<Connector<NativeFixture>>,
+        _temporary: tempfile::TempDir,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let temporary = tempfile::tempdir().unwrap();
+            let journal =
+                Journal::open(&temporary.path().join("state"), "machine-scope", 1000.0).unwrap();
+            let connector = Rc::new(Connector::new(
+                NativeFixture {
+                    machine: RefCell::new(MACHINE.into()),
+                    calls: RefCell::default(),
+                    inspected: Cell::new(0),
+                },
+                journal,
+                Settings {
+                    interval: 1.0,
+                    binding: "machine-scope".into(),
+                    default_timeout: 1.0,
+                    clock_scale: 1.0,
+                },
+                Box::new(|| 1000.0),
+            ));
+            Self {
+                connector,
+                _temporary: temporary,
+            }
+        }
+        async fn finish_refresh(&self) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while self.connector.state.borrow().accounts.refreshing {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("The one queued account refresh must finish");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delayed_account_refresh_keeps_its_original_encrypted_machine_binding() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let f = Fixture::new();
+                Connector::<NativeFixture>::encrypted_guarded(
+                    MACHINE.into(),
+                    f.connector.update_accounts(),
+                )
+                .await;
+                assert!(ENCRYPTED_LOCAL_MACHINE.try_with(Clone::clone).is_err());
+                assert_eq!(f.connector.native.calls.borrow().len(), 1);
+                assert!(f.connector.state.borrow().accounts.refreshing);
+                // The refresh first runs after its originating scope has ended,
+                // while an unrelated observation has another machine binding.
+                Connector::<NativeFixture>::encrypted_guarded(
+                    OTHER_MACHINE.into(),
+                    f.finish_refresh(),
+                )
+                .await;
+                assert_eq!(
+                    *f.connector.native.calls.borrow(),
+                    [
+                        argv(&["--expect-machine", MACHINE, "account", "ls"]),
+                        argv(&[
+                            "--expect-machine",
+                            MACHINE,
+                            "account",
+                            "inspect",
+                            "native-codex"
+                        ]),
+                    ]
+                );
+                assert_eq!(f.connector.native.inspected.get(), 1);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delayed_account_refresh_refuses_a_changed_native_machine() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let f = Fixture::new();
+                Connector::<NativeFixture>::encrypted_guarded(
+                    MACHINE.into(),
+                    f.connector.update_accounts(),
+                )
+                .await;
+                assert_eq!(f.connector.native.calls.borrow().len(), 1);
+                *f.connector.native.machine.borrow_mut() = OTHER_MACHINE.into();
+                f.finish_refresh().await;
+                assert_eq!(
+                    f.connector.native.calls.borrow()[1],
+                    [
+                        "--expect-machine",
+                        MACHINE,
+                        "account",
+                        "inspect",
+                        "native-codex"
+                    ]
+                );
+                assert_eq!(f.connector.native.inspected.get(), 0);
+                let view = f.connector.state.borrow().accounts.view(1000.0);
+                assert_eq!(view["accounts"][0]["usage"]["refresh_error"], true);
+                assert_eq!(view["accounts"][0]["usage"]["checked_at"], 800);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_account_refresh_does_not_inject_an_encrypted_machine_binding() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let f = Fixture::new();
+                f.connector.update_accounts().await;
+                assert_eq!(f.connector.native.calls.borrow().len(), 1);
+                Connector::<NativeFixture>::encrypted_guarded(
+                    OTHER_MACHINE.into(),
+                    f.finish_refresh(),
+                )
+                .await;
+                assert_eq!(
+                    *f.connector.native.calls.borrow(),
+                    [
+                        argv(&["account", "ls"]),
+                        argv(&["account", "inspect", "native-codex"])
+                    ]
+                );
+                assert_eq!(f.connector.native.inspected.get(), 1);
+            })
+            .await;
+    }
 }
 
 #[cfg(test)]

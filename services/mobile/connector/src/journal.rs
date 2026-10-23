@@ -22,6 +22,9 @@ use std::path::Path;
 use std::time::Duration;
 use zerus_relay::protocol::{OPERATIONS, READS};
 
+#[path = "encrypted_journal.rs"]
+mod encrypted;
+
 pub const JOURNAL: &str = "journal.sqlite3";
 pub const LOCK: &str = "connector.lock";
 pub const SIDECARS: [&str; 3] = ["-journal", "-wal", "-shm"];

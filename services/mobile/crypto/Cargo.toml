@@ -1,0 +1,25 @@
+[package]
+name = "zerus-mobile-crypto"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "Endpoint cryptographic primitives for the Zerus encrypted relay transport"
+
+[dependencies]
+base64 = "0.22"
+ed25519-dalek = { version = "3", features = ["hazmat"] }
+getrandom = "0.4"
+hmac = "0.12"
+hpke = { version = "0.14.1", default-features = false, features = ["alloc", "x25519", "aes", "getrandom"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+hex = "0.4"
+curve25519-dalek = "5"
+
+[lints.rust]
+unsafe_code = "forbid"

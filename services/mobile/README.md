@@ -7,13 +7,19 @@ existing SSH access. Requests to a peer go through that gateway; the peer's own
 neighbors are not discovered or authorized recursively. See the
 [gateway upgrade procedure](../../docs/mobile-deployment.md#upgrade-gateway-sharing)
 before updating a multiple-worker installation.
-The relay is trusted with snapshots, requests and conversation results. TLS protects
-transport. Version 1 does **not** provide end-to-end encryption.
+For legacy API v1, the relay is trusted with snapshots, requests and conversation
+results; TLS protects transport. Version 1 does **not** provide end-to-end
+encryption. Opt-in API v2 encrypts private payloads between verified devices and
+keeps routing, delivery and bounded service metadata at the relay. See
+[encrypted workspaces](../../docs/encrypted-workspaces.md) for Create/Join/Change,
+device invitations, trust limits and the
+[public-mode resource requirements](relay/README.md#opt-in-public-encrypted-workspaces).
 
 See [the architecture and wire contract](../../docs/mobile-architecture.md) and
-[deployment instructions](../../docs/mobile-deployment.md). The relay exposes no
-signup, workspace creation or administrator HTTP endpoint. Provisioning is a local
-CLI operation. A phone can revoke its own credential with `DELETE /v1/device`. A
+[deployment instructions](../../docs/mobile-deployment.md). The legacy setup below
+uses local CLI provisioning. Public API v2 adds explicit device/workspace
+enrollment when enabled by the operator; service priority stays operator-owned.
+A legacy phone can revoke its own credential with `DELETE /v1/device`. A
 computer credential may invite, list and revoke the phones of its own workspace
 (`/v1/node/invitations`, `/v1/node/devices`); Zerus desktop uses them for
 **Machines → Phones**.
@@ -31,8 +37,10 @@ zerus-relay --database ./data/relay.sqlite3 serve
 ```
 
 The server is a standalone Rust executable built on Tokio, Axum and SQLx. The
-outbound computer connector remains the Python 3.11+ `zerus-mobile-connector`
-package. The relay image contains no Python interpreter. FCM HTTP v1 support is
+Rust outbound connector implements API v1 and the encrypted API v2 workspace
+flow. Existing Python 3.11+ API v1 gateways remain supported until an explicit
+[per-computer cutover](../../docs/mobile-deployment.md#move-a-computer-to-the-rust-connector).
+The relay image contains no Python interpreter. FCM HTTP v1 support is
 built into the server; provider credentials remain private runtime configuration. See [the Rust runtime contract](relay/README.md)
 for resource ownership, compatibility validation and the upgrade procedure.
 

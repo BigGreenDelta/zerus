@@ -1,6 +1,5 @@
 //! The API v1 codec, envelope validation and error type always build. The
 //! relay server modules need the default `server` feature.
-#[cfg(feature = "server")]
 pub mod alerts;
 #[cfg(feature = "server")]
 pub mod config;

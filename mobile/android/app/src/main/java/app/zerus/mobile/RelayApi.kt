@@ -21,14 +21,16 @@ import java.net.URI
 import java.security.MessageDigest
 
 class RelayException(val status: Int, message: String) : Exception(message)
-class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
+class RelayApi internal constructor(private val client: OkHttpClient = OkHttpClient.Builder()
     .dispatcher(okhttp3.Dispatcher().apply { maxRequests = 64; maxRequestsPerHost = 64 })
     .connectTimeout(10, TimeUnit.SECONDS).readTimeout(35, TimeUnit.SECONDS)
-    .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build()) {
+    .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build(),
+    internal val workspace: WorkspaceJournal? = null,
+    internal val catalogNowSeconds: () -> Long = { System.currentTimeMillis()/1000 }) {
     suspend fun call(url: String, token: String, path: String, body: JSONObject? = null, delete: Boolean = false): JSONObject = withContext(Dispatchers.IO) {
         val request = Request.Builder().url(ManagedRelay.transport(url) + path).header("Accept", "application/json")
         if (token.isNotBlank()) request.header("Authorization", "Bearer $token")
-        if (delete) request.delete() else if (body != null) request.post(JsonRequestBody(body, if (path == "/v1/requests") 30_408_704L else 1_048_576L))
+        if (delete) request.delete() else if (body != null) request.post(JsonRequestBody(body, when(path) { "/v1/requests" -> 30_408_704L; "/v2/requests" -> 41L*1024*1024; else -> 1_048_576L }))
         val call = client.newCall(request.build())
         suspendCancellableCoroutine { continuation ->
             continuation.invokeOnCancellation { call.cancel() }
@@ -44,7 +46,8 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
                                 while(true) {
                                     val count=stream.read(buffer)
                                     if(count<0) break
-                                    require(bytes.size()+count<=1024*1024) { "Gateway response exceeded the 1 MiB safety limit." }
+                                    val ceiling=when { path.substringBefore('?')=="/v2/computers" -> 3*1024*1024;path.startsWith("/v2/") -> 2*1024*1024;else -> 1024*1024 }
+                                    require(bytes.size()+count <= ceiling) { "Gateway response exceeded its safety limit." }
                                     bytes.write(buffer,0,count)
                                 }
                                 bytes.toString(Charsets.UTF_8.name())
@@ -61,26 +64,36 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
     }
 
     suspend fun pair(url: String, code: String): Connection {
+        require(!WorkspaceProtocol.encryptedInvitationCode(code.trim())) { "Use the encrypted phone invitation pairing flow." }
         val normalized = EndpointPolicy.normalize(url)
         require(code.isNotBlank()) { "Enter the invitation code shown on your computer." }
         val result = call(normalized, "", "/v1/pair", JSONObject().put("code", code.trim()).put("device_name", "Zerus Android"))
         return Connection(UUID.randomUUID().toString(), result.string("workspace_name").ifBlank { URI(normalized).host ?: "Workspace" }, normalized, result.getString("device_token"))
     }
-    suspend fun computers(connection: Connection) = call(connection.url, connection.token, "/v1/computers")
-    suspend fun capabilities(connection: Connection) = call(connection.url, connection.token, "/v1/capabilities")
+    /** Safe on the UI dispatcher: encrypted CPU work and blocking journal access choose their workers. */
+    suspend fun computers(connection: Connection) = if(connection.protocolVersion==2) encryptedComputers(connection) else call(connection.url, connection.token, "/v1/computers")
+    suspend fun capabilities(connection: Connection) = call(connection.url, connection.token, if(connection.protocolVersion==2) "/v2/capabilities" else "/v1/capabilities")
+    suspend fun revoke(connection:Connection):JSONObject {
+        check(connection.protocolVersion==1) { "Encrypted connections are forgotten locally. Remove this phone from an enrolled computer to revoke it globally." }
+        return call(connection.url,connection.token,"/v1/device",delete=true)
+    }
+    suspend fun registerPush(connection:Connection,provider:String,token:String) = call(connection.url,connection.token,
+        if(connection.protocolVersion==2) "/v2/push" else "/v1/push",JSONObject().put("provider",provider).put("token",token))
+    suspend fun post(connection:Connection,computerId:String,session:String="",operation:String,payload:JSONObject,id:String):JSONObject {
+        val body=JSONObject().put("request_id",id).put("computer_id",computerId).put("session",session).put("operation",operation).put("payload",payload)
+        return (if(connection.protocolVersion==2) encryptedPost(connection,body) else call(connection.url,connection.token,"/v1/requests",body)).also {
+            check(it.string("request_id")==id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
+        }
+    }
     suspend fun submit(connection: Connection, target: Target, operation: String, payload: JSONObject, id: String): JSONObject {
         require(target.agentId.isBlank() || operation in setOf("inspect", "history", "history_projection", "send", "attachment_read", "file_read")) { "This control belongs to the parent session." }
         require(target.archiveId.isBlank() && payload.string("archive_id").isBlank() || operation in setOf("inspect", "history", "history_projection", "process_output", "restore", "forget", "rename", "fork", "attachment_read", "file_read") && target.archiveId.isNotBlank() && payload.string("archive_id") == target.archiveId) { "Archived conversations are read-only." }
-        return call(connection.url, connection.token, "/v1/requests", JSONObject().put("request_id", id)
-            .put("computer_id", target.computerId).put("session", target.session).put("operation", operation).put("payload", payload)).also {
-                check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
-            }
+        return post(connection,target.computerId,target.session,operation,payload,id)
     }
     internal suspend fun speech(connection: Connection, host: MachineKey, operation: String, payload: JSONObject,
         id: String = UUID.randomUUID().toString()): JSONObject {
         require(host.connectionId == connection.id && operation in SpeechProtocol.operations + "speech_stats")
-        val initial = call(connection.url, connection.token, "/v1/requests", JSONObject().put("request_id", id)
-            .put("computer_id", host.computerId).put("session", "").put("operation", operation).put("payload", payload))
+        val initial = post(connection,host.computerId,"",operation,payload,id)
         check(initial.string("request_id") == id) { "Gateway returned a different voice receipt." }
         val receipt = await(connection, initial)
         check(receipt.string("state") == "completed") {
@@ -103,14 +116,13 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
         require(host.key.connectionId == connection.id && operation in SpeechConfigProtocol.operations)
         if (operation in SpeechConfigProtocol.mutations) require(payload.string("request_id") == id)
         if (operation != "speech_config") require(payload.string("expected_machine_id") == host.machineId)
-        val initial = call(connection.url, connection.token, "/v1/requests", JSONObject().put("request_id", id)
-            .put("computer_id", host.key.computerId).put("session", "").put("operation", operation).put("payload", payload))
+        val initial = post(connection,host.key.computerId,"",operation,payload,id)
         check(initial.string("request_id") == id) { "The gateway returned a different configuration receipt." }
         val receipt = await(connection, initial)
         check(receipt.string("state") == "completed") { "The computer has not confirmed this configuration operation. Check its status." }
         return receipt.getJSONObject("result")
     }
-    suspend fun receipt(connection: Connection, id: String) = call(connection.url, connection.token, "/v1/requests/$id").also {
+    suspend fun receipt(connection: Connection, id: String) = (if(connection.protocolVersion==2) encryptedReceipt(connection,id) else call(connection.url, connection.token, "/v1/requests/$id")).also {
         check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
     }
     suspend fun await(connection: Connection, initial: JSONObject, maxPolls: Int = 35, pollDelayMs:Long = 800): JSONObject {
@@ -160,7 +172,8 @@ class RelayApi(private val client: OkHttpClient = OkHttpClient.Builder()
         val id = UUID.randomUUID().toString()
         return await(connection, submit(connection, target, "mark_read", payload, id))
     }
-    suspend fun events(connection: Connection, after: Long, wait: Int = 25) = call(connection.url, connection.token, "/v1/events?after=$after&wait=$wait")
+    suspend fun events(connection: Connection, after: Long, wait: Int = 25) = if(connection.protocolVersion==2) encryptedEvents(connection,after,wait)
+        else call(connection.url, connection.token, "/v1/events?after=$after&wait=$wait")
 }
 
 object NativeParser {

@@ -23,6 +23,7 @@ final class AppModel {
     // MARK: Workspace catalog
 
     private(set) var connections: [Connection] = []
+    private(set) var pendingEncryptedPairings = Set<String>()
     private(set) var machines: [Machine] = []
     private(set) var relayOperations: [String: Set<String>] = [:]
     private(set) var relayFeatures: [String: Set<String>] = [:]
@@ -119,7 +120,7 @@ final class AppModel {
     }
 
     static func live() -> AppModel {
-        AppModel(client: RelayClient(), connectionStore: KeychainConnectionStore(),
+        AppModel(client: RelayClient(workspaceJournal: try? SQLiteWorkspaceJournal.applicationSupport()), connectionStore: KeychainConnectionStore(),
                  sealedStore: try? SealedFileStore.applicationSupport(keys: KeychainKeyProvider()),
                  cache: try? ConversationCache.live(), pages: try? ConversationPageCache.live(),
                  attachmentStore: try? AttachmentStore.live(), attachmentCache: viewCache("attachment-view"), computerFileCache: viewCache("computer-file-view"))
@@ -144,6 +145,9 @@ final class AppModel {
         do {
             let store = connectionStore
             connections = try await Task.detached { try store.load() }.value
+            for connection in connections where connection.protocolVersion == 2 {
+                if (try? await client.encryptedEnrollmentPending(connection)) == true { pendingEncryptedPairings.insert(connection.id) }
+            }
             try await openPrivateState()
             storageReady = true
             startNotifications()
@@ -317,33 +321,49 @@ final class AppModel {
         guard storageReady, !busy else { return false }
         busy = true
         defer { busy = false }
+        var saved = false
         do {
-            let connection = try await client.pair(url: url, code: code)
+            let encrypted = WorkspaceProtocol.encryptedInvitationCode(code.trimmingCharacters(in: .whitespacesAndNewlines))
+            let connection: Connection
+            if encrypted { connection = try await client.prepareEncryptedPair(url: url, code: code) }
+            else { connection = try await client.pair(url: url, code: code) }
             let next = connections + [connection]
             let store = connectionStore
             try await Task.detached { try store.save(next) }.value
             connections = next
+            saved = true
             if demo { stopPreview() }
+            if encrypted { pendingEncryptedPairings.insert(connection.id); try await client.enrollPrepared(connection) }
             refresh(explicit: true)
             startNotifications()
             return true
         } catch {
             self.error = Self.message(error, fallback: "Pairing failed.")
-            return false
+            return saved
         }
     }
 
-    /// Revokes this phone on the gateway before removing the local credential.
+    func resumeEncryptedPair(_ connection: Connection) async {
+        guard !busy, connections.contains(connection), connection.protocolVersion == 2 else { return }
+        busy = true; defer { busy = false }
+        do { try await client.enrollPrepared(connection); refresh(explicit: true) }
+        catch { self.error = Self.message(error, fallback: "Could not resume encrypted phone enrollment.") }
+    }
+
+    /// Legacy disconnect revokes the bearer; encrypted Forget removes local keys.
     func disconnect(_ connection: Connection) async {
         guard !busy else { return }
         busy = true
         defer { busy = false }
         do {
-            do { try await client.revoke(connection) } catch let failure as RelayError where failure.status == 401 {}
-            let next = connections.filter { $0.id != connection.id }
+            if connection.protocolVersion == 1 { do { try await client.revoke(connection) } catch let failure as RelayError where failure.status == 401 {} }
             let store = connectionStore
-            try await Task.detached { try store.save(next) }.value
+            let client = client
+            let next = try await ConnectionRemoval.forget(connection, from: connections,
+                eraseProtected: { try await client.forgetEncrypted($0) },
+                saveIndex: { next in try await Task.detached { try store.save(next) }.value })
             connections = next
+            pendingEncryptedPairings.remove(connection.id)
             accountsStore?.edit { rows in rows.filter { $0.key.connectionId != connection.id } }
             messages?.edit { state in
                 var copy = state
@@ -368,7 +388,9 @@ final class AppModel {
             await voice.forget(connection: connection.id)
             await conversation.forget(connection: connection.id)
         } catch {
-            self.error = "Could not revoke this phone on the gateway. The connection is preserved. \(Self.message(error, fallback: ""))"
+            self.error = connection.protocolVersion == 2
+                ? "Could not finish forgetting this encrypted connection. Try Forget again. \(Self.message(error, fallback: ""))"
+                : "Could not revoke this phone on the gateway. The connection is preserved. \(Self.message(error, fallback: ""))"
         }
     }
 
@@ -441,8 +463,14 @@ final class AppModel {
             }
             do {
                 let computers = try await client.computers(connection)
+                if connection.protocolVersion == 2 { pendingEncryptedPairings.remove(connection.id) }
                 let retained = catalogSessions, actions = messageState.sessionActions
-                let catalog = await Task.detached { SessionCatalogParser.parse(connection, computers.objects("computers"),retained:retained,actions:actions) }.value
+                let previousMachines = machines, previousProjects = projects, previousAccounts = accountCatalogs
+                let catalog = await Task.detached {
+                    WorkspaceCatalogCache.preserve(connection, response: computers,
+                        fresh: SessionCatalogParser.parse(connection, computers.objects("computers"),retained:retained,actions:actions),
+                        sessions: retained, machines: previousMachines, projects: previousProjects, accounts: previousAccounts)
+                }.value
                 guard generation == catalogGeneration, connections == original else { return }
                 nextMachines += catalog.machines
                 nextAccounts += catalog.accounts
