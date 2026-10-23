@@ -352,17 +352,7 @@ struct LaunchForm: View {
         .onChange(of: accounts.map(\.id), initial: true) { account = LaunchPresentation.defaultAccount(accounts, selected: account) }
         .onChange(of: modelOptions.map(\.value)) { if !selectedModel.isEmpty && !modelOptions.contains(where: { $0.value == selectedModel }) { selectedModel = "" } }
         .onChange(of: effortOptions.map(\.value)) { if !selectedEffort.isEmpty && !effortOptions.contains(where: { $0.value == selectedEffort }) { selectedEffort = "" } }
-        .onChange(of: projects.map(\.id), initial: true) {
-            guard let catalog else { return }
-            let sameScope=projectConnection == machine.connectionId && projectSwarm == catalog.string("swarm_id")
-            defer { projectConnection=machine.connectionId;projectSwarm=catalog.string("swarm_id") }
-            guard !sameScope || !projects.contains(where: { $0.id == projectId }) else { return }
-            let scoped = (app.sessionProjectScope?.key).flatMap { $0.connectionId == machine.connectionId && $0.swarmId == catalog.string("swarm_id") ? $0.id : nil }
-            let preferred = scoped ?? catalog.string("default_project")
-            projectExplicit = scoped != nil
-            projectId = projects.first { $0.id == preferred }?.id ?? projects.first?.id ?? ""
-            folder = browsedFolder
-        }
+        .onChange(of: projects.map(\.id), initial: true) { updateProjectScope(projects, catalog: catalog) }
         .onChange(of: inferredProject) { if !repositorySource && inferredProject != projectId { projectId = inferredProject } }
         .onChange(of: FolderKey(project: projectId, loading: launch.directoryLoading)) {
             if !repositorySource && folder.isEmpty && !launch.directoryLoading, let first = project?.folders.first {
@@ -458,6 +448,22 @@ struct LaunchForm: View {
     private struct FolderKey: Equatable {
         let project: String
         let loading: Bool
+    }
+
+    private func updateProjectScope(_ projects: [LaunchProject], catalog: JSONObject?) {
+        guard let catalog else { return }
+        let swarm = catalog.string("swarm_id")
+        let sameScope = projectConnection == machine.connectionId && projectSwarm == swarm
+        defer { projectConnection = machine.connectionId; projectSwarm = swarm }
+        guard !sameScope || !projects.contains(where: { $0.id == projectId }) else { return }
+        let scoped: String?
+        if let key = app.sessionProjectScope?.key, key.connectionId == machine.connectionId, key.swarmId == swarm {
+            scoped = key.id
+        } else { scoped = nil }
+        let preferred = scoped ?? catalog.string("default_project")
+        projectExplicit = scoped != nil
+        projectId = projects.first { $0.id == preferred }?.id ?? projects.first?.id ?? ""
+        folder = browsedFolder
     }
 
     private var computerSection: some View {
