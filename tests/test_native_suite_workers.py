@@ -242,7 +242,8 @@ class NativeSuiteWorkers(unittest.TestCase):
             with self.subTest(agent=agent, target=target):
                 settings = compat.target_spec(agent, target)
                 version = '1.2.3'
-                package = dict(target=target, version=version, integrity='stand-in-only')
+                package = dict(target=target, version=version, integrity='stand-in-only',
+                               url=compat.AGENTS[agent]['tarball'].format(version=version, target=target))
                 results = self.root / (agent + '-' + target)
                 result = (0, 'ZERUS_NATIVE_RESULT={"tests":95,"skipped":0}\n')
                 with patch.object(compat, 'install_native', return_value=self.claude), \

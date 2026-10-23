@@ -585,17 +585,17 @@ jobs:
             target
           key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
-      # The reviewed lockfile fixes every transitive version and its SHA-512
-      # integrity. The copy keeps node_modules outside the workspace, caches and
-      # artifacts.
+      # Resolve one latest official release, record its complete registry-only
+      # source lock before installation, and retain the install identity for the
+      # mandatory native suites. node_modules stays outside source/caches/artifacts.
       - name: Keyless official DeepSeek contract fixture
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/dsh"
-          cp scripts/ci/dsh-fixture/package.json scripts/ci/dsh-fixture/package-lock.json "$RUNNER_TEMP/dsh/"
-          npm ci --prefix "$RUNNER_TEMP/dsh" --no-audit --no-fund
+          python3 scripts/ci/dsh_fixture.py --prefix "$RUNNER_TEMP/dsh" \
+            --evidence "$GITHUB_WORKSPACE/artifacts/test-results/dsh-fixture"
           echo "$RUNNER_TEMP/dsh/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "ZERUS_TEST_DSH_RECEIPT=$GITHUB_WORKSPACE/artifacts/test-results/dsh-fixture/installed.json" >> "$GITHUB_ENV"
       - run: bash scripts/ci/cli.sh
       - name: Save Rust cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'

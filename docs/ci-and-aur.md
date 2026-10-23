@@ -38,7 +38,7 @@ conservative change selection, including both sides of renames.
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
 | macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
 | Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
-| Windows real agents | Affected PR; full nightly/stable | The pinned `win32-x64` Claude Code and Codex in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
+| Windows real agents | Affected PR; full nightly/stable | One latest `win32-x64` Claude Code and Codex release in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
 Quick checks and the full suites start together once the commit is resolved, so
@@ -239,7 +239,7 @@ The Arch base image is digest-pinned, but `pacman -Syu` intentionally uses curre
 Arch packages. This tests rolling-distribution compatibility; it does not promise
 bit-for-bit reproducibility months later. Rust dependencies are locked, fetched
 in `prepare()` and built/tested with `--frozen` inside source packages. The CI
-image, tmux, official DeepSeek fixture and Windows Qt pins need periodic
+image, tmux and Windows Qt pins need periodic
 maintainer review.
 
 ### Dependency updates and cost
@@ -261,8 +261,9 @@ Dependabot vulnerability alerts and security updates are enabled separately in
 repository settings. Security proposals have their own per-ecosystem groups;
 they are not delayed by the monthly version schedule or counted against its PR
 limit. A fix requiring a manifest migration still needs maintainer attention.
-The DeepSeek fixture lockfile has no version-update entry; a security proposal
-for it must keep the exact reviewed `@deepseek-ai/dsh` version.
+The historical DeepSeek fixture lockfile has no version-update entry. Ordinary
+CI resolves a fresh exact source lock for the official latest release and retains
+it with that run's evidence; it never silently falls back to the historical lock.
 Do not disable security alerts to reduce routine version-update noise.
 
 Dependabot jobs on standard GitHub-hosted runners do not consume included Actions
@@ -291,14 +292,18 @@ its own `HGS_TEST_BIN`. Python integration modules run in separate processes so
 module patches do not leak between suites. Terminal fixtures use private socket
 paths and synthetic homes. No check runs against existing agent sessions.
 Authenticated native-client tests remain explicit opt-ins; baseline CI needs no
-model API keys. Linux installs the pinned official `@deepseek-ai/dsh@0.2.1-rc.2`
-for its keyless local-model contract fixture with `npm ci` from
-`scripts/ci/dsh-fixture/package-lock.json`. The lockfile fixes every transitive
-version and its SHA-512 integrity, so a newly published dependency can neither
-change nor break the install. To adopt another DeepSeek version, change it in that
-`package.json` together with the adapter, regenerate the lock with
-`npm install --package-lock-only` under the CI Node major and review the dependency
-diff. Native agent CLIs are not included in the product package.
+model API keys. Linux resolves one official latest `@deepseek-ai/dsh` release for
+its keyless local-model contract fixture. `scripts/ci/dsh_fixture.py` verifies the
+official package identity and SHA-512 integrity, then records the complete exact
+registry-only dependency lock before `npm ci`. Private npm configuration disables
+Git, file, directory and remote dependency sources during both resolution and
+installation. Metadata, source lock, installation identity and logs remain in the
+test evidence. The original ten-minute end covers selection through publication
+of the install receipt, reserving fifteen seconds for owned npm-group cleanup.
+Missing or changed receipts and a version mismatch fail mandatory native admission.
+The fixture is not a package-script sandbox. A new release can expose an adapter
+incompatibility and fail CI; selecting it does not itself change product support.
+Native agent CLIs are not included in the product package.
 
 The CI CLI jobs set `ZERUS_PYTHON_JOBS` to twice the runner vCPUs (8 on Ubuntu,
 6 on macOS): the Python test classes mostly wait on terminals and subprocesses.
@@ -313,13 +318,13 @@ usage lists the commands. A test the file does not list still runs exactly once.
 `tests/test_claude_input_native.py` checks exact message acceptance by the real
 Claude TUI with a private home/socket and a localhost fake API; it never reads a
 user's account. Full Linux and macOS CI run it with the other Claude native
-suites against the pinned Claude Code package (see below); `HGS_CLAUDE_TEST_BIN`
-selects another executable for a manual run. Claude 2.1.296 and 2.1.308 coverage verifies
+suites against one latest Claude Code package (see below); `HGS_CLAUDE_TEST_BIN`
+selects another executable for a manual run. The coverage verifies
 literal trailing backslashes, multiline messages and durable request replay.
 Terminal submission alone is insufficient: the test waits for the unchanged user
 message in native history. `tests/test_claude_settings_native.py` drives the
-real `/model` picker with a synthetic model catalog and history. Claude 2.1.296 and
-2.1.308 coverage changes model and effort in a fresh session, accepts Claude's own cache
+real `/model` picker with a synthetic model catalog and history. It changes
+model and effort in a fresh session, accepts Claude's own cache
 notice in a resumed conversation, and requires the session-only transcript
 receipt while `settings.json` stays unchanged. A session-only change made in
 Terminal must reach hgs through `PostModelSwitch` with the exact model ID.
@@ -654,7 +659,7 @@ On a Windows development PC the same steps run from Git Bash;
 
 ### Windows real agents through the session host
 
-The `windows-host` job runs the reviewed `win32-x64` Claude Code and Codex in
+The `windows-host` job runs one latest `win32-x64` Claude Code and Codex release in
 isolated session hosts of the release `hgs.exe` on a standard `windows-2025` runner
 (M7 of [Windows Phase 2](superpowers/specs/2026-10-13-windows-native-host-design.md)).
 It is selected with the Windows desktop job and the gate requires both, but it is a
@@ -666,7 +671,7 @@ the same way.
 
 It then runs `scripts/ci/agent-compatibility.py` with `HGS_TEST_BIN` and
 `HGS_TEST_CONPTY_DIR` ([native agent compatibility](#native-agent-compatibility-and-upstream-review)):
-the runner verifies each package against its pin, extracts only `claude.exe` or
+the runner verifies each package against its selected SHA-512 integrity, extracts only `claude.exe` or
 `codex.exe` and runs that agent's class of `tests/test_windows_native_agents.py`,
 whose agents reach only a local fake API (Anthropic's for Claude Code, OpenAI's
 for Codex) and keep their homes private. The suites confirm what spike S6 ran by
@@ -919,8 +924,9 @@ APIs, together with the selected release's CLI help and schema hashes. Reports
 can be compared as data; the workflow does not execute an older agent to generate
 a comparison. A detected addition is a review candidate, not evidence that Zerus supports it or that a
 signed-in account can use it. For Kimi this workflow currently discovers
-versions only. DeepSeek's existing pinned keyless contract fixture runs in full
-Linux CLI CI.
+versions only. Its separate native and approval workflows qualify one latest
+Kimi release for affected PRs or manual runs. DeepSeek's latest-release keyless
+contract fixture runs in full Linux CLI CI.
 
 To test the latest releases or inspect current upstream changes locally:
 
