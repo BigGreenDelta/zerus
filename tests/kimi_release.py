@@ -39,6 +39,21 @@ def identity(info):
             info.st_mtime_ns, info.st_ctime_ns)
 
 
+def comparable_identity(info):
+    if os.name != 'nt':
+        return identity(info)
+    # CPython 3.14.8: path stat's ctime is CreationTime, descriptor
+    # stat's ctime is ChangeTime. Only path stat adds filename-derived 0111.
+    # Full same-route snapshots still compare those raw fields separately.
+    values = tuple(getattr(info, key, None) for key in
+                   ('st_dev', 'st_ino', 'st_mode', 'st_size', 'st_nlink', 'st_mtime_ns', 'st_birthtime_ns'))
+    if any(type(value) is not int for value in values) or values[1] <= 0:
+        raise ValueError('Windows release file identity evidence is unavailable')
+    device, inode, mode, size, links, modified, created = values
+    return (device, inode, stat.S_IFMT(mode), stat.S_IMODE(mode) & ~0o111,
+            size, links, modified, created)
+
+
 def readonly_file(info):
     if os.name == 'nt':
         attributes = getattr(info, 'st_file_attributes', None)
@@ -59,7 +74,9 @@ def sealed(path, limit, expected_size=None):
     readonly_file(before)
     fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
     with os.fdopen(fd, 'rb') as stream:
-        if identity(os.fstat(stream.fileno())) != identity(before):
+        opened = os.fstat(stream.fileno())
+        readonly_file(opened)
+        if comparable_identity(opened) != comparable_identity(before):
             raise ValueError('release file changed before reading')
         checksum, data, count = hashlib.sha256(), [], 0
         while count < before.st_size:
@@ -72,7 +89,10 @@ def sealed(path, limit, expected_size=None):
                 data.append(chunk)
         after = path.lstat()
         readonly_file(after)
-        if identity(os.fstat(stream.fileno())) != identity(before) or identity(after) != identity(before):
+        final = os.fstat(stream.fileno())
+        readonly_file(final)
+        if (identity(final) != identity(opened) or identity(after) != identity(before)
+                or comparable_identity(final) != comparable_identity(after)):
             raise ValueError('release file changed while reading')
     return checksum.hexdigest(), b''.join(data)
 
