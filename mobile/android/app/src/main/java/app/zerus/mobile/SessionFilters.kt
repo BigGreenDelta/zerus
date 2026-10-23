@@ -66,7 +66,7 @@ object SessionFilters {
             positiveCount(session.raw.opt("subagent_active_count") as? Number ?: session.raw.opt("subagent_count")) ||
             session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle" && hasCoordinationWait(session))
     /** Keep the read identity while postponing reply badges and reply-only attention. */
-    fun visibleUnreadReply(session: Session, online: Boolean) = !archived(session) && !replyInProgress(session, online) &&
+    fun visibleUnreadReply(session: Session, online: Boolean) = !archived(session) && !replyInProgress(session, online) && SharedReadPolicies.canShowReplyBadge(session) &&
         (session.raw.optBoolean("unread_reply") || session.raw.optBoolean("mobile_unread_reply"))
     fun backgroundIdle(session: Session): Boolean {
         val count = (session.raw.optJSONObject("process_work")?.opt("count") as? Number)?.toDouble() ?: return false

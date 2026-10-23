@@ -16,6 +16,23 @@ class SharedReadTest {
     private fun mark(reply:String?,attention:String?,conversation:String="conversation")=JSONObject().put("conversation_id",conversation)
         .put("reply_id",reply ?: JSONObject.NULL).put("attention_signature",attention ?: JSONObject.NULL).put("at",1.0)
 
+    @Test fun expiredJournalReplyCannotResurrectOldPhoneHistoryAsNewDesktopReply() {
+        val expired=row(mark("7:100.5",null),reply="",attention=null)
+        assertFalse(SharedReadPolicies.replyRead(expired)) // No invented current reply identity.
+        assertFalse(SharedReadPolicies.canShowReplyBadge(expired))
+        assertTrue(SharedReadPolicies.canShowReplyBadge(row(reply="",attention=null))) // No shared read proof.
+        assertFalse(ReadAllPolicies.listCandidate(expired,true))
+        val reads=ConversationReadState().head(target,"epoch",20,20,true)
+        val decorated=SessionReadAttention.prepare(listOf(expired),reads,true,setOf(ConversationReadPolicies.key(target)),emptyMap()).single()
+        assertFalse(decorated.raw.optBoolean("mobile_unread_reply"))
+        assertEquals(0L,reads.record(target)!!.readThrough) // No historical message is acknowledged.
+        assertTrue(SharedReadPolicies.canShowReplyBadge(row(mark("7:100.5",null),reply="8:200.5")))
+        assertFalse(SharedReadPolicies.canShowReplyBadge(row(mark("8:200.5",null),reply="8:200.5")))
+        assertTrue(ReadAllPolicies.listCandidate(expired.copy(raw=JSONObject(expired.raw.toString()).put("mobile_review_later",true)),true))
+        val legacy=expired.copy(raw=JSONObject(expired.raw.toString()).also { it.remove("attention_signature") })
+        assertTrue(SharedReadPolicies.canShowReplyBadge(legacy))
+    }
+
     @Test fun payloadCarriesExactIdentityOnlyAfterThisPhoneShowedTheReply() {
         val payload=SharedReadPolicies.payload(row(),true,0)!!
         assertEquals(setOf("run_id","conversation_id","reply_id","attention_signature"),payload.keys().asSequence().toSet())

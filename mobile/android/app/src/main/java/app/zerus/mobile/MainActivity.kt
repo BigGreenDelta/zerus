@@ -677,7 +677,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             Text(SessionFilters.label(session), Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             if(SessionNotificationPreferences.muted(session)) Icon(Icons.Default.NotificationsOff,"Notifications muted on all devices",tint=Muted,modifier=Modifier.size(18.dp))
                             // A reply read on another device needs no badge here.
-                            (if (SharedReadPolicies.replyRead(session) || SessionFilters.replyInProgress(session, online)) null else UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
+                            (if (!SharedReadPolicies.canShowReplyBadge(session) || SessionFilters.replyInProgress(session, online)) null else UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
                                 SessionFilters.visibleUnreadReply(session, online)))?.let { unread ->
                                 val muted = SessionNotificationPreferences.muted(session)
                                 Surface(color = if(muted) Color(0xFF2B343E) else Mint, shape = CircleShape, modifier = Modifier.semantics { contentDescription = unread.description }) {

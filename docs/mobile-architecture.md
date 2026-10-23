@@ -571,6 +571,14 @@ conversation in its scope, the captured evidence would clear a phone-local
 reminder or advance past replies counted unread; the predicate follows the same
 skip rules as the ordered edit.
 
+Android Sessions publishes catalog rows with local read decoration in one
+background-prepared update and retains unchanged card identities. Its reply
+badges follow the owning computer's shared reply identity. A retained shared read
+mark does not become a new reply merely because the bounded native journal no
+longer exports that reply ID. This suppresses only the list badge: canonical
+history watermarks stay unchanged without verified prefix evidence, and newer
+explicit reply identities and manual review reminders keep their existing rules.
+
 The Sessions long-press menu is a presentation of the catalog row. Its Mark as
 read is Read all for one conversation; Clear review reminder changes only the
 local reminder. Terminal and native lifecycle items open that exact session and

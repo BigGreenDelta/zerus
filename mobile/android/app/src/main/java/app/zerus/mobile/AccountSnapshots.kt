@@ -154,9 +154,11 @@ object AccountPresentation {
             else -> ""
         }
     }
-    fun warning(account:ReportedAccount)=authenticationProblem(account).isNotBlank() || account.status=="error"
+    fun warning(account:ReportedAccount)=authenticationProblem(account).isNotBlank()
+    /** The list reports account access problems; optional usage diagnostics belong in details. */
+    fun listProblem(account:ReportedAccount)=authenticationProblem(account)
     fun refreshing(catalog:AccountCatalog,account:ReportedAccount)=catalog.online && !catalog.stale && account.refreshing
-    fun type(account:ReportedAccount)=account.identity.plan.ifBlank { account.identity.authMethod.ifBlank { "Plan not reported" } }
+    fun type(account:ReportedAccount)=account.identity.plan.ifBlank { account.identity.authMethod }
     fun compactStatus(catalog:AccountCatalog,account:ReportedAccount,now:Double?=null):String {
         val auth=authenticationProblem(account)
         val lastKnown=!catalog.online || catalog.stale || account.stale || account.refreshError ||

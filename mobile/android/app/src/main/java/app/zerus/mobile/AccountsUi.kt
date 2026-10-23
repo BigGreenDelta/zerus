@@ -33,7 +33,6 @@ import kotlinx.coroutines.delay
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
         item { Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {
             Text("Accounts",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.SemiBold)
-            Text("Usage reports update independently on each computer. Phone sync reads the latest available report.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
             if(model.demo) Text("PREVIEW / Sample account data",color=MaterialTheme.colorScheme.primary,style=MaterialTheme.typography.labelMedium)
             if(model.accountsError.isNotBlank()) Text(model.accountsError,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)
         } }
@@ -86,27 +85,25 @@ private fun workspaceName(model:ZerusViewModel,catalog:AccountCatalog)=model.con
                 ProviderBadge(account.provider,Modifier.size(24.dp))
                 Column(Modifier.weight(1f)) {
                     Text(account.label,style=MaterialTheme.typography.titleSmall,fontWeight=FontWeight.SemiBold,maxLines=1,overflow=TextOverflow.Ellipsis)
-                    Text(DesktopIcons.providerName(account.provider)+" / "+AccountPresentation.type(account),style=MaterialTheme.typography.bodySmall,color=muted,maxLines=1,overflow=TextOverflow.Ellipsis)
+                    Text(listOf(DesktopIcons.providerName(account.provider),AccountPresentation.type(account)).filter(String::isNotBlank).joinToString(" / "),style=MaterialTheme.typography.bodySmall,color=muted,maxLines=1,overflow=TextOverflow.Ellipsis)
                 }
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight,"View account details",Modifier.size(20.dp),tint=muted)
             }
             Column(Modifier.fillMaxWidth().padding(start=34.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                     group.members.groupBy { it.catalog.key }.forEach { (_,members) ->
-                        Column(verticalArrangement=Arrangement.spacedBy(3.dp)) {
-                            AccountMachineLabel(model,members.first().catalog)
-                            members.map { member ->
-                                val marker=AccountPresentation.compactStatus(member.catalog,member.account,now)
-                                if(marker.isBlank()) "" else (if(members.size>1) "${member.account.id} / " else "")+marker
-                            }.filter(String::isNotBlank).distinct().forEach { marker ->
-                                Text(marker,style=MaterialTheme.typography.labelSmall,color=if(members.any { AccountPresentation.warning(it.account) || it.account.refreshError }) Color(0xFFF0A35B) else muted)
-                            }
-                            members.map { AccountPresentation.freshness(it.catalog,it.account,now) }.distinct().forEach { freshness ->
-                                Text(freshness,style=MaterialTheme.typography.labelSmall,color=muted)
-                            }
-                        }
+                        AccountMachineLabel(model,members.first().catalog)
                     }
                 }
+                group.members.mapNotNull { member ->
+                    AccountPresentation.listProblem(member.account).takeIf(String::isNotBlank)?.let { problem ->
+                        if(group.members.size==1) problem else "${model.machineName(member.catalog.key.connectionId,member.catalog.key.computerId,member.catalog.machineName)}: $problem"
+                    }
+                }.distinct().forEach { problem ->
+                    Text(problem,style=MaterialTheme.typography.labelSmall,color=Color(0xFFF0A35B))
+                }
+                if(AccountPresentation.stale(catalog,account,now) && (account.windows.isNotEmpty() || compactBalance(account)!=null))
+                    Text("Saved usage",style=MaterialTheme.typography.labelSmall,color=muted)
                 account.windows.take(2).forEach { window ->
                     val remaining=AccountPresentation.remaining(window,now)
                     val percentage=AccountPresentation.percent(window.usedPercent)
@@ -125,7 +122,7 @@ private fun workspaceName(model:ZerusViewModel,catalog:AccountCatalog)=model.con
                     }
                 }
                 if(account.windows.size>2) Text("+${account.windows.size-2} more usage windows",style=MaterialTheme.typography.labelSmall,color=muted)
-                if(account.windows.isEmpty()) Text(compactBalance(account) ?: "Usage unknown",style=MaterialTheme.typography.bodySmall,color=muted,maxLines=1,overflow=TextOverflow.Ellipsis)
+                if(account.windows.isEmpty()) compactBalance(account)?.let { Text(it,style=MaterialTheme.typography.bodySmall,color=muted,maxLines=1,overflow=TextOverflow.Ellipsis) }
 
             }
         }

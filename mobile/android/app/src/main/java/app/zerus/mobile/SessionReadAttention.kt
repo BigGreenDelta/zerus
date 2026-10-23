@@ -18,7 +18,7 @@ object SessionReadAttention {
             val loadedCount = if (!ready || record?.incomplete == true || state.records.size >= 500 && record == null) null
                 else ConversationReadPolicies.lowerBound(record, loaded[row.target])
             val later = record?.reviewLater == true
-            val unread = !SharedReadPolicies.replyRead(row) && (unreadCount ?: loadedCount ?: 0) > 0
+            val unread = SharedReadPolicies.canShowReplyBadge(row) && (unreadCount ?: loadedCount ?: 0) > 0
             val acknowledged = SharedReadPolicies.attentionAcknowledged(row)
             if (row.raw.optBoolean("mobile_review_later") == later && row.raw.optBoolean("mobile_unread_reply") == unread &&
                 row.raw.optBoolean("attention_acknowledged") == acknowledged) row

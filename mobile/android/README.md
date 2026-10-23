@@ -368,10 +368,17 @@ exact run, conversation, reply and attention signature to the session's
 computer, which shares them with every desktop and phone. A reply or request read
 elsewhere can be adopted here for the exact verified selected reply. Automatic
 adoption for a nonselected conversation is deferred: fleet hints do not prove
-which canonical incoming prefix belongs to that shared reply. Its unread indicator
-may stay stale until a verified selection or explicit Mark read / Read all.
+which canonical incoming prefix belongs to that shared reply. Canonical history
+counters can remain phone-local until a verified selection or explicit Mark read
+/ Read all. Sessions reply badges follow the owning computer's current reply
+identity and shared mark. When its bounded journal no longer lists a current
+reply ID but retains a conversation-scoped read mark, old phone history does not
+recreate a New reply badge. This changes no history watermark; a newly listed
+reply and an independent Review later reminder remain visible.
 Review later stays on this phone. This interim guard does not add native prefix
 proof or change explicit reading and Read all.
+Catalog refresh publishes rows and their local read decoration together, retaining
+unchanged card objects and the list viewport while background preparation runs.
 Bounded background metadata probes can prepare canonical heads for live sessions
 with reported reply evidence, without opening their conversations or fetching
 full history. Previously unvisited sessions with unknown evidence are not
@@ -949,7 +956,7 @@ Pairing QR codes use CameraX 1.6.2 and ZXing core 3.5.4 without Google Play serv
 
 CameraX is Apache 2.0 and includes libyuv under BSD-3-Clause; ZXing is Apache 2.0. Full license texts and source attribution are available in Third-party notices. Pins follow the [official CameraX releases](https://developer.android.com/jetpack/androidx/releases/camera) and [ZXing 3.5.4 release](https://github.com/zxing/zxing/releases/tag/zxing-3.5.4). CameraX requires compile SDK 36 and AGP 8.9.1 or newer, covered by this build.
 
-Accounts is a read-only viewer grouped by workspace and provider-reported account identity, matching desktop accounts. Each card contains its machine labels, using the same names and colors as Sessions. Provider account IDs and organization scope own identity; email-only reports join an ID only when unambiguous. Signed-out and unidentified profiles stay machine-local. Compact cards show account type and aligned period, remaining reset time and usage columns, with recurring-period and hourglass glyphs; tap a card for the full identity, limits, per-machine profiles and update times. Usage selects one best-quality report and never adds quotas across machines. It shows reported account identity, plan, usage windows and wallet balances when the connector provides them. Unknown limits stay unknown; ended windows need a provider refresh. Account snapshots use a separate encrypted private cache, so offline values remain available with their original provider update time and stale styling; offline and authentication problems stay visible. A connector advertising `accounts_snapshot` is required; Refresh reads its latest snapshot and does not force a provider refresh.
+Accounts is a read-only viewer grouped by workspace and provider-reported account identity, matching desktop accounts. Each card contains its machine labels, using the same names and colors as Sessions. Provider account IDs and organization scope own identity; email-only reports join an ID only when unambiguous. Signed-out and unidentified profiles stay machine-local. Compact cards show account type and aligned period, remaining reset time and usage columns, with recurring-period and hourglass glyphs; tap a card for the full identity, limits, per-machine profiles and update times. Authentication problems remain visible in the list; optional usage availability, refresh progress and probe failures are neutral diagnostics in details. Saved usage is labelled once rather than repeating each machine's timestamps. Usage selects one best-quality report and never adds quotas across machines. It shows reported account identity, plan, usage windows and wallet balances when the connector provides them. Unknown limits stay unknown; ended windows need a provider refresh. Account snapshots use a separate encrypted private cache, so offline values remain available with their original provider update time and stale styling. A connector advertising `accounts_snapshot` is required; Refresh reads its latest snapshot and does not force a provider refresh.
 
 ## Project and account selection
 

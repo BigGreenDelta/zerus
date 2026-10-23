@@ -20,18 +20,22 @@ import androidx.compose.ui.unit.dp
     val state=model.catalogRefresh
     if(state.workspaces.isEmpty()) return
     var details by remember { mutableStateOf(false) }
-    val updating=model.displayedAccounts.sumOf { catalog -> catalog.accounts.count { AccountPresentation.refreshing(catalog,it) } }
-    val received=if(state.running || state.failures>0) null else state.workspaces.mapNotNull { it.lastReceivedAt }.maxOrNull()?.let(AccountPresentation::date)
-    val summary=state.summary+(received?.let { " · $it" }.orEmpty())+
-        if(updating>0) " · $updating provider report${if(updating==1) "" else "s"} updating" else ""
+    val received=state.workspaces.mapNotNull { it.lastReceivedAt }.maxOrNull()?.let {
+        java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date((it*1000).toLong()))
+    }
+    val summary=when {
+        state.running -> "Updating…"
+        state.failures>0 -> "Update failed · Saved data kept"
+        else -> received?.let { "Updated $it" } ?: "Connected"
+    }
     val tone=if(state.failures>0 && !state.running) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
     Surface(color=MaterialTheme.colorScheme.surfaceContainerLow) {
-        Row(Modifier.fillMaxWidth().heightIn(min=52.dp).padding(start=16.dp,end=4.dp),verticalAlignment=Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min=40.dp).padding(start=16.dp,end=4.dp),verticalAlignment=Alignment.CenterVertically) {
             Box(Modifier.size(14.dp),contentAlignment=Alignment.Center) {
                 if(state.running) CircularProgressIndicator(Modifier.size(14.dp),strokeWidth=2.dp)
             }
             Text(summary,Modifier.weight(1f).padding(horizontal=8.dp,vertical=8.dp),
-                style=MaterialTheme.typography.labelSmall,color=tone,minLines=2,maxLines=2,overflow=TextOverflow.Ellipsis)
+                style=MaterialTheme.typography.labelSmall,color=tone,maxLines=1,overflow=TextOverflow.Ellipsis)
             IconButton(onClick={details=true},modifier=Modifier.size(40.dp)) { Icon(Icons.Default.Info,"Refresh details",Modifier.size(18.dp),tint=tone) }
         }
     }

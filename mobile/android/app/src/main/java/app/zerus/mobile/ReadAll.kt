@@ -12,7 +12,7 @@ object ReadAllPolicies {
     fun listCandidate(session:Session,online:Boolean,reviewLater:Boolean=false):Boolean =
         !SessionFilters.archived(session) && (reviewLater || session.raw.optBoolean("review_later") ||
             session.raw.optBoolean("mobile_review_later") ||
-            !SharedReadPolicies.replyRead(session) && !SessionFilters.replyInProgress(session,online))
+            SharedReadPolicies.canShowReplyBadge(session) && !SessionFilters.replyInProgress(session,online))
     fun available(evidence:ReadAttentionEvidence?)=evidence!=null &&
         (evidence.authoritative && evidence.epoch.isNotBlank() && evidence.head!=null || evidence.loadedIds.isNotEmpty())
     /** A known head past the watermark, or a loaded reply this phone counts as unread. */

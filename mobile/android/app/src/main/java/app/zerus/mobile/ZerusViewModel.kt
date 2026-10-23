@@ -678,13 +678,15 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val rows=catalogSessions;val state=readState;val ready=readTrackingReady;val heads=currentHistoryHeads
         // Retained windows/frames are bounded to twenty conversations. Copy references on main;
         // workers never read the mutable access-ordered caches or the open conversation state.
-        val loaded=frames.values.associate { it.target to it.events }.toMutableMap()
-        historyWindows.values.forEach { loaded[it.target]=it.events }
-        selected?.target?.let { loaded[it]=conversationEvents }
+        val loaded=loadedReadRows()
         readAttentionJob=viewModelScope.launch {
             val prepared=withContext(Dispatchers.Default) { SessionReadAttention.prepare(rows,state,ready,heads,loaded) }
             if(catalogSessions===rows && readState===state && currentHistoryHeads===heads) catalogSessions=prepared
         }
+    }
+    private fun loadedReadRows():Map<Target,List<Event>> = frames.values.associate { it.target to it.events }.toMutableMap().also { loaded ->
+        historyWindows.values.forEach { loaded[it.target]=it.events }
+        selected?.target?.let { loaded[it]=conversationEvents }
     }
     private class SharedReadRequest(val connection:Connection,val target:Target,val payload:JSONObject,val key:String)
     /** The C4 `mark_read` this phone may send now; [acknowledge] also covers the current request. */
@@ -2239,20 +2241,22 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             newMachines += machines.filter { it.connectionId in unavailable }.map { it.copy(online=false,lastKnown=true) }
             newProjects += projects.filter { it.key.connectionId in unavailable }
             // A receipt or newer catalog may arrive while background parsing is suspended.
+            var preparedSessions:List<Session>
             while(true) {
                 val retained=catalogSessions;val actions=messageState.sessionActions;val version=notificationPreferenceRevision
-                val merged=withContext(Dispatchers.Default) { SessionNotificationPreferences.mergeRows(newSessions,retained,actions) }
+                val reads=readState;val ready=readTrackingReady;val heads=currentHistoryHeads;val loaded=loadedReadRows()
+                val merged=withContext(Dispatchers.Default) { SessionCatalogUpdate.prepare(newSessions,retained,actions,reads,ready,heads,loaded) }
                 if(!catalogGate.owns(operation.id) || connections!=originalConnections) return@launch
-                if(version!=notificationPreferenceRevision || retained!==catalogSessions) continue
-                newSessions.clear();newSessions.addAll(merged);break
+                if(version!=notificationPreferenceRevision || retained!==catalogSessions || reads!==readState || ready!=readTrackingReady || heads!==currentHistoryHeads) continue
+                preparedSessions=merged;break
             }
             accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
-                sessions = newSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
+                sessions = preparedSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
                 projects = newProjects; projectWarnings = warnings
             }
             refreshReadAttention();adoptSharedReads()
-            val index=withContext(Dispatchers.Default) { ConversationIndex.capture(newSessions,newMachines) }
+            val index=withContext(Dispatchers.Default) { ConversationIndex.capture(preparedSessions,newMachines) }
             if(connections == originalConnections) editState { state -> state.copy(conversationIndex=index) }
             watchHistoryHeads()
             selectedProject?.let { chosen -> selectedProject = projects.find { it.key == chosen.key } ?: chosen }

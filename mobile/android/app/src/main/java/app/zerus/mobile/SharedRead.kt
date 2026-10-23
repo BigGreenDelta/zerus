@@ -13,6 +13,15 @@ object SharedReadPolicies {
         ?.takeIf { row.target.conversation.isNotBlank() && it.string("conversation_id")==row.target.conversation }
     /** Exactly the current reply was read on some device. */
     fun replyRead(row:Session):Boolean=row.raw.string("reply_id").let { it.isNotBlank() && mark(row)?.string("reply_id")==it }
+    /** C1 owns the current reply badge. A missing reply identity cannot resurrect old
+     * phone-local history as a new desktop reply; this never advances a history watermark. */
+    fun canShowReplyBadge(row:Session):Boolean {
+        if(replyRead(row)) return false
+        val target=row.target
+        val shared=row.raw.has("attention_signature") && target.run.isNotBlank() && target.conversation.isNotBlank() &&
+            row.raw.string("run_id")==target.run && row.raw.string("conversation_id")==target.conversation
+        return !shared || row.raw.string("reply_id").isNotBlank() || mark(row)?.string("reply_id").isNullOrBlank()
+    }
     /** Fleet hints alone cannot bind a nonselected reply mark to a canonical prefix. */
     fun canAdoptReply(row:Session,selectedTarget:Target?,selectedRaw:JSONObject?,selectedVerified:Boolean):Boolean {
         if(!replyRead(row)) return false
