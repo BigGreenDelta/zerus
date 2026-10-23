@@ -89,7 +89,17 @@ struct LaunchForm: View {
         }
     }
 
-    private var observedForm: some View {
+    private var sourceObservedForm: some View {
+        formContent
+        .onAppear { tag = launch.generatedName }
+        .onChange(of: repositoryUrl) { edited=true; suggestRepositoryPath() }
+        .onChange(of: repositoryPath) { checkoutCursor="" }
+        .onChange(of: launch.repositoryCheckId) { if !launch.repositoryCheckId.isEmpty { repositoryPath=launch.repositoryPath;repositoryManual=true;edited=true } }
+        .onChange(of: launch.directory?.string("path")) { suggestRepositoryPath() }
+        .onChange(of: repositorySource) { edited=true }
+    }
+
+    private var agentObservedForm: some View {
         let catalog = launch.catalog
         let signature = launch.catalogEvidence
         let providers = LaunchPresentation.agents(catalog)
@@ -97,23 +107,22 @@ struct LaunchForm: View {
         let modelOptions = LaunchPresentation.models(catalog, provider: provider, accountId: account)
         let effortOptions = LaunchPresentation.efforts(catalog, provider: provider, accountId: account, model: selectedModel,
                                                        supported: launch.effortSupported(machine))
-        let projects = LaunchPresentation.projects(catalog)
-        let project = projects.first { $0.id == projectId }
-        let evidence = WorktreePresentation.forFolder(launch.worktrees, folder)
-        let inferredProject = LaunchPresentation.inferredProject(catalog, selected: projectId, explicit: projectExplicit, directory: folder,
-                                                                 browser: launch.directory, worktrees: evidence)
-        return formContent
-        .onAppear { tag = launch.generatedName }
-        .onChange(of: repositoryUrl) { edited=true; suggestRepositoryPath() }
-        .onChange(of: repositoryPath) { checkoutCursor="" }
-        .onChange(of: launch.repositoryCheckId) { if !launch.repositoryCheckId.isEmpty { repositoryPath=launch.repositoryPath;repositoryManual=true;edited=true } }
-        .onChange(of: launch.directory?.string("path")) { suggestRepositoryPath() }
-        .onChange(of: repositorySource) { edited=true }
+        return sourceObservedForm
         .onChange(of: signature, initial: true) { if allowedCatalog.isEmpty && !signature.isEmpty { allowedCatalog = signature } }
         .onChange(of: providers, initial: true) { if !providers.contains(provider) { provider = providers.first ?? "" } }
         .onChange(of: accounts.map(\.id), initial: true) { account = LaunchPresentation.defaultAccount(accounts, selected: account) }
         .onChange(of: modelOptions.map(\.value)) { if !selectedModel.isEmpty && !modelOptions.contains(where: { $0.value == selectedModel }) { selectedModel = "" } }
         .onChange(of: effortOptions.map(\.value)) { if !selectedEffort.isEmpty && !effortOptions.contains(where: { $0.value == selectedEffort }) { selectedEffort = "" } }
+    }
+
+    private var observedForm: some View {
+        let catalog = launch.catalog
+        let projects = LaunchPresentation.projects(catalog)
+        let project = projects.first { $0.id == projectId }
+        let evidence = WorktreePresentation.forFolder(launch.worktrees, folder)
+        let inferredProject = LaunchPresentation.inferredProject(catalog, selected: projectId, explicit: projectExplicit, directory: folder,
+                                                                 browser: launch.directory, worktrees: evidence)
+        return agentObservedForm
         .onChange(of: projects.map(\.id), initial: true) { updateProjectScope(projects, catalog: catalog) }
         .onChange(of: inferredProject) { if !repositorySource && inferredProject != projectId { projectId = inferredProject } }
         .onChange(of: FolderKey(project: projectId, loading: launch.directoryLoading)) {
