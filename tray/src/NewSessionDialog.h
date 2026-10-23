@@ -100,7 +100,7 @@ private:
     RepositoryClone *m_repository=nullptr;
     MachinePlatform::Style m_repositoryStyle=MachinePlatform::Style::Posix;
     QFormLayout *m_form;
-    QStackedWidget *m_sourceInput,*m_sourceDetails;
+    QStackedWidget *m_sourceInput,*m_sourceDetails,*m_newProjectField,*m_newProjectLabel;
     QLabel *m_sourceLabel,*m_destinationLabel;
     QWidget *m_folderField,*m_repositoryDestinationField,*m_repositoryState;
     QPushButton *m_folderSource,*m_gitSource,*m_repositoryBrowse,*m_repositoryCheck,*m_repositoryAnother;

@@ -154,10 +154,9 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     auto *projectRow=new QHBoxLayout;projectRow->setSpacing(8);projectRow->addWidget(m_project,2);projectRow->addWidget(m_manage);
     m_machine=new QComboBox;m_machine->setObjectName("launchComputer");m_machine->setAccessibleName(tr("Computer"));m_machine->setMinimumContentsLength(6);m_machine->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);projectRow->addWidget(m_machine,1);
     form->addRow(tr("Target"),projectRow);
-    m_newProjectName=new QLineEdit;m_newProjectName->setObjectName("launchNewProjectName");m_newProjectName->setMaxLength(80);m_newProjectName->setPlaceholderText(tr("Project name"));form->addRow(tr("New project"),m_newProjectName);
-    for(auto *widget:QList<QWidget *>{m_newProjectName,form->labelForField(m_newProjectName)}){
-        auto policy=widget->sizePolicy();policy.setRetainSizeWhenHidden(true);widget->setSizePolicy(policy);
-    }
+    m_newProjectName=new QLineEdit;m_newProjectName->setObjectName("launchNewProjectName");m_newProjectName->setMaxLength(80);m_newProjectName->setPlaceholderText(tr("Project name"));
+    m_newProjectField=new QStackedWidget;m_newProjectField->addWidget(m_newProjectName);m_newProjectField->addWidget(new QWidget);m_newProjectField->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
+    m_newProjectLabel=new QStackedWidget;m_newProjectLabel->addWidget(new QLabel(tr("New project")));m_newProjectLabel->addWidget(new QWidget);m_newProjectLabel->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Fixed);form->addRow(m_newProjectLabel,m_newProjectField);
     auto *sources=new QButtonGroup(this);auto *sourceRow=new QHBoxLayout;sourceRow->setSpacing(8);
     m_folderSource=new QPushButton(workspaceIcon("folder",iconColor),tr("Working folder"));m_folderSource->setObjectName("launchFolderSource");
     m_gitSource=new QPushButton(workspaceIcon("git-branch",iconColor),tr("Git repository"));m_gitSource->setObjectName("launchRepositorySource");
@@ -171,9 +170,9 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     // Stacked pages reserve the larger size hint, so changing source only swaps
     // the inputs; the shared controls below keep their positions.
     m_sourceInput=new QStackedWidget;m_sourceInput->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);m_sourceInput->addWidget(folderInput);
-    m_sourceLabel=plainLabel(tr("Working folder"));form->addRow(m_sourceLabel,m_sourceInput);
+    m_sourceLabel=plainLabel(tr("Working folder"));m_sourceLabel->setWordWrap(false);form->addRow(m_sourceLabel,m_sourceInput);
     m_sourceDetails=new QStackedWidget;m_sourceDetails->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
-    m_destinationLabel=plainLabel();form->addRow(m_destinationLabel,m_sourceDetails);
+    m_destinationLabel=plainLabel();m_destinationLabel->setWordWrap(false);form->addRow(m_destinationLabel,m_sourceDetails);
     m_folderField=new QWidget;auto *folderField=new QVBoxLayout(m_folderField);folderField->setContentsMargins(0,0,0,0);folderField->setSpacing(6);
     m_projectPath=plainLabel();m_projectPath->setObjectName("launchFolderPath");m_projectPath->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_projectPath->setWordWrap(false);
@@ -659,8 +658,8 @@ void NewSessionDialog::updateForm()
     const auto *machine=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
     const bool online=machine&&machine->ok;
     const bool newProject=repository&&m_project->currentData(NewRepositoryProjectRole).toBool();
-    m_form->setRowVisible(m_newProjectName,newProject||(!repository&&m_repositoryNewProject));
-    m_newProjectName->setVisible(newProject);m_form->labelForField(m_newProjectName)->setVisible(newProject);
+    m_form->setRowVisible(m_newProjectField,newProject||(!repository&&m_repositoryNewProject));
+    m_newProjectField->setCurrentIndex(newProject?0:1);m_newProjectLabel->setCurrentIndex(newProject?0:1);
     m_sourceInput->setCurrentIndex(repository?1:0);m_sourceDetails->setCurrentIndex(repository?1:0);
     m_sourceLabel->setText(repository?tr("Repository"):tr("Working folder"));m_destinationLabel->setText(repository?tr("Clone to"):QString());
     m_folderSource->setChecked(!repository);m_gitSource->setChecked(repository);
