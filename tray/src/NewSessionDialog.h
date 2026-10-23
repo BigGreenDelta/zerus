@@ -16,6 +16,9 @@ class QFrame;
 class QListWidget;
 class AccountUsageStore;
 class OpenCodeModelPicker;
+class RepositoryClone;
+class QFormLayout;
+class QProgressBar;
 
 class NewSessionDialog : public QDialog {
     Q_OBJECT
@@ -47,7 +50,10 @@ private:
     void loadMachines();
     void loadFolders(const QString &selectedPath = {});
     void browseFolder();
-    void cloneRepository();
+    void setRepositorySource(bool enabled);
+    void syncRepositoryComputer();
+    void editRepositorySource();
+    void useRepository(const QString &path);
     void updateWorktrees();
     QString matchingProjectFolder(const QString &path, const QString &canonicalPath = {}) const;
     void finishFolderPrefill(const QJsonObject &catalog);
@@ -89,8 +95,15 @@ private:
     FleetState m_fleet;
     SessionOrganization m_projects;
     SessionOrganization *m_liveProjects=nullptr;
-    bool m_cloneLaunchPending=false,m_cloning=false;
-    QPushButton *m_clone;
+    bool m_cloneLaunchPending=false,m_repositorySource=false,m_customDestination=false,m_customProjectName=false,m_repositoryNewProject=false;
+    RepositoryClone *m_repository=nullptr;
+    MachinePlatform::Style m_repositoryStyle=MachinePlatform::Style::Posix;
+    QFormLayout *m_form;
+    QWidget *m_folderField,*m_repositoryDestinationField,*m_repositoryState;
+    QPushButton *m_folderSource,*m_gitSource,*m_repositoryBrowse,*m_repositoryCheck,*m_repositoryAnother;
+    QLineEdit *m_repositoryUrl,*m_repositoryDestination,*m_newProjectName;
+    QLabel *m_repositoryStatus;
+    QProgressBar *m_repositoryProgress;
     QString m_initialProject,m_initialHost,m_accountHost,m_projectCatalogSwarm;
     QString m_preferredAccount;
     QString m_preferredAgent;
