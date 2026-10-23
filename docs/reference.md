@@ -693,6 +693,13 @@ local preferences. **Settings → Appearance → Content scale** adjusts Activit
 questions, the message field and Terminal from 75% to 200% in 5% steps, with 100%
 as the default; the session list, the side panel, the session header and its tabs
 keep their size.
+
+Drag the small handle above the message toolbar upward to enlarge the message
+field, or downward to shrink it. Double-click the handle to restore the default
+height. The height is a local preference shared by sessions and retained across
+restarts; smaller windows temporarily limit it so the conversation stays visible.
+With the handle focused, Up/Down resize it and Home restores the default.
+
 **Settings → Appearance → Activity width** keeps Activity readable in a wide or
 fullscreen window: the transcript, its queued input, questions and the message
 field share one centered column of at most 900 px by default (480–2400 px). The

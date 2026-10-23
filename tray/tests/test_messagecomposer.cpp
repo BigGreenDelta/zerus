@@ -190,7 +190,9 @@ private slots:
     void unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval();
     void initTestCase();
     void voiceInsertionRequiresUnchangedDraftAndNavigation();
-    void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
+    void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); QSettings().remove("workspace/messageEditorHeight"); }
+    void dragResizesMessageFieldAndDoubleClickRestoresDefault();
+    void resizedMessageFieldFitsSmallerWindowWithoutLosingPreference();
     void crashRestoresLastEditAndAttachmentBytes();
     void restartKeepsIsolationRenamesAndAttachmentRemoval();
     void restoredDraftPresenceNeedsNoConversationOrAttachmentRead();
@@ -1180,6 +1182,73 @@ void TestMessageComposer::contentScaleEnlargesOnlyTheMessageField()
     composer->setContentScale(1.0); QTest::qWait(10);
     QCOMPARE(QFontInfo(composer->editor()->font()).pixelSize(), 13);
     QCOMPARE(composer->editor()->height(), height);
+}
+
+void TestMessageComposer::dragResizesMessageFieldAndDoubleClickRestoresDefault()
+{
+    QWidget workspace; auto *layout = new QVBoxLayout(&workspace); layout->addStretch(1);
+    auto *composer = new MessageComposer; layout->addWidget(composer);
+    setSessionReady(*composer, "local/resize"); composer->setAvailability(true);
+    QVERIFY(composer->addAttachment("notes.txt", "text/plain", "Keep attachment"));
+    const QString text = QString("A long draft, with line breaks.\n").repeated(30);
+    composer->editor()->setPlainText(text);
+    auto cursor = composer->editor()->textCursor(); cursor.setPosition(10); cursor.setPosition(40, QTextCursor::KeepAnchor);
+    composer->editor()->setTextCursor(cursor);
+    QSignalSpy sent(composer, &MessageComposer::sendRequested);
+    workspace.resize(700, 900); workspace.show(); QVERIFY(QTest::qWaitForWindowExposed(&workspace));
+    auto *handle = composer->findChild<QWidget *>("messageResizeHandle"); QVERIFY(handle);
+    QCOMPARE(handle->cursor().shape(), Qt::SizeVerCursor);
+    const int initial = composer->editor()->height(); QCOMPARE(initial, 76);
+    const auto sendPosition = sendButton(*composer)->mapTo(&workspace, QPoint());
+    const auto origin = handle->rect().center();
+    QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, origin);
+    QTest::mouseMove(handle, origin - QPoint(0, 160));
+    QTest::mouseRelease(handle, Qt::LeftButton);
+    QTRY_COMPARE(composer->editor()->height(), initial + 160);
+    QCOMPARE(sendButton(*composer)->mapTo(&workspace, QPoint()), sendPosition);
+    QCOMPARE(composer->editor()->toPlainText(), text);
+    QCOMPARE(composer->editor()->textCursor().position(), 40); QCOMPARE(composer->editor()->textCursor().anchor(), 10);
+    QCOMPARE(QSettings().value("workspace/messageEditorHeight").toInt(), initial + 160);
+    const auto preview = qEnvironmentVariable("HGS_COMPOSER_PREVIEW");
+    if (!preview.isEmpty()) {
+        QVERIFY(QDir().mkpath(preview));
+        QVERIFY(composer->grab().save(preview + "/resized-message-field.png"));
+    }
+    setSessionReady(*composer, "local/other"); setSessionReady(*composer, "local/resize");
+    QCOMPARE(composer->editor()->height(), initial + 160); QCOMPARE(composer->editor()->toPlainText(), text);
+    QVERIFY(composer->findChild<ToolbarChip *>("attachmentsChip")->isActive());
+    { MessageComposer reopened; reopened.show(); QTRY_COMPARE(reopened.editor()->height(), initial + 160); }
+    composer->setContentScale(1.25);
+    QTRY_COMPARE(composer->editor()->height(), qRound((initial + 160) * 1.25));
+    QTest::mouseDClick(handle, Qt::LeftButton);
+    QTRY_COMPARE(composer->editor()->height(), 95); // Scaled default, rather than a hard-coded 76 px.
+    QVERIFY(!QSettings().contains("workspace/messageEditorHeight"));
+    QCOMPARE(composer->editor()->toPlainText(), text); QCOMPARE(sent.count(), 0);
+    composer->setInputVisible(false); QVERIFY(!handle->isVisible());
+    composer->setInputVisible(true); QVERIFY(handle->isVisible());
+    handle->setFocus(); QTest::keyClick(handle, Qt::Key_Up);
+    QTRY_COMPARE(composer->editor()->height(), 115);
+    QTest::keyClick(handle, Qt::Key_Home); QTRY_COMPARE(composer->editor()->height(), 95);
+}
+
+void TestMessageComposer::resizedMessageFieldFitsSmallerWindowWithoutLosingPreference()
+{
+    QSettings().setValue("workspace/messageEditorHeight", 420);
+    QWidget workspace; auto *layout = new QVBoxLayout(&workspace); layout->addStretch(1);
+    auto *composer = new MessageComposer; layout->addWidget(composer);
+    workspace.resize(700, 1000); workspace.show(); QVERIFY(QTest::qWaitForWindowExposed(&workspace));
+    QTRY_COMPARE(composer->editor()->height(), 420);
+    workspace.resize(700, 400);
+    QTRY_COMPARE(workspace.height(), 400); // A large saved preference must not raise the window's minimum height.
+    QTRY_VERIFY(composer->height() <= workspace.height() * 2/3);
+    QVERIFY(composer->editor()->height() >= 76); QVERIFY(sendButton(*composer)->isVisible());
+    QCOMPARE(QSettings().value("workspace/messageEditorHeight").toInt(), 420);
+    workspace.resize(700, 1000); QTRY_COMPARE(composer->editor()->height(), 420);
+    auto *handle = composer->findChild<QWidget *>("messageResizeHandle"); QVERIFY(handle);
+    const auto origin = handle->rect().center();
+    QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, origin);
+    QTest::mouseMove(handle, origin + QPoint(0, 1000)); QTest::mouseRelease(handle, Qt::LeftButton);
+    QTRY_COMPARE(composer->editor()->height(), 76);
 }
 
 void TestMessageComposer::attachmentDropReleasesVisualCaret_data()

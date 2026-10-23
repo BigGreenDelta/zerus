@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QMap>
 #include <QPixmap>
+#include <QPointer>
 #include <QSet>
 #include <QWidget>
 #include <QVariant>
@@ -144,6 +145,7 @@ signals:
     void controlsChanged();
 
 protected:
+    bool event(QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -163,6 +165,8 @@ private:
     void referenceFile();
     void attachFile(const QString &path);
     void updateControls();
+    int boundedEditorHeight(int height) const;
+    void updateEditorHeight();
     void rebuildAttachments();
     void removeAttachment(int index);
     void openAttachment(int index);
@@ -195,7 +199,11 @@ private:
     QString m_referenceKey, m_referenceHost, m_referenceMachine, m_referenceContext;
     quint64 m_referenceRevision = 0;
     double m_scale = 1.0;
-    QPlainTextEdit *m_editor;
+    double m_editorHeight = 76.0; // At 100%; temporary viewport limits do not overwrite it.
+    int m_dragEditorHeight = 0;
+    QPlainTextEdit *m_editor = nullptr;
+    QWidget *m_resizeHandle;
+    QPointer<QWidget> m_heightParent;
     QLabel *m_status;
     QFrame *m_settingsPopup;
     QComboBox *m_models, *m_efforts;
