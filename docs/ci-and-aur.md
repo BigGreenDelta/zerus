@@ -43,8 +43,10 @@ conservative change selection, including both sides of renames.
 
 Quick checks and the full suites start together once the commit is resolved, so
 a quick-check failure no longer holds back the other suites. New PR/manual runs cancel
-obsolete runs for the same branch/PR and workflow. Dev main finishes its active
-qualifying run while the newest pending main revision waits. PR jobs have read-only
+obsolete runs for the same branch/PR and workflow. Trusted public Dev main pushes
+use separate bounded qualification and signing/sealing queues; each keeps its active
+phase and coalesces pending revisions to the newest one. PR/manual checks and main
+before Dev rollout keep their existing whole-run concurrency. PR jobs have read-only
 permissions and no publication credentials; fork PRs use `pull_request`, never
 `pull_request_target`. Publishing is confined to trusted upstream `main` and the
 branch-restricted `release` environment. Authenticated model-turn tests remain
@@ -57,13 +59,52 @@ number zero, package `app.zerus.mobile`). The google-services and Crashlytics
 plugins only turn that file into resources; tests and lint never contact
 Firebase, and the mapping upload follows R8, which these tasks do not run.
 
+The macOS CLI unit/debug job finishes before two independent consumers start.
+One continues the original smoke, Python integration and release build; the other
+runs the unchanged latest-agent contracts from that exact debug CLI. A three-file
+handoff contains only `hgs`, `fake_agent` and a manifest bound to the selected
+source, run, producer attempt, actual OS/architecture, producing Rust toolchain
+and source-helper/binary hashes. Consumers use the completed producer's exact
+artifact ID and manifest digest, including its original attempt on a partial
+rerun; there is no live-producer polling or name/latest fallback. The CLI consumer
+selects the producer's exact Rust release and verifies the compiler identity.
+The public `CLI (macos-15)` result and `Suite results` require every selected
+component. The producer saves tested unit/debug dependencies under a `debug`
+content key; the integration/release consumer uses a distinct `complete` key.
+Both keep the legacy registry, Git and target paths and inherit the caller's
+cache authority: only requested trusted-main saves run after successful work and
+an exact-key miss. A cold core first restores the completed debug cache; a cold
+producer first tries the complete cache, then both accept legacy lock/family
+entries. The profile suffix stays inside the final key segment, so housekeeping
+still retains only two total entries in that existing compiler/month family.
+The native consumer has no cache access. Linux retains the default complete CLI path.
+Separate runner setup, dependency restoration and artifact transfer add overhead;
+this split does not establish an observed speedup without hosted evidence.
+
 On upstream `main` pushes with the [Dev channel](public-distribution.md#verified-main-dev-channel)
-enabled, credential-free checks and `dev-macos-bundle` run in parallel. The latter
-uses pinned official Qt, tests the Release GUI, then packages that same tested
-app; there is no second GUI compilation with tests disabled. Signing remains
-in `macos-cask.yml` and starts only after both the trusted CI gate and that exact
-run's unsigned bundle succeed. Candidate source/version checks, Developer ID,
-notarization and disposable cask installation remain required.
+enabled, `ci-dev-qualification.yml` holds one qualification slot through both
+credential-free checks and the parallel unsigned Mac bundle. The bundle uses pinned
+official Qt, tests the Release GUI, then packages that same tested app; there is no
+second GUI compilation with tests disabled. Its gate requires successful checks and
+the exact run's selected bundle; a disabled Mac bundle must be skipped.
+The qualification caller reuses the former whole-CI concurrency key, so the first
+new run waits for any active old CI run to finish before starting qualification.
+
+After the public **CI gate** admits exactly one successful check workflow,
+`ci-dev-tail.yml` holds one separate noncancelling CI slot through Android/Mac
+signing, installation checks, candidate sealing and the monotonic Dev tag. The next
+revision can qualify while this tail runs. Signing remains in the existing protected
+workflows; source/version checks, Developer ID, notarization and disposable cask
+installation remain required. Qualification and delivery retain the same CI run ID,
+number, SHA and artifact namespace. Only trusted checks write caches; PR checks read
+them and signing/publication have no cache access.
+
+The existing **Publish Dev** workflow is the third, independently serialized lane.
+It still starts only after the entire source CI run succeeds and validates that
+run's immutable candidate. Active signing and publication are never cancelled by a
+new main push. All queues retain GitHub's default single pending entry, so newer
+pending work can replace older pending work; every revision is not promised a
+published build. Existing monotonic candidate/catalog checks reject stale delivery.
 
 The short signed `dev-android.yml` build starts after the CI gate alongside Mac
 signing/installation. It builds `assembleRelease`, seals the APK/source and removes

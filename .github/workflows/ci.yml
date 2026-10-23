@@ -61,16 +61,17 @@ permissions:
 cache-mode: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ inputs.ref || github.ref }}
-  # Finish a qualifying Dev build while the newest main revision waits. GitHub
-  # coalesces pending runs; PR/manual and pre-rollout behavior stays cancellable.
+  group: ${{ (github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true') && format('ci-dev-run-{0}', github.run_id) || format('ci-{0}-{1}', github.workflow, inputs.ref || github.ref) }}
+  # Dev main uses independent qualification and signing/sealing job locks.
+  # Keep PR/manual and pre-rollout whole-run cancellation unchanged.
   cancel-in-progress: ${{ !(github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true') }}
 
 jobs:
   automatic:
     name: Trusted main checks
     if: >-
-      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') && (!inputs.ref || inputs.ref == github.sha)
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') && (!inputs.ref || inputs.ref == github.sha) &&
+      !(github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true')
     cache-mode: write
     uses: ./.github/workflows/checks.yml
     with:
@@ -95,10 +96,22 @@ jobs:
       run_windows: ${{ inputs.run_windows || false }}
       run_ios: ${{ inputs.run_ios || false }}
       filter_pr_platforms: ${{ github.event_name == 'pull_request' }}
+  qualification:
+    name: Credential-free Dev qualification
+    if: >-
+      !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' &&
+      (!inputs.ref || inputs.ref == github.sha)
+    cache-mode: write
+    concurrency:
+      # Share the old whole-run lock during rollout. Once old runs finish, this
+      # lock covers qualification only; the Dev top-level lock is run-specific.
+      group: ${{ format('ci-{0}-{1}', github.workflow, inputs.ref || github.ref) }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/ci-dev-qualification.yml
   gate:
     name: CI gate
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [automatic, review]
+    needs: [automatic, review, qualification]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     cache-mode: none
@@ -110,68 +123,38 @@ jobs:
           import json, os
           results = json.loads(os.environ['RESULTS'])
           conclusions = sorted(job['result'] for job in results.values())
-          if conclusions != ['skipped', 'success']:
+          if conclusions != ['skipped', 'skipped', 'success']:
               raise SystemExit(f'Exactly one selected check workflow must succeed: {conclusions}')
           PY
-  dev-android:
-    name: Signed Android dev candidate
-    # The short signed build fits alongside macOS signing preparation after
-    # checks, without occupying a runner polling the gate.
-    needs: [gate, automatic]
+  dev-tail:
+    name: CI Dev signing and sealing
+    needs: [gate, qualification]
     if: >-
-      !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' &&
+      !cancelled() && needs.gate.result == 'success' && needs.qualification.result == 'success' &&
       github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
     permissions:
-      contents: read
-    uses: ./.github/workflows/dev-android.yml
+      contents: write
+    cache-mode: none
+    concurrency:
+      group: ci-main-dev-signing-sealing
+      cancel-in-progress: false
+    uses: ./.github/workflows/ci-dev-tail.yml
+    with:
+      unsigned_release: ${{ needs.qualification.outputs.unsigned_release }}
     secrets:
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
       ANDROID_GOOGLE_SERVICES_JSON: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON }}
-  dev-macos-bundle:
-    name: Parallel unsigned macOS dev bundle
-    if: >-
-      !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' &&
-      github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' && vars.MACOS_CASKS_ENABLED == 'true'
-    uses: ./.github/workflows/macos-bundle.yml
-    with:
-      channel: dev
-  dev-macos:
-    name: Signed macOS dev candidate
-    needs: [gate, automatic, dev-macos-bundle]
-    if: >-
-      !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' && needs.dev-macos-bundle.result == 'success' &&
-      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' && vars.MACOS_CASKS_ENABLED == 'true'
-    uses: ./.github/workflows/macos-cask.yml
-    with:
-      channel: dev
-      reuse_unsigned: true
-      unsigned_release: ${{ needs.dev-macos-bundle.outputs.release }}
-    secrets:
       MACOS_DEVELOPER_ID_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
       MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
       APPLE_NOTARY_API_KEY_P8: ${{ secrets.APPLE_NOTARY_API_KEY_P8 }}
       APPLE_NOTARY_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
       APPLE_NOTARY_API_ISSUER_ID: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
-  dev:
-    name: Verified main dev candidates
-    needs: [gate, automatic, dev-android, dev-macos]
-    # The PR/manual branch is intentionally skipped on main. An explicit status
-    # check avoids inheriting success() over that transitive skipped dependency.
-    if: >-
-      !cancelled() && needs.gate.result == 'success' && needs.automatic.result == 'success' && needs.dev-android.result == 'success' &&
-      (needs.dev-macos.result == 'success' || vars.MACOS_CASKS_ENABLED != 'true' && needs.dev-macos.result == 'skipped') &&
-      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
-    permissions:
-      contents: write
-    uses: ./.github/workflows/dev.yml
-    with:
-      macos: ${{ vars.MACOS_CASKS_ENABLED == 'true' }}
   cache-trim:
     name: Trim superseded caches
-    needs: [automatic]
+    needs: [automatic, qualification]
     # Housekeeping only: a failure never fails the run or holds back Dev.
     if: >-
       always() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') && (!inputs.ref || inputs.ref == github.sha)

@@ -534,21 +534,17 @@ jobs:
           retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
 
   cli:
-    name: CLI (${{ matrix.os }})
+    name: CLI (ubuntu-24.04)
     needs: source
-    if: needs.source.outputs.run_linux == 'true' || needs.source.outputs.run_macos == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ fromJSON(needs.source.outputs.run_linux == 'true' && needs.source.outputs.run_macos == 'true' && '["ubuntu-24.04","macos-15"]' || needs.source.outputs.run_macos == 'true' && '["macos-15"]' || '["ubuntu-24.04"]') }}
-    runs-on: ${{ matrix.os }}
+    if: needs.source.outputs.run_linux == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
       CARGO_TERM_COLOR: always
       HOMEBREW_NO_AUTO_UPDATE: 1
       # Python integration jobs mostly wait on terminals and subprocesses: twice
-      # the 4 (Linux) or 3 (macOS) runner vCPUs.
-      ZERUS_PYTHON_JOBS: ${{ matrix.os == 'macos-15' && 6 || 8 }}
+      # the 4 Linux runner vCPUs.
+      ZERUS_PYTHON_JOBS: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -563,9 +559,6 @@ jobs:
         run: |
           bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/tmux"
           echo "$RUNNER_TEMP/tmux/bin" >> "$GITHUB_PATH"
-      - name: macOS test dependencies
-        if: runner.os == 'macOS'
-        run: brew install tmux python
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -615,6 +608,234 @@ jobs:
           name: cli-results-${{ runner.os }}-${{ runner.arch }}
           path: artifacts/test-results
           retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
+
+  # A completed producer, not an early upload from a still-running CLI job.
+  cli-macos-debug:
+    name: macOS CLI unit and debug build
+    needs: source
+    if: needs.source.outputs.run_macos == 'true'
+    runs-on: macos-15
+    timeout-minutes: 35
+    outputs:
+      artifact_id: ${{ steps.debug-upload.outputs.artifact-id }}
+      manifest_sha256: ${{ steps.seal.outputs.manifest_sha256 }}
+      producer_attempt: ${{ steps.seal.outputs.producer_attempt }}
+      rust_release: ${{ steps.seal.outputs.rust_release }}
+    env:
+      CARGO_TERM_COLOR: always
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - name: macOS test dependencies
+        run: brew install tmux python
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Rust cache identity
+        id: rust
+        run: |
+          echo "rustc=$(rustc -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Restore Rust cache
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}debug
+          restore-keys: |
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}complete
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      - name: Complete original unit, debug and fake-agent builds
+        run: bash scripts/ci/cli.sh debug
+      - name: Seal the tested debug executables and their provenance
+        id: seal
+        run: python3 scripts/ci/macos-debug-artifact.py seal --directory artifacts/mac-cli-debug
+      - name: Publish only the fixed minimal debug handoff
+        id: debug-upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mac-cli-debug-${{ needs.source.outputs.commit }}-a${{ github.run_attempt }}
+          path: |
+            artifacts/mac-cli-debug/hgs
+            artifacts/mac-cli-debug/fake_agent
+            artifacts/mac-cli-debug/manifest.json
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
+      # Save tested unit/debug fingerprints under a separate immutable key;
+      # the core consumer saves its complete build without racing this writer.
+      - name: Save Rust debug cache
+        if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      - name: Retain test logs
+        if: always() && (github.event_name != 'schedule' || failure())
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-debug-results-macOS-${{ runner.arch }}
+          path: artifacts/test-results
+          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
+
+  cli-macos-core:
+    name: macOS CLI integration and release
+    needs: [source, cli-macos-debug]
+    if: >-
+      !cancelled() && needs.source.result == 'success' && needs.source.outputs.run_macos == 'true' && needs.cli-macos-debug.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      CARGO_TERM_COLOR: always
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      ZERUS_PYTHON_JOBS: 6
+      SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
+      MAC_DEBUG_ID: ${{ needs.cli-macos-debug.outputs.artifact_id }}
+      MAC_DEBUG_SHA: ${{ needs.cli-macos-debug.outputs.manifest_sha256 }}
+      MAC_DEBUG_ATTEMPT: ${{ needs.cli-macos-debug.outputs.producer_attempt }}
+      MAC_DEBUG_RUST: ${{ needs.cli-macos-debug.outputs.rust_release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - name: macOS test dependencies
+        run: brew install tmux python
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Admit the completed producer identity before artifact lookup
+        run: |
+          python3 scripts/ci/macos-debug-artifact.py admit --artifact-id "$MAC_DEBUG_ID" \
+            --manifest-sha256 "$MAC_DEBUG_SHA" --producer-attempt "$MAC_DEBUG_ATTEMPT" --rust-release "$MAC_DEBUG_RUST"
+      - name: Download only this completed producer's immutable artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.cli-macos-debug.outputs.artifact_id }}
+          path: ${{ runner.temp }}/mac-cli-debug
+      - name: Select the producer's exact stable Rust release
+        run: rustup toolchain install "$MAC_DEBUG_RUST" --profile minimal && rustup default "$MAC_DEBUG_RUST"
+      - name: Rust cache identity
+        id: rust
+        run: |
+          echo "rustc=$(rustc -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Restore Rust cache
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}complete
+          restore-keys: |
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}debug
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      - name: Verify and publish the exact debug executables
+        run: |
+          python3 scripts/ci/macos-debug-artifact.py install --directory "$RUNNER_TEMP/mac-cli-debug" \
+            --artifact-id "$MAC_DEBUG_ID" --manifest-sha256 "$MAC_DEBUG_SHA" \
+            --producer-attempt "$MAC_DEBUG_ATTEMPT" --rust-release "$MAC_DEBUG_RUST" --check-rust
+      - name: Original smoke, Python integration and release build
+        run: bash scripts/ci/cli.sh remaining
+      - name: Save Rust cache
+        if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      - name: Retain test logs
+        if: always() && (github.event_name != 'schedule' || failure())
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-core-results-macOS-${{ runner.arch }}
+          path: artifacts/test-results
+          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
+
+  cli-macos-native:
+    name: macOS latest real-agent contracts
+    needs: [source, cli-macos-debug]
+    if: >-
+      !cancelled() && needs.source.result == 'success' && needs.source.outputs.run_macos == 'true' && needs.cli-macos-debug.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 35
+    cache-mode: none
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
+      MAC_DEBUG_ID: ${{ needs.cli-macos-debug.outputs.artifact_id }}
+      MAC_DEBUG_SHA: ${{ needs.cli-macos-debug.outputs.manifest_sha256 }}
+      MAC_DEBUG_ATTEMPT: ${{ needs.cli-macos-debug.outputs.producer_attempt }}
+      MAC_DEBUG_RUST: ${{ needs.cli-macos-debug.outputs.rust_release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - name: macOS test dependencies
+        run: brew install tmux python
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Admit the completed producer identity before artifact lookup
+        run: |
+          python3 scripts/ci/macos-debug-artifact.py admit --artifact-id "$MAC_DEBUG_ID" \
+            --manifest-sha256 "$MAC_DEBUG_SHA" --producer-attempt "$MAC_DEBUG_ATTEMPT" --rust-release "$MAC_DEBUG_RUST"
+      - name: Download only this completed producer's immutable artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.cli-macos-debug.outputs.artifact_id }}
+          path: ${{ runner.temp }}/mac-cli-debug
+      - name: Verify and publish the exact debug executables
+        run: |
+          python3 scripts/ci/macos-debug-artifact.py install --directory "$RUNNER_TEMP/mac-cli-debug" \
+            --artifact-id "$MAC_DEBUG_ID" --manifest-sha256 "$MAC_DEBUG_SHA" \
+            --producer-attempt "$MAC_DEBUG_ATTEMPT" --rust-release "$MAC_DEBUG_RUST"
+      - name: Keyless latest Codex, Claude Code and OpenCode compatibility
+        run: python3 scripts/ci/agent-compatibility.py --hgs "$GITHUB_WORKSPACE/target/debug/hgs"
+      - name: Retain test logs
+        if: always() && (github.event_name != 'schedule' || failure())
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-native-results-macOS-${{ runner.arch }}
+          path: artifacts/test-results
+          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
+
+  cli-macos:
+    # Preserve the public historical full-suite admission name.
+    name: CLI (macos-15)
+    needs: [source, cli-macos-debug, cli-macos-core, cli-macos-native]
+    if: always() && needs.source.outputs.run_macos == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    cache-mode: none
+    env:
+      RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          expected = {'source', 'cli-macos-debug', 'cli-macos-core', 'cli-macos-native'}
+          if set(results) != expected or any(row['result'] != 'success' for row in results.values()):
+              raise SystemExit('The selected macOS CLI producer, integration/release and native jobs must all succeed.')
+          PY
 
   # Compiler caches use one entry per saving run and restore the newest by
   # prefix. A save follows a successful build that compiled something, keeping
@@ -1174,12 +1395,12 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, quick, relay, connector, connector-macos, ios, android, cli, arch, arch-package, mac-desktop, windows-desktop, windows-host]
+    needs: [source, quick, relay, connector, connector-macos, ios, android, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch, arch-package, mac-desktop, windows-desktop, windows-host]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       RESULTS: ${{ toJSON(needs) }}
-      RUN_CLI: ${{ needs.source.outputs.run_linux == 'true' || needs.source.outputs.run_macos == 'true' }}
+      RUN_LINUX: ${{ needs.source.outputs.run_linux == 'true' }}
       RUN_ARCH: ${{ needs.source.outputs.run_arch == 'true' }}
       RUN_MACOS: ${{ needs.source.outputs.run_macos == 'true' }}
       RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}
@@ -1195,7 +1416,11 @@ jobs:
               'relay': True,
               'connector': True,
               'android': True,
-              'cli': json.loads(os.environ['RUN_CLI']),
+              'cli': json.loads(os.environ['RUN_LINUX']),
+              'cli-macos-debug': json.loads(os.environ['RUN_MACOS']),
+              'cli-macos-core': json.loads(os.environ['RUN_MACOS']),
+              'cli-macos-native': json.loads(os.environ['RUN_MACOS']),
+              'cli-macos': json.loads(os.environ['RUN_MACOS']),
               'arch': json.loads(os.environ['RUN_ARCH']),
               'arch-package': json.loads(os.environ['RUN_ARCH']),
               'mac-desktop': json.loads(os.environ['RUN_MACOS']),

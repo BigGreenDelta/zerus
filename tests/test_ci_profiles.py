@@ -235,17 +235,18 @@ class DeliveryGraph(unittest.TestCase):
 
     def test_unsigned_mac_can_overlap_checks_but_signing_requires_both_successes(self):
         ci = (ROOT / '.github/workflows/ci.yml').read_text()
+        qualification = (ROOT / '.github/workflows/ci-dev-qualification.yml').read_text()
         helper = security.WorkflowSecurityTests()
-        pending = {'gate': 'failure', 'automatic': 'failure', 'dev-macos-bundle': 'success'}
-        self.assertTrue(helper.dev_selected(ci, 'dev-macos-bundle', pending))
-        self.assertFalse(helper.dev_selected(ci, 'dev-macos', pending))
+        pending = {'gate': 'failure', 'qualification': 'failure'}
+        self.assertTrue(helper.dev_selected(qualification, 'bundle', {}))
+        self.assertFalse(helper.dev_selected(ci, 'dev-tail', pending))
         passed = dict.fromkeys(pending, 'success')
-        self.assertTrue(helper.dev_selected(ci, 'dev-macos', passed))
+        self.assertTrue(helper.dev_selected(ci, 'dev-tail', passed))
         for name in passed:
             for result in ('failure', 'cancelled', 'skipped'):
                 with self.subTest(name=name, result=result):
-                    self.assertFalse(helper.dev_selected(ci, 'dev-macos', {**passed, name: result}))
-        unsigned = job(ci, 'dev-macos-bundle')
+                    self.assertFalse(helper.dev_selected(ci, 'dev-tail', {**passed, name: result}))
+        unsigned = job(qualification, 'bundle')
         self.assertNotIn('secrets', unsigned)
         self.assertNotIn('needs:', unsigned)
         bundle = (ROOT / '.github/workflows/macos-bundle.yml').read_text()
