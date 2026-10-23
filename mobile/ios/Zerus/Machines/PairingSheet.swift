@@ -35,7 +35,7 @@ struct PairingSheet: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 } footer: {
-                    Text("The gateway can read relayed messages. Credentials and drafts stay encrypted on this phone.")
+                    Text(WorkspaceProtocol.encryptedInvitationCode(code) ? "Messages are encrypted between enrolled devices. The computer that executes a request can read its content." : "Legacy invitations trust the relay with relayed content. Use a new phone invitation from an enrolled computer for encrypted transport.")
                 }
             }
             .navigationTitle("Pair a workspace")

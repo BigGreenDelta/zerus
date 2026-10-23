@@ -7,6 +7,7 @@
 #include "UpdatesWidget.h"
 #include "RelaySettings.h"
 #include "WindowsMobileSettings.h"
+#include "WorkspaceSettings.h"
 #include "MobileDeliverySettings.h"
 #include "DownloadCacheSettings.h"
 #include "AutomaticApprovalSettings.h"
@@ -23,6 +24,7 @@
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QUrl>
+#include <QToolButton>
 #include "ProcessSettings.h"
 #include "QuestionNotificationSettings.h"
 #include "UiLanguage.h"
@@ -119,11 +121,17 @@ public:
         auto *updates=makePage(tr("Updates"));updates->addWidget(new UpdatesWidget);updates->addStretch();
         // This computer's connector configuration, then the timing every computer and the phone share.
         auto *mobile=new QWidget;mobile->setMaximumWidth(850);auto *mobileLayout=new QVBoxLayout(mobile);mobileLayout->setContentsMargins(0,0,0,0);mobileLayout->setSpacing(28);
+        workspaceConnection=new WorkspaceSettings::Panel(executable);mobileLayout->addWidget(workspaceConnection);
+        auto *legacyToggle=new QToolButton;legacyToggle->setText(tr("Advanced: legacy connector configuration"));legacyToggle->setCheckable(true);legacyToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);legacyToggle->setArrowType(Qt::RightArrow);legacyToggle->setEnabled(false);mobileLayout->addWidget(legacyToggle,0,Qt::AlignLeft);
+        auto *legacy=new QWidget;auto *legacyLayout=new QVBoxLayout(legacy);legacyLayout->setContentsMargins(0,0,0,0);
 #ifdef Q_OS_WIN
-        mobileLayout->addWidget(new WindowsMobileSettings::Panel);
+        legacyLayout->addWidget(new WindowsMobileSettings::Panel);
 #else
-        mobileLayout->addWidget(new RelaySettings::Panel);
+        legacyLayout->addWidget(new RelaySettings::Panel);
 #endif
+        legacy->setEnabled(false);legacy->hide();mobileLayout->addWidget(legacy);
+        connect(legacyToggle,&QToolButton::toggled,this,[legacy,legacyToggle](bool show){legacy->setVisible(show);legacyToggle->setArrowType(show?Qt::DownArrow:Qt::RightArrow);});
+        workspaceConnection->protectionChanged=[legacy,legacyToggle](bool encrypted){legacy->setEnabled(!encrypted);legacyToggle->setEnabled(!encrypted);if(encrypted){legacyToggle->setChecked(false);legacy->hide();}};
         mobileLayout->addWidget(new PhonePairing::Panel(executable));mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
         files=new DownloadCacheSettings;addPage(files);
         approvalSection=pages->count();approvals=new AutomaticApprovalSettings(executable);addPage(approvals);
@@ -147,17 +155,17 @@ public:
     void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);analytics->setPeers(peers);}
     // A control-only computer keeps no recovery policy of its own.
     void setLocalSessions(bool enabled,bool offered=false){sync->setLocalSessions(enabled);sync->setLocalSessionsOffered(offered);}
-    // Hide the page only where this build offers no mobile gateway. Preserve indices.
+    // Workspace enrollment is available before a local gateway starts.
     void setMobileGateway(bool gateway){
-        nav->item(5)->setHidden(!gateway);
-        if(!gateway&&nav->currentRow()==5)nav->setCurrentRow(0);
+        Q_UNUSED(gateway); // Enrollment is available before a gateway starts.
+        nav->item(5)->setHidden(false);
     }
     void openUpdates(){nav->setCurrentRow(4);}
     void openAbout(){nav->setCurrentRow(aboutSection);}
     void openKeyboard(){nav->setCurrentRow(keyboardSection);}
     void openRecovery(){nav->setCurrentRow(2);sync->refresh();}
     void setWindowLayerState(bool on,bool enabled,const QString &hint){const QSignalBlocker block(onTop);onTop->setChecked(on);onTop->setEnabled(enabled);onTopHint->setText(hint);}
-    void refresh(){sync->refresh();mobileDelivery->refresh();if(nav->currentRow()==aboutSection)refreshCliVersion();if(nav->currentRow()==speechSection)speech->refresh();if(nav->currentRow()==analyticsSection)analytics->refresh();}
+    void refresh(){sync->refresh();mobileDelivery->refresh();if(nav->currentRow()==5)workspaceConnection->refresh();if(nav->currentRow()==aboutSection)refreshCliVersion();if(nav->currentRow()==speechSection)speech->refresh();if(nav->currentRow()==analyticsSection)analytics->refresh();}
     void setSwarmSnapshot(const QJsonObject &snapshot){mobileDelivery->setSwarmSnapshot(snapshot);}
     // Activity's column edges and menu change the same preference.
     void syncActivityWidth(){
@@ -176,6 +184,7 @@ public:
 private:
     void refreshCliVersion(){cliVersion->setText(tr("hgs CLI: checking…"));versionClient->requestVersion();}
     HgsClient *versionClient;QLabel *cliVersion;MobileDeliverySettings *mobileDelivery;
+    WorkspaceSettings::Panel *workspaceConnection;
     SpeechSettings *speech;
     DownloadCacheSettings *files;
     AutomaticApprovalSettings *approvals;

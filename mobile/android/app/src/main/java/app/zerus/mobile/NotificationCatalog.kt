@@ -78,7 +78,8 @@ object NotificationCatalogParser {
                 session.none { Character.isISOControl(it) } && at.isFinite() && at > 0)
             val kind = row.getString("kind")
             // Unknown alert kinds stay plain refresh rows instead of failing the page.
-            NotificationEvent(id, computer, session, kind, at, row.string("alert_kind").takeIf { kind == "alert" && it in alertKinds })
+            NotificationEvent(id, computer, session, kind, at, row.string("alert_kind").takeIf { kind == "alert" && it in alertKinds },
+                row.string("native_reply_id").takeIf { it.toByteArray(Charsets.UTF_8).size in 1..256 && it.none(Char::isISOControl) })
         }.also { events -> require(events.zipWithNext().all { (a, b) -> a.id < b.id }) }
     }
 }

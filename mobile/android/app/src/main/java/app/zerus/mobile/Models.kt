@@ -5,7 +5,9 @@ import org.json.JSONObject
 import java.net.URI
 import java.util.UUID
 
-data class Connection(val id: String, val label: String, val url: String, val token: String) {
+data class Connection(val id: String, val label: String, val url: String, val token: String, val protocolVersion: Int = 1) {
+    init { require(protocolVersion in setOf(1,2)) { "Unsupported workspace transport." } }
+    override fun toString() = "Connection(id=$id, protocolVersion=$protocolVersion)"
     val endpoint: String get() = ManagedRelay.transport(url)
     val displayName: String get() = if (label.isBlank() || runCatching { UUID.fromString(label) }.isSuccess ||
         endpoint != url && label.equals(runCatching { URI(url).host }.getOrNull(),ignoreCase=true))

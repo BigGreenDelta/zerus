@@ -1,6 +1,7 @@
 # Rust relay runtime
 
-`zerus-relay` is the standalone server for Zerus mobile API v1. It runs on the newest
+`zerus-relay` is the standalone server for Zerus mobile API v1 and the opt-in
+encrypted workspace API v2. It runs on the newest
 stable Rust, Tokio, Axum/Hyper and SQLx. PostgreSQL serves multiple workers;
 SQLite is an exclusive local backend. The production image contains the Rust
 binary and its system libraries, without Python. The Python outbound connector
@@ -21,7 +22,8 @@ cargo +1.99.1 test --locked
 relay to the Rust contract or other test that replaces it.
 
 The server is the default `server` feature. Without it the library is only the
-API v1 codec (`json`), envelope validation (`protocol`) and `error`, with none
+API v1 codec (`json`), envelope validation (`protocol`), pure notification policy
+(`alerts`) and `error`, with none
 of the HTTP, database or TLS crates, for the outbound connector:
 
 ```sh
@@ -38,10 +40,124 @@ relay. After a reviewed change to the validation or to a vector submission,
 `ZERUS_BLESS=1 cargo +1.99.1 test --locked --test vectors` rewrites only that
 column; then run `capture.py --check`.
 
-The image and the infra packager copy only `Cargo.toml`, `Cargo.lock`, `.cargo`
-and `src/**/*.rs|*.sql`, so the crate has no build script, declared test target,
-path dependency or include from outside `src/`
-([the source check](../../../tests/test_source_relay_inputs.py)).
+The Docker build context is `services/mobile/`. It copies `relay/Cargo.toml`,
+`relay/Cargo.lock`, `relay/.cargo` and `relay/src/`, plus the sibling
+`crypto/Cargo.toml` and `crypto/src/`. The relay's only permitted production path
+dependency is `../crypto`; neither crate has a build script or production include
+outside its source tree ([the source check](../../../tests/test_source_relay_inputs.py)).
+An external infra packager must preserve this exact `relay/` + `crypto/` sibling
+layout before rollout; the previous relay-only source bundle cannot build v2.
+These source changes have not deployed or migrated any live gateway.
+
+### Opt-in public encrypted workspaces
+
+`public_enrollment` defaults to `false`, preserving legacy limits and memory
+behavior. Public mode requires `large_payload_slots >= 2`, at least two
+authenticated requests, polls and small responses, and `pool_max >= 6`. Declare
+all worker limits consistently: startup pins the shared lane totals and rejects
+workers with incompatible limits or a public database reopened in legacy mode.
+`team_reserved_percent` defaults to 25; validation rejects configurations whose
+ordinary fraction cannot admit a maximum encrypted request/spool or leaves no
+ordinary database slot. A minimal qualified heavy-work configuration uses two
+declared slots: one ordinary and one reserved. This does not add slots beyond
+the declared total or preempt accepted native work.
+
+`max_spool_bytes` bounds disk-backed response files, defaulting to the unchanged
+legacy 64 MiB. Public mode requires both its ordinary and reserved fractions to
+fit a 41 MiB maximum response: at a 25% reservation explicitly configure
+`max_spool_bytes: 171966464` (164 MiB). The private spool directory must reside on
+disk, with that declared capacity available. It does not increase resident memory
+or the two declared heavy-work slots. Enabling public mode with defaults alone
+is rejected; operators must deliberately provision and qualify these limits.
+
+Only the local operator command assigns a workspace's service class:
+
+```sh
+zerus-relay --config /private/relay.json service-class --workspace UUID --class team
+```
+
+Shared database leases reserve admission for requests, polls, body bytes, heavy
+payloads, response spools, CPU work, payload database connections and push sends.
+Ordinary work cannot consume the team fraction. Four connections within the
+declared `pool_max` are partitioned into ordinary and team authentication/control
+pools of two each; payload work uses the remainder. The existing PostgreSQL
+LISTEN connection remains separate. Each worker preloads at most 4096 active
+operator-assigned team credential **hashes** before listening and refreshes the
+bounded cache every two seconds. A hash match chooses the reserved lookup pool;
+the lookup still checks the live credential, revocation and actual workspace
+class. Cache staleness never grants authorization. Raising a class on another
+worker converges within that interval. Protect database/storage capacity and
+network bandwidth separately; admission reservations do not establish a latency
+SLA or permit canceling already accepted work.
+
+API v2 transports signed public membership and opaque ciphertext. Devices create
+their own independent signing/encryption keys and service bearer. The invitation
+secret remains solely in copied typed codes and endpoint private storage. The
+relay never receives a secret or secret verifier. An online enrolled computer
+verifies the exact candidate's secret proof locally and signs its admission.
+Joining grants whole-workspace phone access. No endpoint joins an arbitrary
+workspace ID or accepts client-selected priority.
+
+| Endpoint | Contract |
+| --- | --- |
+| `GET /v2/capabilities` | Service capabilities and fixed ciphertext limits; no account required. |
+| `POST /v2/workspaces` | `{membership,service_token}` signed founder genesis; exact body/token retry recovers Create. |
+| `POST /v2/node/invitations` | `{invitation_id,purpose,expires_at,bootstrap}`; typed computer/phone purpose and issuer-signed pinned roster. |
+| `POST /v2/enrollments` | `{candidate,service_token}`; pending until issuer approval, exact retry preserves identity. |
+| `GET /v2/enrollments/{device_id}` | Candidate bearer recovers `{state,enrollment,bootstrap,membership_head,membership_revision}`. |
+| `GET /v2/node/enrollments` | Bounded issuer candidate page; `after` and `limit <= 100`. |
+| `POST /v2/node/enrollments/{device_id}/approve` | `{enrollment}` signed approval binding the exact candidate and linear membership successor. |
+| `GET /v2/membership`, `GET /v2/node/membership` | Ordered signed history page, `after=-1`, `limit<=100`; response `changes`, head/revision, `next_after`. |
+| `POST /v2/node/membership` | `{membership}` signed Revoke with CAS against the prior signed head. |
+| `DELETE /v2/node/self` | Signed self-Revoke; a retired bearer can recover only the exact accepted retirement. |
+| `POST /v2/node/routes` | `{routes:[{route_id,computer_id}]}` complete manifest, at most 256 routes; omitted routes are withdrawn. |
+| `GET /v2/node/routes`, `DELETE /v2/node/routes/{route_id}` | Bounded metadata/recovery and explicit withdrawal. Route IDs permanently bind their native computer UUID. |
+| `POST /v2/node/snapshot` | `{computer_id,envelope}` encrypted separately for each phone and route. |
+| `GET /v2/computers` | Stable `(computer_id,gateway_id,route_id)` pages; receiver-specific ciphertext, at most 2 MiB ciphertext/page. |
+| `POST /v2/requests`, `GET /v2/requests/{id}` | `{envelope}` submission and permanent no-replay receipt with encrypted result in `envelope`. |
+| `GET /v2/node/requests` | Claims at most one encrypted request; optional `wait <= 25` seconds. |
+| `POST /v2/node/requests/{id}/result` | `{envelope}` immutable signed encrypted outcome. Outer completion is not an authenticated native result. |
+| `POST /v2/node/signals` | Bounded generic scope/change IDs, presence (including explicit `null`) and existing delivery enum; no native names. |
+| `GET /v2/events` | Ordered generic hints with `id,computer_id,kind,scope_id,alert_kind,created_at`; phones refresh authenticated private content. |
+| `POST /v2/push`, `DELETE /v2/push` | Existing bounded provider registration/removal and generic wake delivery. |
+
+An optional `complete_route` UUID on `node/signals` declares the entire current
+active signal set for that route (at most 1000). Omitted scopes become inactive
+atomically; reactivation resets delivery even with the same opaque change ID.
+Explicit `presence:null` clears the route's remembered presence and retains the
+existing unknown-presence delivery policy. Withdrawal/revocation removes held
+hints and recipient snapshots. Phone Forget erases local keys; a global removal
+requires an enrolled computer's signed Revoke.
+
+All v2 identities are permanent no-replay receipts, including outer read hints;
+expiry clears ciphertext without restoring execution authority. Bodies are
+stored in bounded 1 MiB database chunks to avoid whole-envelope SQL buffers.
+Each first receipt identity and immutable route binding retains a permanent
+1 KiB metadata charge within the existing workspace/shard byte budgets, including
+after cleanup, withdrawal or revocation. Each retained generic hint row also
+charges 1 KiB, released only when that row is actually deleted. Exact retries
+and coalescing never charge twice. Startup adopts older unbilled records in
+indexed pages of 256 before serving; real historical usage may exceed a limit,
+in which case new admission fails closed. Adoption neither removes identities
+nor raises quotas. Enrollment, bootstrap and signed membership bytes remain
+charged separately, and bounded event/push counts retain their class reserves.
+Frozen ciphertext may refer to a verified same-branch historical head while its
+sender and recipient remain currently active with identical keys. Revoked node
+bearers can read signed public history only through their own tombstone, allowing
+endpoint verification of retirement; they cannot read private payloads or make
+new changes. Activated v2 credentials cannot upload or retrieve private v1
+payloads. Legacy retirement is additive: `DELETE /v1/node/self {request_id:UUID}`
+returns `{retired:true,request_id,node_id}`. Only the same retired credential and
+exact saved UUID can recover that single receipt; queued work fails and claimed
+work becomes uncertain, without native replay or local journal deletion.
+
+The fixed envelope suite and canonical framing live in
+[`../crypto`](../crypto/README.md); the relay does not hold private keys. A
+request HTTP body is at most 41 MiB (29 MiB crypto plaintext), result/snapshot
+bodies at most 2 MiB, and catalog HTTP responses at most 3 MiB. Public enrollment
+and bootstrap/history pages have independent smaller bounds. Whole-workspace
+membership has bounded immutable device identities and revoked-ID tombstones;
+signed history is paged and never replaced by an unsigned relay roster.
 
 ### PostgreSQL tests
 
@@ -509,6 +625,27 @@ completed and recovered by its receipt. The harness also requires resting RSS
 below 64 MiB to catch retained payload/driver allocations. Health samples are
 local observations during these short probes, not a latency SLO or a throughput
 benchmark; RSS and cgroup accounting include different kinds of memory.
+
+Public mode has a separate owned-container qualification:
+
+```sh
+python tests/public_load.py --image zerus-relay-contract --repeats 5
+```
+
+It creates synthetic device keys and maximum 29 MiB plaintext envelopes outside
+the relay cgroup, enrolls ordinary/team workspaces through v2, and assigns team
+class through the local operator CLI. It overlaps ordinary maximum uploads with
+reserved team uploads, verifies overload/signature/syntax refusals, concurrently
+claims maximum envelopes, posts encrypted results and proves exact retries never
+claim again. Both relay and its separate PostgreSQL container keep 256 MiB
+memory/swap limits; PostgreSQL data/WAL and response spools use disposable disk
+volumes. Relay declares two heavy slots, ten database connections (ordinary/team
+control two each, payload six), and an explicit 164 MiB disk-spool budget.
+The harness checks actual `memory.peak`, zero `memory.events` OOMs and resting RSS
+below 64 MiB, reports the exact image/binary hashes, and removes all fixtures.
+These short probes establish bounded maximum-envelope handling and reserved
+admission only; they do not qualify fleet throughput, a network bandwidth SLA or
+external PostgreSQL/storage saturation.
 
 Historical Python measurements are in `docs/relay-architecture.md`. This Rust
 migration does not certify the 10,000-computer/50,000-phone planning target.

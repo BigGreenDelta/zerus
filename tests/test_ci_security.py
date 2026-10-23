@@ -579,6 +579,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         postgres = [step for step in steps(relay) if "ZERUS_RELAY_TEST_DATABASE_URL" in step]
         self.assertEqual([re.match(r"      - name: (.*)", step)[1] for step in postgres],
                          ["Rust format, lint and PostgreSQL storage contracts",
+                          "Encrypted endpoint protocol and workspace contracts",
                           "Released HTTP and outbound connector compatibility"])
         for step in postgres:
             self.assertIn("\n        env:\n          ZERUS_RELAY_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:"
@@ -587,15 +588,17 @@ class WorkflowSecurityTests(unittest.TestCase):
         for contract in ("", " --test contracts postgres_cross_worker -- --ignored"):
             self.assertIn(f"\n          cargo +1.99.1 test --locked{contract}\n", postgres[0])
         self.assertIn('\n          "$RUNNER_TEMP/relay-venv/bin/python" -m unittest discover -s services/mobile/tests'
-                      " -p 'test_[!b]*.py' -v\n", postgres[1])
+                      " -p 'test_[!b]*.py' -v\n", postgres[-1])
         # The end-to-end suites also run the Rust connector, built beside the relay.
         build = ("\n          cargo +1.99.1 build --locked --manifest-path services/mobile/connector/Cargo.toml"
                  " --target-dir services/mobile/relay/target\n")
         export = ('\n          export ZERUS_CONNECTOR_E2E_COMMAND="$GITHUB_WORKSPACE/services/mobile/relay/target/debug/'
                   'zerus-mobile-connector"\n')
-        self.assertIn(build, postgres[1])
-        self.assertLess(postgres[1].index(build), postgres[1].index(export))
-        self.assertLess(postgres[1].index(export), postgres[1].index("-p 'test_[!b]*.py'"))
+        self.assertIn(build, postgres[-1])
+        self.assertLess(postgres[-1].index(build), postgres[-1].index(export))
+        self.assertLess(postgres[-1].index(export), postgres[-1].index("-p 'test_[!b]*.py'"))
+        self.assertIn("cargo +1.99.1 test --locked --manifest-path services/mobile/crypto/Cargo.toml",postgres[1])
+        self.assertIn("cargo +1.99.1 test --locked --manifest-path services/mobile/workspace-tests/Cargo.toml",postgres[1])
 
     def test_connector_job_runs_the_black_box_suites_against_both_connectors(self):
         connector = job((ROOT / ".github/workflows/checks.yml").read_text(), "connector")

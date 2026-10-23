@@ -16,6 +16,7 @@ import javax.crypto.spec.GCMParameterSpec
 class PrivateStore(context: Context) {
     private val notificationContext = context.applicationContext
     private val preferences = context.getSharedPreferences("zerus_private", Context.MODE_PRIVATE)
+    internal val workspaceJournal by lazy { AndroidWorkspaceJournal(context.applicationContext) }
     companion object { private val keyCreationLock=Any(); internal val notificationLock=Any(); private val pushLock=Any() }
     private val key: SecretKey by lazy { synchronized(keyCreationLock) {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -40,10 +41,24 @@ class PrivateStore(context: Context) {
             "Could not save private state. Message was not sent."
         }
     }
-    fun connections() = read("computers").objects().map { Connection(it.getString("id"), it.getString("label"), it.getString("url"), it.getString("token")) }
-    fun saveConnections(computers: List<Connection>) = synchronized(pushLock) { write("computers", JSONArray(computers.map {
-        JSONObject().put("id", it.id).put("label", it.label).put("url", it.url).put("token", it.token)
-    })) }
+    fun connections():List<Connection> {
+        val current=preferences.contains("connections_v2")
+        val records=if(current) {
+            val index=read("connections_v2").getJSONObject(0)
+            WorkspaceProtocol.exactFields(index,setOf("version","connections"));require(WorkspaceProtocol.number(index,"version")==2L)
+            index.getJSONArray("connections")
+        } else read("computers")
+        return records.objects().also { require(it.size==records.length()) }.map {
+        require(!current || it.has("protocol_version")) { "Workspace transport marker is missing." }
+        val version = if(it.has("protocol_version")) WorkspaceProtocol.number(it,"protocol_version").also { n -> require(n in 1L..2L) }.toInt() else 1
+        require(current || version==1) { "Protected credentials cannot be loaded from the legacy index." }
+        Connection(it.getString("id"), it.getString("label"), it.getString("url"), it.getString("token"),version)
+        }.also { require(it.map { row -> row.id }.toSet().size==it.size) }
+    }
+    // Never put protected credentials in the legacy index: an older app ignores new fields.
+    fun saveConnections(computers: List<Connection>) = synchronized(pushLock) { write("connections_v2", JSONArray().put(JSONObject().put("version",2).put("connections",JSONArray(computers.map {
+        JSONObject().put("id", it.id).put("label", it.label).put("url", it.url).put("token", it.token).put("protocol_version",it.protocolVersion)
+    })))) }
     fun messageState(): MessageState = if (preferences.contains("message_state"))
         MessageCodec.state(read("message_state").getJSONObject(0))
     else MessageState(read("drafts").objects().map(MessageCodec::draft))

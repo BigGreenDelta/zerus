@@ -52,7 +52,6 @@ object SessionNotifications {
     private val locks = ConcurrentHashMap<String, Mutex>()
     private val delivery = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val api = RelayApi()
     private var lastPost = -1L
     private var migrated = false
 
@@ -107,7 +106,7 @@ object SessionNotifications {
         it.id == connection.id && it.url == connection.url && it.token == connection.token
     }
 
-    private suspend fun presenceAlerts(connection: Connection): Boolean? =
+    private suspend fun presenceAlerts(api:RelayApi,connection: Connection): Boolean? =
         notificationPresenceMode { api.capabilities(connection) }
 
     /** true means durable work remains; the worker retries instead of replacing itself. */
@@ -115,6 +114,7 @@ object SessionNotifications {
         locks.getOrPut(connection.id) { Mutex() }.withLock {
             channels(context)
             val store = PrivateStore(context)
+            val api=RelayApi(workspace=store.workspaceJournal)
             var state = store.notificationState(connection.id)
             var force = forceCatalog
             var operations = 0
@@ -137,7 +137,7 @@ object SessionNotifications {
                     if (!capabilitiesChecked) {
                         capabilitiesChecked = true
                         operations++
-                        presenceAlerts(connection)?.let { state = state.copy(presenceAlerts = it) }
+                        presenceAlerts(api,connection)?.let { state = state.copy(presenceAlerts = it) }
                     }
                     val raw = api.computers(connection).getJSONArray("computers").objects()
                     operations++

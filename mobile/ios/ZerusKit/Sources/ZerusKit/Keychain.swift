@@ -93,14 +93,28 @@ public protocol ConnectionStore: Sendable {
 /// The whole list is one Keychain item, so pairing and disconnect replace it atomically.
 public struct KeychainConnectionStore: ConnectionStore {
     let account: String
-    public init(account: String = "connections-v1") { self.account = account }
+    let legacyAccount: String
+    public init(account: String = "connections-v2", legacyAccount: String = "connections-v1") { self.account = account; self.legacyAccount = legacyAccount }
     public func load() throws -> [Connection] {
-        guard let data = try Keychain.read(account) else { return [] }
-        return try JSONDecoder().decode([Connection].self, from: data)
+        if let data = try Keychain.read(account) {
+            guard let json = try JSON.parse(data).object, let rows = json["connections"]?.array,
+                  rows.allSatisfy({ row in if case .int(let value)? = row["protocolVersion"] { return value == 1 || value == 2 }; return false }) else {
+                throw ZerusError.invalid("Workspace transport marker is missing or invalid.")
+            }
+            let index = try JSONDecoder().decode(ConnectionIndex.self, from: data)
+            guard index.version == 2, Set(index.connections.map(\.id)).count == index.connections.count else { throw ZerusError.invalid("Unsupported workspace index.") }
+            return index.connections
+        }
+        guard let data = try Keychain.read(legacyAccount) else { return [] }
+        let legacy = try JSONDecoder().decode([Connection].self, from: data)
+        guard legacy.allSatisfy({ $0.protocolVersion == 1 }) else { throw ZerusError.invalid("Protected credentials cannot be loaded from the legacy index.") }
+        return legacy
     }
     public func save(_ connections: [Connection]) throws {
-        try Keychain.write(account, try JSONEncoder().encode(connections))
+        // An old client ignores new fields, so protected credentials never enter its item.
+        try Keychain.write(account, try JSONEncoder().encode(ConnectionIndex(version: 2, connections: connections)))
     }
+    struct ConnectionIndex: Codable { let version: Int; let connections: [Connection] }
 }
 
 public final class InMemoryConnectionStore: ConnectionStore {

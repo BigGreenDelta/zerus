@@ -39,7 +39,9 @@ pub fn report(
         findings.extend(file);
         let value = config::parse(&text)?;
         findings.extend(config::findings(&value, allow_insecure_localhost));
-        config::validate(&value, allow_insecure_localhost, environment)
+        let mut validated = config::validate(&value, allow_insecure_localhost, environment)?;
+        config::bind_workspace(&mut validated, path)?;
+        Ok(validated)
     });
     let refusal = findings
         .iter()
@@ -63,6 +65,9 @@ pub fn report(
     configuration.insert("findings".into(), Value::Array(listed));
     let mut report = Map::new();
     if let Ok(config) = &validated {
+        if config.encrypted_workspace.is_some() {
+            configuration.insert("encrypted_workspace".into(), json!(true));
+        }
         for (key, value) in [
             ("server_url", json!(config.server_url)),
             ("identity_url", json!(config.identity_url)),

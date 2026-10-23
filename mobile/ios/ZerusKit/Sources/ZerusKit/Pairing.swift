@@ -40,10 +40,11 @@ public enum ManagedRelay {
 }
 
 /// Presentation-only invitation. Neither parsing nor scanning performs network activity.
-public struct PairingInvite: Hashable, Sendable {
+public struct PairingInvite: Hashable, Sendable, CustomDebugStringConvertible {
     public static let maxLength = 4096
     public let server: String
     public let code: String
+    public var debugDescription: String { "PairingInvite(redacted)" }
 
     public init(server: String, code: String) {
         self.server = server
@@ -65,13 +66,16 @@ public struct PairingInvite: Hashable, Sendable {
                   key == "server" || key == "code", fields[key] == nil else { return nil }
             fields[key] = decoded
         }
-        guard let code = fields["code"], (16...128).contains(code.count),
-              code.unicodeScalars.allSatisfy({ ("A"..."Z").contains($0) || ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "-" || $0 == "_" }),
-              let server = fields["server"], server.count <= 2048,
+        guard let code = fields["code"], let server = fields["server"], server.count <= 2048,
               !server.unicodeScalars.contains(where: { $0.properties.isWhitespace || isISOControl($0) || $0 == "\u{FFFD}" }),
               let normalized = try? EndpointPolicy.normalize(server),
               let endpoint = URLComponents(string: normalized),
               endpoint.port == nil || (1...65535).contains(endpoint.port!) else { return nil }
+        if WorkspaceProtocol.encryptedInvitationCode(code) {
+            guard (try? WorkspaceInvitation.parse(code)) != nil else { return nil }
+        } else {
+            guard (16...128).contains(code.count), code.unicodeScalars.allSatisfy({ ("A"..."Z").contains($0) || ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "-" || $0 == "_" }) else { return nil }
+        }
         return PairingInvite(server: ManagedRelay.transport(normalized), code: code)
     }
 

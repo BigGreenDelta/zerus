@@ -46,6 +46,8 @@ pub struct Config {
     pub max_polls_per_workspace: i64,
     pub max_polls_global: usize,
     pub max_small_responses: usize,
+    /// Disk-backed response spools, independently bounded from resident bodies.
+    pub max_spool_bytes: usize,
     pub max_catalog_bytes: usize,
     pub max_rate_entries_authenticated: i64,
     pub max_rate_entries_anonymous: i64,
@@ -53,6 +55,11 @@ pub struct Config {
     pub maintenance_batch: i64,
     pub max_connections: usize,
     pub shutdown_timeout: u64,
+    /// Public enrollment is opt-in; legacy installations retain their limits.
+    pub public_enrollment: bool,
+    pub max_public_workspaces: i64,
+    /// Fraction of every bounded transport lane unavailable to standard work.
+    pub team_reserved_percent: usize,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -87,6 +94,7 @@ impl Default for Config {
             max_polls_per_workspace: 32,
             max_polls_global: 256,
             max_small_responses: 8,
+            max_spool_bytes: 64 * 1024 * 1024,
             max_catalog_bytes: 1024 * 1024,
             max_rate_entries_authenticated: 100000,
             max_rate_entries_anonymous: 10000,
@@ -94,10 +102,42 @@ impl Default for Config {
             maintenance_batch: 256,
             max_connections: 1024,
             shutdown_timeout: 40,
+            public_enrollment: false,
+            max_public_workspaces: 10000,
+            team_reserved_percent: 25,
         }
     }
 }
 impl Config {
+    /// Two bounded connections for each authentication/control class. Public
+    /// payload connections share the remaining declared pool capacity.
+    pub fn payload_pool_max(&self) -> u32 {
+        if self.public_enrollment {
+            self.pool_max.saturating_sub(4)
+        } else {
+            self.pool_max
+        }
+    }
+    pub fn service_lanes(&self) -> [(&'static str, usize); 9] {
+        [
+            ("request", self.max_authenticated_requests),
+            ("poll", self.max_polls_global),
+            ("body", self.max_body_bytes),
+            ("large", self.large_payload_slots),
+            ("response", self.max_small_responses),
+            ("spool", self.max_spool_bytes),
+            ("cpu", 4),
+            ("push", 4),
+            ("database", self.payload_pool_max() as usize),
+        ]
+    }
+    pub fn standard_capacity(&self, total: usize) -> usize {
+        if self.public_enrollment {
+            total - (total * self.team_reserved_percent).div_ceil(100)
+        } else {
+            total
+        }
+    }
     pub fn read(path: Option<&Path>) -> Result<Self> {
         let value: Self = match path {
             Some(p) => serde_json::from_slice(&read_private(p, 1024 * 1024)?)?,
@@ -128,6 +168,7 @@ impl Config {
             && (1..=4096).contains(&self.max_authenticated_requests)
             && (1..=4096).contains(&self.max_anonymous_requests)
             && (1..=64).contains(&self.max_small_responses)
+            && (1..=1024 * 1024 * 1024).contains(&self.max_spool_bytes)
             && (1..=1048576).contains(&self.max_catalog_bytes)
             && (1..=67108864).contains(&self.max_body_bytes)
             && (1..=4096).contains(&self.maintenance_batch)
@@ -138,6 +179,24 @@ impl Config {
             && (1..=65536).contains(&self.max_connections)
             && (1..=120).contains(&self.shutdown_timeout);
         if !valid {
+            return Err(Error::BAD);
+        }
+        if !(1..=1000000).contains(&self.max_public_workspaces)
+            || !(1..=50).contains(&self.team_reserved_percent)
+            || (self.public_enrollment
+                && (self.large_payload_slots < 2
+                    || self.max_authenticated_requests < 2
+                    || self.max_small_responses < 2
+                    || self.max_polls_global < 2
+                    || self.pool_max < 6
+                    || self.standard_capacity(self.max_spool_bytes) < 41 * 1024 * 1024
+                    || self.max_spool_bytes - self.standard_capacity(self.max_spool_bytes)
+                        < 41 * 1024 * 1024
+                    || self.standard_capacity(self.max_body_bytes) == 0
+                    || self
+                        .standard_capacity((self.global_max_bytes / self.quota_shards) as usize)
+                        <= 2 * 1024 * 1024))
+        {
             return Err(Error::BAD);
         }
         let apns = [&self.apns_key, &self.apns_key_id, &self.apns_team_id];

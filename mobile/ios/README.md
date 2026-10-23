@@ -8,6 +8,34 @@ is only checked through its original receipt, and cached history never
 authorizes an action. iOS 18 or later is supported; the bundle ID is
 `app.zerus.mobile`, shared by local Dev, TestFlight and App Store builds.
 
+Encrypted API v2 workspaces use a separate `ze1.` phone invitation from an
+enrolled computer. It pins the inviter's keys and membership head; its secret is
+never sent to the relay. The phone durably saves its identity, service bearer
+and exact signed candidate before enrollment. **Resume pairing** reuses that
+saved candidate, including CryptoKit's randomized Ed25519 signature. Refresh
+only checks receipts and signed membership history.
+
+CryptoKit provides RFC 9180 HPKE and Ed25519. A native SQLite journal stores the
+protected identity under a per-connection ThisDeviceOnly Keychain wrapping key,
+commits membership state/history/head indexes together, and reserves exact
+ciphertext before HTTP. A separate versioned connection item prevents an older
+app from treating protected credentials as plaintext API v1 connections. Missing
+or invalid protected state refuses transport. Legacy API v1 connections retain
+their existing behavior.
+
+**Forget encrypted connection** deletes the phone's wrapping key and retains
+saved drafts. Remove the phone from **Phones** on an enrolled computer to revoke
+it throughout the workspace. Previously received plaintext cannot be erased;
+recorded ciphertext is exposed by later compromise of its recipient's key.
+There is no forward-secrecy claim. See the
+[wire contract](../../services/mobile/crypto/README.md).
+
+Shared protocol fixtures, HTTP tests and real SQLite package tests cover key
+substitution, membership history, exact ciphertext retry and receipt-only
+recovery. Mac package tests exercise CryptoKit, and unsigned simulator builds
+check the app integration. Physical iPhone Keychain lifecycle and protected-data
+behavior require separate device qualification.
+
 Design and roadmap: [iOS architecture and foundation](../../docs/superpowers/specs/2026-10-16-ios-foundation-design.md)
 (epic `zerus-gfph` in Beads).
 
@@ -42,8 +70,8 @@ receipts must keep the confirmed exact destination.
 
 - `ZerusKit/` is a Swift package with the platform-neutral core: JSON values,
   protocol models, policies ported from the Kotlin client, the relay client and
-  sealed persistence. It uses Foundation, CryptoKit, Security and
-  UniformTypeIdentifiers only, so its tests run on a Mac with `swift test`.
+  sealed persistence. It uses Foundation, CryptoKit, Security, SQLite3 and
+  UniformTypeIdentifiers, so its tests run on a Mac with `swift test`.
 - `Zerus/` holds the SwiftUI app and platform services. `Zerus.xcodeproj` uses
   file-system synchronized folders, so new files are picked up without editing
   the project.

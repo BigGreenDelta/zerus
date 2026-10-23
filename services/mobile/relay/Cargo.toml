@@ -39,6 +39,7 @@ server = [
     "dep:url",
     "uuid/v4",
     "uuid/serde",
+    "dep:zerus-mobile-crypto",
 ]
 
 [dependencies]
@@ -69,6 +70,7 @@ tokio-util = { version = "0.7", features = ["io", "rt"], optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 url = { version = "2", optional = true }
 uuid = "1"
+zerus-mobile-crypto = { path = "../crypto", optional = true }
 
 [profile.release]
 strip = true

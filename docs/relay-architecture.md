@@ -42,6 +42,13 @@ codes and expirations; event cursors; connector journal binding; and API v1
 envelopes unchanged. This remains a trusted relay protected by TLS, without a
 claim of end-to-end encryption.
 
+The owner-approved [encrypted transport boundary](mobile-architecture.md#encrypted-relay-transport)
+keeps queues, claims, receipts, routing, quotas, priorities and notification
+delivery on the relay while encrypting private payloads between trusted
+devices. API v2 uses the [specified endpoint protocol](../services/mobile/crypto/README.md)
+and [workspace enrollment model](encrypted-workspaces.md); it does not change
+the API v1 contracts in this document.
+
 ## Durable delivery and transactions
 
 Request identity is the existing UUID and canonical body hash. Never recompute

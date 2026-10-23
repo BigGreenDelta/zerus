@@ -17,6 +17,37 @@ Native Kotlin and Jetpack Compose companion for the Zerus gateway protocol in
 [the mobile architecture](../../docs/mobile-architecture.md). Android 8.0 or later
 is supported. The app works without Google services.
 
+Encrypted API v2 workspaces use a separate phone invitation (`ze1.` code or QR)
+from an enrolled computer. The invitation pins its keys and membership history;
+the secret stays on the devices. Pairing saves the phone's keys, service bearer
+and exact enrollment proof before contacting the relay. The inviting computer
+must be online to approve it. **Resume pairing** reuses the saved proof and bearer.
+Refresh only checks the existing enrollment.
+
+Protected connections use Google Tink's RFC 9180 HPKE and Ed25519, with a
+Keystore-protected key for each connection. The private SQLite journal uses
+indexed 64 KiB chunks for state and ciphertext so Android's cursor row buffer
+does not limit large requests. It commits membership changes and their head
+index together and saves exact ciphertext
+before sending. Receipt recovery never submits a replacement operation. Old apps
+cannot read protected credentials from their legacy connection index; an invalid
+or missing protected state fails closed. API v1 connections remain available and
+continue to trust their relay with plaintext.
+
+**Forget encrypted connection** erases this phone's connection keys and keeps
+saved drafts. Global removal belongs to **Phones** on an enrolled computer and
+requires its signed membership change. Cryptography cannot recall plaintext or
+prevent an operator from withholding updates. Recorded ciphertext is exposed if
+its recipient's private key is later compromised; this protocol does not claim
+forward secrecy. See the [wire contract](../../services/mobile/crypto/README.md).
+
+Shared protocol fixtures and HTTP tests cover signature/key substitution,
+membership history, exact ciphertext retry and receipt-only recovery. The
+emulator-only `WorkspaceJournalSmokeInstrumentation` separately exercises real
+Keystore/SQLite recovery with private state and ciphertext larger than 2 MiB.
+Compiling its test APK does not qualify that native runtime path; running it
+requires an isolated emulator and separately authorized installation.
+
 Pair an HTTPS gateway with a short-lived invitation created by its administrator.
 You can pair several gateways and browse logical projects and sessions across
 their machines. Projects use workspace-scoped stable IDs; empty projects stay
@@ -594,7 +625,8 @@ Interrupted uploads retain their original UUID and recover with status reads onl
 recordings are never automatically uploaded again. The computer owns the durable
 transcription/delivery pipeline even if the phone disconnects. Failed or uncertain
 results remain visible. Playback stops when the app leaves the foreground. The
-relay can read relayed audio; this transport has no end-to-end encryption.
+legacy API v1 relay can read relayed audio. Protected API v2 connections encrypt
+the complete voice request and result between enrolled endpoints.
 
 ## Build and install
 

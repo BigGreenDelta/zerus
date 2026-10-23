@@ -12,6 +12,7 @@ pub mod capabilities;
 pub mod check;
 pub mod cli;
 pub mod config;
+pub mod encrypted_runtime;
 pub mod error;
 pub mod execute;
 pub mod files;
@@ -29,6 +30,7 @@ pub mod media;
 pub mod mutations;
 pub mod native;
 pub mod opencode_privacy;
+pub mod private_state;
 pub mod projects;
 pub mod pybase64;
 pub mod pyjson;
@@ -43,6 +45,9 @@ pub mod url;
 pub mod validate;
 #[cfg(windows)]
 pub mod windows_management;
+pub mod workspace;
+pub mod workspace_cli;
+pub mod workspace_lifecycle;
 
 pub use error::ConnectorError;
 
@@ -103,7 +108,9 @@ pub fn start_bound(
         return Err(ConnectorError::new(refusal.message));
     }
     let value = config::parse(&text)?;
-    let config = config::validate(&value, allow_insecure_localhost, environment)?;
+    let mut config = config::validate(&value, allow_insecure_localhost, environment)?;
+    // Missing/corrupt protected state never falls back to legacy transport.
+    config::bind_workspace(&mut config, path)?;
     let journal = journal::Journal::open(&config.state_dir, &config.binding, now)
         .map_err(|error| ConnectorError::new(error.message()))?;
     #[cfg(windows)]
@@ -194,6 +201,13 @@ pub fn run(started: Started) -> u8 {
             settings,
             Box::new(now),
         ));
+        if let Some(private_dir) = config.encrypted_workspace {
+            #[cfg(unix)]
+            let stop = signals(&connector.stopping);
+            #[cfg(windows)]
+            let stop = windows_management::signals(&connector.stopping, stop_state, generation);
+            return encrypted_runtime::run(&connector, &relay, &private_dir, stop).await;
+        }
         #[cfg(unix)]
         let result = serve(&connector, &relay, signals(&connector.stopping)).await;
         #[cfg(windows)]

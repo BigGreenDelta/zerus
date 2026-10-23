@@ -6,6 +6,16 @@
 relays and `hgs` must not be able to tell the two apart, except in the
 deliberate divergences below.
 
+The Rust connector also implements opt-in encrypted API v2 workspaces. Settings
+offers explicit Create, Join by computer invitation and Change workspace; phone
+invitations are separate. Private payloads, snapshots and receipts use the shared
+[encrypted workspace protocol](../../../docs/encrypted-workspaces.md), while the
+relay keeps routing and bounded service metadata. Protected configurations use
+independent private state and never fall back to plaintext API v1. Their native
+dispatch requires the `guarded-local-v1` identity guard. Windows executes local
+operations; Unix gateways also retain their verified direct SSH routes. Existing
+API v1 configurations and the Python connector keep their previous contracts.
+
 This build runs the relay runtime with the read operations and the session
 mutations: it heartbeats the projected native listing, long-polls the relay,
 runs `inspect`, `process_output`, `mark_read`, `history`, `catalog`, `dirs` and

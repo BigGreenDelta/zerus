@@ -342,18 +342,30 @@ impl Store {
             .one("SELECT events FROM global_usage WHERE id=1", &[])
             .await?
             .ok_or(Error::BAD)?;
+        let (standard, reserved) = self.queue_reservation(t, w, "events", 100000).await?;
         let victim = if i(&usage, "events") >= 10000 {
             t.one(
                 "SELECT id,workspace_id FROM events WHERE workspace_id=? ORDER BY id LIMIT 1",
                 args![w],
             )
             .await?
-        } else if i(&fleet, "events") >= 100000 {
-            t.one(
-                "SELECT id,workspace_id FROM events ORDER BY id LIMIT 1",
-                &[],
-            )
-            .await?
+        } else if i(&fleet, "events") >= 100000 || reserved {
+            let priority = if self.db.cfg.public_enrollment {
+                t.one("SELECT e.id,e.workspace_id FROM events e JOIN workspaces w ON w.id=e.workspace_id WHERE w.service_class='standard' ORDER BY e.id LIMIT 1",&[]).await?
+            } else {
+                None
+            };
+            if priority.is_some() {
+                priority
+            } else if standard {
+                return Err(Error::BUSY);
+            } else {
+                t.one(
+                    "SELECT id,workspace_id FROM events ORDER BY id LIMIT 1",
+                    &[],
+                )
+                .await?
+            }
         } else {
             None
         };
@@ -398,10 +410,22 @@ impl Store {
                 .one("SELECT push_jobs FROM global_usage WHERE id=1", &[])
                 .await?
                 .ok_or(Error::BAD)?;
+            let (standard, reserved) = self.queue_reservation(t, w, "pushes", 10000).await?;
             let victim = if i(&usage, "push_jobs") >= 1000 {
                 t.one("SELECT j.id,d.workspace_id FROM push_jobs j JOIN devices d ON d.id=j.device_id WHERE d.workspace_id=? ORDER BY j.id LIMIT 1",args![w]).await?
-            } else if i(&fleet, "push_jobs") >= 10000 {
-                t.one("SELECT j.id,d.workspace_id FROM push_jobs j JOIN devices d ON d.id=j.device_id ORDER BY j.id LIMIT 1",&[]).await?
+            } else if i(&fleet, "push_jobs") >= 10000 || reserved {
+                let priority = if self.db.cfg.public_enrollment {
+                    t.one("SELECT j.id,d.workspace_id FROM push_jobs j JOIN devices d ON d.id=j.device_id JOIN workspaces w ON w.id=d.workspace_id WHERE w.service_class='standard' ORDER BY j.id LIMIT 1",&[]).await?
+                } else {
+                    None
+                };
+                if priority.is_some() {
+                    priority
+                } else if standard {
+                    return Err(Error::BUSY);
+                } else {
+                    t.one("SELECT j.id,d.workspace_id FROM push_jobs j JOIN devices d ON d.id=j.device_id ORDER BY j.id LIMIT 1",&[]).await?
+                }
             } else {
                 None
             };

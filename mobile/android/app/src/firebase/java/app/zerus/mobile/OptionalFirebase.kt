@@ -142,15 +142,15 @@ class FirebaseTokenWorker(context: Context, parameters: WorkerParameters) : Coro
         val token = store.firebaseToken()
         if (!FcmRegistrationPolicy.needsRegistration(token, store.firebaseBinding(connection.id))) return Result.success()
         return PushSetupLocks.withConnection(connection.id) { try {
-            val api = RelayApi()
-            val providers = api.call(connection.url, connection.token, "/v1/capabilities").optJSONArray("push_providers")
+            val api = RelayApi(workspace=store.workspaceJournal)
+            val providers = api.capabilities(connection).optJSONArray("push_providers")
             if (providers == null || (0 until providers.length()).none { providers.optString(it) == "fcm" }) {
                 store.savePushStatusIfCurrent(connection, "Gateway Firebase push is not configured. Use the live connection.")
                 return@withConnection Result.failure()
             }
             // Push registration is idempotent and separate from native session mutations.
             if (!store.connections().contains(connection) || store.firebaseToken() != token) return@withConnection Result.success()
-            api.call(connection.url, connection.token, "/v1/push", JSONObject().put("provider", "fcm").put("token", token))
+            api.registerPush(connection,"fcm",token)
             store.confirmFirebaseBinding(connection, token)
             Result.success()
         } catch (e: CancellationException) { throw e }

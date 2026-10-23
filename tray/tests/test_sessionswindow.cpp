@@ -11701,8 +11701,10 @@ void TestSessionsWindow::controlOnlyComputerOffersOnlyRemoteMachines(){
     SessionsWindow window(program());window.resize(1100,760);window.setFleet(state);window.show();
     window.findChild<QPushButton *>("workspaceSettings")->click();
     auto *sections=window.findChild<QListWidget *>("settingsSections");QVERIFY(sections);
-    QVERIFY(sections->item(5)->isHidden());QVERIFY(!sections->item(2)->isHidden());QVERIFY(!sections->item(4)->isHidden());
-    // A Unix gateway needs local sessions enabled; Windows offers setup even before enablement.
+    // Create/Join must be reachable before this computer has a local gateway.
+    QVERIFY(!sections->item(5)->isHidden());QVERIFY(!sections->item(2)->isHidden());QVERIFY(!sections->item(4)->isHidden());
+    auto *enrollment=window.findChild<QComboBox *>("workspaceEnrollmentMode");QVERIFY(enrollment);
+    QVERIFY(enrollment->findData("create")>=0);QVERIFY(enrollment->findData("join")>=0);
     auto linuxFleet=fleet();auto linuxBox=linuxFleet.local();linuxBox.metrics=QJsonObject{{"platform","linux"}};
     linuxFleet.setLocal(linuxBox,QDateTime::currentMSecsSinceEpoch());
     window.setFleet(linuxFleet);QVERIFY(!sections->item(5)->isHidden());window.setFleet(state);

@@ -335,13 +335,13 @@ class MainActivity : ComponentActivity() {
             ScanPairingButton(enabled = !model.busy) { invite -> server = invite.server;code = invite.code }
             OutlinedTextField(server, { server = it }, label = { Text("Gateway URL") }, placeholder = { Text("https://zerus.example") }, singleLine = true)
             OutlinedTextField(code, { code = it }, label = { Text("Invitation code") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
-            Text("The gateway can read relayed messages. Credentials and drafts stay encrypted on this phone.", style = MaterialTheme.typography.bodySmall, color = Muted)
+            Text(if(WorkspaceProtocol.encryptedInvitationCode(code)) "Messages are encrypted between enrolled devices. The computer that executes a request can read its content." else "Legacy invitations trust the relay with relayed content. Use a new phone invitation from an enrolled computer for encrypted transport.", style = MaterialTheme.typography.bodySmall, color = Muted)
         } }, confirmButton = { TextButton(enabled = !model.busy && model.storageReady && code.isNotBlank() && server.isNotBlank(),
             onClick = { model.pair(server, code) { pairing = false; code = ""; onNotifications() } }) { Text("Pair") } },
         dismissButton = { TextButton(onClick = { pairing = false;code = "" }, enabled = !model.busy) { Text("Cancel") } })
-    disconnect?.let { connection -> ZerusAlertDialog(onDismissRequest = { disconnect = null }, title = { Text("Disconnect ${connection.displayName}?") },
-        text = { Text("This removes the gateway credential from this phone. Saved drafts remain available.") },
-        confirmButton = { TextButton(onClick = { model.disconnect(connection); disconnect = null }) { Text("Disconnect") } },
+    disconnect?.let { connection -> ZerusAlertDialog(onDismissRequest = { disconnect = null }, title = { Text("${if(connection.protocolVersion==2) "Forget" else "Disconnect"} ${connection.displayName}?") },
+        text = { Text(if(connection.protocolVersion==2) "This erases this phone's connection keys. Saved drafts remain available. To revoke this phone across the workspace, remove it from an enrolled computer." else "This removes the gateway credential from this phone. Saved drafts remain available.") },
+        confirmButton = { TextButton(onClick = { model.disconnect(connection); disconnect = null }) { Text(if(connection.protocolVersion==2) "Forget connection" else "Disconnect") } },
         dismissButton = { TextButton(onClick = { disconnect = null }) { Text("Cancel") } }) }
     review?.let { draft -> ZerusAlertDialog(onDismissRequest = { review = null }, title = { Text("Review unconfirmed delivery") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {

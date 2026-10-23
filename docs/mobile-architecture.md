@@ -275,6 +275,89 @@ and signing keys belong in private local configuration, outside source control.
 Production clients require HTTPS. Any emulator loopback exception is explicitly
 limited to development.
 
+### Encrypted relay transport
+
+Owner-approved boundary, 2026-10-23 (`zerus-45e.6`, enrollment in
+`zerus-45e.8`): the relay must not be able to read private payloads. Routing and
+delivery metadata remain visible so the relay can provide durable queues,
+offline storage, admission limits, service priorities and push delivery. This
+section defines the API v2 boundary implemented in this source tree. The
+[workspace specification](encrypted-workspaces.md) describes enrollment,
+persistence, switching and the security verification map; the
+[wire specification](../services/mobile/crypto/README.md) defines exact bytes.
+API v1 connections described above still trust the relay with plaintext content.
+Public enrollment remains an explicit server configuration.
+
+| Encrypted between trusted devices | Visible to the relay when needed |
+| --- | --- |
+| Messages, answers, approval disclosures and command arguments | Opaque workspace, device, gateway, route and request identifiers |
+| Session/project names, paths, account details, histories and terminal/process output | Protocol version, operation class, delivery state, expiry, payload size and timing |
+| Files, attachments, recordings and transcription content | Server-assigned service class, quotas and cryptographic envelope metadata |
+| Detailed snapshots, results and native error text | Bounded activity/presence and notification hints without private text |
+
+An executable command line or filesystem path is private content, even when it
+describes a process. Only the routing and bounded operational metadata needed
+for the service belong in the visible envelope. Notifications may disclose a
+generic category such as attention needed; session names and message excerpts
+stay encrypted. The exact visible fields require a versioned allowlist.
+
+The relay retains authentication, routing, durable claim/receipt storage,
+pagination, retention, byte accounting and rate/concurrency limits. It stores
+encrypted payloads while recipients are offline. Notification and presence
+rules use explicit bounded hints rather than inspecting private snapshots.
+The team's highest service class is assigned by operator-controlled server
+policy and does not grant access to another workspace's payloads or keys.
+
+Endpoints decrypt and validate private content, verify the cryptographic
+sender's membership and role, and perform the existing native target, run,
+conversation and question checks. A relay-issued bearer token alone must not
+authorize an unrecognized cryptographic sender. Service hints are not evidence
+that native work completed: clients require an authenticated endpoint result.
+Outer operation/resource hints must not weaken durable identity retention;
+mislabeling an encrypted mutation as a read must never permit its execution
+again after relay cleanup.
+
+Each device generates and retains its private keys locally. Verified enrollment
+binds device keys and workspace membership using an existing trusted device.
+Create workspace, Join by code and Change workspace remain the enrollment
+model; an unconfigured machine is not assigned a workspace automatically.
+Phone and computer invitations have separate purposes. Their secret
+verification material is generated on a trusted device and conveyed through
+the copied code or QR, without revealing it to the relay. The relay may hold
+public lookup identifiers and separate service authorization records. A key
+directory controlled only by the relay is insufficient to prevent key
+substitution. Lost local state uses a new invitation from a remaining trusted
+device; no account/password recovery service is introduced.
+
+The protocol must bind payloads to their authenticated sender, workspace,
+intended gateway/target, request identity and applicable key generation. A relay
+must not be able to substitute an executor, change a command or forge its
+result. Retain exact request identities and durable no-replay journals across
+reconnection, ciphertext redelivery, crashes and key changes. Encryption state
+and outgoing payload persistence must prevent nonce/state reuse or silently
+creating a new operation after an uncertain submission. Existing API v1 hashes
+and receipts are not rewritten.
+
+Removal or a workspace change must update cryptographic authorization as well
+as relay credentials. Once the required membership/key update is accepted,
+removed devices must not decrypt future private payloads. Previously received
+plaintext cannot be recalled. Switching workspaces keeps their keys and journals
+separate and preserves local native sessions and desktop project state.
+
+The initial confidentiality boundary follows the existing trusted gateway:
+phone to gateway through the relay, then the gateway's existing SSH connection
+to a direct peer. That gateway can read the content it executes or forwards.
+Direct peers do not become independently enrolled gateways merely to enable
+this protection. Hiding content from an intermediate gateway would require a
+separate target-device cryptographic endpoint and is outside this initial scope.
+
+The selected single-shot HPKE/Ed25519 format uses separate per-recipient
+envelopes and a signed membership log. It does not provide MLS group forward
+secrecy, post-compromise recovery or global consensus against a malicious relay.
+Protected connections never silently fall back to plaintext. Legacy v1
+compatibility does not make historical plaintext or backups encrypted
+retroactively.
+
 ## Delivery safety
 
 1. The phone creates a UUID and durably records the exact draft and target before

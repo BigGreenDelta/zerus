@@ -40,11 +40,13 @@ private val Muted = Color(0xFF9AACB2)
         model.connections.forEach { connection -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(connection.displayName, fontWeight = FontWeight.SemiBold)
             Text(connection.endpoint, color = Muted, style = MaterialTheme.typography.bodySmall)
+            Text(if(connection.protocolVersion==2) "Encrypted workspace. Refresh to check enrollment and connected computers." else "Legacy connection. This relay can read relayed content.",color=Muted,style=MaterialTheme.typography.bodySmall)
+            if(connection.id in model.pendingEncryptedPairings) TextButton(onClick={model.resumeEncryptedPair(connection)},enabled=!model.busy) { Text("Resume pairing") }
             if (!model.demo) MachineTree(model, trees[connection.id].orEmpty(),
                 onRename = { naming = it }, onColor = { coloring = it })
             Text(if (!BuildConfig.FIREBASE_ENABLED) "Push is unavailable in this build. Use the live connection."
                 else model.pushStatuses[connection.id].orEmpty().ifBlank { "Setting up Firebase push…" }, color = Muted, style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = { onDisconnect(connection) }) { Text("Disconnect workspace") }
+            TextButton(onClick = { onDisconnect(connection) }) { Text(if(connection.protocolVersion==2) "Forget encrypted connection" else "Disconnect workspace") }
         } }
         OutlinedButton(onClick = onPair, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text("Pair another workspace") }
         HorizontalDivider()

@@ -407,17 +407,20 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             catch (_: Throwable) { touchTrace?.observationFailed() }
         }
     }
-    private fun reveal(label: String, disclosureLabel: String) {
+    private fun reveal(label: String, disclosureLabel: String, captureDisclosure: Boolean = false): DisclosureScroll? {
         var disclosureScroll: DisclosureScroll? = null
         await("option $label") {
-            if (visible(label) != null) true else {
+            if (visible(label) != null && !captureDisclosure) true else {
                 // Keep the bound inner node when its label scrolls offscreen; never rebind to the history.
                 val disclosure = disclosureScroll ?: bindDisclosureScroll(disclosureLabel).also { disclosureScroll = it }
                 check(disclosureScrollReady(disclosure)) { "Bound disclosure is not in the active window" }
-                disclosure.node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                false
+                if (captureDisclosure && visible(label) != null) true else {
+                    disclosure.node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                    false
+                }
             }
         }
+        return disclosureScroll
     }
     private data class DisclosureScroll(val node: AccessibilityNodeInfo, val window: Int)
     private fun bindDisclosureScroll(label: String): DisclosureScroll {
@@ -904,8 +907,7 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
 
             boundary("begin", "lifecycle_no_submit")
             open("background")
-            reveal("Approve for this session", "Review synthetic background")
-            val lifecycleDisclosure = bindDisclosureScroll("Approve for this session")
+            val lifecycleDisclosure = checkNotNull(reveal("Approve for this session", "Review synthetic background", captureDisclosure = true))
             tap("Approve for this session"); reviewed()
             proveBroaderDraft()
             val lifecycleSend = captureEarlySend() // Capture the underlying card before its native modal obscures it.
@@ -954,13 +956,6 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 // BEGIN LIFECYCLE_READ_DIAGNOSTIC body-restore-passed
                 lifecycleCheckpoint(LifecycleCheckpoint.BODY_RESTORE_PASSED)
                 // END LIFECYCLE_READ_DIAGNOSTIC body-restore-passed
-                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
-                lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_BEGIN)
-                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
-                await("background retires confirmation") { visible("Confirm this option?") == null }
-                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
-                lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_PASSED)
-                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
                 // BEGIN EARLY_SEND_LIVE_ANCHOR lifecycle
                 prepareEarlySendAnchor(lifecycleSend)
                 // END EARLY_SEND_LIVE_ANCHOR lifecycle
@@ -973,6 +968,13 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 // END LIFECYCLE_READ_DIAGNOSTIC disabled-send-passed
                 val elapsed = lifecycleSend.elapsed()
                 check(elapsed >= 0 && elapsed < 3_000) { "Fixture missed the real early-review window: lifecycle elapsedMs=$elapsed" }
+                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
+                lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_BEGIN)
+                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
+                await("background retires confirmation") { visible("Confirm this option?") == null }
+                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
+                lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_PASSED)
+                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
             } finally {
                 earlySend = null
                 phase("early-end:lifecycle:${lifecycleResumedAt?.let { SystemClock.elapsedRealtime() - it }}")

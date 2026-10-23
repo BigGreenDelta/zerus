@@ -195,7 +195,8 @@ impl Store {
         {
             return Err(Error::RETAINED_PAYLOAD);
         }
-        if t.exec("UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=? AND payload_bytes+?<=?",args![total,self.db.shard(&c.workspace),total,self.db.cfg.global_max_bytes/self.db.cfg.quota_shards]).await?==0{return Err(Error::BUSY);}
+        let shard_capacity = self.db.payload_capacity(&mut t, &c.workspace).await?;
+        if t.exec("UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=? AND payload_bytes+?<=?",args![total,self.db.shard(&c.workspace),total,shard_capacity]).await?==0{return Err(Error::BUSY);}
         let at = now();
         let expires = if op == "terminal_input" {
             json!(at + 5.0)
@@ -419,7 +420,8 @@ impl Store {
         };
         let delta = size as i64 - i(&row, "reserved_bytes") - i(&row, "result_bytes") - audio_bytes;
         if delta > 0 {
-            if t.exec("UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=? AND payload_bytes+?<=?",args![delta,self.db.shard(&c.workspace),delta,self.db.cfg.global_max_bytes/self.db.cfg.quota_shards]).await?==0{return Err(Error::BUSY);}
+            let shard_capacity = self.db.payload_capacity(&mut t, &c.workspace).await?;
+            if t.exec("UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=? AND payload_bytes+?<=?",args![delta,self.db.shard(&c.workspace),delta,shard_capacity]).await?==0{return Err(Error::BUSY);}
         } else {
             t.exec(
                 "UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=?",

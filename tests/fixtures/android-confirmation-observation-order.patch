@@ -1,0 +1,32 @@
+diff --git a/mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt b/mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt
+index 2872fccf..b2e978ad 100644
+--- a/mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt
++++ b/mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt
+@@ -956,13 +956,6 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
+                 // BEGIN LIFECYCLE_READ_DIAGNOSTIC body-restore-passed
+                 lifecycleCheckpoint(LifecycleCheckpoint.BODY_RESTORE_PASSED)
+                 // END LIFECYCLE_READ_DIAGNOSTIC body-restore-passed
+-                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
+-                lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_BEGIN)
+-                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
+-                await("background retires confirmation") { visible("Confirm this option?") == null }
+-                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
+-                lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_PASSED)
+-                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
+                 // BEGIN EARLY_SEND_LIVE_ANCHOR lifecycle
+                 prepareEarlySendAnchor(lifecycleSend)
+                 // END EARLY_SEND_LIVE_ANCHOR lifecycle
+@@ -975,6 +968,13 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
+                 // END LIFECYCLE_READ_DIAGNOSTIC disabled-send-passed
+                 val elapsed = lifecycleSend.elapsed()
+                 check(elapsed >= 0 && elapsed < 3_000) { "Fixture missed the real early-review window: lifecycle elapsedMs=$elapsed" }
++                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
++                lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_BEGIN)
++                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin
++                await("background retires confirmation") { visible("Confirm this option?") == null }
++                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
++                lifecycleCheckpoint(LifecycleCheckpoint.CONFIRM_RETIRE_PASSED)
++                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed
+             } finally {
+                 earlySend = null
+                 phase("early-end:lifecycle:${lifecycleResumedAt?.let { SystemClock.elapsedRealtime() - it }}")

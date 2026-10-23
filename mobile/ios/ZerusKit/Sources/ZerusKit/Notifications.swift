@@ -113,14 +113,16 @@ public struct NotificationEvent: Codable, Hashable, Sendable {
     public var kind: String
     public var at: Double
     public var alertKind: String?
+    public var nativeReplyId: String?
 
-    public init(id: Int64, computer: String, session: String, kind: String, at: Double, alertKind: String? = nil) {
+    public init(id: Int64, computer: String, session: String, kind: String, at: Double, alertKind: String? = nil, nativeReplyId: String? = nil) {
         self.id = id
         self.computer = computer
         self.session = session
         self.kind = kind
         self.at = at
         self.alertKind = alertKind
+        self.nativeReplyId = nativeReplyId
     }
 
     /// The transition this row announces; relay alert rows carry it in alert_kind.
@@ -452,7 +454,7 @@ public enum NotificationPolicy {
                    previous.target == session.target, event.at > previous.observedAt {
                     kind = .finished
                     freshCompletion = true
-                    identity = fingerprint(JSON.array([.string(session.target), "Finished", .int(event.id)]).compact)
+                    identity = fingerprint(JSON.array([.string(session.target), "Finished", event.nativeReplyId.map(JSON.string) ?? .int(event.id)]).compact)
                 } else if let previous, !previous.candidateFingerprint.isEmpty, previous.candidateTarget == session.target,
                           (now - 120...now).contains(previous.candidateEventAt) {
                     kind = .finished
@@ -671,7 +673,9 @@ public enum NotificationCatalogParser {
             }
             // Unknown alert kinds stay plain refresh rows instead of failing the page.
             let alertKind = kind == "alert" && alertKinds.contains(row.string("alert_kind")) ? row.string("alert_kind") : nil
-            return NotificationEvent(id: id, computer: computer, session: session, kind: kind, at: at, alertKind: alertKind)
+            let reply = row.string("native_reply_id")
+            let nativeReplyId = (1...256).contains(reply.utf8.count) && !reply.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) ? reply : nil
+            return NotificationEvent(id: id, computer: computer, session: session, kind: kind, at: at, alertKind: alertKind, nativeReplyId: nativeReplyId)
         }
         guard zip(events, events.dropFirst()).allSatisfy({ $0.id < $1.id }) else { throw ZerusError.invalid("Invalid notification page.") }
         return events

@@ -462,19 +462,8 @@ pub async fn revoke_computer(db: &Db, t: &mut Tx, c: &Value) -> Result<()> {
     Ok(())
 }
 /// Archived rows never produce events or alerts.
-pub fn archived(v: &Value) -> bool {
-    v["archived"] == true || v["kind"] == "archive" || v["state"] == "archived"
-}
-pub(crate) fn explicit_wait(v: &Value) -> bool {
-    let w = &v["coordination_wait"];
-    w["schema"] == 1
-        && w["status"] == "ok"
-        && w["count"].as_u64().is_some_and(|n| n > 0 && n <= 1024)
-        && v["run_id"].as_str().is_some_and(|v| !v.is_empty())
-        && v["conversation_id"].as_str().is_some_and(|v| !v.is_empty())
-        && w["run_id"] == v["run_id"]
-        && w["conversation_id"] == v["conversation_id"]
-}
+pub use crate::alerts::archived;
+pub(crate) use crate::alerts::explicit_wait;
 
 /// An older listing may finish after a successful preference mutation. Reject
 /// that heartbeat so its next fresh listing cannot roll back shared Mute.

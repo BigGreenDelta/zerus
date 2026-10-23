@@ -39,8 +39,7 @@ internal suspend fun RelayApi.analytics(connection: Connection, host: MachineKey
     range: AnalyticsRange): AnalyticsSnapshot {
     require(host.connectionId == connection.id && PrivateAnalyticsProtocol.validMachine(machineId))
     val id = UUID.randomUUID().toString()
-    val initial = call(connection.url, connection.token, "/v1/requests", JSONObject().put("request_id", id)
-        .put("computer_id", host.computerId).put("session", "").put("operation", PrivateAnalyticsProtocol.operation).put("payload", range.json()))
+    val initial = post(connection,host.computerId,"",PrivateAnalyticsProtocol.operation,range.json(),id)
     check(initial.string("request_id") == id)
     val receipt = await(connection, initial)
     check(receipt.string("request_id") == id && receipt.string("state") == "completed")

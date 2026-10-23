@@ -1,10 +1,8 @@
 """Keep zerus-relay buildable from the files its image and packager copy.
 
-services/mobile/Dockerfile and the infra relay packager copy only the manifest,
-Cargo.lock, .cargo and src/**/*.rs|*.sql, and the packager skips any path with a
-`tests` component. A build script, a declared test target, a path dependency or
-an include from outside src/ would then fail only in the image or on the relay
-host.
+The deployment context contains relay/ and the reviewed sibling crypto/ crate.
+Only manifests, the relay lock/config and source files enter the build. Keep
+every runtime dependency within that context, including transitive path crates.
 """
 import re
 import tomllib
@@ -14,12 +12,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RELAY = ROOT / "services/mobile/relay"
 SOURCES = RELAY / "src"
+CRYPTO = RELAY.parent / "crypto"
 
 
 class RelayInputsTest(unittest.TestCase):
     def test_the_image_copies_only_the_packaged_inputs(self):
         copies = re.findall(r"(?m)^COPY (?!--from=)(.*)$", (RELAY.parent / "Dockerfile").read_text())
-        self.assertEqual(copies, ["relay/Cargo.toml relay/Cargo.lock ./", "relay/.cargo ./.cargo", "relay/src ./src"])
+        self.assertEqual(copies, ["relay/Cargo.toml relay/Cargo.lock ./", "relay/.cargo ./.cargo", "relay/src ./src",
+                                  "crypto/Cargo.toml ../crypto/Cargo.toml", "crypto/src ../crypto/src"])
+        self.assertIn("WORKDIR /build/relay", (RELAY.parent / "Dockerfile").read_text())
 
     def test_the_manifest_needs_no_other_file(self):
         manifest = tomllib.loads((RELAY / "Cargo.toml").read_text())
@@ -37,6 +38,14 @@ class RelayInputsTest(unittest.TestCase):
         tables += [*manifest.get("patch", {}).values(), manifest.get("replace", {})]
         for table in tables:
             for name, spec in table.items():
+                if name == "zerus-mobile-crypto":
+                    self.assertEqual(spec.get("path"), "../crypto")
+                else:
+                    self.assertNotIn("path", spec if isinstance(spec, dict) else {}, name)
+        crypto = tomllib.loads((CRYPTO / "Cargo.toml").read_text())
+        self.assertFalse((CRYPTO / "build.rs").exists())
+        for table in (crypto.get(kind, {}) for kind in kinds):
+            for name, spec in table.items():
                 self.assertNotIn("path", spec if isinstance(spec, dict) else {}, name)
         for name in ("config", "config.toml"):
             if (RELAY / ".cargo" / name).exists():
@@ -44,8 +53,9 @@ class RelayInputsTest(unittest.TestCase):
                 self.assertFalse({"paths", "patch"} & set(settings), name)
 
     def test_sources_include_only_packaged_files(self):
-        for path in SOURCES.rglob("*"):
-            relative = path.relative_to(RELAY)
+        for path in [*SOURCES.rglob("*"), *(CRYPTO / "src").rglob("*")]:
+            root = RELAY if path.is_relative_to(RELAY) else CRYPTO
+            relative = path.relative_to(root)
             self.assertNotIn("tests", relative.parts)
             if not path.is_file():
                 continue
@@ -60,7 +70,7 @@ class RelayInputsTest(unittest.TestCase):
                     literal = re.fullmatch(r'"([^"\\]+)"', argument.strip())
                     self.assertIsNotNone(literal, "name the file with a plain literal")
                     included = (path.parent / literal[1]).resolve()
-                    self.assertTrue(included.is_relative_to(SOURCES.resolve()), included)
+                    self.assertTrue(included.is_relative_to((root / "src").resolve()), included)
                     self.assertIn(included.suffix, {".rs", ".sql"})
                     self.assertTrue(included.is_file())
 

@@ -7,12 +7,24 @@ public struct Connection: Codable, Hashable, Sendable, Identifiable {
     public var label: String
     public let url: String
     public let token: String
+    public let protocolVersion: Int
 
-    public init(id: String, label: String, url: String, token: String) {
+    public init(id: String, label: String, url: String, token: String, protocolVersion: Int = 1) {
+        precondition([1, 2].contains(protocolVersion), "Unsupported workspace transport.")
         self.id = id
         self.label = label
         self.url = url
         self.token = token
+        self.protocolVersion = protocolVersion
+    }
+
+    enum CodingKeys: String, CodingKey { case id, label, url, token, protocolVersion }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id); label = try c.decode(String.self, forKey: .label)
+        url = try c.decode(String.self, forKey: .url); token = try c.decode(String.self, forKey: .token)
+        protocolVersion = c.contains(.protocolVersion) ? try c.decode(Int.self, forKey: .protocolVersion) : 1
+        guard [1, 2].contains(protocolVersion) else { throw ZerusError.invalid("Unsupported workspace transport.") }
     }
 
     public var endpoint: String { ManagedRelay.transport(url) }

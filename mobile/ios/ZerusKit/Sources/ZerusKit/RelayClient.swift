@@ -46,7 +46,7 @@ public enum Deadline {
     }
 }
 
-/// HTTPS client for protocol version 1. It never follows redirects, stores no
+/// HTTPS client for legacy and encrypted connections. It never follows redirects, stores no
 /// cookies or cached responses and never retries a request by itself.
 public struct RelayClient: Sendable {
     public static let responseLimit = 1024 * 1024
@@ -55,9 +55,14 @@ public struct RelayClient: Sendable {
     public static let deviceName = "Zerus iOS"
 
     let session: URLSession
+    let workspace: SQLiteWorkspaceJournal?
+    let catalogNowSeconds: @Sendable () -> Int64
 
-    public init(session: URLSession = URLSession(configuration: RelayClient.configuration())) {
+    public init(session: URLSession = URLSession(configuration: RelayClient.configuration()), workspaceJournal: SQLiteWorkspaceJournal? = nil,
+                catalogNowSeconds: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970) }) {
         self.session = session
+        self.workspace = workspaceJournal
+        self.catalogNowSeconds = catalogNowSeconds
     }
 
     public static func configuration() -> URLSessionConfiguration {
@@ -83,18 +88,20 @@ public struct RelayClient: Sendable {
         if !token.trimmingCharacters(in: .whitespaces).isEmpty { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let body {
             let data = try JSON.object(body).data()
-            let limit = path == "/v1/requests" ? Self.requestEnvelopeLimit : Self.requestLimit
+            let limit = path == "/v2/requests" ? 41 * 1024 * 1024 : (path == "/v1/requests" ? Self.requestEnvelopeLimit : Self.requestLimit)
             guard data.count <= limit else { throw ZerusError(.limit, "The request exceeds the gateway's size limit.") }
             request.httpBody = data
             request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
         }
         let (bytes, response) = try await session.bytes(for: request, delegate: NoRedirects.shared)
         guard let http = response as? HTTPURLResponse else { throw ZerusError(.unavailable, "The gateway returned an invalid response.") }
-        if http.expectedContentLength > Int64(Self.responseLimit) { throw Self.responseTooLarge }
+        let catalog = path == "/v2/computers" || path.hasPrefix("/v2/computers?")
+        let responseLimit = catalog ? 3 * Self.responseLimit : (path.hasPrefix("/v2/") ? 2 * Self.responseLimit : Self.responseLimit)
+        if http.expectedContentLength > Int64(responseLimit) { throw Self.responseTooLarge }
         var data = Data()
-        data.reserveCapacity(Int(max(0, min(http.expectedContentLength, Int64(Self.responseLimit)))))
+        data.reserveCapacity(Int(max(0, min(http.expectedContentLength, Int64(responseLimit)))))
         for try await byte in bytes {
-            guard data.count < Self.responseLimit else { throw Self.responseTooLarge }
+            guard data.count < responseLimit else { throw Self.responseTooLarge }
             data.append(byte)
         }
         guard (200..<300).contains(http.statusCode) else {
@@ -107,13 +114,14 @@ public struct RelayClient: Sendable {
         return object
     }
 
-    static let responseTooLarge = ZerusError(.limit, "Gateway response exceeded the 1 MiB safety limit.")
+    static let responseTooLarge = ZerusError(.limit, "Gateway response exceeded its safety limit.")
 
     // MARK: Device endpoints
 
     public func pair(url: String, code: String, deviceName: String = RelayClient.deviceName) async throws -> Connection {
         let normalized = try EndpointPolicy.normalize(url)
         let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !WorkspaceProtocol.encryptedInvitationCode(trimmed) else { throw ZerusError.invalid("Use the encrypted phone invitation pairing flow.") }
         guard !trimmed.isEmpty else { throw ZerusError.invalid("Enter the invitation code shown on your computer.") }
         let result = try await call(normalized, token: "", path: "/v1/pair", body: ["code": .string(trimmed), "device_name": .string(deviceName)])
         guard case .string(let token)? = result["device_token"], !token.isEmpty else {
@@ -125,26 +133,29 @@ public struct RelayClient: Sendable {
     }
 
     public func computers(_ connection: Connection) async throws -> JSONObject {
-        try await call(connection.url, token: connection.token, path: "/v1/computers")
+        if connection.protocolVersion == 2 { return try await encryptedComputers(connection) }
+        return try await call(connection.url, token: connection.token, path: "/v1/computers")
     }
 
     public func capabilities(_ connection: Connection) async throws -> JSONObject {
-        try await call(connection.url, token: connection.token, path: "/v1/capabilities")
+        try await call(connection.url, token: connection.token, path: "/v\(connection.protocolVersion)/capabilities")
     }
 
     /// Revokes this phone's credential, queued requests and push registration.
     public func revoke(_ connection: Connection) async throws {
+        guard connection.protocolVersion == 1 else { throw ZerusError.invalid("Encrypted connections are forgotten locally. Remove this phone from an enrolled computer to revoke it globally.") }
         _ = try await call(connection.url, token: connection.token, path: "/v1/device", method: "DELETE")
     }
 
     /// Registers this phone's APNs device token for generic wakes.
     public func registerPush(_ connection: Connection, provider: String, token: String) async throws {
         guard PushRegistration.providers.contains(provider), PushRegistration.validToken(token) else { throw ZerusError.invalid("Invalid push registration.") }
-        _ = try await call(connection.url, token: connection.token, path: "/v1/push", body: ["provider": .string(provider), "token": .string(token)])
+        _ = try await call(connection.url, token: connection.token, path: "/v\(connection.protocolVersion)/push", body: ["provider": .string(provider), "token": .string(token)])
     }
 
     public func events(_ connection: Connection, after: Int64, wait: Int = 25) async throws -> JSONObject {
-        try await call(connection.url, token: connection.token, path: "/v1/events?after=\(after)&wait=\(wait)")
+        if connection.protocolVersion == 2 { return try await encryptedEvents(connection, after: after, wait: wait) }
+        return try await call(connection.url, token: connection.token, path: "/v1/events?after=\(after)&wait=\(wait)")
     }
 
     // MARK: Requests
@@ -169,7 +180,9 @@ public struct RelayClient: Sendable {
     public func post(_ connection: Connection, computerId: String, session: String = "", operation: String, payload: JSONObject, id: String) async throws -> JSONObject {
         let body: JSONObject = ["request_id": .string(id), "computer_id": .string(computerId), "session": .string(session),
                                 "operation": .string(operation), "payload": .object(payload)]
-        let result = try await call(connection.url, token: connection.token, path: "/v1/requests", body: body)
+        let result: JSONObject
+        if connection.protocolVersion == 2 { result = try await encryptedPost(connection, body: body) }
+        else { result = try await call(connection.url, token: connection.token, path: "/v1/requests", body: body) }
         guard result.string("request_id") == id else { throw Self.mismatchedReceipt }
         return result
     }
@@ -187,6 +200,7 @@ public struct RelayClient: Sendable {
 
     /// Reads the original receipt; it never creates a replacement request.
     public func receipt(_ connection: Connection, id: String) async throws -> JSONObject {
+        if connection.protocolVersion == 2 { return try await encryptedReceipt(connection, id: id) }
         guard let escaped = id.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-_"))) else {
             throw ZerusError.invalid("Invalid request identity.")
         }

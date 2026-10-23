@@ -5,6 +5,7 @@ import java.net.URLDecoder
 
 /** Presentation-only invitation. Neither parsing nor scanning performs network activity. */
 data class PairingInvite(val server: String, val code: String) {
+    override fun toString() = "PairingInvite(redacted)"
     companion object {
         const val MAX_LENGTH = 4096
         fun parse(value: String): PairingInvite? = runCatching {
@@ -20,7 +21,8 @@ data class PairingInvite(val server: String, val code: String) {
                 require(key in setOf("server", "code") && fields.put(key, decoded) == null)
             }
             val code = requireNotNull(fields["code"])
-            require(code.length in 16..128 && code.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' })
+            if(WorkspaceProtocol.encryptedInvitationCode(code)) WorkspaceInvitation.parse(code)
+            else require(code.length in 16..128 && code.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' })
             val server = requireNotNull(fields["server"])
             require(server.length <= 2048 && server.none { it.isWhitespace() || it.isISOControl() } && !server.contains('\uFFFD'))
             val normalized = EndpointPolicy.normalize(server)
