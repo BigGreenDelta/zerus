@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+import urllib.error
+import urllib.parse
 from unittest.mock import patch
 
 import test_ci_security as security
@@ -152,7 +154,7 @@ class IOSDuplicate(unittest.TestCase):
                         contextlib.redirect_stdout(io.StringIO()) as log:
                     asc.main()
                     self.assertEqual(reads.call_count, 2)
-                    query = reads.call_args_list[1].args[1]
+                    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(reads.call_args_list[1].args[0].url).query))
                     self.assertEqual(query['filter[app]'], '123')
                     self.assertEqual(query['filter[version]'], '1215')
                     self.assertEqual(query['filter[preReleaseVersion.platform]'], 'IOS')
@@ -178,11 +180,12 @@ class IOSDuplicate(unittest.TestCase):
                            check=True, capture_output=True)
             subprocess.run(['openssl', 'pkey', '-in', str(key), '-pubout', '-out', str(public)],
                            check=True, capture_output=True)
-            jwt = asc.token(key, 'ABCDEFGH12', 'issuer-fixture', 1000)
+            read = asc.read_request('apps', {'filter[bundleId]': 'app.zerus.mobile', 'limit': '2'})
+            jwt = asc.token(key, 'ABCDEFGH12', 'issuer-fixture', 1000, read)
             header, payload, signature = jwt.split('.')
             decode = lambda value: base64.urlsafe_b64decode(value + '=' * (-len(value) % 4))
             claims = json.loads(decode(payload))
-            self.assertEqual(claims['scope'], ['GET /v1/apps', 'GET /v1/builds'])
+            self.assertEqual(claims['scope'], [read.scope])
             self.assertEqual(claims['exp'] - claims['iat'], 120)
             raw = decode(signature)
             self.assertEqual(len(raw), 64)
@@ -201,6 +204,176 @@ class IOSDuplicate(unittest.TestCase):
             for bad in [der + b'\0', b'\x30\x00', b'', b'\x30\x06\x02\x01\x80\x02\x01\x01']:
                 with self.subTest(bad=bad), self.assertRaises(ValueError):
                     asc.raw_signature(bad)
+
+
+class IOSRequestScopes(unittest.TestCase):
+    # This suite uses mocked signing and HTTP only; no ASC/key/account access.
+    signature = b'\x30\x06\x02\x01\x01\x02\x01\x02'
+
+    def setUp(self):
+        self.apps = [dict(type='apps', id='123', attributes=dict(bundleId='app.zerus.mobile'))]
+        self.build = dict(type='builds', attributes=dict(version='1215', expired=False, processingState='VALID'))
+
+    def environment(self, output):
+        return dict(CHANNEL='dev', BUILD_NUMBER='1215', ASC_KEY_ID='ABCDEFGH12',
+                    ASC_ISSUER_ID='11111111-1111-4111-8111-111111111111',
+                    ASC_KEY='synthetic-key-never-signed', GITHUB_OUTPUT=str(output))
+
+    @staticmethod
+    def claims(request):
+        bearer = request.get_header('Authorization').removeprefix('Bearer ')
+        payload = bearer.split('.')[1]
+        return json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+
+    def test_scope_matches_each_actual_filtered_get(self):
+        observed = []
+        def opened(request, timeout):
+            self.assertEqual(timeout, 20)
+            self.assertEqual(request.get_method(), 'GET')
+            target = urllib.parse.urlsplit(request.full_url)
+            self.assertEqual((target.scheme, target.netloc), ('https', 'api.appstoreconnect.apple.com'))
+            observed.append((self.claims(request), target.path + '?' + target.query))
+            return io.BytesIO(json.dumps({'data': self.apps if len(observed) == 1 else []}).encode())
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / 'output'
+            with patch.dict(os.environ, self.environment(output), clear=True), \
+                    patch.object(asc.subprocess, 'check_output', return_value=self.signature) as signing, \
+                    patch.object(asc.urllib.request, 'build_opener', return_value=SimpleNamespace(open=opened)) as opener, \
+                    patch.object(asc.time, 'time', side_effect=[1000, 1100]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                asc.main()
+            # Also runs against the exact parent: import succeeds; this scope assertion is RED.
+            self.assertEqual([claims['scope'] for claims, path in observed],
+                             [['GET ' + path] for claims, path in observed],
+                             'JWT scopes must match each actual filtered GET')
+            self.assertEqual(len(observed), 2)
+            self.assertEqual(signing.call_count, 2)
+            self.assertEqual([c['iat'] for c, _ in observed], [1000, 1100])
+            self.assertTrue(all(c['exp'] - c['iat'] == 120 for c, _ in observed))
+            app_query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(observed[0][1]).query))
+            build_query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(observed[1][1]).query))
+            self.assertEqual(app_query, {'filter[bundleId]': 'app.zerus.mobile', 'limit': '2'})
+            self.assertEqual(build_query, {'filter[app]': '123', 'filter[version]': '1215',
+                                          'filter[preReleaseVersion.version]': (ROOT / 'mobile/ios/DEV_VERSION').read_text().strip(),
+                                          'filter[preReleaseVersion.platform]': 'IOS', 'limit': '2'})
+            self.assertTrue(all(call.args[0] is asc.NoRedirect for call in opener.call_args_list))
+            self.assertEqual(output.read_text(), 'upload=true\n')
+
+    def test_canonical_path_is_stable_and_shared_with_scope(self):
+        query = {'limit': '2', 'filter[bundleId]': 'app.zerus.mobile'}
+        read = asc.read_request('apps', query)
+        self.assertEqual(read, asc.read_request('apps', dict(reversed(list(query.items())))))
+        query['filter[bundleId]'] = 'foreign.example'
+        self.assertEqual(read.scope, 'GET ' + urllib.parse.urlsplit(read.url).path + '?' + urllib.parse.urlsplit(read.url).query)
+        self.assertEqual(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(read.url).query))['filter[bundleId]'], 'app.zerus.mobile')
+        for endpoint, params in [('users', {'limit': '2'}), ('apps', {})]:
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                asc.read_request(endpoint, params)
+
+    def test_foreign_or_invalid_app_never_mints_build_token(self):
+        for apps in [[], self.apps * 2, [dict(type='apps', id='123', attributes=dict(bundleId='foreign.example'))],
+                     [dict(type='builds', id='123', attributes=dict(bundleId='app.zerus.mobile'))],
+                     [dict(type='apps', id='../foreign', attributes=dict(bundleId='app.zerus.mobile'))]]:
+            with self.subTest(apps=apps), tempfile.TemporaryDirectory() as root:
+                output = Path(root) / 'output'
+                with patch.dict(os.environ, self.environment(output), clear=True), \
+                        patch.object(asc, 'token', return_value='synthetic-bearer') as tokens, \
+                        patch.object(asc, 'get', return_value=apps) as reads, self.assertRaises(ValueError):
+                    asc.main()
+                self.assertEqual(tokens.call_count, 1)
+                self.assertEqual(reads.call_count, 1)
+                self.assertFalse(output.exists())
+
+    def test_http_failure_never_retries_or_admits_upload(self):
+        for failing_read in (1, 2):
+            with self.subTest(failing_read=failing_read), tempfile.TemporaryDirectory() as root:
+                output = Path(root) / 'output'
+                responses = [self.apps, ValueError('ASC GET refused: 403')] if failing_read == 2 else [ValueError('ASC GET refused: 403')]
+                with patch.dict(os.environ, self.environment(output), clear=True), \
+                        patch.object(asc, 'token', return_value='synthetic-bearer') as tokens, \
+                        patch.object(asc, 'get', side_effect=responses) as reads, self.assertRaises(ValueError):
+                    asc.main()
+                self.assertEqual(tokens.call_count, failing_read)
+                self.assertEqual(reads.call_count, failing_read)
+                self.assertFalse(output.exists())
+
+    def test_existing_valid_or_processing_build_suppresses_upload_with_mocked_http(self):
+        for state in ('VALID', 'PROCESSING'):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as root:
+                output = Path(root) / 'output'
+                build = {**self.build, 'attributes': {**self.build['attributes'], 'processingState': state}}
+                with patch.dict(os.environ, self.environment(output), clear=True), \
+                        patch.object(asc, 'token', return_value='synthetic-bearer'), \
+                        patch.object(asc, 'get', side_effect=[self.apps, [build]]) as reads, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    asc.main()
+                self.assertEqual(reads.call_count, 2)
+                self.assertEqual(output.read_text(), 'upload=false\n')
+
+    def test_unknown_failed_or_expired_build_never_admits_output(self):
+        for changed in ({'expired': True}, {'processingState': 'FAILED'}, {'processingState': 'UNKNOWN'}, {'version': '1214'}):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as root:
+                output = Path(root) / 'output'
+                build = {**self.build, 'attributes': {**self.build['attributes'], **changed}}
+                with patch.dict(os.environ, self.environment(output), clear=True), \
+                        patch.object(asc, 'token', return_value='synthetic-bearer'), \
+                        patch.object(asc, 'get', side_effect=[self.apps, [build]]), self.assertRaises(ValueError):
+                    asc.main()
+                self.assertFalse(output.exists())
+
+    def rejected(self, raw, code=403):
+        read = asc.read_request('apps', {'filter[bundleId]': 'app.zerus.mobile', 'limit': '2'})
+        body = io.BytesIO(raw)
+        error = urllib.error.HTTPError(read.url, code, 'private-reason',
+                                       {'Authorization': 'Bearer private-bearer'}, body)
+        with patch.object(asc.urllib.request, 'build_opener', return_value=SimpleNamespace(open=lambda *a, **k: (_ for _ in ()).throw(error))):
+            with self.assertRaises(ValueError) as caught:
+                asc.get(read, 'private-bearer')
+        self.assertTrue(body.closed)
+        self.assertTrue(caught.exception.__suppress_context__)
+        return str(caught.exception)
+
+    def test_http_error_reports_only_safe_generic_fields(self):
+        raw = json.dumps({'errors': [{'code': 'FORBIDDEN_ERROR', 'title': 'The given operation is not allowed.',
+                                     'id': 'private-id', 'detail': 'private-key private-bearer',
+                                     'source': {'pointer': 'private-pointer'}}]}).encode()
+        message = self.rejected(raw)
+        for expected in ('403', '/v1/apps', 'FORBIDDEN_ERROR', 'The given operation is not allowed.'):
+            self.assertIn(expected, message)
+        for forbidden in ('private', 'Authorization', 'filter', 'https:', 'detail', 'pointer'):
+            self.assertNotIn(forbidden, message)
+
+    def test_http_error_never_echoes_arbitrary_code_title_or_body(self):
+        for raw in [b'private-key private-bearer', b'[]', b'{"errors":"private"}',
+                    json.dumps({'errors': [{'code': 'PRIVATEKEY12', 'title': 'private-key private-bearer'}]}).encode(),
+                    b'private-key' * 1000]:
+            with self.subTest(size=len(raw)):
+                message = self.rejected(raw)
+                self.assertIn('403', message)
+                for secret in ('private', 'PRIVATEKEY12', 'Bearer', 'Authorization'):
+                    self.assertNotIn(secret, message)
+
+    def test_error_body_read_and_entries_are_bounded(self):
+        class Body(io.BytesIO):
+            def read(self, size=-1):
+                self.requested = size
+                return super().read(size)
+        body = Body(json.dumps({'errors': [{'code': 'FORBIDDEN_ERROR', 'title': 'Forbidden'}] * 100}).encode())
+        read = asc.read_request('builds', {'filter[app]': '123'})
+        error = urllib.error.HTTPError(read.url, 403, 'private', {}, body)
+        message = asc.http_error(read, error)
+        self.assertEqual(body.requested, 8193)
+        self.assertLessEqual(message.count('FORBIDDEN_ERROR'), 3)
+        self.assertLess(len(message), 1024)
+        self.assertTrue(body.closed)
+
+    def test_redirect_and_incomplete_or_oversize_reads_refuse(self):
+        read = asc.read_request('apps', {'filter[bundleId]': 'app.zerus.mobile'})
+        with self.assertRaisesRegex(ValueError, 'redirect'):
+            asc.NoRedirect().redirect_request(None, None, 302, 'private', {}, 'https://foreign.example')
+        for raw in [json.dumps({'data': [], 'links': {'next': 'https://foreign.example'}}).encode(), b'x' * (512 * 1024 + 1)]:
+            with self.subTest(size=len(raw)), patch.object(asc.urllib.request, 'build_opener', return_value=SimpleNamespace(open=lambda *a, **k: io.BytesIO(raw))), self.assertRaises(ValueError):
+                asc.get(read, 'private-bearer')
 
 
 class DeliveryGraph(unittest.TestCase):

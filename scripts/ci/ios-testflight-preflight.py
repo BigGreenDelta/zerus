@@ -12,6 +12,8 @@ import re
 import subprocess
 import tempfile
 import time
+from typing import NamedTuple
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -46,10 +48,31 @@ def raw_signature(der):
     return b''.join(values)
 
 
-def token(key, key_id, issuer, now):
+class ReadRequest(NamedTuple):
+    endpoint: str
+    path: str
+
+    @property
+    def scope(self):
+        return 'GET ' + self.path
+
+    @property
+    def url(self):
+        return 'https://api.appstoreconnect.apple.com' + self.path
+
+
+def read_request(endpoint, query):
+    if endpoint not in ('apps', 'builds') or not query:
+        raise ValueError('Exact ASC read required')
+    # Share the identical canonical query between JWT scope and HTTP request.
+    path = '/v1/' + endpoint + '?' + urllib.parse.urlencode(sorted(query.items()))
+    return ReadRequest(endpoint, path)
+
+
+def token(key, key_id, issuer, now, read):
     header = encode({'alg': 'ES256', 'kid': key_id, 'typ': 'JWT'})
     payload = encode({'iss': issuer, 'iat': now, 'exp': now + 120, 'aud': 'appstoreconnect-v1',
-                      'scope': ['GET /v1/apps', 'GET /v1/builds']})
+                      'scope': [read.scope]})
     body = header + b'.' + payload
     signature = subprocess.check_output(['openssl', 'dgst', '-sha256', '-sign', str(key)],
                                         input=body, stderr=subprocess.PIPE, timeout=10)
@@ -61,11 +84,45 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise ValueError('ASC read must not redirect')
 
 
-def get(endpoint, query, bearer):
-    url = 'https://api.appstoreconnect.apple.com/v1/' + endpoint + '?' + urllib.parse.urlencode(query)
-    request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + bearer})
-    with urllib.request.build_opener(NoRedirect).open(request, timeout=20) as response:
-        raw = response.read(512 * 1024 + 1)
+def http_error(read, error):
+    # Never echo arbitrary response text, details, identifiers, URLs or headers.
+    codes = {'FORBIDDEN_ERROR', 'NOT_AUTHORIZED', 'UNAUTHORIZED', 'AUTHENTICATION_ERROR',
+             'NOT_FOUND', 'RESOURCE_NOT_FOUND', 'PARAMETER_ERROR', 'INVALID_REQUEST',
+             'RATE_LIMIT_EXCEEDED', 'INTERNAL_ERROR', 'STATE_ERROR', 'ENTITY_ERROR'}
+    titles = {'Access Forbidden', 'Forbidden', 'The given operation is not allowed.',
+              'The request is not authorized.', 'Not Authorized',
+              'Authentication credentials are missing or invalid.',
+              'The specified resource does not exist', 'The specified resource does not exist.',
+              'A parameter has an invalid value', 'A parameter has an invalid value.',
+              'The request rate limit has been exceeded.', 'An unexpected error occurred.'}
+    parsed = []
+    try:
+        raw = error.read(8192 + 1)
+        if len(raw) <= 8192:
+            body = json.loads(raw)
+            errors = body.get('errors') if isinstance(body, dict) else None
+            if isinstance(errors, list):
+                for item in errors[:3]:
+                    if isinstance(item, dict):
+                        code, title = item.get('code'), item.get('title')
+                        parsed.append({'code': code if isinstance(code, str) and code in codes else 'unrecognized',
+                                       'title': title if isinstance(title, str) and title in titles else 'unrecognized'})
+    except (OSError, ValueError, TypeError, RecursionError):
+        pass
+    finally:
+        error.close()
+    status = error.code if type(error.code) is int and 100 <= error.code <= 599 else 'unknown'
+    return 'ASC GET refused: ' + json.dumps({'status': status, 'endpoint': '/v1/' + read.endpoint,
+                                           'errors': parsed}, separators=(',', ':'))
+
+
+def get(read, bearer):
+    request = urllib.request.Request(read.url, headers={'Authorization': 'Bearer ' + bearer}, method='GET')
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=20) as response:
+            raw = response.read(512 * 1024 + 1)
+    except urllib.error.HTTPError as error:
+        raise ValueError(http_error(read, error)) from None
     if len(raw) > 512 * 1024:
         raise ValueError('ASC read exceeds bounds')
     data = json.loads(raw)
@@ -74,10 +131,17 @@ def get(endpoint, query, bearer):
     return data['data']
 
 
-def upload_needed(apps, builds, number):
+def app_identity(apps):
     if (len(apps) != 1 or apps[0].get('type') != 'apps'
-            or apps[0].get('attributes', {}).get('bundleId') != 'app.zerus.mobile'):
+            or apps[0].get('attributes', {}).get('bundleId') != 'app.zerus.mobile'
+            or not isinstance(apps[0].get('id'), str)
+            or not re.fullmatch('[0-9]{1,20}', apps[0]['id'])):
         raise ValueError('Exact Zerus app not found')
+    return apps[0]['id']
+
+
+def upload_needed(apps, builds, number):
+    app_identity(apps)
     if not builds:
         return True
     if len(builds) != 1:
@@ -107,13 +171,13 @@ def main():
         with key.open('x') as out:
             os.chmod(key, 0o600)
             out.write(os.environ['ASC_KEY'])
-        bearer = token(key, key_id, issuer, int(time.time()))
-        apps = get('apps', {'filter[bundleId]': 'app.zerus.mobile', 'limit': '2'}, bearer)
-        if len(apps) != 1 or not re.fullmatch('[0-9]{1,20}', apps[0].get('id', '')):
-            raise ValueError('Exact ASC app identity unavailable')
-        builds = get('builds', {'filter[app]': apps[0]['id'], 'filter[version]': number,
-                               'filter[preReleaseVersion.version]': version,
-                               'filter[preReleaseVersion.platform]': 'IOS', 'limit': '2'}, bearer)
+        read = read_request('apps', {'filter[bundleId]': 'app.zerus.mobile', 'limit': '2'})
+        apps = get(read, token(key, key_id, issuer, int(time.time()), read))
+        app = app_identity(apps)
+        read = read_request('builds', {'filter[app]': app, 'filter[version]': number,
+                                     'filter[preReleaseVersion.version]': version,
+                                     'filter[preReleaseVersion.platform]': 'IOS', 'limit': '2'})
+        builds = get(read, token(key, key_id, issuer, int(time.time()), read))
         needed = upload_needed(apps, builds, number)
     with Path(os.environ['GITHUB_OUTPUT']).open('a') as out:
         out.write(f'upload={str(needed).lower()}\n')
