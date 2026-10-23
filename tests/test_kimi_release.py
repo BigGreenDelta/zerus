@@ -1,9 +1,12 @@
 """Selected-release admission controls: synthetic sealed bytes, no native process."""
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -81,6 +84,46 @@ class SelectedRelease(unittest.TestCase):
             self.admit(root, other, sha)
         image.chmod(0o600); image.write_bytes(b'changed bytes!!'); image.chmod(0o400)
         with self.assertRaises(ValueError):
+            self.admit(root, image, sha)
+
+    @contextmanager
+    def windows(self, overrides=None, after=False):
+        original = Path.lstat
+        counts = {}
+        def observed(path, *args, **kwargs):
+            info = original(path, *args, **kwargs)
+            values = {key: getattr(info, key) for key in dir(info) if key.startswith('st_')}
+            counts[path.name] = counts.get(path.name, 0) + 1
+            attributes = stat.FILE_ATTRIBUTE_READONLY
+            if overrides and path.name in overrides and (not after or counts[path.name] > 1):
+                attributes = overrides[path.name]
+            if attributes is not None:
+                values['st_file_attributes'] = attributes
+            else:
+                values.pop('st_file_attributes', None)
+            return SimpleNamespace(**values)
+        # Only the subject's OS surface is NT; pathlib and the host remain Unix.
+        with mock.patch.object(release, 'os', SimpleNamespace(name='nt', open=os.open,
+                                           fdopen=os.fdopen, fstat=os.fstat, O_RDONLY=os.O_RDONLY)), \
+                mock.patch.object(Path, 'lstat', observed):
+            yield
+
+    def test_windows_exact_readonly_attributes_admit_the_sealed_selection(self):
+        root, image, sha, _ = self.fixture()
+        with self.windows():
+            self.assertEqual(self.admit(root, image, sha), '2.3.1')
+
+    def test_windows_writable_or_missing_attribute_refuses_each_sealed_file(self):
+        for name in ('selected-release.json', 'manifest.json', 'kimi-code-linux-x64'):
+            for value in (0, None, True):
+                with self.subTest(name=name, value=value):
+                    root, image, sha, _ = self.fixture()
+                    with self.windows({name: value}), self.assertRaisesRegex(ValueError, 'Windows read-only'):
+                        self.admit(root, image, sha)
+
+    def test_windows_readonly_removed_during_read_is_refused(self):
+        root, image, sha, _ = self.fixture()
+        with self.windows({image.name: 0}, after=True), self.assertRaisesRegex(ValueError, 'Windows read-only'):
             self.admit(root, image, sha)
 
     @unittest.skipIf(os.name == 'nt', 'Unix file modes and symbolic links')

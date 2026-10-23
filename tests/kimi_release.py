@@ -39,14 +39,24 @@ def identity(info):
             info.st_mtime_ns, info.st_ctime_ns)
 
 
+def readonly_file(info):
+    if os.name == 'nt':
+        attributes = getattr(info, 'st_file_attributes', None)
+        readonly = getattr(stat, 'FILE_ATTRIBUTE_READONLY', None)
+        if (type(attributes) is not int or type(readonly) is not int or readonly <= 0
+                or attributes & readonly == 0):
+            raise ValueError('release file Windows read-only attribute is unavailable or unset')
+    elif info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o400:
+        raise ValueError('release file must be private and sealed read-only')
+
+
 def sealed(path, limit, expected_size=None):
     path = Path(path)
     before = path.lstat()
     if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit
             or expected_size is not None and before.st_size != expected_size):
         raise ValueError('release file kind, links or size changed')
-    if os.name != 'nt' and (before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) != 0o400):
-        raise ValueError('release file must be private and sealed read-only')
+    readonly_file(before)
     fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
     with os.fdopen(fd, 'rb') as stream:
         if identity(os.fstat(stream.fileno())) != identity(before):
@@ -60,7 +70,9 @@ def sealed(path, limit, expected_size=None):
             checksum.update(chunk)
             if limit <= 65536:
                 data.append(chunk)
-        if identity(os.fstat(stream.fileno())) != identity(before) or identity(path.lstat()) != identity(before):
+        after = path.lstat()
+        readonly_file(after)
+        if identity(os.fstat(stream.fileno())) != identity(before) or identity(after) != identity(before):
             raise ValueError('release file changed while reading')
     return checksum.hexdigest(), b''.join(data)
 
