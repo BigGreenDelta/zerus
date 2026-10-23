@@ -631,8 +631,21 @@ bool NewSessionDialog::automaticWorktreeAvailable() const
 {
     const auto path=m_folder->currentData(Qt::UserRole+2).toString();
     const auto root=m_worktreeCatalog["selected_root"].toString();
-    if(m_catalogRequest||m_worktreeCatalog["state"]!="ok"||m_worktreeCatalog["stale"].toBool()||m_worktreeCatalog["partial"].toBool()
+    if(m_catalogRequest||m_worktreeCatalog["state"]!="ok"||m_worktreeCatalog["stale"].toBool()
         ||m_worktreeCatalog["common_dir"].toString().isEmpty()||!QDir::isAbsolutePath(root)||QFileInfo(root).fileName().isEmpty())return false;
+    if(m_worktreeCatalog["partial"].toBool()){
+        // Git confirms the requested canonical cwd and selected root separately
+        // from the bounded list. The selected checkout may be beyond its cap.
+        const auto style=folderStyle(m_fleet,host());const auto selected=m_worktreeCatalog["path"].toString();
+        if(!MachinePlatform::absolute(selected,style)||!MachinePlatform::within(selected,root,style))return false;
+        // HgsClient also derives sibling snapshots from listed entries. Those
+        // cannot turn a known missing or bare row into an eligible checkout.
+        for(const auto &value:m_worktreeCatalog["worktrees"].toArray()){
+            const auto entry=value.toObject();
+            if(MachinePlatform::same(root,entry["path"].toString(),style))return entry["available"].toBool()&&entry["kind"]!="bare";
+        }
+        return true;
+    }
     for(const auto &value:m_worktreeCatalog["worktrees"].toArray()){
         const auto entry=value.toObject();
         if(entry["available"].toBool()&&entry["kind"]!="bare"&&MachinePlatform::within(path,entry["path"].toString(),folderStyle(m_fleet,host())))return true;

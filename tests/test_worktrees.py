@@ -82,8 +82,10 @@ class Worktrees(Repository,unittest.TestCase):
         self.fake("sys.stdout.write('x'*(2*1024*1024));sys.stdout.flush()\n");self.assertEqual(self.catalog()['state'],'too_large')
     def test_large_catalog_drains_pipes_and_marks_partial(self):
         common=str(self.repo/'.git')
-        self.fake("if 'worktree' in sys.argv:\n for i in range(520):\n  sys.stdout.write('worktree /fixture/'+str(i)+'-'+('x'*150)+'\\0HEAD 0000000000000000000000000000000000000000\\0branch refs/heads/a\\0\\0')\nelse: print("+repr(common)+")\n")
+        self.fake("if 'worktree' in sys.argv:\n for i in range(520):\n  sys.stdout.write('worktree /fixture/'+str(i)+'-'+('x'*150)+'\\0HEAD 0000000000000000000000000000000000000000\\0branch refs/heads/a\\0\\0')\nelif '--show-toplevel' in sys.argv: print("+repr(str(self.repo))+")\nelse: print("+repr(common)+")\n")
         data=self.catalog();self.assertEqual(data['state'],'ok');self.assertTrue(data['partial']);self.assertEqual(len(data['worktrees']),512)
+        self.assertEqual(data['path'],str(self.repo.resolve()));self.assertEqual(data['selected_root'],str(self.repo.resolve()))
+        self.assertNotIn(data['selected_root'],[row['path'] for row in data['worktrees']])
     def test_concurrent_catalog_requests_share_snapshot(self):
         linked=self.linked()
         with concurrent.futures.ThreadPoolExecutor() as pool:data=list(pool.map(self.catalog,[self.repo,linked]*3))
