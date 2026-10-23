@@ -73,7 +73,7 @@ import Dispatch
         print("FIXTURE-UI \(name) uptime=\(ProcessInfo.processInfo.systemUptime) generation=\(fixtureGeneration)")
     }
     private func post(_ action: String) {
-        XCTAssertTrue(["begin-feedback-review", "replace", "begin-countdown-review", "become-unavailable"].contains(action))
+        XCTAssertTrue(["begin-feedback-review", "replace", "begin-countdown-review", "become-unavailable", "close-controls"].contains(action))
         XCTAssertTrue(posted.insert(action).inserted, "No control replays")
         XCTAssertEqual(app.staticTexts["fixture-generation"].label, fixtureGeneration)
         let name = "test.example.zerus.ui.\(fixtureLaunch).\(fixtureGeneration.lowercased()).\(action)"
@@ -120,7 +120,9 @@ import Dispatch
         if app.state != .runningForeground { app.activate() }
         if app.buttons["Cancel"].exists { app.buttons["Cancel"].tap() }
         XCTAssertTrue(app.buttons["Close controls"].exists)
-        app.buttons["Close controls"].tap()
+        // Teardown owns registrations, not native input delivery. A missed UI tap cannot strand them.
+        // This terminal event has the same launch/generation and is sent once; posting is not its ACK.
+        post("close-controls")
         let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'closed'"), object: app.staticTexts["fixture-control-status"])
         XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 2), .completed, "Owned registration cleanup must be acknowledged")
         phase("closed")

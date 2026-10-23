@@ -56,6 +56,64 @@ def finite_source_predicate(expression, values):
     return eval(compile(tree, "<finite-source-predicate>", "eval"), {"__builtins__": {}}, values)
 
 
+def ios_terminal_cleanup_memory(source, mode):
+    """Finite source-bound notification/token stand-in, not Swift or native delivery evidence."""
+    actions = source.split('    private var actions: [Action] {', 1)[1].split('    private func name(', 1)[0]
+    selected = dict(re.findall(r'case \.(\w+): \[([^\]]*)\]', actions))
+    terminal = re.search(r'return selected \+ \[\.(\w+)\]', actions)[1]
+    assert terminal == 'closeControls'
+    names = re.findall(r'\.(\w+)', selected[mode]) + [terminal]
+    assert len(names) == len(set(names))
+    assert '"test.example.zerus.ui.\\(launch).\\(generation.lowercased()).\\(action.rawValue)"' in source
+    consume = source.split('    private func consume(', 1)[1].split('    func close()', 1)[0]
+    guard = re.search(r'guard ([^\n]+) else \{', consume)[1]
+    predicate = guard.replace('!closed', 'not closed').replace('failure.isEmpty', 'failure_empty').replace(
+        'actions.contains(action)', 'mode_admits').replace('!consumed.contains(action)', 'not consumed').replace(
+        'tokens[action]', 'owned_token').replace(',', ' and')
+    order = ['tokens.removeValue(forKey: action)', 'guard notify_cancel(token) == 0',
+             'consumed.insert(action)', 'case .closeControls: close(); return', 'status = "ack|']
+    assert [consume.index(term) for term in order] == sorted(consume.index(term) for term in order)
+    close = source.split('    func close() {\n', 1)[1].split('\n    }\n}', 1)[0]
+    assert close == '''        closed = true
+        for action in Array(tokens.keys) {
+            guard let token = tokens.removeValue(forKey: action) else { failed("missing-owned-token"); continue }
+            if notify_cancel(token) != 0 { failed("close-cancel") }
+        }
+        if failure.isEmpty { status = "closed" }'''
+    state = SimpleNamespace(tokens={name: index + 17 for index, name in enumerate(names)}, consumed=set(),
+                            closed=False, failure='', status='ready', cancellations=[], generation='current')
+
+    def failed(reason):
+        if not state.failure: state.failure = reason
+        state.status = 'error|' + state.failure
+
+    def cancel(token, failures):
+        assert token not in state.cancellations, 'No retry of an owned or uncertain cancellation'
+        state.cancellations.append(token)
+        return token not in failures
+
+    def dispatch(action=terminal, *, generation='current', token=None, failures=()):
+        # A wrong generation or unregistered action has no matching notification registration.
+        if generation != state.generation or action not in names: return
+        received = state.tokens.get(action) if token is None else token
+        allowed = finite_source_predicate(predicate, dict(closed=state.closed, failure_empty=not state.failure,
+            mode_admits=action in names, consumed=action in state.consumed, owned_token=state.tokens.get(action), token=received))
+        if not allowed: failed('stale-or-repeated-action'); return
+        owned = state.tokens.pop(action)
+        if not cancel(owned, failures): failed('consumption-cancel'); return
+        state.consumed.add(action)
+        if action == terminal:
+            state.closed = True
+            for pending in list(state.tokens):
+                if not cancel(state.tokens.pop(pending), failures): failed('close-cancel')
+            if not state.failure: state.status = 'closed'
+        else:
+            state.status = 'ack|' + action
+
+    return SimpleNamespace(state=state, dispatch=dispatch,
+        qualified=lambda visible_ack=None: state.closed and not state.tokens and not state.failure and visible_ack == 'closed')
+
+
 def android_diagnostic_memory(source):
     """Source-bound finite callback/line stand-in; no Android, JVM or real window operation."""
     line = source.split('    private fun evidenceLine(', 1)[1].split('    private fun diagnosticStage(', 1)[0]
@@ -759,6 +817,103 @@ class IosCleanupBudgetTests(unittest.TestCase):
             memory.faults.update({stage + "_name": "/evidence/outcome.json", stage + "_delay": 60})
             with self.subTest(final_stage=stage), self.assertRaisesRegex(AssertionError, "final persistence"):
                 memory.finalize()
+
+
+class IosTerminalCleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.host = (ROOT / 'mobile/ios/ApprovalUIFixture/ApprovalUIFixtureApp.swift').read_text()
+        self.tests = (ROOT / 'mobile/ios/ApprovalUIFixture/ApprovalChoicesUITests.swift').read_text()
+
+    def test_exact_reverse_retains_all_seven_cases_and_every_other_fixture_statement(self):
+        host = self.host
+        replacements = [
+            ('/// Four fixed review controls and one terminal cleanup notification in this disposable fixture only.',
+             '/// Four fixed, payload-free notifications inside this disposable simulator fixture only.'),
+            ('        case closeControls = "close-controls"\n', ''),
+            ('            switch self { case .beginCountdownReview: "c"; case .beginFeedbackReview: "f"; case .replace, .becomeUnavailable: nil\n'
+             '            // Cleanup is acknowledged by the actual visible closed status after all cancellations.\n'
+             '            case .closeControls: nil }',
+             '            switch self { case .beginCountdownReview: "c"; case .beginFeedbackReview: "f"; case .replace, .becomeUnavailable: nil }'),
+            ('        let selected: [Action] = switch mode {', '        switch mode {'),
+            ('        return selected + [.closeControls]\n', ''),
+            ('        switch action { case .closeControls: close(); return\n        case .beginFeedbackReview,',
+             '        switch action { case .beginFeedbackReview,'),
+        ]
+        for new, old in replacements:
+            self.assertEqual(host.count(new), 1)
+            host = host.replace(new, old, 1)
+        self.assertEqual(hashlib.sha256(host.encode()).hexdigest(),
+                         '7ae7121e881888143e6ad57846f7ebef8d18d70a4e5f0acfc66ee85180339ab7')
+        source = self.tests
+        for new, old in [
+            ('"become-unavailable", "close-controls"].contains(action)', '"become-unavailable"].contains(action)'),
+            ('        // Teardown owns registrations, not native input delivery. A missed UI tap cannot strand them.\n'
+             '        // This terminal event has the same launch/generation and is sent once; posting is not its ACK.\n'
+             '        post("close-controls")', '        app.buttons["Close controls"].tap()'),
+        ]:
+            self.assertEqual(source.count(new), 1)
+            source = source.replace(new, old, 1)
+        self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),
+                         'c78cadac19a029a021c9f03ca292ffdcb669250369383100efa6458ce7b5aa4b')
+
+    def test_terminal_dispatch_is_owned_in_every_mode_and_closes_each_token_once(self):
+        for mode in ('normal', 'feedback', 'replacement', 'countdown', 'unavailable'):
+            with self.subTest(mode=mode):
+                fixture = ios_terminal_cleanup_memory(self.host, mode)
+                tokens = dict(fixture.state.tokens)
+                fixture.dispatch()
+                self.assertEqual(fixture.state.cancellations[0], tokens['closeControls'])
+                self.assertCountEqual(fixture.state.cancellations, tokens.values())
+                self.assertEqual(fixture.state.status, 'closed')
+                self.assertFalse(fixture.qualified())
+                self.assertTrue(fixture.qualified('closed'))
+        self.assertIn('Button("Close controls") { app.controls.close() }', self.host)
+        name = 'test.example.zerus.ui.' + 'a' * 36 + '.' + 'b' * 36 + '.close-controls'
+        self.assertLessEqual(len(name.encode()), 128)
+
+    def test_stale_generation_action_token_repeat_and_unknown_cancellation_never_qualify(self):
+        for values in (dict(generation='stale'), dict(action='unknown'), dict(action='replace')):
+            fixture = ios_terminal_cleanup_memory(self.host, 'feedback')
+            tokens = dict(fixture.state.tokens)
+            fixture.dispatch(**values)
+            self.assertEqual(fixture.state.tokens, tokens)
+            self.assertFalse(fixture.qualified('closed'))
+        fixture = ios_terminal_cleanup_memory(self.host, 'feedback')
+        fixture.dispatch(token=999)
+        self.assertEqual(fixture.state.status, 'error|stale-or-repeated-action')
+        self.assertEqual(fixture.state.cancellations, [])
+        self.assertFalse(fixture.qualified('closed'))
+        fixture = ios_terminal_cleanup_memory(self.host, 'feedback')
+        fixture.dispatch(); cancelled = list(fixture.state.cancellations)
+        fixture.dispatch(token=cancelled[0])
+        self.assertEqual(fixture.state.cancellations, cancelled)
+        self.assertFalse(fixture.qualified('closed'))
+        for failed_action in ('closeControls', 'beginFeedbackReview'):
+            fixture = ios_terminal_cleanup_memory(self.host, 'feedback')
+            token = fixture.state.tokens[failed_action]
+            fixture.dispatch(failures=(token,))
+            cancelled = list(fixture.state.cancellations)
+            fixture.dispatch(token=token)
+            self.assertEqual(fixture.state.cancellations, cancelled)
+            self.assertEqual(cancelled.count(token), 1)
+            self.assertFalse(fixture.qualified('closed'))
+
+    def test_missing_visible_ack_cannot_be_replaced_by_post_success_or_an_unrelated_status(self):
+        cleanup = self.tests.split('    private func closeFixture() {', 1)[1].split('    private var send:', 1)[0]
+        self.assertEqual(cleanup.count('post("close-controls")'), 1)
+        self.assertNotIn('app.buttons["Close controls"].tap()', cleanup)
+        self.assertIn('defer { app?.terminate() }', cleanup)
+        self.assertIn('NSPredicate(format: "label == \'closed\'")', cleanup)
+        self.assertIn('XCTWaiter.wait(for: [closed], timeout: 2), .completed', cleanup)
+        self.assertLess(cleanup.index('post("close-controls")'), cleanup.index('XCTWaiter.wait(for: [closed]'))
+        self.assertNotIn('sleep', cleanup)
+        # Counterexample: successful post with no delivered callback cannot acknowledge teardown.
+        fixture = ios_terminal_cleanup_memory(self.host, 'feedback')
+        self.assertFalse(fixture.qualified('closed'))
+        fixture.dispatch()
+        for visible in (None, 'ready', 'ack|begin-feedback-review', 'error|close-cancel'):
+            self.assertFalse(fixture.qualified(visible))
+        self.assertTrue(fixture.qualified('closed'))
 
 
 class ApprovalHarnessTests(unittest.TestCase):

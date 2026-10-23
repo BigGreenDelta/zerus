@@ -4,15 +4,18 @@ import ZerusKit
 import Darwin
 import Dispatch
 
-/// Four fixed, payload-free notifications inside this disposable simulator fixture only.
+/// Four fixed review controls and one terminal cleanup notification in this disposable fixture only.
 /// The random names avoid cross-test collisions; they do not authenticate a sender.
 @MainActor @Observable final class FixtureControls {
     enum Mode: String { case normal, countdown, feedback, replacement, unavailable }
     enum Action: String, Hashable, Sendable {
         case beginFeedbackReview = "begin-feedback-review", replace, beginCountdownReview = "begin-countdown-review"
         case becomeUnavailable = "become-unavailable"
+        case closeControls = "close-controls"
         var acknowledgementCode: String? {
-            switch self { case .beginCountdownReview: "c"; case .beginFeedbackReview: "f"; case .replace, .becomeUnavailable: nil }
+            switch self { case .beginCountdownReview: "c"; case .beginFeedbackReview: "f"; case .replace, .becomeUnavailable: nil
+            // Cleanup is acknowledged by the actual visible closed status after all cancellations.
+            case .closeControls: nil }
         }
     }
     let launch: String
@@ -45,8 +48,9 @@ import Dispatch
         available = selectedMode != .feedback && selectedMode != .countdown
     }
     private var actions: [Action] {
-        switch mode { case .normal: []; case .feedback: [.beginFeedbackReview]; case .replacement: [.replace]; case .countdown: [.beginCountdownReview]
+        let selected: [Action] = switch mode { case .normal: []; case .feedback: [.beginFeedbackReview]; case .replacement: [.replace]; case .countdown: [.beginCountdownReview]
         case .unavailable: [.becomeUnavailable] }
+        return selected + [.closeControls]
     }
     private func name(_ action: Action) -> String {
         let value = "test.example.zerus.ui.\(launch).\(generation.lowercased()).\(action.rawValue)"
@@ -79,7 +83,8 @@ import Dispatch
         tokens.removeValue(forKey: action) // A cancellation is attempted once, including an unknown result.
         guard notify_cancel(token) == 0 else { failed("consumption-cancel"); return }
         consumed.insert(action)
-        switch action { case .beginFeedbackReview, .beginCountdownReview: available = true; case .replace: serial += 1
+        switch action { case .closeControls: close(); return
+        case .beginFeedbackReview, .beginCountdownReview: available = true; case .replace: serial += 1
         case .becomeUnavailable: available = false }
         let now = ProcessInfo.processInfo.systemUptime
         status = "ack|\(action.rawValue)|\(serial)|\(now)"

@@ -254,9 +254,13 @@ The four fixture-only control modes use Darwin notifications through `notify_reg
 `notify_cancel` ([Apple API header](https://raw.githubusercontent.com/apple-oss-distributions/Libnotify/main/notify.h),
 [notification semantics](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/notify.3.html)).
 The shared namespace does not authenticate a sender. This channel is confined to the disposable simulator fixture:
-exact names bind a fresh test-launch UUID and a separate random app-generation UUID, with only the action needed by
-the chosen mode registered. Each action consumes and cancels its own token once, and the UI must acknowledge its
-action/serial. Posting success alone proves no delivery. Explicit fixture closure checks cancellation before termination;
+exact names bind a fresh test-launch UUID and a separate random app-generation UUID, with only the review action needed by
+the chosen mode registered. Every mode also registers one terminal `close-controls` action for owned teardown. After the
+original case assertions, the test posts it once; it cancels its own token before closing the remaining registrations.
+The actual visible `closed` acknowledgement must arrive within the unchanged two-second limit before termination;
+posting success alone cannot acknowledge cleanup. The visible Close controls button remains available, but automated
+registration cleanup does not depend on native tap delivery. Each review action likewise consumes and cancels its own
+token once, and the UI must acknowledge its action/serial. Explicit fixture closure checks cancellation before termination;
 a failed registration, acknowledgement, timing precondition, or cleanup cannot pass. No production target uses this API.
 
 Countdown mode additionally starts unavailable, selects the original native option while ordinary card inputs remain
