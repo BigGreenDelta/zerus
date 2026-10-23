@@ -46,9 +46,9 @@ struct RootView: View {
         .minimizingTabBarOnScroll()
         .sheet(isPresented: $settings) { SettingsView() }
         .quickLookPreview(Binding(get: { model.viewer.opened?.file }, set: { if $0 == nil { model.viewer.opened = nil } }))
-        .sheet(isPresented: $model.choosingLaunchMachine) { NewSessionMachineSheet() }
         .fullScreenCover(isPresented: Binding(get: { model.launch.visible }, set: { if !$0 { model.launch.close() } })) {
-            if let machine = model.launch.machine { LaunchForm(machine: machine).environment(model) }
+            if model.launch.machine != nil { LaunchForm().environment(model) }
+            else { NavigationStack { Text("Refresh your connected computers first.").toolbar { Button("Close") { model.launch.close() } } } }
         }
         .sheet(item: $pairing) { request in PairingSheet(request: request) }
         .onChange(of: model.conversationRequest) { _, target in
@@ -170,7 +170,7 @@ struct MainToolbar: ToolbarContent {
                 .withoutGlassBackground()
         }
         ToolbarItem(placement: .topBarTrailing) {
-            Button { model.choosingLaunchMachine = true } label: { Image(systemName: "plus") }
+            Button { model.launch.open() } label: { Image(systemName: "plus") }
                 .disabled(model.demo || model.connections.isEmpty)
                 .accessibilityLabel("New session")
         }

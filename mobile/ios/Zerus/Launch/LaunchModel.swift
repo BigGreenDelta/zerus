@@ -27,6 +27,8 @@ final class LaunchModel {
     var formId = 0
     /// Generated once per form: the default session name and Auto's new branch.
     var generatedName = ""
+    var repositoryPath = ""
+    var repositoryCheckId = ""
     /// Launch, worktree and folder receipt statuses when the form opened; later changes belong to this form.
     var baseline: [String: String] = [:]
     /// Auto worktree progress: creating, checking or launching.
@@ -64,23 +66,26 @@ final class LaunchModel {
         return ""
     }
 
+    func open() {
+        let candidates = app.machines.sorted { (app.selectedMachines.contains($0.key) ? 0 : 1) < (app.selectedMachines.contains($1.key) ? 0 : 1) }
+        if let chosen = candidates.first(where: { reason($0.key).isEmpty }) ?? candidates.first { prepare(chosen.key) }
+        else { visible = true; error = "Refresh your connected computers first." }
+    }
+
     func prepare(_ machine: MachineKey) {
         guard !busy else { return }
         let problem = reason(machine)
-        guard problem.isEmpty else {
-            app.error = problem
-            return
-        }
+        let opening = !visible
         generation += 1
         self.machine = machine
+        repositoryPath = ""; repositoryCheckId = ""
         visible = true
         catalog = nil
         directory = nil
         worktrees = nil
         error = ""
         catalogEvidence = ""
-        formId = generation
-        generatedName = LaunchPresentation.generatedName()
+        if opening { formId = generation; generatedName = LaunchPresentation.generatedName() }
         stage = ""
         createdWorktree = ""
         createdEvidence = nil
@@ -92,6 +97,7 @@ final class LaunchModel {
         worktreeTask?.cancel()
         worktreeLoading = false
         directoryLoading = false
+        guard problem.isEmpty else { error = problem; catalogLoading = false; return }
         guard let connection = app.connections.first(where: { $0.id == machine.connectionId }) else { return }
         let form = generation
         catalogLoading = true
@@ -115,6 +121,108 @@ final class LaunchModel {
             }
         }
         browse(machine, "~")
+    }
+
+    func repositoryReason(_ machine: MachineKey,path:String?=nil) -> String {
+        if (RepositoryAcquisition.operations + ["worktrees"]).contains(where: { !supports(machine,$0) }) { return "Update the gateway and Zerus on this computer to clone repositories." }
+        if app.machines.first(where: { $0.key == machine })?.machineId.isEmpty != false { return "Refresh this computer's identity." }
+        if RepositoryAcquisition.pending(conversation.sessionActions,machine,path:path) != nil { return "This destination has an unconfirmed checkout. Check its result or choose another destination." }
+        return reason(machine)
+    }
+
+    func checkRepositoryResult(_ action: SessionAction) {
+        let machine = action.target.machineKey
+        guard !busy, visible, self.machine == machine,
+              let stored = conversation.sessionActions.first(where: { $0.requestId == action.requestId && $0.operation == RepositoryAcquisition.clone }),
+              !conversation.actionFlights.contains(stored.requestId), let connection = app.connections.first(where: { $0.id == machine.connectionId }) else { return }
+        stage = "checking"
+        conversation.actionFlights.insert(stored.requestId)
+        Task {
+            defer { stage = ""; conversation.actionFlights.remove(stored.requestId) }
+            do {
+                let id = UUID().uuidString.lowercased()
+                let payload = try RepositoryAcquisition.statusPayload(stored,id:id)
+                let receipt = try await app.client.waitForReceipt(connection, initial: try await app.client.submit(connection, target: stored.target,
+                    operation: "repository_status", payload: payload, id: id))
+                let settled = RepositoryAcquisition.result(stored,receipt,readId:id)
+                _ = try await app.durableMessages { $0.action(settled) }
+                error = settled.error
+            } catch { self.error = RepositoryAcquisition.uncertain }
+        }
+    }
+
+    func cloneAndLaunch(_ machine: MachineKey, url: String, path: String, agent: String, tag: String, accountId: String,
+                        expectedCatalog: String, projectId: String, model: String, effort: String, implicitInbox: Bool) {
+        guard !busy, visible, self.machine == machine, catalogEvidence == expectedCatalog else { return }
+        if let problem = repositoryReason(machine,path:path).nonEmpty { error = problem; return }
+        let identity = app.machines.first { $0.key == machine }?.machineId ?? ""
+        let arguments: JSONObject
+        do { arguments = try RepositoryAcquisition.arguments(machineId: identity,url:url,path:path) }
+        catch { self.error = AppModel.message(error,fallback:"Invalid repository choices."); return }
+        guard let connection = app.connections.first(where: { $0.id == machine.connectionId }), let catalog else { return }
+        let form = generation, target = computerTarget(machine)
+        stage = "checking"; error = ""
+        Task {
+            var action: SessionAction?
+            var attempted = false, rejected = false
+            defer { stage = ""; if let action { conversation.actionFlights.remove(action.requestId) } }
+            do {
+                let id = UUID().uuidString.lowercased()
+                var checkPayload = arguments; checkPayload["request_id"] = .string(id)
+                let checked = try await app.client.waitForReceipt(connection, initial: try await app.client.submit(connection, target: target,
+                    operation: "repository_check", payload: checkPayload,id:id))
+                let destination=try RepositoryAcquisition.checkedDestination(arguments,checked,id:id)
+                guard visible, self.machine == machine, generation == form, catalogEvidence == expectedCatalog else { throw ZerusError.invalid("The selected computer or form changed.") }
+                if destination.needsConfirmation {
+                    repositoryPath=destination.path;repositoryCheckId=id
+                    error="Destination resolved. Review Clone to, then choose Clone and start."
+                    return
+                }
+                // Validate the whole launch before reserving or creating a checkout.
+                let launchArgs = try launchArguments(machine,catalog,agent:agent,directory:path,tag:tag,accountId:accountId,projectId:projectId,
+                    worktrees:nil,model:model,effort:effort,implicitInbox:implicitInbox)
+                guard visible, self.machine == machine, generation == form, catalogEvidence == expectedCatalog, repositoryReason(machine,path:path).isEmpty else {
+                    throw ZerusError.invalid("The selected computer or form changed.")
+                }
+                let creation = SessionAction(requestId: UUID().uuidString.lowercased(),target:target,operation:RepositoryAcquisition.clone,arguments:arguments)
+                action = creation;conversation.actionFlights.insert(creation.requestId)
+                _ = try await app.durableMessages({ state in
+                    guard RepositoryAcquisition.pending(state.sessionActions,machine,path:path) == nil else { throw ZerusError.invalid("A checkout is already pending.") }
+                    return state.action(creation)
+                },acknowledge: { current,written in written.sessionActions.first { $0.requestId == creation.requestId }.map(current.action) ?? current })
+                guard visible, generation == form, self.machine == machine, catalogEvidence == expectedCatalog, app.connections.contains(connection),
+                      app.machines.contains(where: { $0.key == machine && $0.machineId == identity && $0.online && !$0.lastKnown }) else {
+                    throw ZerusError.invalid("The selected computer changed before checkout.")
+                }
+                stage = "cloning"; attempted = true
+                var payload = arguments; payload["request_id"] = .string(creation.requestId)
+                let initial: JSONObject
+                do { initial = try await app.client.submit(connection,target:target,operation:creation.operation,payload:payload,id:creation.requestId) }
+                catch let failure as RelayError { rejected = ConversationModel.rejectedStatuses.contains(failure.status); throw failure }
+                await conversation.settleSessionAction(creation,try await app.client.waitForReceipt(connection,initial:initial,maxPolls:100))
+                guard let settled = app.messageState.sessionActions.first(where: { $0.requestId == creation.requestId }), settled.status == "completed", settled.resultPath == path else {
+                    throw ZerusError.invalid(app.messageState.sessionActions.first { $0.requestId == creation.requestId }?.error.nonEmpty ?? RepositoryAcquisition.uncertain)
+                }
+                // Only a fresh definite result can continue; status recovery never launches.
+                guard visible, generation == form, self.machine == machine, catalogEvidence == expectedCatalog, reason(machine).isEmpty else {
+                    throw ZerusError.invalid("Checkout created. Review the current session choices.")
+                }
+                stage = "checking"
+                directoryTask?.cancel();worktreeTask?.cancel();directoryLoading=false;worktreeLoading=false
+                let browser = try await readDirectory(connection,machine,path)
+                guard LaunchPresentation.selectedFolder(browser,path) else { throw ZerusError.invalid("Checkout created; check its folder before starting.") }
+                let checkout = try await readWorktrees(connection,machine,path,requested:path)
+                guard RepositoryAcquisition.verifiedCheckout(checkout,path:path) else { throw ZerusError.invalid("Checkout created; its Git folder could not be confirmed. Use checkout to review it.") }
+                directory = browser;worktrees=checkout
+                let launch = SessionAction(requestId: UUID().uuidString.lowercased(),target:target,operation:"launch",arguments:launchArgs)
+                stage = "launching"; submitting = true; conversation.actionFlights.insert(launch.requestId)
+                await submitLaunch(machine,connection,launch,agent:agent,directory:path,expectedCatalog:expectedCatalog,form:form)
+            } catch {
+                if let action { await record(action.requestId,status: !attempted || rejected ? "failed" : "uncertain",
+                    message: !attempted || rejected ? AppModel.message(error,fallback:"Checkout was not sent.") : RepositoryAcquisition.uncertain) }
+                self.error = AppModel.message(error,fallback:RepositoryAcquisition.uncertain)
+            }
+        }
     }
 
     /// Closing never interrupts worktree creation or a launch; their receipts must settle first.

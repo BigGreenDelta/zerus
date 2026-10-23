@@ -50,6 +50,39 @@ journal class within the shared read quota. Delivered terminal rows expire
 after one hour; existing persisted SQL predicates and mutation tombstones stay
 unchanged. The Python connector does not list or advertise this operation.
 
+With the exact native help line
+`Mobile repository acquisition ABI: repository-acquisition-v1`, this Rust connector
+also advertises `repository_check`, `repository_clone` and `repository_status`.
+These computer-scoped operations use an empty session and
+`{request_id,expected_machine_id,url,parent,name}`. Status adds `clone_request_id`
+with the original native clone UUID while retaining a fresh read request ID.
+Parent is an absolute POSIX path (check alone also accepts `~`); URL admission
+allows SSH/HTTPS and configured SSH aliases, rejecting local/Windows paths,
+remote helpers and embedded credentials. Native admission remains authoritative.
+
+The connector always enters the native immutable-machine guard, including a
+non-fleet local target, and invokes only `repository check|clone|status`. Clone
+uses the exact mutation request UUID and the existing native owned-directory,
+worker and encoded-receipt custody. Status verifies that original UUID and the
+SHA-256 fingerprint of `[url,parent,name]`; results whitelist schema, outer/original
+IDs, machine, status, canonical parent/path/name and a bounded failure detail.
+The entire encoded projection, including escaping and long paths, is bounded to
+16 KiB; native output has a separate 32 KiB read bound for receipt/newline overhead.
+Internal staging paths and arbitrary native fields are not forwarded.
+Read-only check may resolve a parent alias and reports the canonical destination.
+The phone shows a changed destination and requires another explicit Clone and start
+before any mutation. Clone/status require the exact confirmed canonical parent/name.
+
+The clone wrapper has a 75-second whole-call budget; only its fixed one-hop native
+route gets 80 seconds. Both remain inside the connector's 90-second stop allowance.
+A timeout stops the owned wrapper, whose existing native worker cancels only its
+Git operation; partial files remain. Reads have 30-second budgets. A lost/expired
+relay receipt is recovered with an explicit native status read, never another clone.
+The original mutation tombstone is retained. Check/status share the bounded read
+quota and have separate additive indexed one-hour retention; persisted legacy
+index predicates are unchanged. Python and Windows-local mobile gateways do not
+offer these operations; the phone refuses acquisition on them.
+
 The optional `clear_context` field `dismiss_prompt` is a strict Boolean. Either
 value requires the distinct `clear_context_dismiss` feature, offered only for an
 exact trimmed native HELP line `Mobile clear-context ABI: dismiss-prompt-v1`.

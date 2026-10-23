@@ -1,0 +1,74 @@
+diff --git a/mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt b/mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt
+index 0a44ef27..2bf60b86 100644
+--- a/mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt
++++ b/mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt
+@@ -91 +91,2 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
+-        val currentReview: (QuestionUiProbe.ContentSnapshot, Long, Long) -> Boolean) {
++        val currentReview: (QuestionUiProbe.ContentSnapshot, Long, Long) -> Boolean,
++        val reviewState: (QuestionUiProbe.ContentSnapshot, Long, Long) -> QuestionUiProbe.EarlyReviewState) {
+@@ -134,0 +136,3 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
++            // BEGIN EARLY_REVIEW_FOCUS_WAIT current
++            if (!awaitCurrentReview(bound)) return false
++            // END EARLY_REVIEW_FOCUS_WAIT current
+@@ -137,0 +142,22 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
++        // BEGIN EARLY_REVIEW_FOCUS_WAIT observation
++        private fun awaitCurrentReview(bound: QuestionUiProbe.ContentSnapshot): Boolean {
++            val end = checkNotNull(resumeEnd)
++            while (true) {
++                if (!currentCard() || bound.generation != checkNotNull(boundGeneration)) return false
++                val now = SystemClock.elapsedRealtime()
++                check(now < end) { "Early-review deadline expired while awaiting eligibility" }
++                when (reviewState(bound, now, end)) {
++                    QuestionUiProbe.EarlyReviewState.INVALID -> return false
++                    QuestionUiProbe.EarlyReviewState.CURRENT -> {
++                        check(SystemClock.elapsedRealtime() < end) { "Early-review deadline expired after eligibility observation" }
++                        return true
++                    }
++                    QuestionUiProbe.EarlyReviewState.WAIT -> {
++                        val remaining = end - SystemClock.elapsedRealtime()
++                        check(remaining > 0) { "Early-review deadline expired while ineligible" }
++                        SystemClock.sleep(minOf(30L, remaining))
++                    }
++                }
++            }
++        }
++        // END EARLY_REVIEW_FOCUS_WAIT observation
+@@ -767 +793,8 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
+-            return EarlySend(send, send.windowId, current, observation, currentReview)
++            // BEGIN EARLY_REVIEW_FOCUS_WAIT callback
++            val reviewState = { bound: QuestionUiProbe.ContentSnapshot, now: Long, end: Long -> main {
++                check(currentCard())
++                QuestionUiProbe.classifyEarlyReview(checkNotNull(actionProbeSession),
++                    checkNotNull(model.conversationQuestions.singleOrNull()), bound, now, end)
++            } }
++            // END EARLY_REVIEW_FOCUS_WAIT callback
++            return EarlySend(send, send.windowId, current, observation, currentReview, reviewState)
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt b/mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt
+index 8e6b0b5d..8b12bc21 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt
+@@ -105,0 +106,24 @@ internal object QuestionUiProbe {
++    // BEGIN EARLY_REVIEW_FOCUS_WAIT classification
++    enum class EarlyReviewState { CURRENT, WAIT, INVALID }
++
++    /** Read-only fixture evidence. WAIT never authorizes input or renews the first bound clock. */
++    @Synchronized fun classifyEarlyReview(owned: Session, question: Question, bound: ContentSnapshot,
++        elapsedNow: Long, originalEnd: Long): EarlyReviewState {
++        val latest = checkNotNull(contentSnapshot(owned, question))
++        if (bound.generation <= 0 || latest.generation < bound.generation ||
++            owned.firstReviewSnapshot(bound.generation - 1) != bound) return EarlyReviewState.INVALID
++        val first = bound.record.detail as? Committed ?: return EarlyReviewState.INVALID
++        val current = latest.record.detail as? Committed ?: return EarlyReviewState.INVALID
++        val start = first.reviewStartedAt ?: return EarlyReviewState.INVALID
++        val currentStart = current.reviewStartedAt
++        if (bound.record.stage != Stage.CONTENT_COMMIT || latest.record.stage != Stage.CONTENT_COMMIT ||
++            bound.record.card != latest.record.card || bound.record.questionObject != latest.record.questionObject ||
++            bound.record.selection != latest.record.selection || !first.eligible ||
++            start < 0 || start > Long.MAX_VALUE - 3_000 || originalEnd != start + 3_000 ||
++            elapsedNow < start || elapsedNow >= originalEnd ||
++            currentStart != null && (currentStart < start || currentStart > elapsedNow)) return EarlyReviewState.INVALID
++        if (earlyReviewCurrent(owned, question, bound, elapsedNow, originalEnd)) return EarlyReviewState.CURRENT
++        return if (!current.eligible || currentStart == null) EarlyReviewState.WAIT else EarlyReviewState.INVALID
++    }
++    // END EARLY_REVIEW_FOCUS_WAIT classification
++

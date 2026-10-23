@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """Authored SDK-free source contracts; not Kotlin or runtime qualification."""
 import hashlib
+import importlib.util
 from pathlib import Path
 import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+_focus_spec = importlib.util.spec_from_file_location("review_focus_projection", ROOT / "tests/review_focus_projection.py")
+_focus_projection = importlib.util.module_from_spec(_focus_spec)
+_focus_spec.loader.exec_module(_focus_projection)
+original_review_fixture = _focus_projection.original_review_fixture
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
-# Product baseline includes prepared inspection publication before installation.
-# It also includes catalog refresh reporting and private implicit-Inbox launch
-# arguments; the probe definitions and all ten question-verification writes are unchanged.
+# Keep the reviewed 9b217ddd/b9c1e29c reconstruction pins unchanged. The exact
+# test fixture reverses only the later 962699e6 read-catalog/badge update and
+# c1eebe96 mobile checkout additions; neither changes question eligibility or
+# the ten verification writes. No Git history or Android SDK is needed at run time.
 MODEL_SHA = "a94c04695da3626c49f1cc5a875c82f8b3893688d256c7cfa3ebf66cad9e619a"
 MAIN_SHA = "7c676d33a2218da83511697f5a597c4876b946e1c130d601c265e855b7259f4b"
+UPDATES = ROOT / "tests/fixtures/question-availability-reviewed-updates.patch"
+UPDATES_SHA = "5088def68877668c9a7e261851d552cd30b0fee1806aa072a911172f6ff4f60a"
 WRITERS = ["INSTALL_WAIT_PRESENTATION", "INSTALL_PRESENTATION", "PREPARE_PRESENTATION", "TERMINAL_CLOSED",
            "ACTION_RESULT", "CONNECTION_FORGOTTEN", "OPEN_SESSION", "BACK", "CLEAR_UNCONFIRMED", "INSPECT_FAILED"]
 
@@ -22,13 +30,96 @@ def strip_availability(source):
     return re.sub(r" /\* BEGIN QUESTION_AVAILABILITY_PROBE (writer-[a-z-]+) \*/[\s\S]*?/\* END QUESTION_AVAILABILITY_PROBE \1 \*/", "", source)
 
 
+def reverse_reviewed_updates(name, source):
+    """Reverse exact reviewed hunks, never an arbitrary function/line range."""
+    raw = UPDATES.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != UPDATES_SHA:
+        raise AssertionError("reviewed source-update fixture changed")
+    prefix = "mobile/android/app/src/main/java/app/zerus/mobile/"
+    files = {}
+    for section in raw.decode().split("diff --git ")[1:]:
+        header, body = section.split("\n", 1)
+        before, after = header.split()
+        filename = before.removeprefix("a/" + prefix)
+        if (filename not in ("ZerusViewModel.kt", "MainActivity.kt")
+                or before != "a/" + prefix + filename or after != "b/" + prefix + filename
+                or filename in files):
+            raise AssertionError("unexpected source-update fixture path")
+        hunks = []
+        for hunk in re.split(r"(?m)^@@[^\n]*\n", body)[1:]:
+            lines = hunk.splitlines(keepends=True)
+            if not lines or any(line[:1] not in (" ", "+", "-") for line in lines):
+                raise AssertionError("unsupported source-update fixture hunk")
+            old = "".join(line[1:] for line in lines if line[0] in " -")
+            new = "".join(line[1:] for line in lines if line[0] in " +")
+            if not old or not new or old == new:
+                raise AssertionError("empty source-update fixture hunk")
+            hunks.append((old, new))
+        if not hunks:
+            raise AssertionError("missing source-update fixture hunks")
+        files[filename] = hunks
+    if set(files) != {"ZerusViewModel.kt", "MainActivity.kt"} or name not in files:
+        raise AssertionError("incomplete source-update fixture")
+    for old, new in files[name]:
+        if source.count(new) != 1:
+            raise AssertionError("reviewed source-update hunk is missing, changed or duplicated")
+        source = source.replace(new, old, 1)
+    return source
+
+
+def reconstructed(name, source):
+    return strip_availability(reverse_reviewed_updates(name, source))
+
+
+def original_source(name, source):
+    try:
+        digest = hashlib.sha256(reconstructed(name, source).encode()).hexdigest()
+    except AssertionError:
+        return False
+    return digest == {"ZerusViewModel.kt": MODEL_SHA, "MainActivity.kt": MAIN_SHA}[name]
+
+
 class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
     def test_original_model_and_main_reconstruct_including_every_policy_and_assignment(self):
         for name, digest in [("ZerusViewModel.kt", MODEL_SHA), ("MainActivity.kt", MAIN_SHA)]:
             source = (MAIN / name).read_text()
-            self.assertEqual(hashlib.sha256(strip_availability(source).encode()).hexdigest(), digest)
+            self.assertEqual(hashlib.sha256(reconstructed(name, source).encode()).hexdigest(), digest)
             changed = source.replace("activityVerified || model.demo", "true", 1) if name == "MainActivity.kt" else source.replace("it.blocksSending", "false", 1)
-            self.assertNotEqual(hashlib.sha256(strip_availability(changed).encode()).hexdigest(), digest)
+            self.assertFalse(original_source(name, changed))
+
+    def test_reverse_updates_keep_every_question_policy_and_verification_assignment_protected(self):
+        source = (MAIN / "ZerusViewModel.kt").read_text()
+        for expression in (
+                "sessionActions.any { it.target == target && it.blocksSending }",
+                "clearExpectation?.let { ContextPolicies.sameSessionRun(it.target, target) } == true",
+                "contextOperations.any { ContextPolicies.sameSessionRun(it.target, target) && it.blocksSending }"):
+            with self.subTest(policy=expression):
+                self.assertIn(expression, source)
+                self.assertFalse(original_source("ZerusViewModel.kt", source.replace(expression, "false", 1)))
+        writes = list(re.finditer(r"\bactivityVerified\s*=(?!=)\s*(false|verified|activeFrameVerified)(?= /\* BEGIN QUESTION_AVAILABILITY_PROBE writer-)", source))
+        self.assertEqual(len(writes), len(WRITERS))
+        for writer, match in zip(WRITERS, writes):
+            with self.subTest(writer=writer):
+                changed = source[:match.start(1)] + "true" + source[match.end(1):]
+                self.assertFalse(original_source("ZerusViewModel.kt", changed))
+        main = (MAIN / "MainActivity.kt").read_text()
+        for expression in ("model.activityVerified || model.demo",
+                           "online && model.activityVerified && !model.contextBlocked(target)"):
+            self.assertIn(expression, main)
+            self.assertFalse(original_source("MainActivity.kt", main.replace(expression, "true", 1)))
+
+    def test_reverse_updates_refuse_changed_missing_or_duplicate_reviewed_hunks(self):
+        source = (MAIN / "ZerusViewModel.kt").read_text()
+        # These are reviewed additions, not probe markers or protected old policy.
+        for old, new in (("RepositoryAcquisition.statusPayload(stored,id)", "JSONObject()"),
+                         ("val loaded=loadedReadRows()", "val loaded=emptyMap<Target,List<Event>>()"),
+                         ('    fun openLaunch() {\n', ''),
+                         ('    fun openLaunch() {\n', '    fun openLaunch() {\n    fun openLaunch() {\n')):
+            with self.subTest(update=old, replacement=new):
+                self.assertIn(old, source)
+                self.assertFalse(original_source("ZerusViewModel.kt", source.replace(old, new, 1)))
+        main = (MAIN / "MainActivity.kt").read_text()
+        self.assertFalse(original_source("MainActivity.kt", main.replace("!SharedReadPolicies.canShowReplyBadge(session)", "true", 1)))
 
     def test_each_existing_write_is_followed_by_its_fixed_reason_without_changing_rhs(self):
         source = (MAIN / "ZerusViewModel.kt").read_text()
@@ -74,7 +165,7 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
         # The fixture baseline includes the parent-selection and Compose role-child corrections;
         # physical case oracles stay exact.
-        self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
+        self.assertEqual(hashlib.sha256(original_review_fixture().encode()).hexdigest(),
                          "73cee450f08e33c007ad6f3188a6a69135674e2503f80ea48582ba8aa394a9f7")
 
     def test_prepared_publication_uses_the_actual_bounded_owner_before_any_atomic_install(self):

@@ -903,6 +903,7 @@ fn fixed_receipts_keep_python_texts() {
 fn every_native_budget_ends_before_systemd_stops_the_unit() {
     let budgets = [
         native::DEFAULT_TIMEOUT,
+        zerus_mobile_connector::repositories::CLONE_TIMEOUT,
         capabilities::PROBE_TIMEOUT,
         accounts::CATALOG_TIMEOUT,
         accounts::INSPECT_TIMEOUT,
