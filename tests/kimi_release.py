@@ -92,6 +92,7 @@ def sealed(path, limit, expected_size=None):
         final = os.fstat(stream.fileno())
         readonly_file(final)
         if (identity(final) != identity(opened) or identity(after) != identity(before)
+                or comparable_identity(final) != comparable_identity(opened)
                 or comparable_identity(final) != comparable_identity(after)):
             raise ValueError('release file changed while reading')
     return checksum.hexdigest(), b''.join(data)

@@ -176,6 +176,12 @@ class SelectedRelease(unittest.TestCase):
             with self.subTest(field=field), self.windows(), self.assertRaises(ValueError):
                 release.comparable_identity(SimpleNamespace(**values))
 
+    def test_windows_paired_birthtime_changes_cannot_keep_a_false_cross_route_match(self):
+        root, image, sha, _ = self.fixture()
+        with self.windows(path_change={'st_birthtime_ns': 999}, fd_change={'st_birthtime_ns': 999}), \
+                self.assertRaises(ValueError):
+            self.admit(root, image, sha)
+
     @unittest.skipIf(os.name == 'nt', 'Unix file modes and symbolic links')
     def test_private_modes_links_and_owner_are_required(self):
         for name in ('manifest.json', 'selected-release.json', 'kimi-code-linux-x64'):
