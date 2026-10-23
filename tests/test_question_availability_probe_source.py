@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Authored SDK-free source contracts; not Kotlin or runtime qualification."""
 import hashlib
+import importlib.util
 from pathlib import Path
 import re
 import unittest
 
-from review_focus_projection import original_review_fixture
-
 ROOT = Path(__file__).resolve().parents[1]
+_focus_spec = importlib.util.spec_from_file_location("review_focus_projection", ROOT / "tests/review_focus_projection.py")
+_focus_projection = importlib.util.module_from_spec(_focus_spec)
+_focus_spec.loader.exec_module(_focus_projection)
+original_review_fixture = _focus_projection.original_review_fixture
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
 # Keep the reviewed 9b217ddd/b9c1e29c reconstruction pins unchanged. The exact

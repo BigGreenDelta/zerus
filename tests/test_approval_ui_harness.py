@@ -15,8 +15,6 @@ import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
-from review_focus_projection import original_review_fixture, reverse_focus_wait, BASELINES
-
 ROOT = Path(__file__).resolve().parents[1]
 # Fixture pins include the parent-selection correction; its exact two-term reverse retains full 96fc.
 
@@ -38,6 +36,12 @@ def module(name, path):
     value = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(value)
     return value
+
+
+_focus_projection = module("review_focus_projection", "tests/review_focus_projection.py")
+original_review_fixture = _focus_projection.original_review_fixture
+reverse_focus_wait = _focus_projection.reverse_focus_wait
+BASELINES = _focus_projection.BASELINES
 
 
 def without_android_focus_diagnostics(source):

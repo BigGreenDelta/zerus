@@ -1,12 +1,20 @@
 """Finite source-bound stand-ins, not Kotlin, Compose, Android or device qualification."""
 import ast
 import hashlib
+import importlib.util
 from pathlib import Path
 import re
 from types import SimpleNamespace as NS
 import unittest
 
-from review_focus_projection import ROOT, FIXTURE, PROBE, BASELINES, reverse_focus_wait
+ROOT = Path(__file__).resolve().parents[1]
+_focus_spec = importlib.util.spec_from_file_location("review_focus_projection", ROOT / "tests/review_focus_projection.py")
+_focus_projection = importlib.util.module_from_spec(_focus_spec)
+_focus_spec.loader.exec_module(_focus_projection)
+FIXTURE = _focus_projection.FIXTURE
+PROBE = _focus_projection.PROBE
+BASELINES = _focus_projection.BASELINES
+reverse_focus_wait = _focus_projection.reverse_focus_wait
 
 
 def evaluate(source, values):

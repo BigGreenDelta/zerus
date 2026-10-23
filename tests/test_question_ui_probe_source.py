@@ -7,9 +7,11 @@ from pathlib import Path
 import re
 import unittest
 
-from review_focus_projection import original_review_fixture
-
 ROOT = Path(__file__).resolve().parents[1]
+_focus_spec = importlib.util.spec_from_file_location("review_focus_projection", ROOT / "tests/review_focus_projection.py")
+_focus_projection = importlib.util.module_from_spec(_focus_spec)
+_focus_spec.loader.exec_module(_focus_projection)
+original_review_fixture = _focus_projection.original_review_fixture
 MAIN = "mobile/android/app/src/main/java/app/zerus/mobile/"
 FIXTURE = "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
 ORIGINAL_UI = "3687bd4bb2f7243c06fc99865c08120795360b273aa8291b612794a9bfdf57bf"
