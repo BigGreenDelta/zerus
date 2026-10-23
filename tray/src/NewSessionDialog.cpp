@@ -33,6 +33,7 @@
 #include <QProgressBar>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QStackedWidget>
 #include <QUuid>
 #include <QVBoxLayout>
 namespace {
@@ -154,6 +155,9 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_machine=new QComboBox;m_machine->setObjectName("launchComputer");m_machine->setAccessibleName(tr("Computer"));m_machine->setMinimumContentsLength(6);m_machine->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);projectRow->addWidget(m_machine,1);
     form->addRow(tr("Target"),projectRow);
     m_newProjectName=new QLineEdit;m_newProjectName->setObjectName("launchNewProjectName");m_newProjectName->setMaxLength(80);m_newProjectName->setPlaceholderText(tr("Project name"));form->addRow(tr("New project"),m_newProjectName);
+    for(auto *widget:QList<QWidget *>{m_newProjectName,form->labelForField(m_newProjectName)}){
+        auto policy=widget->sizePolicy();policy.setRetainSizeWhenHidden(true);widget->setSizePolicy(policy);
+    }
     auto *sources=new QButtonGroup(this);auto *sourceRow=new QHBoxLayout;sourceRow->setSpacing(8);
     m_folderSource=new QPushButton(workspaceIcon("folder",iconColor),tr("Working folder"));m_folderSource->setObjectName("launchFolderSource");
     m_gitSource=new QPushButton(workspaceIcon("git-branch",iconColor),tr("Git repository"));m_gitSource->setObjectName("launchRepositorySource");
@@ -163,8 +167,14 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_folder->setMinimumContentsLength(16);m_folder->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_folder->setPlaceholderText(tr("Choose a folder…"));
     m_browse=new QPushButton(tr("Browse…"));m_browse->setObjectName("browseLaunchFolder");m_browse->setAutoDefault(false);
-    auto *folderRow=new QHBoxLayout;folderRow->setSpacing(8);folderRow->addWidget(m_folder,1);folderRow->addWidget(m_browse);
-    m_folderField=new QWidget;auto *folderField=new QVBoxLayout(m_folderField);folderField->setContentsMargins(0,0,0,0);folderField->setSpacing(6);folderField->addLayout(folderRow);
+    auto *folderInput=new QWidget;auto *folderRow=new QHBoxLayout(folderInput);folderRow->setContentsMargins(0,0,0,0);folderRow->setSpacing(8);folderRow->addWidget(m_folder,1);folderRow->addWidget(m_browse);
+    // Stacked pages reserve the larger size hint, so changing source only swaps
+    // the inputs; the shared controls below keep their positions.
+    m_sourceInput=new QStackedWidget;m_sourceInput->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);m_sourceInput->addWidget(folderInput);
+    m_sourceLabel=plainLabel(tr("Working folder"));form->addRow(m_sourceLabel,m_sourceInput);
+    m_sourceDetails=new QStackedWidget;m_sourceDetails->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
+    m_destinationLabel=plainLabel();form->addRow(m_destinationLabel,m_sourceDetails);
+    m_folderField=new QWidget;auto *folderField=new QVBoxLayout(m_folderField);folderField->setContentsMargins(0,0,0,0);folderField->setSpacing(6);
     m_projectPath=plainLabel();m_projectPath->setObjectName("launchFolderPath");m_projectPath->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_projectPath->setWordWrap(false);
     m_projectPath->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
@@ -174,16 +184,17 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     for(auto *widget:QList<QWidget *>{m_projectPath}) {
         auto policy=widget->sizePolicy();policy.setRetainSizeWhenHidden(true);widget->setSizePolicy(policy);
     }
-    form->addRow(tr("Working folder"),m_folderField);
-    m_repositoryUrl=new QLineEdit;m_repositoryUrl->setObjectName("launchRepositoryUrl");m_repositoryUrl->setMaxLength(4096);m_repositoryUrl->setPlaceholderText("https://github.com/owner/repository.git");m_repositoryUrl->setToolTip(tr("An SSH or HTTPS repository URL, on GitHub or another Git server."));form->addRow(tr("Repository"),m_repositoryUrl);
+    m_sourceDetails->addWidget(m_folderField);
+    m_repositoryUrl=new QLineEdit;m_repositoryUrl->setObjectName("launchRepositoryUrl");m_repositoryUrl->setMaxLength(4096);m_repositoryUrl->setPlaceholderText("https://github.com/owner/repository.git");m_repositoryUrl->setToolTip(tr("An SSH or HTTPS repository URL, on GitHub or another Git server."));m_sourceInput->addWidget(m_repositoryUrl);
+    auto *repositoryDetails=new QWidget;auto *detailsLayout=new QVBoxLayout(repositoryDetails);detailsLayout->setContentsMargins(0,0,0,0);detailsLayout->setSpacing(6);m_sourceDetails->addWidget(repositoryDetails);
     m_repositoryDestinationField=new QWidget;auto *destinationRow=new QHBoxLayout(m_repositoryDestinationField);destinationRow->setContentsMargins(0,0,0,0);destinationRow->setSpacing(8);
     m_repositoryDestination=new QLineEdit;m_repositoryDestination->setObjectName("launchRepositoryDestination");m_repositoryDestination->setMaxLength(8192);m_repositoryDestination->setToolTip(tr("The complete new checkout path. Edit its folder name or choose a parent folder with Browse."));
-    m_repositoryBrowse=new QPushButton(tr("Browse…"));m_repositoryBrowse->setObjectName("browseRepositoryDestination");m_repositoryBrowse->setAutoDefault(false);destinationRow->addWidget(m_repositoryDestination,1);destinationRow->addWidget(m_repositoryBrowse);form->addRow(tr("Clone to"),m_repositoryDestinationField);
+    m_repositoryBrowse=new QPushButton(tr("Browse…"));m_repositoryBrowse->setObjectName("browseRepositoryDestination");m_repositoryBrowse->setAutoDefault(false);destinationRow->addWidget(m_repositoryDestination,1);destinationRow->addWidget(m_repositoryBrowse);destinationRow->setAlignment(Qt::AlignTop);detailsLayout->addWidget(m_repositoryDestinationField);
     m_repositoryState=new QWidget;auto *repositoryState=new QVBoxLayout(m_repositoryState);repositoryState->setContentsMargins(0,0,0,0);repositoryState->setSpacing(6);
     m_repositoryStatus=plainLabel();m_repositoryStatus->setObjectName("launchRepositoryStatus");repositoryState->addWidget(m_repositoryStatus);
     m_repositoryProgress=new QProgressBar;m_repositoryProgress->setRange(0,0);m_repositoryProgress->setTextVisible(false);repositoryState->addWidget(m_repositoryProgress);
     auto *recoveryRow=new QHBoxLayout;m_repositoryCheck=new QPushButton(tr("Check result"));m_repositoryCheck->setObjectName("launchRepositoryCheckResult");m_repositoryAnother=new QPushButton(tr("Choose another destination…"));m_repositoryAnother->setObjectName("launchRepositoryAnotherDestination");
-    for(auto *button:{m_repositoryCheck,m_repositoryAnother}){button->setAutoDefault(false);recoveryRow->addWidget(button);}recoveryRow->addStretch();repositoryState->addLayout(recoveryRow);form->addRow(QString(),m_repositoryState);
+    for(auto *button:{m_repositoryCheck,m_repositoryAnother}){button->setAutoDefault(false);recoveryRow->addWidget(button);}recoveryRow->addStretch();repositoryState->addLayout(recoveryRow);detailsLayout->addWidget(m_repositoryState);detailsLayout->addStretch();
     auto *worktreeField=new QVBoxLayout;worktreeField->setSpacing(6);
     auto *worktreeRow=new QHBoxLayout;worktreeRow->setSpacing(8);
     m_autoWorktree=new QPushButton(workspaceIcon("git-branch",iconColor),tr("Auto"));m_autoWorktree->setObjectName("automaticLaunchWorktree");
@@ -253,6 +264,11 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     layout->addLayout(form);
     m_error=plainLabel();m_error->setObjectName("launchError");layout->addWidget(m_error);
     layout->addStretch();auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel);m_cancel=buttons->button(QDialogButtonBox::Cancel);m_start=buttons->addButton(tr("Start session"),QDialogButtonBox::AcceptRole);m_start->setObjectName("primary");layout->addWidget(buttons);
+    int actionWidth=0;const auto initialAction=m_start->text();m_start->ensurePolished();
+    for(const auto &text:{tr("Start session"),tr("Clone and start"),tr("Use checkout and start"),tr("Creating worktree…"),tr("Checking folder…"),tr("Cloning…"),tr("Checking…")}){
+        m_start->setText(text);actionWidth=qMax(actionWidth,m_start->sizeHint().width());
+    }
+    m_start->setText(initialAction);m_start->setMinimumWidth(actionWidth);
     // Without a computer to start on, it only opens Machines with this computer
     // selected; enabling local sessions keeps its own confirmation there.
     m_openMachines=buttons->addButton(tr("Open Machines"),QDialogButtonBox::ActionRole);m_openMachines->setObjectName("launchOpenMachines");m_openMachines->hide();
@@ -643,8 +659,10 @@ void NewSessionDialog::updateForm()
     const auto *machine=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
     const bool online=machine&&machine->ok;
     const bool newProject=repository&&m_project->currentData(NewRepositoryProjectRole).toBool();
-    m_form->setRowVisible(m_newProjectName,newProject);m_form->setRowVisible(m_folderField,!repository);
-    m_form->setRowVisible(m_repositoryUrl,repository);m_form->setRowVisible(m_repositoryDestinationField,repository);
+    m_form->setRowVisible(m_newProjectName,newProject||(!repository&&m_repositoryNewProject));
+    m_newProjectName->setVisible(newProject);m_form->labelForField(m_newProjectName)->setVisible(newProject);
+    m_sourceInput->setCurrentIndex(repository?1:0);m_sourceDetails->setCurrentIndex(repository?1:0);
+    m_sourceLabel->setText(repository?tr("Repository"):tr("Working folder"));m_destinationLabel->setText(repository?tr("Clone to"):QString());
     m_folderSource->setChecked(!repository);m_gitSource->setChecked(repository);
     const auto path=m_folder->currentData(Qt::UserRole+2).toString();
     const auto shown=MachinePlatform::native(path,folderStyle(m_fleet,host()));
@@ -687,7 +705,7 @@ void NewSessionDialog::updateForm()
     m_repositoryProgress->setVisible(m_repository&&m_repository->busy());
     m_repositoryCheck->setVisible(m_repository&&m_repository->uncertain());m_repositoryAnother->setVisible(m_repository&&m_repository->uncertain());
     m_repositoryCheck->setEnabled(!busy&&online);m_repositoryAnother->setEnabled(!busy);
-    m_form->setRowVisible(m_repositoryState,repository&&(m_repositoryProgress->isVisible()||!m_repositoryStatus->text().isEmpty()||(m_repository&&m_repository->uncertain())));
+    m_repositoryState->setVisible(m_repository&&(m_repository->busy()||!m_repositoryStatus->text().isEmpty()||m_repository->uncertain()));
     m_worktrees->setEnabled(!busy&&!m_catalogRequest&&!m_worktreeCatalog["stale"].toBool()&&!m_worktreeCatalog["worktrees"].toArray().isEmpty());
     m_newWorktree->setEnabled(!busy&&!m_catalogRequest&&machine&&machine->ok&&automaticWorktreeAvailable());
     m_worktreeOptions->setEnabled(!repository&&(m_worktrees->isEnabled()||m_newWorktree->isEnabled()));

@@ -1955,6 +1955,7 @@ accepts an SSH or HTTPS URL from GitHub or another Git server. **Clone to** show
 the suggested complete destination; edit it to rename the target folder or use
 **Browse…** to choose its parent. A manual destination stays when the URL changes.
 Parent folders are remembered separately for each computer.
+Switching sources keeps the shared controls and action buttons in place.
 
 Select an existing logical project, Inbox, or **New project…**, then use the
 single **Clone and start** action. Progress, access errors and recovery controls
