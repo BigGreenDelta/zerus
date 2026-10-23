@@ -5489,6 +5489,12 @@ void SessionsWindow::renameSession()
     preview->setStyleSheet(QString("color:%1; font-size:12px").arg(m_muted)); layout->addWidget(preview);
     auto *error = label({}, "renameError"); error->setWordWrap(true);
     error->setStyleSheet(QString("color:%1").arg(m_dark ? "#ff9298" : "#b52b3d")); layout->addWidget(error);
+    // Typing changes content, never the form's geometry. Keep two measured lines
+    // for both the full-name preview and validation, including the empty state.
+    for (auto *message : {preview, error}) {
+        message->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); message->ensurePolished();
+        message->setFixedHeight(2 * message->fontMetrics().lineSpacing());
+    }
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
     auto *save = buttons->button(QDialogButtonBox::Save); save->setText(tr("Rename")); save->setObjectName("primary");
     save->style()->unpolish(save); save->style()->polish(save);
@@ -5502,8 +5508,8 @@ void SessionsWindow::renameSession()
     };
     const auto validate = [&]() {
         const QString invalid = problem(name->text());
-        error->setText(invalid); error->setVisible(!invalid.isEmpty());
-        preview->setText(prefix + name->text());
+        error->setText(invalid); error->setToolTip(invalid);
+        preview->setText(prefix + name->text()); preview->setToolTip(preview->text());
         save->setEnabled(invalid.isEmpty() && name->text() != oldTag);
     };
     connect(name, &QLineEdit::textChanged, &dialog, validate);

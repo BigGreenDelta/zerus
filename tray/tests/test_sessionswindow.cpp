@@ -396,6 +396,8 @@ private slots:
     void terminatingWorktreeSessionOffersRemainingCleanupAndConsumesExactNativeOutcome();
     void nativeCleanupCanSupplyAnUncachedFolderAndArchiveTransitionsExpireOnlyTheirRepository();
     void renameValidationCancelAndSelection();
+    void renameValidationKeepsDialogGeometry_data();
+    void renameValidationKeepsDialogGeometry();
     void forkValidationCancelAndPinnedPayload();
     void forkKeepsSourceAndGroup_data();
     void forkKeepsSourceAndGroup();
@@ -8365,6 +8367,47 @@ void TestSessionsWindow::renameValidationCancelAndSelection()
     client->inspectionFailed({}, "codex/hgs/dashboard", "late old failure");
     QVERIFY(!activity->toPlainText().contains("stale rename response"));
     QVERIFY(!window.findChild<QLabel *>("hint")->text().contains("late old failure"));
+}
+
+void TestSessionsWindow::renameValidationKeepsDialogGeometry_data()
+{
+    QTest::addColumn<QString>("theme"); QTest::addColumn<int>("width");
+    for (const auto &theme : {QString("dark"), QString("light")})
+        for (const int width : {430, 640}) QTest::newRow(qPrintable(theme + QString::number(width))) << theme << width;
+}
+
+void TestSessionsWindow::renameValidationKeepsDialogGeometry()
+{
+    QFETCH(QString, theme); QFETCH(int, width); QSettings().setValue("workspace/theme", theme);
+    auto state = fleet(); auto box = state.local();
+    auto occupied = box.sessions[0]; occupied.name = "codex/hgs/taken"; occupied.tag = "taken"; box.sessions.append(occupied);
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); window.setFleet(state); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    QSignalSpy writes(window.findChild<HgsClient *>(), &HgsClient::writeDone);
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()); QVERIFY(dialog);
+        const auto close = qScopeGuard([dialog] { dialog->reject(); });
+        dialog->resize(width, dialog->height()); QTest::qWait(30);
+        auto *name = dialog->findChild<QLineEdit *>("renameSessionName"); QVERIFY(name);
+        auto *preview = dialog->findChild<QLabel *>("renameFullName"); auto *error = dialog->findChild<QLabel *>("renameError");
+        auto *buttons = dialog->findChild<QDialogButtonBox *>(); QVERIFY(preview && error && buttons);
+        auto *save = buttons->button(QDialogButtonBox::Save); auto *cancel = buttons->button(QDialogButtonBox::Cancel);
+        const auto rectangles = [&] { return QList<QRect>{dialog->geometry(), name->geometry(), preview->geometry(),
+            error->geometry(), buttons->geometry(), save->geometry(), cancel->geometry()}; };
+        const auto before = rectangles();
+        for (const auto &tag : QStringList{"new name", "new name ", "new name", "", " leading", "a/b", "a:b", "a.b", "a\tb", "taken", "Новый план", QString(300, 'a'), "final name"}) {
+            name->setText(tag); QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest); QTest::qWait(10);
+            QCOMPARE(rectangles(), before);
+            QCOMPARE(preview->text(), "codex/hgs/" + tag); QCOMPARE(save->isEnabled(), error->text().isEmpty());
+        }
+        QCOMPARE(preview->toolTip(), preview->text()); QCOMPARE(error->toolTip(), error->text());
+        const auto directory = qEnvironmentVariable("HGS_RENAME_PREVIEW");
+        if (!directory.isEmpty()) {
+            QVERIFY(QDir().mkpath(directory)); name->setText("final name "); QTest::qWait(10);
+            QVERIFY(dialog->grab().save(directory + "/rename-" + theme + QString::number(width) + ".png"));
+        }
+    });
+    window.findChild<QAction *>("renameSessionAction")->trigger(); QCOMPARE(writes.size(), 0);
 }
 
 void TestSessionsWindow::renameOtherSessionKinds()
