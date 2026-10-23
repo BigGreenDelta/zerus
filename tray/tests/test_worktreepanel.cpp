@@ -527,6 +527,41 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         auto *tree=panel.findChild<QTreeWidget *>("worktreeCatalog");QTRY_COMPARE(tree->topLevelItemCount(),4);QCOMPARE(tree->topLevelItem(0)->childCount(),1);QVERIFY(tree->topLevelItem(0)->child(0)->text(0).contains("kimi/repo/two"));
         panel.setContext("mac","/plain",state);client.worktreesReady(2,"mac","/repo",catalog());QVERIFY(!panel.findChild<QLabel *>("worktreeStatus")->text().contains("/wrong"));
     }
+    void automaticLaunchWithPartialCatalog_data(){
+        QTest::addColumn<QString>("host");QTest::addColumn<QString>("evidence");QTest::addColumn<bool>("available");
+        for(const auto &host:{QString(),QString("mac")}){
+            const auto scope=host.isEmpty()?QByteArray("local-"):QByteArray("remote-");
+            for(const auto *evidence:{"complete","included","omitted","alias"})QTest::newRow((scope+evidence).constData())<<host<<QString(evidence)<<true;
+            for(const auto *evidence:{"stale","unknown","foreign","missing","bare"})QTest::newRow((scope+evidence).constData())<<host<<QString(evidence)<<false;
+        }
+    }
+    void automaticLaunchWithPartialCatalog(){
+        QFETCH(QString,host);QFETCH(QString,evidence);QFETCH(bool,available);
+        auto data=catalog();data["partial"]=evidence!="complete";data["stale"]=evidence=="stale";
+        const auto source=evidence=="missing"?QString("/missing"):evidence=="bare"?QString("/bare"):evidence=="alias"?QString("/alias"):QString("/repo");
+        data["path"]=evidence=="alias"?"/repo/subfolder":source;
+        data["selected_root"]=evidence=="unknown"?QJsonValue():QJsonValue(evidence=="missing"||evidence=="bare"?source:QString("/repo"));
+        if(evidence=="omitted"||evidence=="foreign")data["worktrees"]=QJsonArray{QJsonObject{{"path","/another"},{"kind","linked"},{"available",true}}};
+        if(evidence=="foreign")data["path"]="/another";
+        const auto save=[&](const QJsonObject &value){QFile file(dir.filePath("catalog.json"));if(!file.open(QIODevice::WriteOnly))return false;return file.write(QJsonDocument(value).toJson())>0;};
+        QVERIFY(save(data));
+        SessionOrganization projects;const auto project=projects.createGroup("Work");projects.addFolder(project,host.isEmpty()?QString("arch"):host,source);
+        NewSessionDialog dialog(FakeCli::program(script()),fleet(),host,"codex",project);dialog.setGroups(projects,project);dialog.show();
+        QSignalSpy loaded(dialog.findChild<HgsClient *>(),&HgsClient::worktreesReady);QTRY_COMPARE(loaded.size(),1);
+        auto *automatic=dialog.findChild<QPushButton *>("automaticLaunchWorktree"),*none=dialog.findChild<QPushButton *>("launchWithoutWorktree");
+        QCOMPARE(automatic->isEnabled(),available);QCOMPARE(automatic->isChecked(),available);QCOMPARE(none->isChecked(),!available);
+        QVERIFY(!calls().contains("worktrees create"));
+        if(!available)return;
+        // Moving to an ordinary folder clears Auto; returning uses the exact
+        // computer/path snapshot, including a checkout omitted by the list cap.
+        QVERIFY(save(QJsonObject{{"state","not_repo"},{"worktrees",QJsonArray{}}}));dialog.selectPath("/ordinary");QTRY_COMPARE(loaded.size(),2);
+        QVERIFY(!automatic->isEnabled());QVERIFY(none->isChecked());QVERIFY(save(data));dialog.selectPath(source);QTRY_COMPARE(loaded.size(),3);
+        QVERIFY(automatic->isEnabled());QVERIFY(automatic->isChecked());QVERIFY(!calls().contains("worktrees create"));
+        if(evidence=="omitted"){
+            QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+            QCOMPARE(calls().count("worktrees create"),1);QVERIFY(launched.first()[2].toString().startsWith("/repo-work-"));QCOMPARE(launched.first()[0].toString(),host);
+        }
+    }
     void pickerPreservesProjectMachineAccountAndCustomFolderAcrossPolls(){
         auto state=fleet();SessionOrganization org;const auto project=org.createGroup("Work");const auto id=org.addFolder(project,"mac","/repo");
         NewSessionDialog dialog(FakeCli::program(script()),state,"mac","codex",project);dialog.setGroups(org,project);QVERIFY(dialog.selectFolder(id));dialog.show();
