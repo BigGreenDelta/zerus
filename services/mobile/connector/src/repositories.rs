@@ -61,7 +61,7 @@ pub fn project(operation: &str, p: &Value, raw: &Value) -> Result<Value, &'stati
                 }
             )
         || raw["name"] != name
-        || (p["parent"] != "~" && p["parent"] != parent)
+        || (operation != "repository_check" && p["parent"] != parent)
     {
         return Err(INVALID);
     }

@@ -56,6 +56,47 @@ class RepositoryAcquisitionTest {
         assertEquals("failed",SessionActionPolicies.result(action,failed).status)
         assertEquals("failed",SessionActionPolicies.result(action,JSONObject().put("request_id",id).put("state","failed")).status)
     }
+    @Test fun canonicalReadOnlyCheckProposesVisibleDestinationButMutationStaysExact() {
+        val requested=RepositoryAcquisition.arguments(nativeId,"git@forge:owner/source.git","/var/tmp/source")
+        val ready=receipt(nativeId);ready.getJSONObject("result").put("clone_request_id",nativeId).put("status","ready")
+            .put("parent","/private/var/tmp").put("path","/private/var/tmp/source")
+        val decision=RepositoryAcquisition.checkedDestination(requested,ready,nativeId)
+        assertTrue(decision.needsConfirmation);assertEquals("/private/var/tmp/source",decision.path)
+        val canonical=decision.arguments
+        val rechecked=RepositoryAcquisition.checkedDestination(canonical,ready,nativeId)
+        assertFalse(rechecked.needsConfirmation)
+        assertEquals("/private/var/tmp",canonical.getString("parent"))
+        assertEquals(requested.getString("url"),canonical.getString("url"))
+        assertNotEquals(RepositoryAcquisition.destination(requested.getString("parent"),requested.getString("name")),
+            RepositoryAcquisition.destination(canonical.getString("parent"),canonical.getString("name")))
+        val original=action.copy(arguments=requested.toString())
+        val changed=receipt();changed.getJSONObject("result").put("parent","/private/var/tmp").put("path","/private/var/tmp/source")
+        assertEquals("uncertain",RepositoryAcquisition.result(original,changed).status)
+        changed.put("request_id",nativeId);changed.getJSONObject("result").put("request_id",nativeId)
+        assertEquals("uncertain",RepositoryAcquisition.result(original,changed,nativeId).status)
+        val wrong=JSONObject(ready.toString());wrong.getJSONObject("result").put("name","other")
+        assertThrows(IllegalArgumentException::class.java) { RepositoryAcquisition.checkedDestination(requested,wrong,nativeId) }
+    }
+    @Test fun everyUnresolvedDestinationHasOriginalStatusRecoveryAndBoundedStablePages() {
+        fun attempt(index:Int)=action.copy(requestId="00000000-0000-4000-8000-%012d".format(index),status="uncertain",
+            arguments=RepositoryAcquisition.arguments(nativeId,"git@forge:owner/source.git","/fixture/source$index").toString())
+        val actions=(1..13).map(::attempt)
+        for(index in listOf(1,2)) {
+            val page=RepositoryAcquisition.recovery(actions,machine,"/fixture/source$index")
+            assertEquals(actions[index-1].requestId,page.selected?.requestId)
+            val read=RepositoryAcquisition.statusPayload(page.selected!!,nativeId)
+            assertEquals(actions[index-1].requestId,read.string("clone_request_id"));assertEquals("source$index",read.string("name"))
+            assertEquals(nativeId,read.string("request_id"));assertEquals(5,page.others.size)
+        }
+        val found=mutableSetOf<String>();var cursor=""
+        do {
+            val page=RepositoryAcquisition.recovery(actions.reversed(),machine,"/fixture/new",cursor)
+            assertTrue(page.others.size<=5);page.others.forEach { assertTrue(found.add(it.requestId)) };cursor=page.next.orEmpty()
+        } while(cursor.isNotEmpty())
+        assertEquals(actions.map { it.requestId }.toSet(),found)
+        assertNull(RepositoryAcquisition.pending(actions,machine,"/fixture/new"))
+        assertTrue(RepositoryAcquisition.recovery(actions,machine.copy(connectionId="other"),"/fixture/source1").others.isEmpty())
+    }
     @Test fun freshSelectedCheckoutProofIsRequiredBeforeLaunch() {
         val raw=JSONObject().put("state","ok").put("stale",false).put("partial",true)
             .put("path","/fixture/source").put("requested_path","/fixture/source").put("common_dir","/fixture/source/.git")

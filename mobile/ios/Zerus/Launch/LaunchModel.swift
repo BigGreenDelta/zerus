@@ -27,6 +27,8 @@ final class LaunchModel {
     var formId = 0
     /// Generated once per form: the default session name and Auto's new branch.
     var generatedName = ""
+    var repositoryPath = ""
+    var repositoryCheckId = ""
     /// Launch, worktree and folder receipt statuses when the form opened; later changes belong to this form.
     var baseline: [String: String] = [:]
     /// Auto worktree progress: creating, checking or launching.
@@ -76,6 +78,7 @@ final class LaunchModel {
         let opening = !visible
         generation += 1
         self.machine = machine
+        repositoryPath = ""; repositoryCheckId = ""
         visible = true
         catalog = nil
         directory = nil
@@ -138,8 +141,7 @@ final class LaunchModel {
             defer { stage = ""; conversation.actionFlights.remove(stored.requestId) }
             do {
                 let id = UUID().uuidString.lowercased()
-                var payload = stored.arguments
-                payload["request_id"] = .string(id); payload["clone_request_id"] = .string(stored.requestId)
+                let payload = try RepositoryAcquisition.statusPayload(stored,id:id)
                 let receipt = try await app.client.waitForReceipt(connection, initial: try await app.client.submit(connection, target: stored.target,
                     operation: "repository_status", payload: payload, id: id))
                 let settled = RepositoryAcquisition.result(stored,receipt,readId:id)
@@ -169,10 +171,12 @@ final class LaunchModel {
                 var checkPayload = arguments; checkPayload["request_id"] = .string(id)
                 let checked = try await app.client.waitForReceipt(connection, initial: try await app.client.submit(connection, target: target,
                     operation: "repository_check", payload: checkPayload,id:id))
-                guard checked.string("request_id") == id, checked.string("state") == "completed", let ready = checked.object("result"),
-                      ready.string("request_id") == id, ready.string("machine_id") == identity, ready.string("status") == "ready",
-                      ready.string("parent") == arguments.string("parent"), ready.string("name") == arguments.string("name"), ready.string("path") == path else {
-                    throw ZerusError.invalid(checked.string("error").nonEmpty ?? "Repository or destination could not be verified.")
+                let destination=try RepositoryAcquisition.checkedDestination(arguments,checked,id:id)
+                guard visible, self.machine == machine, generation == form, catalogEvidence == expectedCatalog else { throw ZerusError.invalid("The selected computer or form changed.") }
+                if destination.needsConfirmation {
+                    repositoryPath=destination.path;repositoryCheckId=id
+                    error="Destination resolved. Review Clone to, then choose Clone and start."
+                    return
                 }
                 // Validate the whole launch before reserving or creating a checkout.
                 let launchArgs = try launchArguments(machine,catalog,agent:agent,directory:path,tag:tag,accountId:accountId,projectId:projectId,

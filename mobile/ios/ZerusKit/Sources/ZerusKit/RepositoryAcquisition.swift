@@ -41,12 +41,50 @@ public enum RepositoryAcquisition {
     public static func verifiedCheckout(_ raw:JSONObject?,path:String)->Bool {
         WorktreePresentation.forFolder(raw,path)?.string("path") == path && WorktreePresentation.contains(raw,path)
     }
+    /// Only the read-only check may resolve an alias; its visible destination needs explicit confirmation.
+    public struct CheckedDestination {
+        public let arguments:JSONObject
+        public let path:String
+        public let needsConfirmation:Bool
+    }
+    public static func checkedDestination(_ args:JSONObject,_ receipt:JSONObject,id:String) throws -> CheckedDestination {
+        guard receipt.string("request_id") == id, receipt.string("state") == "completed", let raw=receipt.object("result"), raw["schema"] == .int(1),
+              raw.string("request_id") == id, raw.string("clone_request_id") == id, raw.string("machine_id") == args.string("expected_machine_id"),
+              raw.string("status") == "ready", raw.string("name") == args.string("name") else { throw ZerusError.invalid("Repository or destination could not be verified.") }
+        let checked=try arguments(machineId:args.string("expected_machine_id"),url:args.string("url"),path:raw.string("path"))
+        guard checked.string("parent") == raw.string("parent"), checked.string("name") == args.string("name") else { throw ZerusError.invalid("Invalid checked destination.") }
+        let path=destination(checked.string("parent"),checked.string("name"))
+        return CheckedDestination(arguments:checked,path:path,needsConfirmation:path != destination(args.string("parent"),args.string("name")))
+    }
+    public struct RecoveryPage {
+        public let selected:SessionAction?
+        public let others:[SessionAction]
+        public let next:String?
+    }
+    /// UUID order gives stable bounded pages while new results reorder the durable action list.
+    public static func recovery(_ actions:[SessionAction],_ machine:MachineKey,path:String,before:String="",limit:Int=5)->RecoveryPage {
+        let target=Target(computerId:machine.computerId,session:"",run:"",conversation:"",connectionId:machine.connectionId)
+        func matches(_ action:SessionAction)->Bool { action.operation == clone && action.target == target }
+        let selected=actions.last { matches($0) && (path.isEmpty || destination($0.arguments.string("parent"),$0.arguments.string("name")) == path) }
+        let size=min(max(limit,1),10)
+        var page:[SessionAction]=[]
+        for action in actions where matches(action) && action.blocksSending && action.requestId != selected?.requestId && (before.isEmpty || action.requestId < before) {
+            page.append(action);page.sort { $0.requestId > $1.requestId };if page.count>size+1 { page.removeLast() }
+        }
+        return RecoveryPage(selected:selected,others:Array(page.prefix(size)),next:page.count>size ? page[size-1].requestId : nil)
+    }
     public static func pending(_ actions: [SessionAction], _ machine: MachineKey, path:String?=nil) -> SessionAction? {
         actions.last { action in
             let reserved=destination(action.arguments.string("parent"),action.arguments.string("name"))
             return action.operation == clone && action.target == Target(computerId:machine.computerId,session:"",run:"",conversation:"",connectionId:machine.connectionId) && action.blocksSending &&
                 (path == nil || !DirectoryCreation.pathError(reserved).isEmpty || reserved == path)
         }
+    }
+    public static func statusPayload(_ action:SessionAction,id:String) throws -> JSONObject {
+        guard action.operation == clone, AttachmentPolicy.validId(id), id != action.requestId else { throw ZerusError.invalid("Invalid checkout read identity.") }
+        var payload=action.arguments
+        payload["request_id"] = .string(id);payload["clone_request_id"] = .string(action.requestId)
+        return payload
     }
     public static func result(_ action: SessionAction, _ receipt: JSONObject, readId: String? = nil) -> SessionAction {
         var copy = action

@@ -78,6 +78,7 @@ private val Amber = Color(0xFFFFCB7D)
     var repositoryPath by rememberSaveable(form,machine) { mutableStateOf("") }
     var repositoryManual by rememberSaveable(form,machine) { mutableStateOf(false) }
     var choosingMachine by remember(form) { mutableStateOf(false) }
+    var checkoutCursor by remember(form,machine,repositoryPath) { mutableStateOf("") }
     LaunchedEffect(repositoryUrl,model.launchDirectoryState) {
         if(!repositoryManual) {
             val parent=repositoryPath.substringBeforeLast('/',"").ifEmpty { model.launchDirectoryState?.string("path").orEmpty() }
@@ -99,6 +100,9 @@ private val Amber = Color(0xFFFFCB7D)
     var tag by rememberSaveable(form) { mutableStateOf(model.launchGeneratedName) }
     var autoPreferred by rememberSaveable(form,machine) { mutableStateOf(true) }
     var edited by rememberSaveable(form) { mutableStateOf(false) }
+    LaunchedEffect(model.launchRepositoryCheckId) {
+        if(model.launchRepositoryCheckId.isNotEmpty()) { repositoryPath=model.launchRepositoryPath;repositoryManual=true;edited=true }
+    }
     var appliedWorktree by rememberSaveable(form,machine) { mutableStateOf("") }
     var choosingProject by rememberSaveable(form,machine) { mutableStateOf(false) }
     var choosingWorktree by rememberSaveable(form,machine) { mutableStateOf(false) }
@@ -175,9 +179,8 @@ private val Amber = Color(0xFFFFCB7D)
     val createdWorktree = machineActions.lastOrNull { it.operation == "worktree_create" && it.status == "completed" && it.resultPath.isNotBlank() && inForm(it) }
     val pendingLaunch = machineActions.lastOrNull { it.operation == "launch" && it.blocksSending }?.takeIf { !model.launchSubmitting }
     val confirmed = machineActions.lastOrNull { it.operation == "launch" && it.status == "completed" && it.resultTarget != null && inForm(it) }
-    val latestCheckout = machineActions.lastOrNull { it.operation==RepositoryAcquisition.clone }
-    val pendingCheckout = RepositoryAcquisition.pending(machineActions,machine)
-    val checkouts = listOfNotNull(pendingCheckout,latestCheckout).distinctBy { it.requestId }
+    val checkoutPage=RepositoryAcquisition.recovery(machineActions,machine,repositoryPath,checkoutCursor)
+    val checkouts=listOfNotNull(checkoutPage.selected)+checkoutPage.others
     val nameError = LaunchPresentation.nameError(tag)
     val formReason = LaunchPresentation.disabledReason(LaunchReadiness(machineReason = model.launchReason(machine),
         catalogLoading = model.launchCatalogLoading,catalogAvailable = catalog != null && allowedCatalog.isNotBlank(),catalogChanged = changed,
@@ -253,6 +256,10 @@ private val Amber = Color(0xFFFFCB7D)
                             repositorySource=false;autoPreferred=false;selectFolder(checkout.resultPath)
                         },enabled=!busy) { Text("Use checkout") }
                     } }
+                    if(repositorySource && (checkoutPage.next!=null || checkoutCursor.isNotEmpty())) Row {
+                        if(checkoutCursor.isNotEmpty()) TextButton(onClick={ checkoutCursor="" },enabled=!busy) { Text("First checkouts") }
+                        checkoutPage.next?.let { next -> TextButton(onClick={ checkoutCursor=next },enabled=!busy) { Text("More unfinished checkouts") } }
+                    }
                     if(model.launchCatalogLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
                     pendingWorktree?.let { action -> LaunchNotice(Amber) {
                         Text("Worktree creation is unconfirmed. Check the original result before creating another.",style = MaterialTheme.typography.bodyMedium)

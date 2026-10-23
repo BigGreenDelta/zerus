@@ -30,6 +30,14 @@ The original mutation and native clone UUID remain bound through reconnects;
 uncertain recovery only checks status and offers Use checkout, never replaying
 clone or launching automatically. See the [Android contract](../android/README.md#project-and-account-selection).
 
+Repository recovery selects the attempt for the current Clone to destination and
+pages other unresolved attempts in bounded groups. Each Check original result
+reads that attempt's original native clone UUID; choosing another destination
+keeps it recoverable. A read-only check may resolve a parent alias (for example,
+`/var/tmp` to `/private/var/tmp` on macOS). The form shows that canonical path and
+requires a fresh explicit Clone and start before creating it; mutation and status
+receipts must keep the confirmed exact destination.
+
 ## Layout
 
 - `ZerusKit/` is a Swift package with the platform-neutral core: JSON values,

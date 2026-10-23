@@ -92,3 +92,14 @@ class RepositoryTests(SessionCase):
         self.assertEqual(result["result"]["status"], "failed")
         self.assertLess(len(json.dumps(result, ensure_ascii=False).encode()), 16384)
         self.assertEqual(await self.submit(request, process, redeliver=True), result)
+
+    async def test_read_only_check_reports_canonical_alias_for_explicit_confirmation(self):
+        request = self.command("repository_check")
+        request["payload"]["parent"] = "/var/tmp"
+        self.answer(request, status="ready", parent="/private/var/tmp", path="/private/var/tmp/" + request["payload"]["name"])
+        process = await self.launch()
+        result = await self.submit(request, process)
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["result"]["parent"], "/private/var/tmp")
+        self.assertEqual(len(self.native_calls()), 1)
+        self.assertEqual(json.loads(self.native_calls()[0]["stdin"])["argv"][1], "check")

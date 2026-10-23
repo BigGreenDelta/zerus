@@ -975,6 +975,14 @@ also remains available after a later launch failure or closing the form. An
 unconfirmed attempt reserves its original destination; Inspect folder opens it
 for review, while a different destination can be used for a new explicit attempt.
 
+Repository recovery selects the attempt for the current Clone to destination and
+pages other unresolved attempts in bounded groups. Each Check original result
+reads that attempt's original native clone UUID; choosing another destination
+keeps it recoverable. A read-only check may resolve a parent alias (for example,
+`/var/tmp` to `/private/var/tmp` on macOS). The form shows that canonical path and
+requires a fresh explicit Clone and start before creating it; mutation and status
+receipts must keep the confirmed exact destination.
+
  Account and agent pairs share one list: a
 large colored provider logo spans the email and one line of cached limits, or `limits n/a`.
 Small usage/elapsed rails and pace colors match the desktop status footer.

@@ -1160,6 +1160,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var launchFormId by mutableLongStateOf(0L);private set
     /** Generated once per form: the default session name and Auto's new branch. */
     var launchGeneratedName by mutableStateOf("");private set
+    var launchRepositoryPath by mutableStateOf("");private set
+    var launchRepositoryCheckId by mutableStateOf("");private set
     /** Launch and worktree receipt statuses when the form opened; later changes belong to this form. */
     var launchBaseline by mutableStateOf<Map<String,String>>(emptyMap());private set
     /** Auto worktree launch progress: creating, checking or launching. */
@@ -1199,7 +1201,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val id=UUID.randomUUID().toString()
-                val payload=JSONObject(stored.arguments).put("request_id",id).put("clone_request_id",stored.requestId)
+                val payload=RepositoryAcquisition.statusPayload(stored,id)
                 val receipt=api.await(connection,api.submit(connection,stored.target,"repository_status",payload,id))
                 val settled=RepositoryAcquisition.result(stored,receipt,id)
                 durable({ state -> state.action(settled) })
@@ -1222,10 +1224,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val checkId=UUID.randomUUID().toString()
                 val checked=api.await(connection,api.submit(connection,target,"repository_check",JSONObject(args.toString()).put("request_id",checkId),checkId))
-                val ready=checked.optJSONObject("result")
-                check(checked.string("request_id")==checkId && checked.string("state")=="completed" && ready!=null && ready.string("request_id")==checkId &&
-                    ready.string("machine_id")==identity && ready.string("status")=="ready" && ready.string("parent")==args.string("parent") && ready.string("name")==args.string("name") && ready.string("path")==path) {
-                    checked.string("error").ifEmpty { "Repository or destination could not be verified." }
+                val destination=RepositoryAcquisition.checkedDestination(args,checked,checkId)
+                check(launchVisible && launchMachine==machine && launchGeneration==generation && launchCatalogEvidence==expectedCatalog) { "The selected computer or form changed." }
+                if(destination.needsConfirmation) {
+                    launchRepositoryPath=destination.path;launchRepositoryCheckId=checkId
+                    launchError="Destination resolved. Review Clone to, then choose Clone and start."
+                    return@launch
                 }
                 // Validate every launch choice before reserving or creating any checkout.
                 val launchArgs=LaunchPresentation.arguments(catalog,agent,path,tag,accountId,projectId,null,model,effort,launchEffortSupported(machine),implicitInbox)
@@ -1269,6 +1273,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(launchBusy) return
         val reason=launchReason(machine)
         val opening=!launchVisible
+        launchRepositoryPath="";launchRepositoryCheckId=""
         launchGeneration++;launchMachine=machine;launchVisible=true;launchCatalogState=null;launchDirectoryState=null;launchWorktreeState=null;launchError="";launchCatalogEvidence=""
         if(opening) { launchFormId=launchGeneration;launchGeneratedName=LaunchPresentation.generatedName() };launchStage="";launchCreatedWorktree="";launchCreatedEvidence=null;launchAutomaticFailed=false
         launchCreatedDirectory=""

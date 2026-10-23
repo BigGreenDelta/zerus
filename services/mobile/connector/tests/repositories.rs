@@ -212,3 +212,25 @@ fn additive_reads_expire_without_losing_clone_tombstone() {
         )
         .unwrap());
 }
+
+#[test]
+fn read_only_check_accepts_canonical_alias_but_mutations_keep_exact_destination() {
+    let mut r = request("repository_check");
+    r["payload"]["parent"] = json!("/var/tmp");
+    let p = &r["payload"];
+    let mut raw = native("repository_check", p);
+    raw["parent"] = json!("/private/var/tmp");
+    raw["path"] = json!(format!("/private/var/tmp/{}", p["name"].as_str().unwrap()));
+    let checked = repositories::project("repository_check", p, &raw).unwrap();
+    assert_eq!(checked["parent"], "/private/var/tmp");
+    for op in ["repository_clone", "repository_status"] {
+        let mut r = request(op);
+        r["payload"]["parent"] = json!("/var/tmp");
+        let mut changed = native(op, &r["payload"]);
+        changed["parent"] = raw["parent"].clone();
+        changed["path"] = raw["path"].clone();
+        assert!(repositories::project(op, &r["payload"], &changed).is_err());
+        r["payload"]["parent"] = raw["parent"].clone();
+        repositories::project(op, &r["payload"], &native(op, &r["payload"])).unwrap();
+    }
+}

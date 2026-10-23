@@ -51,6 +51,48 @@ final class RepositoryAcquisitionTests: XCTestCase {
         raw["status"]="failed";raw["detail"]="Git refused";r["result"] = .object(raw)
         XCTAssertEqual(SessionActionPolicies.result(a,r).status,"failed")
     }
+    func testCanonicalReadOnlyCheckProposesDestinationButMutationStaysExact() throws {
+        let requested=try RepositoryAcquisition.arguments(machineId:nativeId,url:"git@forge:owner/source.git",path:"/var/tmp/source")
+        var ready=receipt(nativeId),raw=ready.object("result")!
+        raw["clone_request_id"] = .string(nativeId);raw["status"]="ready";raw["parent"]="/private/var/tmp";raw["path"]="/private/var/tmp/source";ready["result"] = .object(raw)
+        let decision=try RepositoryAcquisition.checkedDestination(requested,ready,id:nativeId)
+        XCTAssertTrue(decision.needsConfirmation);XCTAssertEqual(decision.path,"/private/var/tmp/source")
+        let canonical=decision.arguments
+        XCTAssertFalse(try RepositoryAcquisition.checkedDestination(canonical,ready,id:nativeId).needsConfirmation)
+        XCTAssertEqual(canonical.string("parent"),"/private/var/tmp");XCTAssertEqual(canonical.string("url"),requested.string("url"))
+        XCTAssertNotEqual(canonical.string("parent"),requested.string("parent"))
+        var original=try action();original.arguments=requested
+        var changed=receipt(),changedRaw=changed.object("result")!
+        changedRaw["parent"]="/private/var/tmp";changedRaw["path"]="/private/var/tmp/source";changed["result"] = .object(changedRaw)
+        XCTAssertEqual(RepositoryAcquisition.result(original,changed).status,"uncertain")
+        changed["request_id"] = .string(nativeId);changedRaw["request_id"] = .string(nativeId);changed["result"] = .object(changedRaw)
+        XCTAssertEqual(RepositoryAcquisition.result(original,changed,readId:nativeId).status,"uncertain")
+        raw["name"]="other";ready["result"] = .object(raw)
+        XCTAssertThrowsError(try RepositoryAcquisition.checkedDestination(requested,ready,id:nativeId))
+    }
+    func testEveryUnresolvedDestinationHasOriginalStatusRecoveryAndBoundedStablePages() throws {
+        var actions:[SessionAction]=[]
+        for index in 1...13 {
+            var a=try action();a.requestId=String(format:"00000000-0000-4000-8000-%012d",index);a.status="uncertain"
+            a.arguments=try RepositoryAcquisition.arguments(machineId:nativeId,url:"git@forge:owner/source.git",path:"/fixture/source\(index)");actions.append(a)
+        }
+        for index in [1,2] {
+            let page=RepositoryAcquisition.recovery(actions,machine,path:"/fixture/source\(index)")
+            XCTAssertEqual(page.selected?.requestId,actions[index-1].requestId)
+            let read=try RepositoryAcquisition.statusPayload(page.selected!,id:nativeId)
+            XCTAssertEqual(read.string("clone_request_id"),actions[index-1].requestId);XCTAssertEqual(read.string("name"),"source\(index)")
+            XCTAssertEqual(read.string("request_id"),nativeId);XCTAssertEqual(page.others.count,5)
+        }
+        var found=Set<String>(),cursor=""
+        repeat {
+            let page=RepositoryAcquisition.recovery(Array(actions.reversed()),machine,path:"/fixture/new",before:cursor)
+            XCTAssertLessThanOrEqual(page.others.count,5)
+            for action in page.others { XCTAssertTrue(found.insert(action.requestId).inserted) };cursor=page.next ?? ""
+        } while !cursor.isEmpty
+        XCTAssertEqual(found,Set(actions.map(\.requestId)))
+        XCTAssertNil(RepositoryAcquisition.pending(actions,machine,path:"/fixture/new"))
+        XCTAssertTrue(RepositoryAcquisition.recovery(actions,MachineKey(connectionId:"other",computerId:machine.computerId),path:"/fixture/source1").others.isEmpty)
+    }
     func testFreshSelectedCheckoutProofBeforeLaunch() {
         var raw:JSONObject=["state":"ok","stale":false,"partial":true,"path":"/fixture/source","requested_path":"/fixture/source",
             "common_dir":"/fixture/source/.git","worktrees":[["path":"/fixture/source","kind":"main","available":true]]]

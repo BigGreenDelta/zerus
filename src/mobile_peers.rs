@@ -828,7 +828,7 @@ fn transport(
         .saturating_duration_since(Instant::now())
         .as_millis();
     ensure!(
-        remaining > 0 && remaining <= 30_000,
+        remaining > 0 && remaining <= transport_budget(helper, request.as_ref()).as_millis(),
         "invalid mobile transport deadline"
     );
     let envelope = TransportRequest {
@@ -865,7 +865,9 @@ fn supervise() -> Result<i32> {
         "mobile transport parent changed"
     );
     ensure!(
-        envelope.deadline_ms > now && envelope.deadline_ms - now <= 30_000,
+        envelope.deadline_ms > now
+            && u128::from(envelope.deadline_ms - now)
+                <= transport_budget(envelope.helper, envelope.request.as_ref()).as_millis(),
         "invalid mobile transport deadline"
     );
     let config = Config::load()?;
@@ -1176,6 +1178,15 @@ fn peer_budget(argv: &[String]) -> Duration {
     let acquisition = argv.first().is_some_and(|op| op == "repository")
         && argv.get(1).is_some_and(|op| op == "clone");
     Duration::from_secs(if acquisition { 80 } else { 30 })
+}
+
+fn transport_budget(helper: Helper, request: Option<&LocalRequest>) -> Duration {
+    if matches!(helper, Helper::Local) {
+        if let Some(request) = request.filter(|request| validate(request).is_ok()) {
+            return peer_budget(&request.argv);
+        }
+    }
+    Duration::from_secs(30)
 }
 
 fn execute(config: &Config, args: &[String]) -> Result<i32> {

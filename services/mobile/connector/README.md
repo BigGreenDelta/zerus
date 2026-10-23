@@ -69,6 +69,9 @@ IDs, machine, status, canonical parent/path/name and a bounded failure detail.
 The entire encoded projection, including escaping and long paths, is bounded to
 16 KiB; native output has a separate 32 KiB read bound for receipt/newline overhead.
 Internal staging paths and arbitrary native fields are not forwarded.
+Read-only check may resolve a parent alias and reports the canonical destination.
+The phone shows a changed destination and requires another explicit Clone and start
+before any mutation. Clone/status require the exact confirmed canonical parent/name.
 
 The clone wrapper has a 75-second whole-call budget; only its fixed one-hop native
 route gets 80 seconds. Both remain inside the connector's 90-second stop allowance.

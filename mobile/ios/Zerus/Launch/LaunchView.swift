@@ -11,6 +11,7 @@ struct LaunchForm: View {
     @State private var repositoryUrl = ""
     @State private var repositoryPath = ""
     @State private var repositoryManual = false
+    @State private var checkoutCursor = ""
     @State private var provider = ""
     @State private var account = ""
     @State private var selectedModel = ""
@@ -72,9 +73,8 @@ struct LaunchForm: View {
         let createdWorktree = actions.last { $0.operation == "worktree_create" && $0.status == "completed" && !$0.resultPath.isEmpty && inForm($0) }
         let pendingLaunch = launch.submitting ? nil : actions.last { $0.operation == "launch" && $0.blocksSending }
         let confirmed = actions.last { $0.operation == "launch" && $0.status == "completed" && $0.resultTarget != nil && inForm($0) }
-        let latestCheckout = actions.last { $0.operation == RepositoryAcquisition.clone }
-        let pendingCheckout = RepositoryAcquisition.pending(actions,machine)
-        let checkouts = [pendingCheckout,latestCheckout].compactMap { $0 }.reduce(into:[SessionAction]()) { result,action in if !result.contains(where: { $0.requestId == action.requestId }) { result.append(action) } }
+        let checkoutPage=RepositoryAcquisition.recovery(actions,machine,path:repositoryPath,before:checkoutCursor)
+        let checkouts=checkoutPage.selected.map { [$0] } ?? []
         let nameError = LaunchPresentation.nameError(tag)
         let readiness = Self.readiness(launch: launch, machine: machine, catalog: catalog, allowedCatalog: allowedCatalog, changed: changed,
                                        projectSupported: projectSupported, project: project, folder: folder, folderValid: folderValid, providers: providers,
@@ -93,7 +93,13 @@ struct LaunchForm: View {
                 VStack(alignment: .leading, spacing: 22) {
                     computerSection
                     sourceSection
-                    if repositorySource { ForEach(checkouts,id: \.requestId) { checkoutNotice($0) } }
+                    if repositorySource {
+                        ForEach(checkouts + checkoutPage.others,id: \.requestId) { checkoutNotice($0) }
+                        HStack {
+                            if !checkoutCursor.isEmpty { Button("First checkouts") { checkoutCursor="" }.disabled(busy) }
+                            if let next=checkoutPage.next { Button("More unfinished checkouts") { checkoutCursor=next }.disabled(busy) }
+                        }
+                    }
                     if launch.catalogLoading { ProgressView().progressViewStyle(.linear).tint(Theme.mint) }
                     if let action = pendingWorktree {
                         notice(Theme.amber) {
@@ -337,6 +343,8 @@ struct LaunchForm: View {
         .interactiveDismissDisabled(busy || dirty)
         .onAppear { tag = launch.generatedName }
         .onChange(of: repositoryUrl) { edited=true; suggestRepositoryPath() }
+        .onChange(of: repositoryPath) { checkoutCursor="" }
+        .onChange(of: launch.repositoryCheckId) { if !launch.repositoryCheckId.isEmpty { repositoryPath=launch.repositoryPath;repositoryManual=true;edited=true } }
         .onChange(of: launch.directory?.string("path")) { suggestRepositoryPath() }
         .onChange(of: repositorySource) { edited=true }
         .onChange(of: signature, initial: true) { if allowedCatalog.isEmpty && !signature.isEmpty { allowedCatalog = signature } }
@@ -517,7 +525,7 @@ struct LaunchForm: View {
         guard !launch.busy, next != machine else { return }
         provider="";account="";selectedModel="";selectedEffort=""
         folder="";browsedFolder="";appliedWorktree="";allowedCatalog="";autoPreferred=true
-        repositoryPath="";repositoryManual=false;edited=true
+        repositoryPath="";repositoryManual=false;checkoutCursor="";edited=true
         launch.prepare(next)
     }
 
