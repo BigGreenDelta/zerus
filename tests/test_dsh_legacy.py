@@ -13,7 +13,7 @@ import uuid
 import test_dsh_native as native
 
 
-@unittest.skipUnless(native.DSH and native.HGS.exists(), 'official dsh and built hgs required')
+@unittest.skipUnless(native.fixture.required() or native.DSH and native.HGS.exists(), 'official dsh and built hgs required')
 class LegacyPermissions(unittest.TestCase):
     LEGACY_ADAPTER = True
     rpc = native.NativeHarness.__dict__['rpc']

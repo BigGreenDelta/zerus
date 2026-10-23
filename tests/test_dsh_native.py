@@ -19,19 +19,21 @@ import signal
 import sys
 import urllib.request
 import http.cookiejar
+import importlib.util
 
 REPO = Path(__file__).resolve().parents[1]
 DSH = shutil.which('dsh')
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs'))
+_fixture_spec = importlib.util.spec_from_file_location('ci_dsh_fixture', REPO / 'scripts/ci/dsh_fixture.py')
+fixture = importlib.util.module_from_spec(_fixture_spec)
+_fixture_spec.loader.exec_module(fixture)
 
 
-@unittest.skipUnless(DSH and HGS.exists(), 'official dsh and built hgs required')
+@unittest.skipUnless(fixture.required() or DSH and HGS.exists(), 'official dsh and built hgs required')
 class NativeHarness(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        version = subprocess.check_output([DSH, '--version'], text=True).strip()
-        if version != '0.2.1-rc.2':
-            raise unittest.SkipTest('contract is pinned to official 0.2.1-rc.2')
+        fixture.admit_fixture(DSH, HGS)
         cls.temp = tempfile.TemporaryDirectory(prefix='hgs-dsh-', dir='/tmp')
         cls.root = Path(cls.temp.name)
         cls.home = cls.root / 'native'
@@ -43,7 +45,7 @@ class NativeHarness(unittest.TestCase):
         cls.workspace = cls.root / 'workspace'
         cls.workspace.mkdir()
         (cls.root / 'holds').mkdir()
-        package = Path(DSH).resolve().parent.parent
+        package = fixture.package_root(DSH)
         bridge = REPO / 'src/dsh/bridge.mjs'
         if getattr(cls, 'LEGACY_ADAPTER', False):
             # Same released harness, but the resident bridge predates account
@@ -949,7 +951,7 @@ class NativeHarness(unittest.TestCase):
         self.assertNotIn('schedules', next(r for r in rows if r['name'] == b['name']))
 
 
-@unittest.skipUnless(DSH and HGS.exists(), 'official dsh and built hgs required')
+@unittest.skipUnless(fixture.required() or DSH and HGS.exists(), 'official dsh and built hgs required')
 class NativeSchedules(unittest.TestCase):
     """The official optional Schedule bundle, managed per exact session."""
     SCHEDULE_BUNDLE = True
