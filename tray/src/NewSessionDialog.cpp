@@ -268,6 +268,11 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         m_start->setText(text);actionWidth=qMax(actionWidth,m_start->sizeHint().width());
     }
     m_start->setText(initialAction);m_start->setMinimumWidth(actionWidth);
+    int sourceLabelWidth=0;m_sourceLabel->ensurePolished();
+    for(const auto &text:{tr("Working folder"),tr("Repository")}){
+        m_sourceLabel->setText(text);sourceLabelWidth=qMax(sourceLabelWidth,m_sourceLabel->sizeHint().width());
+    }
+    m_sourceLabel->setText(tr("Working folder"));m_sourceLabel->setMinimumWidth(sourceLabelWidth);
     // Without a computer to start on, it only opens Machines with this computer
     // selected; enabling local sessions keeps its own confirmation there.
     m_openMachines=buttons->addButton(tr("Open Machines"),QDialogButtonBox::ActionRole);m_openMachines->setObjectName("launchOpenMachines");m_openMachines->hide();

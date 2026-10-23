@@ -397,6 +397,8 @@ elif a and a[0]=='worktrees':
         QVERIFY(!dialog.findChild<CloneRepositoryDialog *>());QVERIFY(lines("clone-calls").isEmpty());
         const auto preview=qEnvironmentVariable("ZERUS_PREVIEW_DIR");if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/new-session-repository-"+theme+".png"));
         dialog.findChild<QPushButton *>("launchFolderSource")->click();QVERIFY(dialog.findChild<QComboBox *>("launchProjectFolder")->isVisible());
+        for(const auto *label:dialog.findChildren<QLabel *>())if(label->isVisible()&&label->text()=="Working folder")
+            QVERIFY(label->width()>=label->fontMetrics().horizontalAdvance(label->text()));
         if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/new-session-folder-"+theme+".png"));
     }
     void inlineRecoveryReadsReceiptAndRequiresExplicitStart_data(){QTest::addColumn<QString>("host");QTest::newRow("local")<<QString();QTest::newRow("remote")<<QString("mac");}
