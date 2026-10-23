@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import urllib.error
@@ -23,6 +24,7 @@ F = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(F)
 
 
+@unittest.skipUnless(hasattr(os, 'O_DIRECTORY'), 'Unix private-directory receipt controls')
 class LatestFixture(unittest.TestCase):
     def setUp(self):
         self.seal = 'sha512-' + base64.b64encode(bytes(range(64))).decode()
@@ -60,15 +62,16 @@ class LatestFixture(unittest.TestCase):
         response = io.BytesIO(self.raw)
         with patch.object(F.urllib.request, 'build_opener') as opener:
             opener.return_value.open.return_value = response
-            self.assertEqual(F.discover(), self.raw)
+            self.assertEqual(F.discover(time.monotonic() + 30), self.raw)
             request = opener.return_value.open.call_args.args[0]
             self.assertEqual(request.full_url, F.LATEST)
-            self.assertEqual(opener.return_value.open.call_args.kwargs['timeout'], 30)
+            self.assertGreater(opener.return_value.open.call_args.kwargs['timeout'], 29)
+            self.assertLessEqual(opener.return_value.open.call_args.kwargs['timeout'], 30)
             opener.return_value.open.assert_called_once()
         with patch.object(F.urllib.request, 'build_opener') as opener:
             opener.return_value.open.return_value = io.BytesIO(b'x' * (F.MAX_METADATA + 1))
             with self.assertRaisesRegex(ValueError, 'metadata exceeds'):
-                F.discover()
+                F.discover(time.monotonic() + 30)
         with self.assertRaisesRegex(ValueError, 'must not redirect'):
             F.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://example.invalid/x')
 
@@ -94,7 +97,7 @@ class LatestFixture(unittest.TestCase):
         self.commands.append(command)
         self.environments.append(kwargs['env'])
         self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
-        self.assertLessEqual(kwargs['timeout'], 600)
+        self.assertEqual(kwargs['cleanup_end'] - kwargs['work_end'], F.CLEANUP_SECONDS)
         self.assertEqual(command[0], '/fixture/npm')
         self.assertIn('--registry=' + F.REGISTRY, command)
         if command[1] == '--version':
@@ -135,9 +138,9 @@ class LatestFixture(unittest.TestCase):
         self.prefix, self.evidence = Path(root) / 'prefix', Path(root) / 'evidence'
         self.commands, self.environments = [], []
         with patch.object(F.shutil, 'which', return_value='/fixture/npm'), patch.object(F, 'discover', return_value=self.raw) as discover, \
-                patch.object(F.subprocess, 'run', side_effect=self.fake_npm):
+                patch.object(F, 'owned_command', side_effect=self.fake_npm):
             receipt = F.install(self.prefix, self.evidence)
-        discover.assert_called_once_with()
+        discover.assert_called_once()
         return receipt
 
     def test_one_resolution_is_sealed_before_install_and_runtime_identity_is_bound(self):
@@ -172,9 +175,9 @@ class LatestFixture(unittest.TestCase):
             evidence = Path(root) / 'evidence'
             with patch.object(F.shutil, 'which', return_value='/fixture/npm'), \
                     patch.object(F, 'discover', side_effect=urllib.error.URLError('offline')) as discover, \
-                    patch.object(F, 'npm_policy'), patch.object(F.subprocess, 'run') as npm, self.assertRaises(urllib.error.URLError):
+                    patch.object(F, 'npm_policy'), patch.object(F, 'owned_command') as npm, self.assertRaises(urllib.error.URLError):
                 F.install(Path(root) / 'prefix', evidence)
-            discover.assert_called_once_with()
+            discover.assert_called_once()
             npm.assert_not_called()
             self.assertFalse((evidence / 'installed.json').exists())
 
@@ -187,7 +190,7 @@ class LatestFixture(unittest.TestCase):
                 result.returncode = 1 if command[1] == 'ci' else 0
                 return result
             with patch.object(F.shutil, 'which', return_value='/fixture/npm'), patch.object(F, 'discover', return_value=self.raw), \
-                    patch.object(F.subprocess, 'run', side_effect=fail), self.assertRaisesRegex(ValueError, 'no fallback'):
+                    patch.object(F, 'owned_command', side_effect=fail), self.assertRaisesRegex(ValueError, 'no fallback'):
                 F.install(self.prefix, self.evidence)
             self.assertTrue((self.evidence / 'selection.json').is_file())
             self.assertFalse((self.evidence / 'installed.json').exists())
@@ -207,7 +210,7 @@ class LatestFixture(unittest.TestCase):
                     (self.prefix / 'package-lock.json').write_text(json.dumps(lock))
                     return result
                 with patch.object(F.shutil, 'which', return_value='/fixture/npm'), patch.object(F, 'discover', return_value=self.raw), \
-                        patch.object(F.subprocess, 'run', side_effect=resolve), self.assertRaises(ValueError):
+                        patch.object(F, 'owned_command', side_effect=resolve), self.assertRaises(ValueError):
                     F.install(self.prefix, self.evidence)
                 self.assertEqual([c[1] for c in self.commands], ['--version', 'config', 'config', 'install'])
                 self.assertFalse((self.evidence / 'selection.json').exists())
@@ -217,7 +220,7 @@ class LatestFixture(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             self.prefix, self.evidence = Path(root) / 'prefix', Path(root) / 'evidence'
             with patch.object(F.shutil, 'which', return_value='/fixture/npm'), patch.object(F, 'discover', return_value=self.raw), \
-                    patch.object(F.subprocess, 'run', side_effect=subprocess.TimeoutExpired('npm', 600)) as npm:
+                    patch.object(F, 'owned_command', side_effect=subprocess.TimeoutExpired('npm', 600)) as npm:
                 with self.assertRaises(subprocess.TimeoutExpired):
                     F.install(self.prefix, self.evidence)
             npm.assert_called_once()
@@ -242,7 +245,7 @@ class LatestFixture(unittest.TestCase):
                     kwargs['stdout'].write(data)
                     return type('Completed', (), {'returncode': 0})()
                 with patch.object(F.shutil, 'which', return_value='/fixture/npm'), patch.object(F, 'discover') as discover, \
-                        patch.object(F.subprocess, 'run', side_effect=probe), self.assertRaises(ValueError):
+                        patch.object(F, 'owned_command', side_effect=probe), self.assertRaises(ValueError):
                     F.install(self.prefix, self.evidence)
                 discover.assert_not_called()
                 self.assertFalse(any(command[1] in ('install', 'ci') for command in self.commands))
@@ -253,6 +256,116 @@ class LatestFixture(unittest.TestCase):
         package = json.loads(raw)['packages']['node_modules/' + F.PACKAGE]
         chosen = dict(version=package['version'], url=package['resolved'], integrity=package['integrity'])
         self.assertGreater(F.validate_lock(raw, chosen), 100)
+
+    def test_discovery_and_file_reads_reject_late_chunks_and_close_before_refusal(self):
+        clock = [0.0]
+        class Late(io.BytesIO):
+            def read(self, size=-1):
+                value = super().read(size)
+                clock[0] = 6.0
+                return value
+        response = Late(self.raw)
+        with patch.object(F.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(F.urllib.request, 'build_opener') as opener:
+            opener.return_value.open.return_value = response
+            with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                F.discover(5.0)
+            self.assertEqual(opener.return_value.open.call_args.kwargs['timeout'], 5.0)
+        self.assertTrue(response.closed)
+        clock[0] = 0.0
+        source = Late(b'fixture')
+        with patch.object(F.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(Path, 'open', return_value=source):
+            with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                F.bounded(Path('memory'), 20, 5.0)
+        self.assertTrue(source.closed)
+
+    def test_late_pending_publication_fsync_or_final_close_cannot_leave_installed_receipt(self):
+        fsync, close = F.os.fsync, F.os.close
+        for stage in ('pending', 'published', 'closed'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as root:
+                self.prefix, self.evidence = Path(root) / 'prefix', Path(root) / 'evidence'
+                self.commands, self.environments = [], []
+                clock = [0.0]
+                def target_path(descriptor):
+                    info = os.fstat(descriptor)
+                    for path in (self.evidence / 'installed-pending.json', self.evidence):
+                        if path.exists() and (path.stat().st_dev, path.stat().st_ino) == (info.st_dev, info.st_ino):
+                            return path
+                    return None
+                def late(descriptor):
+                    fsync(descriptor)
+                    target = target_path(descriptor)
+                    if stage == 'pending' and target == self.evidence / 'installed-pending.json' or \
+                            stage == 'published' and target == self.evidence and (self.evidence / 'installed.json').exists():
+                        clock[0] = 986.0
+                def late_close(descriptor):
+                    target = target_path(descriptor)
+                    close(descriptor)
+                    if stage == 'closed' and target == self.evidence and (self.evidence / 'installed.json').exists():
+                        clock[0] = 986.0
+                with patch.object(F.shutil, 'which', return_value='/fixture/npm'), patch.object(F, 'discover', return_value=self.raw), \
+                        patch.object(F, 'owned_command', side_effect=self.fake_npm), \
+                        patch.object(F.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(F.os, 'fsync', side_effect=late), \
+                        patch.object(F.os, 'close', side_effect=late_close):
+                    with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                        F.install(self.prefix, self.evidence, end=1000.0)
+                self.assertFalse((self.evidence / 'installed.json').exists())
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os, 'WNOWAIT'), 'Linux owned-group custody')
+    def test_owned_npm_descendant_timeout_cannot_make_a_delayed_installed_receipt(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            receipt, ready = root / 'installed.json', root / 'ready'
+            child = 'import pathlib,time;time.sleep(1.5);pathlib.Path(' + repr(str(receipt)) + ').write_text("late")'
+            script = ('import pathlib,subprocess,sys,time;'
+                      'subprocess.Popen([sys.executable,"-c",' + repr(child) + ']);'
+                      'pathlib.Path(' + repr(str(ready)) + ').write_text("started");time.sleep(30)')
+            with (root / 'log').open('wb') as log:
+                started = time.monotonic()
+                with self.assertRaisesRegex(ValueError, 'deadline expired'):
+                    F.owned_command([sys.executable, '-c', script], cwd=root, env={'PATH': os.environ['PATH']},
+                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                    work_end=started + .8, cleanup_end=started + 5)
+            self.assertTrue(ready.exists(), 'Synthetic npm must actually spawn its descendant')
+            time.sleep(1.6)
+            self.assertFalse(receipt.exists(), 'An owned descendant must not keep writing after refusal')
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os, 'WNOWAIT'), 'Linux owned-group custody')
+    def test_owned_npm_reaps_only_after_group_cleanup_and_never_signals_after_reap(self):
+        popen, killpg = F.subprocess.Popen, F.os.killpg
+        events = []
+        def spawn(*args, **kwargs):
+            proc = popen(*args, **kwargs)
+            wait = proc.wait
+            def reap(*args, **kwargs):
+                events.append('reap')
+                return wait(*args, **kwargs)
+            proc.wait = reap
+            return proc
+        def signal(group, value):
+            self.assertNotIn('reap', events)
+            events.append('signal')
+            return killpg(group, value)
+        with tempfile.TemporaryDirectory() as root, open(os.devnull, 'wb') as log:
+            started = time.monotonic()
+            with patch.object(F.subprocess, 'Popen', side_effect=spawn), patch.object(F.os, 'killpg', side_effect=signal):
+                result = F.owned_command([sys.executable, '-c', 'pass'], cwd=root, env={'PATH': os.environ['PATH']},
+                                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                         work_end=started + 3, cleanup_end=started + 5)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(events[-1], 'reap')
+        self.assertIn('signal', events)
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os, 'WNOWAIT'), 'Linux owned-group custody')
+    def test_unknown_or_reaped_leader_never_authorizes_group_signal_or_success(self):
+        proc = type('Process', (), {'pid': 654321, 'wait': lambda *a, **kw: self.fail('Unknown leader must not be waited on')})()
+        with patch.object(F.subprocess, 'Popen', return_value=proc), patch.object(F, 'process_stat', return_value=('Z', proc.pid, proc.pid, 123)), \
+                patch.object(F.os, 'waitid', side_effect=ChildProcessError('already reaped')), patch.object(F.os, 'killpg') as signal:
+            started = time.monotonic()
+            with self.assertRaisesRegex(ValueError, 'cleanup is unknown'):
+                F.owned_command(['synthetic'], cwd='.', env={}, stdin=subprocess.DEVNULL, stdout=None, stderr=None,
+                                work_end=started + 1, cleanup_end=started + 3)
+            signal.assert_not_called()
 
     def test_prefix_is_fresh_and_npm_has_private_configuration_without_credentials(self):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {'NPM_TOKEN': 'synthetic-secret',
