@@ -18,7 +18,7 @@ INFOPLIST_KEY_NSMicrophoneUsageDescription = Zerus uses the microphone to record
 
 // The marketing version must equal mobile/ios/DEV_VERSION (checked by
 // scripts/ci/check-source.py). Build scripts pass the CI sequence as the build.
-MARKETING_VERSION = 0.2.1
+MARKETING_VERSION = 0.3.1
 CURRENT_PROJECT_VERSION = 0
 ZERUS_BUILD_CHANNEL = local
 ZERUS_SOURCE_REVISION = unknown
