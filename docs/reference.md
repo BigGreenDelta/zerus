@@ -644,10 +644,10 @@ the conversation and press **Voice** again; opening settings does not start a
 recording. If settings cannot open, the dialog keeps the manual navigation path.
 
 Session rows show provider, machine, current action, model, effort and Git context.
-Use the compact icon in a session row's upper-right corner, or right-click and
-choose **Compact session row**, to show only its name, status and agent type.
-The expand icon in that same position or the Right key restores the full row;
-the row remains selectable and keeps its normal context actions. This device
+Double-click a session row to toggle between the full card and a compact row
+showing only its name, status and agent type. Right-click **Compact session row**
+is also available. Compact rows keep their expand icon; it or the Right key
+restores the full row. The row remains selectable and keeps its normal context actions. This device
 remembers the preference for that conversation across restarts. **Expand all
 collapsed** in the Sessions menu restores every compact row, including sessions
 hidden by the current filters. Row density never compacts the agent's context
@@ -938,8 +938,9 @@ Reading older history preserves scroll and selection; **Jump to latest** returns
 to live events without resizing the timeline. Its double-down-arrow icon sits beside
 Voice in the composer toolbar, outside the messages; the tooltip includes the
 number of new events. Subagents use the same icon in their own toolbar.
-Double-clicking a session or
-subagent row, or pressing Enter on it, opens Activity and performs the same jump.
+Pressing Enter on a session or subagent row opens Activity and performs the same
+jump. Double-clicking a subagent row also jumps to latest; double-clicking a
+session row toggles its compact presentation.
 Connect commands remain available through **Copy connect command** in the session
 menu. Claude hands finished
 background work and other sessions' messages back as a new turn. Activity never

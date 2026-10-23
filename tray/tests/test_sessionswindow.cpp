@@ -5368,6 +5368,18 @@ void TestSessionsWindow::compactSessionRowActionsPreserveSelectionAndDraft()
     QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selected); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this other conversation draft"));
     QCOMPARE(writes.size(), 0); QCOMPARE(sends.size(), 0); QCOMPARE(reads.size(), 0); QCOMPARE(activated.size(), 0);
     QVERIFY(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty());
+    // Double-click is the compact/expand gesture on the open conversation.
+    // It persists density without a native action or a lost composer draft.
+    for (bool collapsed : {true, false}) {
+        const auto point = list->visualItemRect(list->currentItem()).center();
+        QTest::mouseDClick(list->viewport(), Qt::LeftButton, {}, point);
+        QTest::mouseRelease(list->viewport(), Qt::LeftButton, {}, point);
+        QCOMPARE(list->currentItem()->data(SessionRoles::RowCollapsed).toBool(), collapsed);
+        QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selected);
+        QCOMPARE(composer->editor()->toPlainText(), QString("Keep this other conversation draft"));
+        QCOMPARE(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty(), !collapsed);
+        QCOMPARE(writes.size(), 0); QCOMPARE(sends.size(), 0); QCOMPARE(reads.size(), 0); QCOMPARE(activated.size(), 0);
+    }
 }
 
 void TestSessionsWindow::selectedSessionRowsCompactAndExpandLocally()

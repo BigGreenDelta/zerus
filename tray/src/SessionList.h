@@ -50,6 +50,7 @@ protected:
     void dragLeaveEvent(QDragLeaveEvent *) override;
     void dropEvent(QDropEvent *) override;
     void mousePressEvent(QMouseEvent *) override;
+    void mouseDoubleClickEvent(QMouseEvent *) override;
     void mouseMoveEvent(QMouseEvent *) override;
     void mouseReleaseEvent(QMouseEvent *) override;
     void keyPressEvent(QKeyEvent *) override;
@@ -68,6 +69,9 @@ private:
     QHash<QPersistentModelIndex, QToolButton *> m_rowExpandButtons;
     bool m_rowExpandButtonsPending = false;
     bool m_rowFullLayout = true;
+    QElapsedTimer m_expandClickClock;
+    QString m_expandClickKey;
+    QRect m_expandClickRect;
     QRect childrenControlRect(const QListWidgetItem *item) const;
     QStyleOptionViewItem animationOption(const QModelIndex &index) const;
     QList<QPersistentModelIndex> m_visibleWorkingRows;

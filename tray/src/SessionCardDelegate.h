@@ -92,8 +92,8 @@ public:
             && index.data(SessionRoles::LaunchId).toString().isEmpty();
     }
     static QRect rowDensityRect(const QStyleOptionViewItem &option, const QModelIndex &index) {
-        if (!densityControlAvailable(index) || SessionStrip::expansion(option.widget) < 1) return {};
-        // The control stays in the title's trailing corner at both row heights.
+        if (!rowCollapsed(index) || SessionStrip::expansion(option.widget) < 1) return {};
+        // Compact rows retain their accessible expand control.
         const QRect card = sessionCardRect(option.rect);
         return {card.right() - 28, option.rect.top() + 7, 24, 24};
     }
@@ -206,13 +206,12 @@ public:
     }
     struct TitleLayout { QRect title, status, unread, question, provider; QString text, agent; };
     static TitleLayout titleLayout(const QStyleOptionViewItem &option, const QModelIndex &index, const CardStatus &status) {
-        return titleLayout(option.rect, option.font, option.widget && option.widget->property("compact").toBool(), index, status,
-            qobject_cast<const SessionList *>(option.widget) && densityControlAvailable(index));
+        return titleLayout(option.rect, option.font, option.widget && option.widget->property("compact").toBool(), index, status);
     }
-    static TitleLayout titleLayout(const QRect &row, const QFont &base, bool compact, const QModelIndex &index, const CardStatus &status, bool densityControl = true) {
+    static TitleLayout titleLayout(const QRect &row, const QFont &base, bool compact, const QModelIndex &index, const CardStatus &status) {
         const bool child = !index.data(SessionRoles::ChildId).toString().isEmpty();
         const QRect r = sessionCardRect(row).adjusted(child ? 24 : 0, 0, 0, 0);
-        const int x = r.x() + 12 + (status.muted ? 18 : 0), right = r.right() - (densityControl && densityControlAvailable(index) ? 35 : 11);
+        const int x = r.x() + 12 + (status.muted ? 18 : 0), right = r.right() - 11;
         const int y = r.y() + (child ? (compact ? 5 : 6) : (compact ? 3 : 5));
         int statusWidth = SessionStatusBadge::width(status.caption, status.kind, base);
         const int questions = optionalQuestionCount(index);
@@ -225,8 +224,7 @@ public:
         const int providerRoom = right - x - statusWidth - 16 - trailing - reservedTitle;
         const int naturalWidth = agent.isEmpty() ? 0 : IdentityBadges::width(IdentityBadges::Provider, agent, base, child ? 85 : 95);
         const int providerWidth = naturalWidth && !child && providerRoom < naturalWidth ? 26 : naturalWidth;
-        // The density control must not consume the title's minimum room. Long
-        // elapsed/status captions elide within their badge at narrow widths.
+        // Long elapsed/status captions elide within their badge at narrow widths.
         statusWidth = qMin(statusWidth, qMax(26, right - x - 8 - trailing - (providerWidth ? providerWidth + 8 : 0) - reservedTitle));
         const int titleWidth = qMax(0, right - x - statusWidth - 8 - trailing - (providerWidth ? providerWidth + 8 : 0));
         const QString text = CachedText::elided(font, index.data(SessionRoles::Title).toString(), Qt::ElideRight, titleWidth);

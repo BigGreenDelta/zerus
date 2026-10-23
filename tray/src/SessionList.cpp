@@ -163,7 +163,7 @@ void SessionList::syncRowExpandButtons()
         const auto index = indexAt(QPoint(viewport()->width() / 2, y));
         if (!index.isValid()) { ++y; continue; }
         const auto option = animationOption(index);
-        const QRect rect = SessionDelegate::rowDensityRect(option, index);
+        const QRect rect = SessionDelegate::expandRowRect(option, index);
         y = qMax(y + 1, option.rect.bottom() + 1);
         if (rect.isEmpty()) continue;
         ++controls;
@@ -172,28 +172,28 @@ void SessionList::syncRowExpandButtons()
         if (!button) {
             button = new QToolButton(viewport());
             button->setAutoRaise(true); button->setIconSize({16, 16}); button->setFocusPolicy(Qt::StrongFocus);
-            connect(button, &QToolButton::clicked, this, [this, pin] {
-                if (!pin.isValid()) return;
-                if (SessionDelegate::rowCollapsed(pin)) emit rowExpanded(pin.data(SessionRoles::Key).toString());
-                else emit rowCompacted(pin.data(SessionRoles::Key).toString());
+            connect(button, &QToolButton::clicked, this, [this, pin, button] {
+                if (!pin.isValid() || !SessionDelegate::rowCollapsed(pin)) return;
+                const auto key = pin.data(SessionRoles::Key).toString();
+                m_expandClickKey = key;
+                m_expandClickRect = button->geometry();
+                m_expandClickClock.start();
+                emit rowExpanded(key);
             });
             m_rowExpandButtons.insert(pin, button);
         }
         unused.remove(pin);
-        const bool collapsed = SessionDelegate::rowCollapsed(index);
-        const auto caption = collapsed ? tr("Expand session row") : tr("Compact session row");
-        button->setObjectName(collapsed ? "expandSessionRow" : "compactSessionRow");
+        const auto caption = tr("Expand session row");
+        button->setObjectName("expandSessionRow");
         button->setProperty("sessionKey", index.data(SessionRoles::Key));
-        button->setAccessibleName((collapsed ? tr("Expand session row: %1") : tr("Compact session row: %1"))
+        button->setAccessibleName(tr("Expand session row: %1")
             .arg(index.data(SessionRoles::Title).toString()));
         button->setAccessibleDescription(SessionDelegate::compactDescription(option, index));
         const auto tooltip = SessionDelegate::compactTooltip(option, index);
         button->setToolTip(tooltip.isEmpty() ? caption : caption + '\n' + tooltip);
-        if (!button->property("rowTheme").isValid() || button->property("rowTheme").toBool() != dark
-            || button->property("rowCollapsed").toBool() != collapsed) {
+        if (!button->property("rowTheme").isValid() || button->property("rowTheme").toBool() != dark) {
             button->setProperty("rowTheme", dark);
-            button->setProperty("rowCollapsed", collapsed);
-            button->setIcon(workspaceIcon(collapsed ? "expand-row" : "compact-row", QColor(dark ? "#a1adbb" : "#647386")));
+            button->setIcon(workspaceIcon("expand-row", QColor(dark ? "#a1adbb" : "#647386")));
             button->setStyleSheet(QString("QToolButton { background:transparent; border:1px solid transparent; border-radius:4px; padding:0; } QToolButton:hover { background:%1; } QToolButton:focus { border-color:%2; }")
                 .arg(dark ? "#344650" : "#d4e4e9", dark ? "#8bdfc0" : "#22795b"));
         }
@@ -363,6 +363,30 @@ void SessionList::selectRange(int targetRow, bool additive)
     // Keep the current/open conversation intact, independently of the range tip.
     selectionModel()->select(selection, QItemSelectionModel::ClearAndSelect);
     scrollToItem(target);
+}
+
+void SessionList::mouseDoubleClickEvent(QMouseEvent *e)
+{
+    const auto point = e->position().toPoint();
+    const auto *item = itemAt(point);
+    if (e->button() != Qt::LeftButton || narrow(this) || !rangeSelectable(item)
+        || item->data(SessionRoles::Key).toString().isEmpty() || childrenControlRect(item).contains(point)) {
+        WorkspaceList::mouseDoubleClickEvent(e);
+        return;
+    }
+    // The first press already handled selection. Do not turn the second
+    // release into another navigation or range-selection action.
+    m_togglePress = true;
+    m_pressedGroup.clear(); m_pressedParent.clear();
+    e->accept();
+    if (e->modifiers() != Qt::NoModifier) return;
+    const auto key = item->data(SessionRoles::Key).toString();
+    // Expanding by the icon removes that button under the pointer. Its second
+    // click can reach the row, but must not immediately compact it again.
+    if (m_expandClickKey == key && m_expandClickRect.contains(point) && m_expandClickClock.isValid()
+        && m_expandClickClock.elapsed() <= QApplication::doubleClickInterval()) return;
+    if (SessionDelegate::rowCollapsed(indexFromItem(item))) emit rowExpanded(key);
+    else emit rowCompacted(key);
 }
 
 void SessionList::mouseMoveEvent(QMouseEvent *e)
