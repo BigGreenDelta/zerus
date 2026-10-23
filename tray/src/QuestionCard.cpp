@@ -16,6 +16,7 @@
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QKeyEvent>
 #include <QLineEdit>
 #include <QValidator>
 #include <QMouseEvent>
@@ -590,6 +591,7 @@ void QuestionCard::rebuild()
             const QString description = !broader ? own : own.isEmpty() ? confirmation : own + '\n' + confirmation;
             auto *choice = new Choice(form.multi, option.value("label").toString(), description, page,
                 literal || broader || description.isEmpty() ? nullptr : markdownText("questionChoiceDescription", description));
+            choice->button->installEventFilter(this);
             choice->button->setObjectName("questionOption"); choice->button->setProperty("optionId", option.value("id").toString());
             choice->button->setProperty("questionId", form.id); group->addButton(choice->button);
             choice->button->setChecked(answer.options.contains(option.value("id").toString()));
@@ -604,7 +606,7 @@ void QuestionCard::rebuild()
                 const auto otherDescription = question.value("other_description").toString().simplified();
                 auto *other = new Choice(form.multi, otherLabel.isEmpty() ? tr("Other") : otherLabel,
                     otherDescription.isEmpty() ? tr("Write your own answer") : otherDescription, page);
-                form.other = other->button; form.other->setObjectName("questionOther"); form.other->setProperty("questionId", form.id);
+                form.other = other->button; form.other->installEventFilter(this); form.other->setObjectName("questionOther"); form.other->setProperty("questionId", form.id);
                 group->addButton(form.other); form.other->setChecked(answer.other); column->addWidget(other);
                 connect(form.other, &QAbstractButton::toggled, this, [this] { capture(); });
             }
@@ -896,6 +898,18 @@ bool QuestionCard::event(QEvent *event)
 bool QuestionCard::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == parentWidget() && event->type() == QEvent::Resize) scheduleSizing();
+    if (event->type() == QEvent::KeyPress) {
+        const auto *key = static_cast<QKeyEvent *>(event);
+        auto *choice = qobject_cast<QAbstractButton *>(watched);
+        if (choice && m_pages->isAncestorOf(choice)
+            && (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
+            && (key->modifiers() & ~Qt::KeypadModifier) == Qt::NoModifier) {
+            // Use the visible primary action, including all review and delivery
+            // guards. Holding Enter must not confirm broader consent or resend.
+            if (!key->isAutoRepeat() && m_submit->isVisible()) m_submit->click();
+            return true;
+        }
+    }
     return QWidget::eventFilter(watched, event);
 }
 
@@ -904,7 +918,7 @@ void QuestionCard::submit()
     if (!m_submit->isEnabled()) return;
     bool valid = false; const auto result = answers(&valid);
     if (!valid) return;
-    // An option beyond this one request needs a second, explicit click.
+    // An option beyond this one request needs a second, explicit confirmation.
     const QString broader = m_question.value("approval_choices").toBool() ? broaderSelection() : QString();
     if (!broader.isEmpty() && m_drafts[m_key].confirm != broader) {
         m_drafts[m_key].confirm = broader; updateControls(); return;
