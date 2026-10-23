@@ -16,6 +16,7 @@ PROBE = _focus_projection.PROBE
 BASELINES = _focus_projection.BASELINES
 reverse_focus_wait = _focus_projection.reverse_focus_wait
 reverse_disclosure_reveal = _focus_projection.reverse_disclosure_reveal
+reverse_confirmation_order = _focus_projection.reverse_confirmation_order
 
 
 def disclosure_preparation_memory(source, visibility, *, header=True, ready=True, capture=True):
@@ -66,6 +67,41 @@ def disclosure_preparation_memory(source, visibility, *, header=True, ready=True
     if capture and not capturing:
         disclosure = bind('option')  # Actual old lifecycle's second, unguarded lookup.
     return disclosure, owned, state
+
+
+def confirmation_read_memory(source, *, absent=True, absence_cost=2307, trace=None):
+    """Evaluate the actual observation order over recorded-cost fakes, never Android evidence."""
+    trace = [] if trace is None else trace
+    body = source.split('                lifecycleCheckpoint(LifecycleCheckpoint.BODY_RESTORE_PASSED)', 1)[1].split(
+        '            } finally {', 1)[0]
+    statements = {
+        'anchor': 'prepareEarlySendAnchor(lifecycleSend)',
+        'disabled': 'check(count() == 4 && !button("Send answer").isEnabled)',
+        'elapsed': 'check(elapsed >= 0 && elapsed < 3_000)',
+        'absence': 'await("background retires confirmation") { visible("Confirm this option?") == null }',
+    }
+    assert all(body.count(statement) == 1 for statement in statements.values())
+    ordered = sorted(statements, key=lambda step: body.index(statements[step]))
+    assert 'val end = Math.addExact(start, 3_000)' in source
+    assert 'SystemClock.elapsedRealtime() + 10_000' in source
+    assert not any(term in body for term in ('.begin(', '.bindReview(', 'resumeEnd =', 'reviewStart ='))
+    now = 415  # Recorded BODY_RESTORE_PASSED133085 minus original reviewStartedAt132670.
+    for step in ordered:
+        trace.append(step)
+        if step == 'anchor':
+            now += 269
+            assert now < 3000, 'original early-review deadline'
+        elif step == 'disabled':
+            now += 9
+            assert now < 3000, 'original early-review deadline'
+        elif step == 'elapsed':
+            assert 0 <= now < 3000, 'original early-review deadline'
+        else:
+            assert 0 <= absence_cost <= 10_000, 'original absence10s bound'
+            now += absence_cost
+            assert absent, 'mandatory native confirmation absence refused'
+    assert set(trace) == set(statements)
+    return trace, now
 
 
 def evaluate(source, values):
@@ -249,7 +285,7 @@ class DisclosureRevealBindingSource(unittest.TestCase):
                            ('    private fun await(', '    private fun find('),
                            ('            tap("Approve for this session"); reviewed()\n            proveBroaderDraft()',
                             '            boundary("complete", "lifecycle_no_submit")')]:
-            self.assertEqual(self.fixture.split(start, 1)[1].split(end, 1)[0], self.before.split(start, 1)[1].split(end, 1)[0])
+            self.assertEqual(reverse_confirmation_order(self.fixture).split(start, 1)[1].split(end, 1)[0], self.before.split(start, 1)[1].split(end, 1)[0])
 
     def test_transient_option_lookup_has_old_failure_and_retains_one_current_disclosure(self):
         with self.assertRaisesRegex(AssertionError, 'Current disclosure anchor is not visible'):
@@ -292,6 +328,66 @@ class DisclosureRevealBindingSource(unittest.TestCase):
             new = ''.join(line[1:] for line in hunk.splitlines(keepends=True) if line[0] in ' +')
             self.assertEqual(self.fixture.count(new), 1)
             for changed in (new + '// changed reviewed preparation\n', '', new + new):
+                with self.subTest(hunk=new[:80], replacement=changed[:80]), self.assertRaises(AssertionError):
+                    reverse_focus_wait(FIXTURE, self.fixture.replace(new, changed, 1))
+
+
+class ConfirmationObservationOrderSource(unittest.TestCase):
+    def setUp(self):
+        self.fixture = (ROOT / FIXTURE).read_text()
+        self.before = reverse_confirmation_order(self.fixture)
+
+    def test_exact_permutation_preserves_all_old_oracles_and_establishes_owned_early_read_first(self):
+        self.assertEqual(hashlib.sha256(self.before.encode()).hexdigest(),
+                         '6d4ff021aad9da5cf4be6dee18eb3f25b6ed50f761d2999882a8110484687160')
+        self.assertEqual(hashlib.sha256(reverse_focus_wait(FIXTURE, self.fixture).encode()).hexdigest(), BASELINES[FIXTURE])
+        begin = '                // BEGIN LIFECYCLE_READ_DIAGNOSTIC confirm-retire-begin\n'
+        end = '                // END LIFECYCLE_READ_DIAGNOSTIC confirm-retire-passed\n'
+        moved = begin + self.before.split(begin, 1)[1].split(end, 1)[0] + end
+        self.assertEqual(self.before.count(moved), 1); self.assertEqual(self.fixture.count(moved), 1)
+        self.assertEqual(self.before.replace(moved, '', 1), self.fixture.replace(moved, '', 1))
+        body = self.fixture.split('                lifecycleCheckpoint(LifecycleCheckpoint.BODY_RESTORE_PASSED)', 1)[1].split(
+            '            } finally {', 1)[0]
+        self.assertLess(body.index('prepareEarlySendAnchor(lifecycleSend)'), body.index('check(count() == 4 && !button("Send answer").isEnabled)'))
+        self.assertLess(body.index('check(elapsed >= 0 && elapsed < 3_000)'), body.index('await("background retires confirmation")'))
+        for forbidden in ('tap(', 'performAction(', 'injectInputEvent(', 'startActivity(', '.begin(', '.bindReview(', 'model.'):
+            self.assertNotIn(forbidden, body)
+        before_read = self.fixture.split('await("same Activity regained focus")', 1)[1].split('check(count() == 4 && !button("Send answer").isEnabled)', 1)[0]
+        for exact in ('lifecycleActivity === activity && !activity.isFinishing && !activity.isDestroyed',
+                      'activity.lifecycle.currentState == androidx.lifecycle.Lifecycle.State.RESUMED && activity.hasWindowFocus()',
+                      'lifecycleSend.bindReview()', 'check(lifecycleSend.current())',
+                      'check(broaderDraftMatches(false))', 'disclosureScrollReady(lifecycleDisclosure)',
+                      'prepareEarlySendAnchor(lifecycleSend)'):
+            self.assertIn(exact, before_read)
+        prepare = self.fixture.split('    private fun prepareEarlySendAnchor(', 1)[1].split('    private fun cachedSendButton(', 1)[0]
+        for exact in ('check(cached.current())', 'check(SystemClock.elapsedRealtime() < end)',
+                      'fresh.windowId == cached.window', 'fresh.packageName?.toString() == targetContext.packageName',
+                      'check(fresh.isVisibleToUser)', 'fresh.text?.toString() == "Send answer"'):
+            self.assertIn(exact, prepare)
+
+    def test_recorded_cost_has_old_deadline_failure_and_keeps_both_oracles_after_reorder(self):
+        old_trace = []
+        with self.assertRaisesRegex(AssertionError, 'original early-review deadline'):
+            confirmation_read_memory(self.before, trace=old_trace)
+        self.assertEqual(old_trace, ['absence', 'anchor', 'disabled'])
+        trace, elapsed_after_reads = confirmation_read_memory(self.fixture)
+        self.assertEqual(trace, ['anchor', 'disabled', 'elapsed', 'absence'])
+        self.assertEqual(elapsed_after_reads, 3000)
+
+    def test_still_present_confirmation_and_original_absence_bound_never_complete(self):
+        trace = []
+        with self.assertRaisesRegex(AssertionError, 'mandatory native confirmation absence refused'):
+            confirmation_read_memory(self.fixture, absent=False, trace=trace)
+        self.assertEqual(trace, ['anchor', 'disabled', 'elapsed', 'absence'])
+        with self.assertRaisesRegex(AssertionError, 'original absence10s bound'):
+            confirmation_read_memory(self.fixture, absence_cost=10_001)
+
+    def test_reorder_projection_refuses_changed_missing_or_duplicated_exact_hunks(self):
+        patch = _focus_projection.CONFIRMATION_ORDER_PATCH.read_text()
+        for hunk in re.split(r'(?m)^@@[^\n]*\n', patch)[1:]:
+            new = ''.join(line[1:] for line in hunk.splitlines(keepends=True) if line[0] in ' +')
+            self.assertEqual(self.fixture.count(new), 1)
+            for changed in (new + '// changed reviewed observation\n', '', new + new):
                 with self.subTest(hunk=new[:80], replacement=changed[:80]), self.assertRaises(AssertionError):
                     reverse_focus_wait(FIXTURE, self.fixture.replace(new, changed, 1))
 
