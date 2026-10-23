@@ -63,8 +63,8 @@ AGENTS = {
         windows=dict(suites=['test_windows_native_agents.NativeWindowsClaude'], timeout=1200,
                      coverage=HOST_COVERAGE + '; exec-form answer channel for questions and approvals, Terminal answers, '
                      'owned hook exit and channel-absent unviewed-pane growth')),
-    # OpenCode 2 is accepted at or above a reviewed minimum (the pin); the canary
-    # qualifies its newest release without moving the pin. Its x86_64 Linux package
+    # OpenCode 2 is accepted at or above the recorded minimum; CI tests only the
+    # newest release without changing that product boundary. Its x86_64 Linux package
     # without AVX2 requirements is named `baseline` and runs on every x86_64 host.
     # The suite owns its private homes, service port and keyless model.
     'opencode': dict(
