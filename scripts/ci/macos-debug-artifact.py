@@ -77,11 +77,11 @@ def context():
                 attempt=number(os.environ.get('GITHUB_RUN_ATTEMPT', '')), platform=observed)
 
 
-def identity(path, limit=MAX_BINARY):
+def identity(path, limit=MAX_BINARY, allow_linked=False):
     """Hash one regular no-follow leaf; no binary/version/help execution."""
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
         before = os.fstat(stream.fileno())
-        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 < before.st_size <= limit,
+        require(stat.S_ISREG(before.st_mode) and (allow_linked or before.st_nlink == 1) and 0 < before.st_size <= limit,
                 'Unknown, linked or oversize artifact leaf')
         hashed = hashlib.sha256()
         remaining = before.st_size
@@ -117,7 +117,7 @@ def toolchain(machine):
     version = release(version[1])
     require('\nhost: ' + ARCHES[machine][0] + '\n' in '\n' + verbose, 'Rust host differs from runtime architecture')
     compiler = Path(subprocess.check_output(['rustup', 'which', 'rustc'], text=True, timeout=10).strip())
-    return dict(release=version, verbose=verbose, compiler=identity(compiler))
+    return dict(release=version, verbose=verbose, compiler=identity(compiler, allow_linked=True))
 
 
 def prerequisites():
@@ -139,7 +139,10 @@ def seal(root, directory, bound, compiler):
     directory.mkdir(mode=0o700)
     for name, relative in FILES.items():
         origin = root / relative
-        expected = identity(origin)
+        # Cargo may hard-link its finished deps/examples executable into this
+        # public debug path. Read it without mutation; the exclusive handoff
+        # copy and every downloaded artifact must still have one link.
+        expected = identity(origin, allow_linked=True)
         macho(origin, bound['platform']['machine'])
         # Exclusive output files; only these public compiled executables leave the job.
         with os.fdopen(os.open(origin, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as incoming, (directory / name).open('xb') as output:

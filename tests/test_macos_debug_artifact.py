@@ -51,6 +51,20 @@ class Fixture:
 
 
 class ArtifactControls(unittest.TestCase):
+    def test_read_only_cargo_hardlinks_become_exclusive_handoff_copies(self):
+        with tempfile.TemporaryDirectory() as folder:
+            f = Fixture(Path(folder))
+            for name, relative in artifact.FILES.items():
+                os.link(f.root / relative, f.root / (name + '-cargo-uplift'))
+            second = f.root / 'second-handoff'
+            with patch.object(artifact, 'prerequisites', return_value=dict(python='fixture', node='v24', tmux='3.8')):
+                sha = artifact.seal(f.root, second, f.bound, f.compiler)
+            data = artifact.verify(f.root, second, f.bound, sha, '1', '1.99.1')
+            for name, relative in artifact.FILES.items():
+                self.assertEqual((f.root / relative).stat().st_nlink, 2)
+                self.assertEqual((second / name).stat().st_nlink, 1)
+                self.assertEqual(data['files'][name], artifact.identity(f.root / relative, allow_linked=True))
+
     def test_exact_minimal_receipt_and_partial_rerun_keep_the_original_producer(self):
         with tempfile.TemporaryDirectory() as folder:
             f = Fixture(Path(folder))
