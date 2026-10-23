@@ -36,6 +36,106 @@ struct LaunchForm: View {
     private var launch: LaunchModel { app.launch }
 
     var body: some View {
+        let projects = LaunchPresentation.projects(launch.catalog)
+        let evidence = WorktreePresentation.forFolder(launch.worktrees, folder)
+        let branch = launch.generatedName
+        let computer = app.machineName(machine)
+        let actions = app.conversation.sessionActions.filter { $0.target.machineKey == machine }
+        let inForm: (SessionAction) -> Bool = { launch.baseline[$0.requestId] != $0.status }
+        let createdWorktree = actions.last { $0.operation == "worktree_create" && $0.status == "completed" && !$0.resultPath.isEmpty && inForm($0) }
+        observedForm
+        .sheet(isPresented: $choosingProject) {
+            ProjectPicker(projects: projects, selected: projectId) { chosen in
+                choosingProject = false
+                projectExplicit = true
+                if chosen != projectId {
+                    projectId = chosen
+                    folder = browsedFolder
+                    edited = true
+                }
+            }
+        }
+        .sheet(isPresented: $choosingWorktree) {
+            WorktreeChooser(entries: WorktreePresentation.entries(evidence), selected: folder) { path in
+                choosingWorktree = false
+                autoPreferred = false
+                select(path)
+            }
+        }
+        .sheet(isPresented: $creatingWorktree) {
+            if let evidence {
+                CreateWorktreeSheet(machine: machine, evidence: evidence,
+                                    suggestedBranch: tag.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " ", with: "-").nonEmpty ?? branch)
+            }
+        }
+        .sheet(isPresented: $browsing, onDismiss: {
+            // Navigation replaced the verified folder; check the kept selection again so it stays usable.
+            if !repositorySource && !folder.isEmpty && !LaunchPresentation.selectedFolder(launch.directory, folder) { launch.browse(machine, folder) }
+        }) {
+            FolderBrowser(machine: machine) { selected in
+                if repositorySource {
+                    let name = repositoryPath.components(separatedBy:"/").last?.nonEmpty ?? RepositoryAcquisition.suggestedName(repositoryUrl)
+                    repositoryPath=RepositoryAcquisition.destination(selected,name)
+                } else { folder = selected; browsedFolder = selected }
+                browsing = false
+                edited = true
+            }
+        }
+        .alert("Discard new session?", isPresented: $discarding) {
+            Button("Discard", role: .destructive) { launch.close() }
+            Button("Keep editing", role: .cancel) {}
+        } message: {
+            Text("Your choices for this session will be lost." + (createdWorktree.map { "\n\nThe created worktree and its branch stay on \(computer): \($0.resultPath)" } ?? ""))
+        }
+    }
+
+    private var observedForm: some View {
+        let catalog = launch.catalog
+        let signature = launch.catalogEvidence
+        let providers = LaunchPresentation.agents(catalog)
+        let accounts = LaunchPresentation.accounts(catalog, provider)
+        let modelOptions = LaunchPresentation.models(catalog, provider: provider, accountId: account)
+        let effortOptions = LaunchPresentation.efforts(catalog, provider: provider, accountId: account, model: selectedModel,
+                                                       supported: launch.effortSupported(machine))
+        let projects = LaunchPresentation.projects(catalog)
+        let evidence = WorktreePresentation.forFolder(launch.worktrees, folder)
+        let inferredProject = LaunchPresentation.inferredProject(catalog, selected: projectId, explicit: projectExplicit, directory: folder,
+                                                                 browser: launch.directory, worktrees: evidence)
+        return formContent
+        .onAppear { tag = launch.generatedName }
+        .onChange(of: repositoryUrl) { edited=true; suggestRepositoryPath() }
+        .onChange(of: repositoryPath) { checkoutCursor="" }
+        .onChange(of: launch.repositoryCheckId) { if !launch.repositoryCheckId.isEmpty { repositoryPath=launch.repositoryPath;repositoryManual=true;edited=true } }
+        .onChange(of: launch.directory?.string("path")) { suggestRepositoryPath() }
+        .onChange(of: repositorySource) { edited=true }
+        .onChange(of: signature, initial: true) { if allowedCatalog.isEmpty && !signature.isEmpty { allowedCatalog = signature } }
+        .onChange(of: providers, initial: true) { if !providers.contains(provider) { provider = providers.first ?? "" } }
+        .onChange(of: accounts.map(\.id), initial: true) { account = LaunchPresentation.defaultAccount(accounts, selected: account) }
+        .onChange(of: modelOptions.map(\.value)) { if !selectedModel.isEmpty && !modelOptions.contains(where: { $0.value == selectedModel }) { selectedModel = "" } }
+        .onChange(of: effortOptions.map(\.value)) { if !selectedEffort.isEmpty && !effortOptions.contains(where: { $0.value == selectedEffort }) { selectedEffort = "" } }
+        .onChange(of: projects.map(\.id), initial: true) { updateProjectScope(projects, catalog: catalog) }
+        .onChange(of: inferredProject) { if !repositorySource && inferredProject != projectId { projectId = inferredProject } }
+        .onChange(of: FolderKey(project: projectId, loading: launch.directoryLoading)) {
+            if !repositorySource && folder.isEmpty && !launch.directoryLoading, let first = project?.folders.first {
+                folder = first.path
+                launch.browse(machine, first.path)
+            }
+        }
+        .onChange(of: launch.createdWorktree) {
+            // A confirmed checkout from Auto or Create manually is selected directly.
+            let created = launch.createdWorktree
+            if !created.isEmpty && created != appliedWorktree {
+                appliedWorktree = created
+                folder = created
+                browsedFolder = ""
+                autoPreferred = false
+                creatingWorktree = false
+                edited = true
+            }
+        }
+    }
+
+    private var formContent: some View {
         let catalog = launch.catalog
         let signature = launch.catalogEvidence
         let providers = LaunchPresentation.agents(catalog)
@@ -62,8 +162,6 @@ struct LaunchForm: View {
         let automatic = !repositorySource && autoPreferred && autoPossible
         let branch = launch.generatedName
         let plannedPath = automatic ? WorktreePresentation.automaticPath(evidence, branch: branch) : ""
-        let inferredProject = LaunchPresentation.inferredProject(catalog, selected: projectId, explicit: projectExplicit, directory: folder,
-                                                                 browser: launch.directory, worktrees: evidence)
         let folderValid = LaunchPresentation.selectedFolder(launch.directory, folder)
         let changed = !allowedCatalog.isEmpty && signature != allowedCatalog
         let actions = app.conversation.sessionActions.filter { $0.target.machineKey == machine }
@@ -88,7 +186,7 @@ struct LaunchForm: View {
         let canChoose = !busy && !launch.worktreeLoading && !WorktreePresentation.entries(evidence).isEmpty
         let canCreate = !busy && !launch.worktreeLoading && autoPossible && launch.worktreeReason(machine).isEmpty
 
-        NavigationStack {
+        return NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     computerSection
@@ -341,80 +439,6 @@ struct LaunchForm: View {
             .zerusScreen()
         }
         .interactiveDismissDisabled(busy || dirty)
-        .onAppear { tag = launch.generatedName }
-        .onChange(of: repositoryUrl) { edited=true; suggestRepositoryPath() }
-        .onChange(of: repositoryPath) { checkoutCursor="" }
-        .onChange(of: launch.repositoryCheckId) { if !launch.repositoryCheckId.isEmpty { repositoryPath=launch.repositoryPath;repositoryManual=true;edited=true } }
-        .onChange(of: launch.directory?.string("path")) { suggestRepositoryPath() }
-        .onChange(of: repositorySource) { edited=true }
-        .onChange(of: signature, initial: true) { if allowedCatalog.isEmpty && !signature.isEmpty { allowedCatalog = signature } }
-        .onChange(of: providers, initial: true) { if !providers.contains(provider) { provider = providers.first ?? "" } }
-        .onChange(of: accounts.map(\.id), initial: true) { account = LaunchPresentation.defaultAccount(accounts, selected: account) }
-        .onChange(of: modelOptions.map(\.value)) { if !selectedModel.isEmpty && !modelOptions.contains(where: { $0.value == selectedModel }) { selectedModel = "" } }
-        .onChange(of: effortOptions.map(\.value)) { if !selectedEffort.isEmpty && !effortOptions.contains(where: { $0.value == selectedEffort }) { selectedEffort = "" } }
-        .onChange(of: projects.map(\.id), initial: true) { updateProjectScope(projects, catalog: catalog) }
-        .onChange(of: inferredProject) { if !repositorySource && inferredProject != projectId { projectId = inferredProject } }
-        .onChange(of: FolderKey(project: projectId, loading: launch.directoryLoading)) {
-            if !repositorySource && folder.isEmpty && !launch.directoryLoading, let first = project?.folders.first {
-                folder = first.path
-                launch.browse(machine, first.path)
-            }
-        }
-        .onChange(of: launch.createdWorktree) {
-            // A confirmed checkout from Auto or Create manually is selected directly.
-            let created = launch.createdWorktree
-            if !created.isEmpty && created != appliedWorktree {
-                appliedWorktree = created
-                folder = created
-                browsedFolder = ""
-                autoPreferred = false
-                creatingWorktree = false
-                edited = true
-            }
-        }
-        .sheet(isPresented: $choosingProject) {
-            ProjectPicker(projects: projects, selected: projectId) { chosen in
-                choosingProject = false
-                projectExplicit = true
-                if chosen != projectId {
-                    projectId = chosen
-                    folder = browsedFolder
-                    edited = true
-                }
-            }
-        }
-        .sheet(isPresented: $choosingWorktree) {
-            WorktreeChooser(entries: WorktreePresentation.entries(evidence), selected: folder) { path in
-                choosingWorktree = false
-                autoPreferred = false
-                select(path)
-            }
-        }
-        .sheet(isPresented: $creatingWorktree) {
-            if let evidence {
-                CreateWorktreeSheet(machine: machine, evidence: evidence,
-                                    suggestedBranch: tag.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " ", with: "-").nonEmpty ?? branch)
-            }
-        }
-        .sheet(isPresented: $browsing, onDismiss: {
-            // Navigation replaced the verified folder; check the kept selection again so it stays usable.
-            if !repositorySource && !folder.isEmpty && !LaunchPresentation.selectedFolder(launch.directory, folder) { launch.browse(machine, folder) }
-        }) {
-            FolderBrowser(machine: machine) { selected in
-                if repositorySource {
-                    let name = repositoryPath.components(separatedBy:"/").last?.nonEmpty ?? RepositoryAcquisition.suggestedName(repositoryUrl)
-                    repositoryPath=RepositoryAcquisition.destination(selected,name)
-                } else { folder = selected; browsedFolder = selected }
-                browsing = false
-                edited = true
-            }
-        }
-        .alert("Discard new session?", isPresented: $discarding) {
-            Button("Discard", role: .destructive) { launch.close() }
-            Button("Keep editing", role: .cancel) {}
-        } message: {
-            Text("Your choices for this session will be lost." + (createdWorktree.map { "\n\nThe created worktree and its branch stay on \(computer): \($0.resultPath)" } ?? ""))
-        }
     }
 
     private static func readiness(launch: LaunchModel, machine: MachineKey, catalog: JSONObject?, allowedCatalog: String, changed: Bool,
