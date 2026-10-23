@@ -60,6 +60,33 @@ class Repositories(unittest.TestCase):
             args += ["--request-id", token]
         return self.hgs(*args, rc=rc)
 
+    def mobile(self, argv, machine, rc=0):
+        envelope = {"schema": 1, "target_machine_id": machine, "argv": argv, "payload": None}
+        result = subprocess.run([str(HGS), "swarm", "__mobile-peer-local", "--json"],
+                                input=json.dumps(envelope), env=self.env, cwd=self.root,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, rc, result.stdout + result.stderr)
+        return json.loads(result.stdout) if rc == 0 else result
+
+    def test_mobile_guarded_acquisition_uses_actual_git_and_original_receipt(self):
+        machine = self.hgs("swarm", "export", "--json")["node_id"]
+        token = str(uuid.uuid4())
+        argv = ["repository", "check", "--url", self.url, "--parent", str(self.root), "--name", "mobile checkout", "--json"]
+        self.assertEqual(self.mobile(argv, machine)["status"], "ready")
+        argv[1] = "clone"
+        argv += ["--request-id", token]
+        cloned = self.mobile(argv, machine)
+        self.assertEqual(cloned["status"], "cloned")
+        self.assertEqual((self.root / "mobile checkout" / "content").read_text(), "preserved\n")
+        self.assertEqual(self.mobile(argv, machine), cloned)
+        self.assertEqual(self.mobile(["repository", "status", "--request-id", token, "--json"], machine), cloned)
+
+    def test_mobile_wrong_machine_refuses_before_creating_any_destination(self):
+        self.hgs("swarm", "export", "--json")
+        self.mobile(["repository", "clone", "--url", self.url, "--parent", str(self.root), "--name", "foreign", "--request-id", str(uuid.uuid4()), "--json"], str(uuid.uuid4()), rc=1)
+        self.assertFalse((self.root / "foreign").exists())
+        self.assertEqual((self.source / "content").read_text(), "preserved\n")
+
     def synthetic_git(self, body):
         """Override only hgs's private, prepended Git, leaving fixture Git real."""
         real_git = shutil.which("git")

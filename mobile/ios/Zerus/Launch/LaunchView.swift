@@ -1,53 +1,24 @@
 import SwiftUI
 import ZerusKit
 
-/// Chooses the computer for a new session.
-struct NewSessionMachineSheet: View {
-    @Environment(AppModel.self) private var app
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                if app.machines.isEmpty { Text("Refresh your connected machines first.").foregroundStyle(Theme.muted) }
-                ForEach(app.machines, id: \.key) { machine in
-                    let reason = app.launch.reason(machine.key)
-                    Button {
-                        dismiss()
-                        app.launch.prepare(machine.key)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            MachineLabel(name: machine.name, colorHex: app.machineColor(machine.key))
-                            if app.connections.count > 1 {
-                                Text(app.connections.first { $0.id == machine.connectionId }?.displayName ?? "").font(.caption2).foregroundStyle(Theme.muted)
-                            }
-                            if !reason.isEmpty { Text(reason).font(.footnote).foregroundStyle(Theme.muted) }
-                        }
-                    }
-                    .disabled(!reason.isEmpty)
-                }
-            }
-            .navigationTitle("New session on which machine?")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-            .zerusScreen()
-        }
-        .presentationDetents([.medium, .large])
-    }
-}
-
 /// The full-screen New session form. Edits ask before they are discarded, and nothing can close it
 /// while a folder, worktree or session is being created.
 struct LaunchForm: View {
     @Environment(AppModel.self) private var app
-    let machine: MachineKey
+    private var machine: MachineKey { app.launch.machine! }
 
+    @State private var repositorySource = false
+    @State private var repositoryUrl = ""
+    @State private var repositoryPath = ""
+    @State private var repositoryManual = false
     @State private var provider = ""
     @State private var account = ""
     @State private var selectedModel = ""
     @State private var selectedEffort = ""
     @State private var projectId = ""
     @State private var projectExplicit = false
+    @State private var projectConnection = ""
+    @State private var projectSwarm = ""
     @State private var folder = ""
     @State private var browsedFolder = ""
     @State private var tag = ""
@@ -87,11 +58,9 @@ struct LaunchForm: View {
         let inProject = project?.folders.contains { $0.path == folder } == true
         let related = project != nil && !inProject && WorktreePresentation.anchor(placement, project!, folder) != nil
         let autoPossible = supported && WorktreePresentation.automaticAvailable(evidence, folder)
-        let automatic = autoPreferred && autoPossible
+        let automatic = !repositorySource && autoPreferred && autoPossible
         let branch = launch.generatedName
         let plannedPath = automatic ? WorktreePresentation.automaticPath(evidence, branch: branch) : ""
-        let plannedAdded = automatic && project != nil && evidence != nil &&
-            WorktreePresentation.anchor(WorktreePresentation.withCreated(evidence!, path: plannedPath), project!, plannedPath) == nil
         let inferredProject = LaunchPresentation.inferredProject(catalog, selected: projectId, explicit: projectExplicit, directory: folder,
                                                                  browser: launch.directory, worktrees: evidence)
         let folderValid = LaunchPresentation.selectedFolder(launch.directory, folder)
@@ -103,13 +72,17 @@ struct LaunchForm: View {
         let createdWorktree = actions.last { $0.operation == "worktree_create" && $0.status == "completed" && !$0.resultPath.isEmpty && inForm($0) }
         let pendingLaunch = launch.submitting ? nil : actions.last { $0.operation == "launch" && $0.blocksSending }
         let confirmed = actions.last { $0.operation == "launch" && $0.status == "completed" && $0.resultTarget != nil && inForm($0) }
+        let latestCheckout = actions.last { $0.operation == RepositoryAcquisition.clone }
+        let pendingCheckout = RepositoryAcquisition.pending(actions,machine)
+        let checkouts = [pendingCheckout,latestCheckout].compactMap { $0 }.reduce(into:[SessionAction]()) { result,action in if !result.contains(where: { $0.requestId == action.requestId }) { result.append(action) } }
         let nameError = LaunchPresentation.nameError(tag)
         let readiness = Self.readiness(launch: launch, machine: machine, catalog: catalog, allowedCatalog: allowedCatalog, changed: changed,
                                        projectSupported: projectSupported, project: project, folder: folder, folderValid: folderValid, providers: providers,
                                        provider: provider, accounts: accounts, account: account, nameError: nameError, automatic: automatic,
-                                       confirmed: confirmed != nil)
-        let reason = LaunchPresentation.disabledReason(readiness)
-        let progress = launch.stage == "checking" ? "Checking folder…" : (launch.stage == "launching" || launch.submitting) ? "Creating session…"
+                                       confirmed: confirmed != nil, repository: repositorySource)
+        let repositoryProblem: String = repositorySource ? (launch.repositoryReason(machine,path:repositoryPath).nonEmpty ?? repositoryInputError()) : ""
+        let reason = LaunchPresentation.disabledReason(readiness).nonEmpty ?? repositoryProblem
+        let progress = launch.stage == "cloning" ? "Cloning repository…" : launch.stage == "checking" ? "Checking folder…" : (launch.stage == "launching" || launch.submitting) ? "Creating session…"
             : (launch.stage == "creating" || launch.worktreeSubmitting) ? "Creating worktree…" : ""
         let dirty = confirmed == nil && (edited || tag != launch.generatedName)
         let canChoose = !busy && !launch.worktreeLoading && !WorktreePresentation.entries(evidence).isEmpty
@@ -118,6 +91,9 @@ struct LaunchForm: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
+                    computerSection
+                    sourceSection
+                    if repositorySource { ForEach(checkouts,id: \.requestId) { checkoutNotice($0) } }
                     if launch.catalogLoading { ProgressView().progressViewStyle(.linear).tint(Theme.mint) }
                     if let action = pendingWorktree {
                         notice(Theme.amber) {
@@ -193,7 +169,7 @@ struct LaunchForm: View {
                             hint("Project assignment is unavailable on this computer. Update its connector and native CLI to choose a project.")
                         }
                     }
-                    section("Folder") {
+                    if !repositorySource { section("Working folder") {
                         let projectFolders = project?.folders ?? []
                         if let project, projectFolders.isEmpty, folder.isEmpty {
                             notice(Theme.amber) { Text(implicitProject ? "Browse to choose a folder. \(projectDetectionNote)" : "\(project.name) has no folder on \(computer). Browse to choose one; it will be added to this project.") }
@@ -237,11 +213,11 @@ struct LaunchForm: View {
                         }
                         if !automatic, let project, !folder.isEmpty {
                             if implicitProject { hint(projectDetectionNote) }
-                            else if related { hint("Verified worktree of \(project.name). No project folder will be added.") }
-                            else if !inProject { hint("This folder is outside \(project.name). Starting here adds it to the project.", color: Theme.amber) }
+                            else if !inProject && !related { hint("This folder is outside \(project.name). Starting here adds it to the project.", color: Theme.amber) }
                         }
                     }
-                    section("Worktree") {
+                    }
+                    if !repositorySource { section("Worktree") {
                         HStack(spacing: 6) {
                             Picker("Worktree", selection: Binding(get: { automatic }, set: { value in
                                 autoPreferred = value
@@ -265,15 +241,11 @@ struct LaunchForm: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("New worktree").font(.caption.weight(.semibold)).foregroundStyle(Theme.muted)
                                 Text(plannedPath).font(.footnote).textSelection(.enabled)
-                                hint("New branch \(branch) from HEAD, created when the session starts.")
-                                if implicitProject { hint(projectDetectionNote) }
-                                else if plannedAdded, let project { hint("The new worktree will be added to \(project.name).", color: Theme.amber) }
                             }
-                        } else if autoPossible {
-                            hint("The session starts directly in the selected folder.")
-                        } else if let note = WorktreePresentation.automaticNote(launch.worktrees, folder: folder, supported: supported, loading: launch.worktreeLoading).nonEmpty {
-                            hint(note)
+                        } else if launch.worktreeLoading {
+                            hint("Checking repository…")
                         }
+                    }
                     }
                     section("Account and agent") {
                         LaunchAccountList(choices: choices, provider: provider, account: account, enabled: !busy) { chosen in
@@ -340,7 +312,7 @@ struct LaunchForm: View {
                     } label: {
                         HStack(spacing: 10) {
                             if busy { ProgressView().tint(Theme.background) }
-                            Text(busy ? (progress.nonEmpty ?? "Working…") : "Create session").fontWeight(.semibold)
+                            Text(busy ? (progress.nonEmpty ?? "Working…") : repositorySource ? "Clone and start" : "Create session").fontWeight(.semibold)
                         }
                         .frame(maxWidth: .infinity, minHeight: 48)
                     }
@@ -364,22 +336,28 @@ struct LaunchForm: View {
         }
         .interactiveDismissDisabled(busy || dirty)
         .onAppear { tag = launch.generatedName }
+        .onChange(of: repositoryUrl) { edited=true; suggestRepositoryPath() }
+        .onChange(of: launch.directory?.string("path")) { suggestRepositoryPath() }
+        .onChange(of: repositorySource) { edited=true }
         .onChange(of: signature, initial: true) { if allowedCatalog.isEmpty && !signature.isEmpty { allowedCatalog = signature } }
         .onChange(of: providers, initial: true) { if !providers.contains(provider) { provider = providers.first ?? "" } }
         .onChange(of: accounts.map(\.id), initial: true) { account = LaunchPresentation.defaultAccount(accounts, selected: account) }
         .onChange(of: modelOptions.map(\.value)) { if !selectedModel.isEmpty && !modelOptions.contains(where: { $0.value == selectedModel }) { selectedModel = "" } }
         .onChange(of: effortOptions.map(\.value)) { if !selectedEffort.isEmpty && !effortOptions.contains(where: { $0.value == selectedEffort }) { selectedEffort = "" } }
         .onChange(of: projects.map(\.id), initial: true) {
-            guard !projects.contains(where: { $0.id == projectId }) else { return }
-            let scoped = (app.sessionProjectScope?.key).flatMap { $0.connectionId == machine.connectionId && $0.swarmId == catalog?.string("swarm_id") ? $0.id : nil }
-            let preferred = scoped ?? catalog?.string("default_project")
-            if scoped != nil { projectExplicit = true }
+            guard let catalog else { return }
+            let sameScope=projectConnection == machine.connectionId && projectSwarm == catalog.string("swarm_id")
+            defer { projectConnection=machine.connectionId;projectSwarm=catalog.string("swarm_id") }
+            guard !sameScope || !projects.contains(where: { $0.id == projectId }) else { return }
+            let scoped = (app.sessionProjectScope?.key).flatMap { $0.connectionId == machine.connectionId && $0.swarmId == catalog.string("swarm_id") ? $0.id : nil }
+            let preferred = scoped ?? catalog.string("default_project")
+            projectExplicit = scoped != nil
             projectId = projects.first { $0.id == preferred }?.id ?? projects.first?.id ?? ""
             folder = browsedFolder
         }
-        .onChange(of: inferredProject) { if inferredProject != projectId { projectId = inferredProject } }
+        .onChange(of: inferredProject) { if !repositorySource && inferredProject != projectId { projectId = inferredProject } }
         .onChange(of: FolderKey(project: projectId, loading: launch.directoryLoading)) {
-            if folder.isEmpty && !launch.directoryLoading, let first = project?.folders.first {
+            if !repositorySource && folder.isEmpty && !launch.directoryLoading, let first = project?.folders.first {
                 folder = first.path
                 launch.browse(machine, first.path)
             }
@@ -422,11 +400,13 @@ struct LaunchForm: View {
         }
         .sheet(isPresented: $browsing, onDismiss: {
             // Navigation replaced the verified folder; check the kept selection again so it stays usable.
-            if !folder.isEmpty && !LaunchPresentation.selectedFolder(launch.directory, folder) { launch.browse(machine, folder) }
+            if !repositorySource && !folder.isEmpty && !LaunchPresentation.selectedFolder(launch.directory, folder) { launch.browse(machine, folder) }
         }) {
             FolderBrowser(machine: machine) { selected in
-                folder = selected
-                browsedFolder = selected
+                if repositorySource {
+                    let name = repositoryPath.components(separatedBy:"/").last?.nonEmpty ?? RepositoryAcquisition.suggestedName(repositoryUrl)
+                    repositoryPath=RepositoryAcquisition.destination(selected,name)
+                } else { folder = selected; browsedFolder = selected }
                 browsing = false
                 edited = true
             }
@@ -441,7 +421,7 @@ struct LaunchForm: View {
 
     private static func readiness(launch: LaunchModel, machine: MachineKey, catalog: JSONObject?, allowedCatalog: String, changed: Bool,
                                   projectSupported: Bool, project: LaunchProject?, folder: String, folderValid: Bool, providers: [String], provider: String,
-                                  accounts: [LaunchAccount], account: String, nameError: String, automatic: Bool, confirmed: Bool) -> LaunchReadiness {
+                                  accounts: [LaunchAccount], account: String, nameError: String, automatic: Bool, confirmed: Bool, repository: Bool) -> LaunchReadiness {
         var readiness = LaunchReadiness()
         readiness.machineReason = launch.reason(machine)
         readiness.catalogLoading = launch.catalogLoading
@@ -450,10 +430,10 @@ struct LaunchForm: View {
         readiness.projectRequired = projectSupported
         readiness.projectChosen = project != nil
         readiness.projectHasFolder = project.map { !$0.folders.isEmpty } ?? true
-        readiness.folderChosen = !folder.isEmpty
-        readiness.folderLoading = launch.directoryLoading
-        readiness.folderVerified = folderValid
-        readiness.repositoryLoading = launch.worktreeLoading
+        readiness.folderChosen = repository || !folder.isEmpty
+        readiness.folderLoading = !repository && launch.directoryLoading
+        readiness.folderVerified = repository || folderValid
+        readiness.repositoryLoading = !repository && launch.worktreeLoading
         readiness.providers = providers.count
         readiness.providerChosen = providers.contains(provider)
         readiness.accounts = accounts.count
@@ -472,6 +452,75 @@ struct LaunchForm: View {
         let loading: Bool
     }
 
+    private var computerSection: some View {
+        section("Computer") {
+            Menu {
+                ForEach(app.machines,id: \.key) { candidate in
+                    Button { selectMachine(candidate.key) } label: {
+                        Text(candidate.name)
+                        if app.connections.count > 1 { Text(app.connections.first { $0.id == candidate.connectionId }?.displayName ?? "") }
+                        if !launch.reason(candidate.key).isEmpty { Text(launch.reason(candidate.key)) }
+                    }
+                }
+            } label: { fieldLabel(app.machineName(machine),supporting:app.connections.first { $0.id == machine.connectionId }?.displayName,icon:Image(systemName:"desktopcomputer"),tint:Theme.muted) }
+            .disabled(launch.busy)
+        }
+    }
+
+    private var sourceSection: some View {
+        section("Source") {
+            Picker("Source",selection:$repositorySource) {
+                Text("Working folder").tag(false)
+                Text("Git repository").tag(true)
+            }.pickerStyle(.segmented).disabled(launch.busy)
+            if repositorySource {
+                TextField("Repository URL",text:$repositoryUrl,prompt:Text("https://github.com/owner/repo.git"))
+                    .textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder).disabled(launch.busy)
+                    .accessibilityLabel("Repository URL")
+                HStack {
+                    TextField("Clone to",text:Binding(get:{ repositoryPath },set:{ repositoryPath=$0;repositoryManual=true;edited=true }))
+                        .textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder).disabled(launch.busy)
+                        .accessibilityLabel("Clone to")
+                    Button("Browse") { browsing=true }.disabled(launch.busy)
+                }
+            }
+        }
+    }
+
+    private func checkoutNotice(_ checkout:SessionAction) -> some View {
+        notice(checkout.status == "completed" ? nil : Theme.amber) {
+            Text(checkout.status == "completed" ? "Checkout ready" : (checkout.error.nonEmpty ?? RepositoryAcquisition.uncertain))
+            let checkoutPath=checkout.resultPath.nonEmpty ?? RepositoryAcquisition.destination(checkout.arguments.string("parent"),checkout.arguments.string("name"))
+            Text(checkoutPath).font(.footnote).textSelection(.enabled)
+            if checkout.blocksSending && DirectoryCreation.pathError(checkoutPath).isEmpty {
+                Button("Inspect folder") { repositorySource=false;autoPreferred=false;select(checkoutPath) }.disabled(launch.busy)
+            }
+            if checkout.blocksSending { Button("Check original result") { launch.checkRepositoryResult(checkout) }.disabled(launch.busy) }
+            if checkout.status == "completed" && !checkout.resultPath.isEmpty {
+                Button("Use checkout") { repositorySource=false;autoPreferred=false;select(checkout.resultPath) }.disabled(launch.busy)
+            }
+        }
+    }
+
+    private func repositoryInputError() -> String {
+        do { _ = try RepositoryAcquisition.arguments(machineId:app.machines.first { $0.key == machine }?.machineId ?? "",url:repositoryUrl,path:repositoryPath); return "" }
+        catch { return AppModel.message(error,fallback:"Choose a repository and destination.") }
+    }
+    private func suggestRepositoryPath() {
+        guard !repositoryManual else { return }
+        let name=RepositoryAcquisition.suggestedName(repositoryUrl)
+        let selectedParent=repositoryPath.isEmpty ? (launch.directory?.string("path") ?? "") : repositoryPath.components(separatedBy:"/").dropLast().joined(separator:"/")
+        let parent=selectedParent.isEmpty && repositoryPath.hasPrefix("/") ? "/" : selectedParent
+        if !parent.isEmpty && !name.isEmpty { repositoryPath=RepositoryAcquisition.destination(parent,name) }
+    }
+    private func selectMachine(_ next: MachineKey) {
+        guard !launch.busy, next != machine else { return }
+        provider="";account="";selectedModel="";selectedEffort=""
+        folder="";browsedFolder="";appliedWorktree="";allowedCatalog="";autoPreferred=true
+        repositoryPath="";repositoryManual=false;edited=true
+        launch.prepare(next)
+    }
+
     private func select(_ path: String) {
         folder = path
         browsedFolder = ""
@@ -482,7 +531,10 @@ struct LaunchForm: View {
     private func create(automatic: Bool, reason: String, placement: JSONObject?) {
         guard !launch.busy, reason.isEmpty else { return }
         let implicitInbox = !projectExplicit && projectId == "ungrouped"
-        if automatic {
+        if repositorySource {
+            launch.cloneAndLaunch(machine,url:repositoryUrl,path:repositoryPath,agent:provider,tag:tag,accountId:account,expectedCatalog:allowedCatalog,
+                projectId:projectId,model:selectedModel,effort:selectedEffort,implicitInbox:implicitInbox)
+        } else if automatic {
             launch.launchWithWorktree(machine, agent: provider, folder: folder, tag: tag, accountId: account, expectedCatalog: allowedCatalog, projectId: projectId,
                                       model: selectedModel, effort: selectedEffort, implicitInbox: implicitInbox)
         } else {

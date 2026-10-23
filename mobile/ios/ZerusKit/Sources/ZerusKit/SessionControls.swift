@@ -5,7 +5,7 @@ import Foundation
 public enum SessionActionPolicies {
     public static let lifecycle: Set<String> = ["pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget"]
     public static let operations: Set<String> = lifecycle.union(["send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create",
-                                                                 "directory_create", "recovery_action", SessionNotificationPreferences.operation])
+                                                                 "directory_create", RepositoryAcquisition.clone, "recovery_action", SessionNotificationPreferences.operation])
     public static let terminalKeys: Set<String> = ["Enter", "Escape", "Tab", "BTab", "BSpace", "Up", "Down", "Left", "Right", "Home", "End", "PPage",
                                                    "NPage", "DC", "C-c", "C-d", "C-l", "C-a", "C-e", "C-u", "C-w"]
     /// The relay's fixed effort levels; other native variants need `effortVariants`.
@@ -28,6 +28,11 @@ public enum SessionActionPolicies {
     /// Validated exact arguments for one operation; unknown keys are refused. A settings effort outside the relay's
     /// fixed levels needs `effortVariants` for this session, relay and computer.
     public static func arguments(_ operation: String, _ raw: JSONObject, effortVariants: Bool = false) throws -> JSONObject {
+        if operation == RepositoryAcquisition.clone {
+            let checked = try RepositoryAcquisition.arguments(machineId: string(raw,"expected_machine_id"), url: string(raw,"url"), path: RepositoryAcquisition.destination(string(raw,"parent"),string(raw,"name")))
+            guard Set(raw.keys) == Set(checked.keys) else { throw ZerusError.invalid("Unexpected checkout argument.") }
+            return checked
+        }
         if operation == SessionNotificationPreferences.operation { return try SessionNotificationPreferences.arguments(raw) }
         guard operations.contains(operation) else { throw ZerusError.invalid("Unsupported session action.") }
         let allowed: Set<String>
@@ -205,6 +210,7 @@ public enum SessionActionPolicies {
 
     /// Settles one action from its original receipt. Anything not proven is uncertain.
     public static func result(_ action: SessionAction, _ receipt: JSONObject) -> SessionAction {
+        if action.operation == RepositoryAcquisition.clone { return RepositoryAcquisition.result(action,receipt) }
         var copy = action
         func uncertain(_ message: String) -> SessionAction {
             copy.status = "uncertain"

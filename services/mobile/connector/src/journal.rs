@@ -64,8 +64,8 @@ pub const SPEECH_CONFIG_READ_SQL: &str = "('speech_config','speech_config_status
 pub const VOICE_READ_SQL: &str = "('voice_profiles','voice_status')";
 
 /// Additive Rust-only reads stay outside the frozen Python class predicate.
-pub const GIT_STATUS_COUNT_SQL: &str = "SELECT count(*) FROM requests WHERE operation='git_status'";
-pub const GIT_STATUS_PRUNE_SQL: &str = "DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation='git_status' AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)";
+pub const GIT_STATUS_COUNT_SQL: &str = "SELECT count(*) FROM requests WHERE operation IN ('git_status','repository_check','repository_status')";
+pub const GIT_STATUS_PRUNE_SQL: &str = "DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation IN ('git_status','repository_check','repository_status') AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)";
 
 /// Delivered short-lived reads go after two minutes, other reads after an
 /// hour; a delivered mutation becomes a tombstone after seven days.

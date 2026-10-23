@@ -19,6 +19,17 @@ bounded provider details, retained catalog state and truncation notices. Opening
 these views never starts the service, fetches a full catalog, edits a favorite or
 manages provider credentials.
 
+New session uses one full-screen form: Computer is selected inline, followed by
+Working folder / Git repository, project, account/agent and session name. Repository
+URLs suggest an editable Clone to path; Browse chooses the parent. Source toggles
+retain drafts, machine changes discard machine-bound paths/accounts, and explicit
+project/Inbox choices survive only in the same workspace/swarm. Worktree keeps
+Auto / None, options and the resulting path without routine explanatory paragraphs.
+Cloning requires the Rust connector's additive mobile acquisition operations.
+The original mutation and native clone UUID remain bound through reconnects;
+uncertain recovery only checks status and offers Use checkout, never replaying
+clone or launching automatically. See the [Android contract](../android/README.md#project-and-account-selection).
+
 ## Layout
 
 - `ZerusKit/` is a Swift package with the platform-neutral core: JSON values,

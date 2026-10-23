@@ -15,7 +15,7 @@ data class SessionAction(val requestId: String, val target: Target, val operatio
 
 object SessionActionPolicies {
     val lifecycle = setOf("pause", "resume", "archive", "rename", "fork", "terminate", "restore", "forget")
-    val operations = lifecycle + setOf("send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create", "directory_create", "recovery_action", SessionNotificationPreferences.operation, SessionProjectProtocol.assign)
+    val operations = lifecycle + setOf("send_now", "settings", "process_stop", "terminal_input", "launch", "worktree_create", "directory_create", RepositoryAcquisition.clone, "recovery_action", SessionNotificationPreferences.operation, SessionProjectProtocol.assign)
     val terminalKeys=setOf("Enter","Escape","Tab","BTab","BSpace","Up","Down","Left","Right","Home","End","PPage","NPage","DC","C-c","C-d","C-l","C-a","C-e","C-u","C-w")
     /** Effort names every relay accepts in `settings`. */
     val relayEfforts = setOf("", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on")
@@ -32,6 +32,11 @@ object SessionActionPolicies {
     fun nativeEfforts(target: Target, inspected: JSONObject?, advertised: Boolean) =
         advertised && target.session.startsWith("opencode/") && inspected?.string("agent") == "opencode"
     fun arguments(operation: String, raw: JSONObject, nativeEfforts: Boolean = false): JSONObject {
+        if(operation==RepositoryAcquisition.clone) {
+            val checked=RepositoryAcquisition.arguments(raw.getString("expected_machine_id"),raw.getString("url"),RepositoryAcquisition.destination(raw.getString("parent"),raw.getString("name")))
+            require(raw.keys().asSequence().toSet()==checked.keys().asSequence().toSet())
+            return checked
+        }
         if(operation == SessionNotificationPreferences.operation) return SessionNotificationPreferences.arguments(raw)
         require(operation in operations) { "Unsupported session action." }
         if(operation==SessionProjectProtocol.assign) return SessionProjectProtocol.arguments(raw)
@@ -153,6 +158,7 @@ object SessionActionPolicies {
     }
     fun result(action: SessionAction, receipt: JSONObject): SessionAction {
         if(receipt.string("request_id") != action.requestId) return action.copy(status="uncertain",error="The receipt belongs to another request.")
+        if(action.operation==RepositoryAcquisition.clone) return RepositoryAcquisition.result(action,receipt)
         if(action.operation==SessionProjectProtocol.assign) return SessionProjectProtocol.result(action,receipt)
         if(receipt.string("state") == "failed") return action.copy(status="failed",error=receipt.string("error").ifBlank { "The computer rejected this action." })
         if(action.operation == SessionNotificationPreferences.operation) return SessionNotificationPreferences.result(action,receipt)

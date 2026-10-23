@@ -661,3 +661,14 @@ below.
 | `test_peer_end_to_end.PeerEndToEndTests.test_phone_reaches_peer_only_through_enrolled_gateway` | The connector half: `test_bb_fleet`, `test_bb_gateway.test_equal_session_names_reach_only_their_own_machine`, `test_mutations_forward_exact_payloads_and_upload_their_results`, `test_route_is_part_of_the_request_identity`; the relay half: real-relay end-to-end tests on PostgreSQL | partial |
 | `test_peer_end_to_end.PeerEndToEndTests.test_unreachable_peer_stays_listed_offline_under_its_gateway` | The connector half: `test_bb_peer_routes.test_unreachable_verified_peer_is_shared_offline_and_never_contacted`; the relay half: real-relay end-to-end tests on PostgreSQL | partial |
 | `tests/test_mobile_peers.py`: `MobilePeers.test_connector_timeout_and_cancellation_reap_owned_transports` | `test_bb_peer_transport.test_peer_commands_reach_the_peer_and_a_deadline_reaps_the_owned_transport` (the deadline); the cancellation runs only on SIGINT (divergence h) | partial |
+
+### Additive mobile repository acquisition
+
+`test_bb_repositories` exercises the actual Rust connector against a private loopback
+relay and scripted native process: exact machine guard and original clone UUID,
+duplicate delivery, native fingerprint refusal, status-only recovery, old-native
+capability refusal and bounded failure projection. It is Rust-only, like Git status;
+the frozen Python operation vectors stay unchanged. Native `tests/test_repositories.py`
+also runs guarded acquisition with actual local Git, preserving a foreign source and
+refusing a replaced/wrong machine before destination creation. Neither suite contacts
+an external repository or starts a native session.

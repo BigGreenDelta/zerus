@@ -33,6 +33,7 @@ pub mod projects;
 pub mod pybase64;
 pub mod pyjson;
 pub mod pyvalue;
+pub mod repositories;
 pub mod request;
 pub mod runtime;
 pub mod session_notifications;

@@ -374,6 +374,18 @@ pub fn validate(
         session: session.into(),
         payload,
     };
+    if zerus_relay::repositories::OPERATIONS.contains(&operation) {
+        if request.get("session").and_then(Value::as_str) != Some("") {
+            return Err(error("repository acquisition uses no session target"));
+        }
+        zerus_relay::repositories::validate(
+            operation,
+            request.get("payload").unwrap_or(&Value::Null),
+            request_id,
+        )
+        .map_err(|_| error("invalid repository acquisition fields"))?;
+        return Ok(validated("", request.get("payload").cloned()));
+    }
     if operation == crate::git_status::OPERATION {
         if request.get("session").and_then(Value::as_str) != Some("") {
             return Err(error("Git status uses no session target"));

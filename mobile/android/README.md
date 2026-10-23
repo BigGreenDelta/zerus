@@ -953,8 +953,29 @@ Accounts is a read-only viewer grouped by workspace and provider-reported accoun
 
 ## Project and account selection
 
-New session is a full-screen form with Project, Folder, Worktree, Account and
-agent, and Session name sections. Account and agent pairs share one list: a
+New session is a full-screen form with Computer, Source, Project, Working folder,
+Worktree, Account and agent, and Session name sections. Computer is selected
+inside the form, initially preferring the current machine scope; there is no
+separate machine-selection step. Changing it resets native folder/account
+choices, retains the URL and session name, and keeps an explicit project/Inbox
+only within the same workspace and canonical swarm.
+
+Source offers **Working folder** and **Git repository**. A repository URL suggests
+the destination leaf; **Clone to** is editable and Browse chooses its parent.
+A manually entered destination is retained when the URL changes. **Clone and start**
+checks the selected computer, URL, destination and launch choices before creating
+anything. It clones into a new folder and starts there only after a definite
+native result. Existing folders are never replaced and Git is never initialized
+for an ordinary folder. This requires a current Rust connector and the guarded
+native mobile acquisition ABI; older/Python gateways show an update reason.
+A checkout interrupted by transport loss is kept as one durable original request.
+**Check original result** reads that clone's native receipt; a confirmed recovery
+offers **Use checkout** and never starts a session automatically. A created checkout
+also remains available after a later launch failure or closing the form. An
+unconfirmed attempt reserves its original destination; Inspect folder opens it
+for review, while a different destination can be used for a new explicit attempt.
+
+ Account and agent pairs share one list: a
 large colored provider logo spans the email and one line of cached limits, or `limits n/a`.
 Small usage/elapsed rails and pace colors match the desktop status footer.
 Default labels, profile IDs and quota error details stay out of these rows;
@@ -980,11 +1001,12 @@ project, as the form states.
 
 Worktree mirrors desktop. **Auto** is the default when a fresh, complete catalog
 shows the selected folder inside an available checkout with a named root. The
-form shows the sibling `<root>-<branch>` path and new branch before launch.
+form shows the sibling `<root>-<branch>` path before launch; routine worktree
+explanations are omitted from the form.
 Create session then locks the form, creates that worktree from `HEAD` with a
 durable receipt, checks its folder and catalog, and launches there. A worktree
-of a project folder is placed as a related worktree; otherwise the form states
-that the new folder will be added. Opening the form and checking folders never
+of a project folder is placed as a related worktree; other explicit project
+placements retain their existing assignment checks. Opening the form and checking folders never
 create anything. **None** starts in the selected folder; ordinary non-Git folders, catalog errors
 and older computers use it, and never initialize Git. The options menu offers
 **Choose existing…** and **Create manually…** (branch, base and destination);
