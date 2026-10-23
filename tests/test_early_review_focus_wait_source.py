@@ -116,7 +116,21 @@ class EarlyReviewFocusWaitSource(unittest.TestCase):
             text = (ROOT / path).read_text(); self.assertIn(old, text)
             with self.assertRaises(AssertionError): reverse_focus_wait(path, text.replace(old, new, 1))
         changed = self.fixture.replace('check(fresh.refresh())', 'check(true)', 1)
-        self.assertNotEqual(hashlib.sha256(reverse_focus_wait(FIXTURE, changed).encode()).hexdigest(), BASELINES[FIXTURE])
+        with self.assertRaisesRegex(AssertionError, 'original focus-wait baseline changed'):
+            reverse_focus_wait(FIXTURE, changed)
+
+    def test_projector_refuses_missing_or_duplicated_sealed_additions(self):
+        for path, source, indent, label in [
+                (FIXTURE, self.fixture, '            ', 'current'),
+                (FIXTURE, self.fixture, '        ', 'observation'),
+                (PROBE, self.probe, '    ', 'classification')]:
+            begin = indent + '// BEGIN EARLY_REVIEW_FOCUS_WAIT ' + label + '\n'
+            end = indent + '// END EARLY_REVIEW_FOCUS_WAIT ' + label + '\n'
+            addition = begin + source.split(begin, 1)[1].split(end, 1)[0] + end
+            self.assertEqual(source.count(addition), 1)
+            for changed in (source.replace(addition, '', 1), source + addition):
+                with self.subTest(path=path, label=label), self.assertRaises(AssertionError):
+                    reverse_focus_wait(path, changed)
 
     def test_same_card_focus_reset_never_becomes_actionable_until_current(self):
         bound = snapshot()

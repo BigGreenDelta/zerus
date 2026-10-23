@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
 PROBE = "mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt"
 PATCH = ROOT / "tests/fixtures/android-early-review-focus-wait.patch"
-PATCH_SHA = "e52722319368fc79a9633fefc9e89fe452bf33dfc4d281822284c4c539d228d8"
+PATCH_SHA = "36aba7369aff6650774184d1283ed80f47af9d32aa79ea836f76fc81475720d4"
 BASELINES = {
     FIXTURE: "73cee450f08e33c007ad6f3188a6a69135674e2503f80ea48582ba8aa394a9f7",
     PROBE: "beb6a3caf6ae07ca3a062f4f30286aad3b19b71427eed7c9e8d662f7d5ae85be",
@@ -35,7 +35,9 @@ def reverse_focus_wait(path, source):
                 raise AssertionError("unsupported focus-wait hunk")
             old = "".join(line[1:] for line in lines if line[0] in " -")
             new = "".join(line[1:] for line in lines if line[0] in " +")
-            if not old or not new or old == new:
+            # A zero-context pure addition has no old text. Only its exact
+            # SHA-sealed, unique postimage may be removed below.
+            if not new or old == new:
                 raise AssertionError("empty focus-wait hunk")
             hunks.append((old, new))
         if not hunks:
@@ -47,6 +49,8 @@ def reverse_focus_wait(path, source):
         if source.count(new) != 1:
             raise AssertionError("focus-wait postimage missing, changed or duplicated")
         source = source.replace(new, old, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != BASELINES[path]:
+        raise AssertionError("original focus-wait baseline changed")
     return source
 
 

@@ -2,26 +2,15 @@ diff --git a/mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalCh
 index 0a44ef27..2bf60b86 100644
 --- a/mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt
 +++ b/mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt
-@@ -88,7 +88,8 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
-     // END QUESTION_SEND_DIAGNOSTIC definition
-     private data class EarlySend(private val initialNode: AccessibilityNodeInfo, val window: Int, val currentCard: () -> Boolean,
-         val observation: (Int?) -> QuestionUiProbe.ContentSnapshot?,
+@@ -91 +91,2 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
 -        val currentReview: (QuestionUiProbe.ContentSnapshot, Long, Long) -> Boolean) {
 +        val currentReview: (QuestionUiProbe.ContentSnapshot, Long, Long) -> Boolean,
 +        val reviewState: (QuestionUiProbe.ContentSnapshot, Long, Long) -> QuestionUiProbe.EarlyReviewState) {
-         // BEGIN EARLY_SEND_LIVE_ANCHOR state
-         var node: AccessibilityNodeInfo = initialNode
-             private set
-@@ -132,9 +133,34 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
-             if (!currentCard()) return false
-             if (reviewStart == null) return true
-             val bound = checkNotNull(boundSnapshot)
+@@ -134,0 +136,3 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
 +            // BEGIN EARLY_REVIEW_FOCUS_WAIT current
 +            if (!awaitCurrentReview(bound)) return false
 +            // END EARLY_REVIEW_FOCUS_WAIT current
-             return bound.generation == checkNotNull(boundGeneration) &&
-                 currentReview(bound, SystemClock.elapsedRealtime(), checkNotNull(resumeEnd))
-         }
+@@ -137,0 +142,22 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
 +        // BEGIN EARLY_REVIEW_FOCUS_WAIT observation
 +        private fun awaitCurrentReview(bound: QuestionUiProbe.ContentSnapshot): Boolean {
 +            val end = checkNotNull(resumeEnd)
@@ -44,13 +33,7 @@ index 0a44ef27..2bf60b86 100644
 +            }
 +        }
 +        // END EARLY_REVIEW_FOCUS_WAIT observation
-         fun elapsed() = SystemClock.elapsedRealtime() - checkNotNull(reviewStart)
-     }
-     private var earlySend: EarlySend? = null
-@@ -764,7 +790,14 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
-                 QuestionUiProbe.earlyReviewCurrent(checkNotNull(actionProbeSession),
-                     checkNotNull(model.conversationQuestions.singleOrNull()), bound, now, end)
-             } }
+@@ -767 +793,8 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
 -            return EarlySend(send, send.windowId, current, observation, currentReview)
 +            // BEGIN EARLY_REVIEW_FOCUS_WAIT callback
 +            val reviewState = { bound: QuestionUiProbe.ContentSnapshot, now: Long, end: Long -> main {
@@ -60,17 +43,11 @@ index 0a44ef27..2bf60b86 100644
 +            } }
 +            // END EARLY_REVIEW_FOCUS_WAIT callback
 +            return EarlySend(send, send.windowId, current, observation, currentReview, reviewState)
-         }
-         fun earlyReview(name: String, checkEarly: () -> Unit) {
-             val captured = captureEarlySend()
 diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt b/mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt
 index 8e6b0b5d..8b12bc21 100644
 --- a/mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt
 +++ b/mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt
-@@ -103,6 +103,30 @@ internal object QuestionUiProbe {
-         return snapshot
-     }
- 
+@@ -105,0 +106,24 @@ internal object QuestionUiProbe {
 +    // BEGIN EARLY_REVIEW_FOCUS_WAIT classification
 +    enum class EarlyReviewState { CURRENT, WAIT, INVALID }
 +
@@ -95,6 +72,3 @@ index 8e6b0b5d..8b12bc21 100644
 +    }
 +    // END EARLY_REVIEW_FOCUS_WAIT classification
 +
-     /** Negative-input evidence only: a forward reset cannot renew the first bound review window. */
-     @Synchronized fun earlyReviewCurrent(owned: Session, question: Question, bound: ContentSnapshot,
-         elapsedNow: Long, originalEnd: Long): Boolean {
