@@ -1,4 +1,4 @@
-name: Pinned Kimi approval contracts
+name: Latest Kimi approval contracts
 
 on:
   pull_request:
@@ -14,6 +14,8 @@ on:
       - 'scripts/fetch-conpty.py'
       - 'scripts/conpty_pair.py'
       - 'packaging/windows/conpty.json'
+      - 'tests/kimi_release.py'
+      - 'tests/test_kimi_release.py'
       - 'tests/test_kimi_approvals_native.py'
       - 'tests/test_kimi_approvals_windows.py'
       - 'tests/test_kimi_approvals_ci.py'
@@ -35,7 +37,7 @@ concurrency:
 
 jobs:
   approvals:
-    name: Kimi approvals 2.1.1 and 2.2.0 (${{ matrix.os }})
+    name: Kimi latest approvals (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -56,7 +58,9 @@ jobs:
           python-version: '3.14.8'
       - name: Finite source and memory controls, with no native cases
         shell: bash
-        run: python -B -m unittest discover -s tests -p test_kimi_approvals_ci.py -v
+        run: |
+          python -B -m unittest discover -s tests -p test_kimi_approvals_ci.py -v
+          python -B -m unittest discover -s tests -p test_kimi_release.py -v
       - name: Keep compiler state in this disposable runner
         shell: bash
         run: |
@@ -86,14 +90,14 @@ jobs:
         run: |
           rustup toolchain install 1.99.1 --profile minimal
           cargo +1.99.1 build --locked --bin hgs -j 2
-      - name: macOS seven real approval cases on each reviewed version
+      - name: macOS seven real approval cases on one official latest release
         if: runner.os == 'macOS'
         shell: bash
         run: |
           python -s -B scripts/ci/kimi-approvals.py --source-sha "$SOURCE_SHA" \
             --hgs "$CARGO_TARGET_DIR/debug/hgs" --tmux "$RUNNER_TEMP/kimi-approvals-tmux/bin/tmux" \
             --output "$GITHUB_WORKSPACE/artifacts/test-results/kimi-approvals" </dev/null
-      - name: Windows layout preflight, then seven real approval cases per version
+      - name: Windows layout preflight, then seven real approval cases on one official latest release
         if: runner.os == 'Windows'
         shell: pwsh
         run: |

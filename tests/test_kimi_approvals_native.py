@@ -3,7 +3,7 @@
 user's account. Linux uses /proc; macOS reuses test_kimi_native's reviewed
 exec capture and kernel argument-area oracle for the image, start and private
 environment. Run with HGS_KIMI_TEST_BIN=/absolute/path/to/a/pinned/kimi
-and HGS_KIMI_TEST_SHA256 set to one reviewed pin (otherwise skipped).
+and HGS_KIMI_TEST_SHA256 plus its sealed HGS_KIMI_TEST_RECORD.
 
 Kimi's updater replaces the executable it runs from, so each case runs its own
 copy with automatic updates off, never the given file or a shared install, and
@@ -20,6 +20,7 @@ an unfinished wire in a real Kimi; their refusals are unit-tested.
 import hashlib, http.server, io, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest, uuid
 from pathlib import Path
 from unittest import mock
+from kimi_release import admitted_version
 if os.name != 'nt':
     import test_pause as lifecycle
     import test_kimi_native as guard
@@ -34,11 +35,6 @@ KIMI = os.environ.get('HGS_KIMI_TEST_BIN')
 KIMI_SHA256 = os.environ.get('HGS_KIMI_TEST_SHA256', '')
 GUARDED = [Path(path) for path in os.environ.get('HGS_KIMI_GUARD', '').split(os.pathsep) if path]
 EVIDENCE = os.environ.get('HGS_KIMI_EVIDENCE_DIR')
-# The reviewed builds: the maintained Kimi and the one installed for new sessions.
-REVIEWED = {'66f47536e40b02bb1d577cdd324768f73d39b8b9472e0ca140e73d8e225cd7de': '2.1.1',
-            '8ee7405d82958f0a50a3aab0773aba9e01057978bad93ba379eaf89e5b6111af': '2.2.0',
-            '4bab6f96c2c289368b7f05a04f66737c53a59ce740f932d8f149240584758efb': '2.1.1',
-            'dab42ead275f8a49e9ce30a6263f614fce5926455bed103d0d16940655619bf5': '2.2.0'}
 PLATFORM = '/kimi-platform'
 # Exactly these private values reach Kimi; no other KIMI_ key and no credential prefix.
 REQUIRED = ('HOME', 'KIMI_CODE_HOME', 'KIMI_CODE_BASE_URL', 'KIMI_CODE_NO_AUTO_UPDATE', 'KIMI_DISABLE_TELEMETRY',
@@ -320,8 +316,7 @@ class NativeKimiApprovals(ApprovalCases, lifecycle.Harness):
             self.command = DANGER
         if '_clipped_' in self._testMethodName:
             self.rows = 12
-        self.assertIn(KIMI_SHA256, REVIEWED, 'HGS_KIMI_TEST_SHA256 must be a reviewed pin')
-        self.version = REVIEWED[KIMI_SHA256]
+        self.version = admitted_version(KIMI, KIMI_SHA256)
         source = Path(KIMI).resolve()
         self.guards = seals([source, *GUARDED])
         self.assertEqual(self.guards[str(source)], KIMI_SHA256)
@@ -684,7 +679,7 @@ class FixtureControls(unittest.TestCase):
             def prepare(case):
                 raise OSError('synthetic copy failure')
 
-            with mock.patch.multiple(module, KIMI=str(pin), KIMI_SHA256=sha, REVIEWED={sha: '2.1.1'}, GUARDED=[]), \
+            with mock.patch.multiple(module, KIMI=str(pin), KIMI_SHA256=sha, admitted_version=mock.Mock(return_value='2.1.1'), GUARDED=[]), \
                     mock.patch.object(lifecycle.Harness, 'setUp', base_setup), \
                     mock.patch.object(NativeKimiApprovals, 'prepare', prepare), \
                     mock.patch.object(NativeKimiApprovals, 'tearDown', lambda case: seen.append(dict(case.env))):

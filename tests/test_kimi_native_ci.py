@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import tarfile
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -53,11 +54,172 @@ class KimiNativeCI(unittest.TestCase):
     def test_official_manifests_match_all_four_frozen_pins(self):
         for platform in ('linux-x64', 'darwin-arm64'):
             pins = ci.checked_pins(platform)
-            self.assertEqual(tuple(pins), ci.VERSIONS)
-            self.assertTrue(all(pins[v][platform]['size'] < ci.IMAGE_LIMIT for v in ci.VERSIONS))
+            self.assertEqual(tuple(pins), ci.HISTORICAL_VERSIONS)
+            self.assertTrue(all(pins[v][platform]['size'] < ci.IMAGE_LIMIT for v in ci.HISTORICAL_VERSIONS))
         for content in ('{"a":1,"a":2}', '{"object":{"a":1,"a":2}}'):
             with self.assertRaisesRegex(ValueError, 'duplicate'):
                 ci.strict(content)
+
+    def test_latest_resolution_is_once_and_manifest_target_and_size_are_bound(self):
+        sha = hashlib.sha256(b'image').hexdigest()
+        manifest = dict(version='2.3.1', tag='@moonshot-ai/kimi-code@2.3.1',
+                        platforms={'linux-x64': dict(filename='kimi-code-linux-x64', checksum=sha)})
+        raw = json.dumps(manifest).encode()
+        with mock.patch.object(ci, 'metadata', side_effect=[(b'2.3.1\n', {}), (raw, {}), (b'', {'size': 5})]) as get:
+            record, observed, _ = ci.resolve_latest('linux-x64')
+        self.assertEqual(record, dict(schema=1, version='2.3.1', target='linux-x64', image_size=5,
+                                     manifest_sha256=hashlib.sha256(raw).hexdigest(), image_sha256=sha))
+        self.assertEqual(observed, raw)
+        self.assertEqual(get.call_args_list, [mock.call('https://code.kimi.com/kimi-code/latest', 64),
+            mock.call('https://code.kimi.com/kimi-code/binaries/2.3.1/manifest.json', 65536),
+            mock.call('https://code.kimi.com/kimi-code/binaries/2.3.1/kimi-code-linux-x64', ci.IMAGE_LIMIT, method='HEAD')])
+        for body in (b'', b'latest', b'2.3.1-beta', b'2.3.1/../2.2.0', b'2.3.1\n2.2.0'):
+            with self.subTest(body=body), mock.patch.object(ci, 'metadata', return_value=(body, {})) as get:
+                with self.assertRaises(ValueError):
+                    ci.resolve_latest('linux-x64')
+                get.assert_called_once()
+        for key, value in (('version', '2.2.0'), ('tag', '@other/code@2.3.1')):
+            changed = json.dumps(dict(manifest, **{key: value})).encode()
+            with mock.patch.object(ci, 'metadata', side_effect=[(b'2.3.1', {}), (changed, {})]) as get:
+                with self.assertRaises(ValueError):
+                    ci.resolve_latest('linux-x64')
+                self.assertEqual(get.call_count, 2)
+
+    def test_latest_metadata_refuses_bad_lengths_encoding_late_reads_and_redirects(self):
+        for body, declared in ((b'2.3.1', 5), (b'2.3.1', 4), (b'2.3', 5)):
+            response = Response(body, declared)
+            with mock.patch.object(ci.urllib.request, 'build_opener') as build:
+                build.return_value.open.return_value = response
+                if len(body) == declared:
+                    self.assertEqual(ci.metadata('https://code.kimi.com/kimi-code/latest', 64)[0], body)
+                else:
+                    with self.assertRaises(ValueError):
+                        ci.metadata('https://code.kimi.com/kimi-code/latest', 64)
+        response = Response(b'2.3.1')
+        response.headers['Content-Encoding'] = 'gzip'
+        with mock.patch.object(ci.urllib.request, 'build_opener') as build:
+            build.return_value.open.return_value = response
+            with self.assertRaises(ValueError):
+                ci.metadata('https://code.kimi.com/kimi-code/latest', 64)
+            self.assertEqual(response.reads, 0)
+        response = Response(b'2.3.1')
+        with mock.patch.object(ci.urllib.request, 'build_opener') as build, \
+                mock.patch.object(ci.time, 'monotonic', side_effect=[0, 1, 61]):
+            build.return_value.open.return_value = response
+            with self.assertRaises(ValueError):
+                ci.metadata('https://code.kimi.com/kimi-code/latest', 64)
+        source = 'https://code.kimi.com/kimi-code/latest'
+        request = ci.OfficialRedirect().redirect_request(urllib.request.Request(source), None, 302, '',
+                        headers(Location=source.replace('code.', 'cdn.')), source.replace('code.', 'cdn.'))
+        self.assertEqual(request.full_url, 'https://cdn.kimi.com/kimi-code/latest')
+        with self.assertRaises(ValueError):
+            ci.OfficialRedirect().redirect_request(urllib.request.Request(source, method='HEAD'), None, 302, '',
+                        headers(Location=source.replace('code.', 'cdn.')), source.replace('code.', 'cdn.'))
+
+    def test_head_size_is_bounded_without_reading_binary_bytes(self):
+        for declared, duplicate, accepted in ((5, False, True), (0, False, False),
+                                              (ci.IMAGE_LIMIT + 1, False, False), (5, True, False)):
+            response = Response(b'', declared)
+            if duplicate:
+                response.headers['Content-Length'] = str(declared)
+            with mock.patch.object(ci.urllib.request, 'build_opener') as build:
+                build.return_value.open.return_value = response
+                if accepted:
+                    self.assertEqual(ci.metadata('https://code.kimi.com/kimi-code/binaries/2.3.1/kimi-code-linux-x64',
+                                    ci.IMAGE_LIMIT, method='HEAD')[1]['size'], 5)
+                else:
+                    with self.assertRaises(ValueError):
+                        ci.metadata('https://code.kimi.com/kimi-code/binaries/2.3.1/kimi-code-linux-x64',
+                                    ci.IMAGE_LIMIT, method='HEAD')
+                self.assertEqual(response.reads, 0)
+        source = 'https://code.kimi.com/kimi-code/binaries/2.3.1/kimi-code-linux-x64'
+        redirected = ci.OfficialRedirect('HEAD').redirect_request(urllib.request.Request(source, method='HEAD'),
+                      None, 302, '', headers(Location=source.replace('code.', 'cdn.')), source.replace('code.', 'cdn.'))
+        self.assertEqual(redirected.get_method(), 'HEAD')
+
+    def test_invalid_target_manifest_never_probes_or_downloads_an_image(self):
+        good = dict(filename='kimi-code-linux-x64', checksum='a' * 64)
+        for entry in (dict(good, filename='../../image'), dict(good, checksum='A' * 64),
+                      dict(good, checksum=True), dict(good, checksum='')):
+            raw = json.dumps(dict(version='2.3.1', tag='@moonshot-ai/kimi-code@2.3.1',
+                                  platforms={'linux-x64': entry})).encode()
+            with mock.patch.object(ci, 'metadata', side_effect=[(b'2.3.1', {}), (raw, {})]) as get:
+                with self.assertRaises(ValueError):
+                    ci.resolve_latest('linux-x64')
+                self.assertEqual(get.call_count, 2)
+
+    def test_one_release_is_staged_nonexecutable_before_its_record_is_admitted(self):
+        root = self.root(); images, evidence = root / 'images', root / 'evidence'
+        images.mkdir(); evidence.mkdir()
+        record = dict(schema=1, version='2.3.1', target='linux-x64', image_size=5,
+                      image_sha256=hashlib.sha256(b'image').hexdigest(), manifest_sha256=hashlib.sha256(b'{}').hexdigest())
+        def fetch(url, path, size, sha):
+            self.assertFalse((images / 'selected-release.json').exists())
+            self.assertEqual((images / 'manifest.json').read_bytes(), b'{}')
+            self.assertEqual((size, sha), (5, record['image_sha256']))
+            path.write_bytes(b'image'); path.chmod(0o400)
+            return {'sha256': sha}
+        with mock.patch.object(ci, 'resolve_latest', return_value=(record, b'{}', {})) as resolve, \
+                mock.patch.object(ci, 'fetch', side_effect=fetch) as download:
+            selected, image, admission = ci.stage_latest(images, evidence, 'linux-x64')
+        resolve.assert_called_once_with('linux-x64'); download.assert_called_once()
+        self.assertEqual((selected, image.name, json.loads(admission.read_text())),
+                         (record, 'kimi-code-linux-x64', record))
+        self.assertEqual(admission.stat().st_mode & 0o777, 0o400)
+        self.assertEqual((images / 'manifest.json').stat().st_mode & 0o777, 0o400)
+
+    def test_failed_image_download_cannot_publish_a_selected_record(self):
+        root = self.root(); images, evidence = root / 'images', root / 'evidence'
+        images.mkdir(); evidence.mkdir()
+        record = dict(version='2.3.1', image_size=5, image_sha256='a' * 64)
+        with mock.patch.object(ci, 'resolve_latest', return_value=(record, b'{}', {})), \
+                mock.patch.object(ci, 'fetch', side_effect=ValueError('hash mismatch')) as fetch:
+            with self.assertRaises(ValueError):
+                ci.stage_latest(images, evidence, 'linux-x64')
+            fetch.assert_called_once()
+        self.assertFalse((images / 'selected-release.json').exists())
+
+    def test_native_orchestration_runs_one_version_and_never_falls_back(self):
+        for failure in (False, True):
+            root = self.root(); output = root / 'out'; runtime = root / 'runtime'; runtime.mkdir()
+            hgs, tmux = root / 'hgs', root / 'tmux'
+            hgs.write_bytes(b'hgs'); tmux.write_bytes(b'tmux')
+            sha = 'a' * 40
+            record = dict(version='2.3.1', image_sha256='b' * 64)
+            def stage(images, evidence, platform):
+                if failure:
+                    raise ValueError('unknown latest metadata')
+                image, admission = images / 'kimi-code-linux-x64', images / 'selected-release.json'
+                for path in (image, admission, images / 'manifest.json'):
+                    path.write_bytes(b'synthetic'); path.chmod(0o400)
+                return record, image, admission
+            def launch(argv, **kwargs):
+                reservation = json.loads((output / 'evidence/reservation.json').read_text())
+                self.assertEqual((reservation['state'], reservation['versions'], reservation['native_cases']), ('SPENT', ['2.3.1'], 8))
+                self.assertIn('HGS_KIMI_TEST_RECORD', kwargs['env'])
+                ci.write(Path(argv[5]), dict(tests=8, started=list(ci.METHODS), completed=list(ci.METHODS),
+                          failures=0, errors=0, skipped=0, expected_failures=0, unexpected_successes=0))
+                return object()
+            with mock.patch.object(sys, 'argv', [str(ci.__file__), '--source-sha', sha, '--hgs', str(hgs),
+                       '--tmux', str(tmux), '--output', str(output)]), \
+                    mock.patch.object(ci, 'hosted_paths'), mock.patch.object(ci, 'checked_methods'), \
+                    mock.patch.object(ci, 'target', return_value='linux-x64'), \
+                    mock.patch.object(ci.tempfile, 'mkdtemp', return_value=str(runtime)), \
+                    mock.patch.object(ci.subprocess, 'check_output', return_value=sha), \
+                    mock.patch.object(ci, 'source_map', return_value={}), mock.patch.object(ci, 'digest', return_value='b' * 64), \
+                    mock.patch.object(ci, 'stage_latest', side_effect=stage) as selected, \
+                    mock.patch.object(ci.subprocess, 'Popen', side_effect=launch) as spawned, \
+                    mock.patch.object(ci, 'await_child', return_value=0), mock.patch.object(ci, 'retain', return_value={}):
+                if failure:
+                    with self.assertRaises(ValueError):
+                        ci.main()
+                    spawned.assert_not_called()
+                else:
+                    self.assertEqual(ci.main(), 0); spawned.assert_called_once()
+                selected.assert_called_once()
+            receipt = json.loads((output / 'evidence/receipt.json').read_text())
+            self.assertEqual((receipt['outcome'], receipt['completed_versions'], receipt['native_cases']),
+                             ('FAIL', 0, None) if failure else ('PASS', 1, 8))
 
     def test_tmux_installer_keeps_linux_defaults_and_explicitly_enables_macos_unicode(self):
         # Only configure argv is under test. All network, archive, hash, make

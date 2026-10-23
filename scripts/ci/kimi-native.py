@@ -25,7 +25,8 @@ import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSIONS = ('2.1.1', '2.2.0')
+# Historical data validation only; native execution always uses stage_latest().
+HISTORICAL_VERSIONS = ('2.1.1', '2.2.0')
 METHODS = (
     'test_kimi_native.NativeKimi.test_exact_input_reaches_the_model_once',
     'test_kimi_native.NativeKimi.test_pause_and_resume_keep_the_conversation',
@@ -76,20 +77,90 @@ def target(system=None, machine=None):
 
 
 class OfficialRedirect(urllib.request.HTTPRedirectHandler):
-    def __init__(self):
+    def __init__(self, method='GET'):
         self.hops = []
+        self.method = method
 
     def redirect_request(self, request, fp, code, message, headers, newurl):
         source, destination = map(urllib.parse.urlsplit, (request.full_url, newurl))
         if (self.hops or code != 302 or len(headers.get_all('Location', [])) != 1
-                or request.get_method() != 'GET'
+                or request.get_method() != self.method or self.method not in ('GET', 'HEAD')
                 or source.scheme != 'https' or source.netloc != 'code.kimi.com'
-                or not source.path.startswith('/kimi-code/binaries/') or source.query or source.fragment
+                or not (source.path.startswith('/kimi-code/binaries/') or source.path == '/kimi-code/latest')
+                or source.query or source.fragment
                 or destination.scheme != 'https' or destination.netloc != 'cdn.kimi.com'
                 or destination.path != source.path or destination.query or destination.fragment):
             raise ValueError('unreviewed download redirect')
         self.hops.append(dict(source=request.full_url, target=newurl, status=code))
-        return urllib.request.Request(newurl, headers=dict(request.headers), method='GET')
+        return urllib.request.Request(newurl, headers=dict(request.headers), method=self.method)
+
+
+def metadata(url, limit, method='GET'):
+    """One bounded official metadata request; no fallback, retries or execution."""
+    redirects = OfficialRedirect(method)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), redirects)
+    end = time.monotonic() + 60
+    with opener.open(urllib.request.Request(url, headers={'Accept-Encoding': 'identity'}, method=method),
+                     timeout=30) as response:
+        lengths = response.headers.get_all('Content-Length', [])
+        if (response.status != 200 or len(lengths) != 1 or not re.fullmatch('[0-9]+', lengths[0])
+                or not 0 < int(lengths[0]) <= limit
+                or response.headers.get('Content-Encoding', 'identity') != 'identity'):
+            raise ValueError('official metadata status/length/encoding is invalid')
+        size, body = int(lengths[0]), bytearray()
+        if method == 'GET':
+            while len(body) < size:
+                if time.monotonic() >= end:
+                    raise TimeoutError('metadata deadline')
+                chunk = response.read(min(65536, size - len(body)))
+                if time.monotonic() >= end or not chunk:
+                    raise ValueError('short or late metadata')
+                body.extend(chunk)
+            if response.read(1):
+                raise ValueError('oversized metadata')
+        if time.monotonic() >= end:
+            raise TimeoutError('metadata deadline')
+        return bytes(body), dict(url=url, final_url=response.url, redirects=redirects.hops, size=size)
+
+
+def resolve_latest(platform_id):
+    raw, latest = metadata('https://code.kimi.com/kimi-code/latest', 64)
+    version = raw.decode('ascii').strip()
+    if re.fullmatch(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})', version) is None:
+        raise ValueError('official latest is not one stable version')
+    prefix = 'https://code.kimi.com/kimi-code/binaries/' + version + '/'
+    raw, manifest_fetch = metadata(prefix + 'manifest.json', 65536)
+    manifest = strict(raw)
+    filename = 'kimi-code-' + platform_id + ('.exe' if platform_id.startswith('win32-') else '')
+    entry = manifest['platforms'][platform_id]
+    if (manifest['version'] != version or manifest['tag'] != '@moonshot-ai/kimi-code@' + version
+            or entry['filename'] != filename or not isinstance(entry['checksum'], str)
+            or re.fullmatch('[0-9a-f]{64}', entry['checksum']) is None):
+        raise ValueError('latest manifest target/version/hash differs')
+    _, image_head = metadata(prefix + filename, IMAGE_LIMIT, method='HEAD')
+    record = dict(schema=1, version=version, target=platform_id,
+                  manifest_sha256=hashlib.sha256(raw).hexdigest(), image_sha256=entry['checksum'],
+                  image_size=image_head['size'])
+    return record, raw, dict(latest=latest, manifest=manifest_fetch, image_head=image_head)
+
+
+def stage_latest(images, evidence, platform_id):
+    record, manifest, discovery = resolve_latest(platform_id)
+    path = images / 'manifest.json'
+    with path.open('xb') as stream:
+        stream.write(manifest)
+        stream.flush()
+        os.fsync(stream.fileno())
+    path.chmod(0o400)
+    filename = 'kimi-code-' + platform_id + ('.exe' if platform_id.startswith('win32-') else '')
+    image = images / filename
+    url = 'https://code.kimi.com/kimi-code/binaries/' + record['version'] + '/' + filename
+    discovery['image'] = fetch(url, image, record['image_size'], record['image_sha256'])
+    record_path = images / 'selected-release.json'
+    write(record_path, record)
+    record_path.chmod(0o400)
+    write(evidence / 'selected-release-fetch.json', discovery)
+    return record, image, record_path
 
 
 def fetch(url, output, size, sha256, opener=None, redirects=None):
@@ -105,7 +176,7 @@ def fetch(url, output, size, sha256, opener=None, redirects=None):
         if (response.status != 200 or lengths != [str(size)]
                 or response.headers.get('Content-Encoding', 'identity') != 'identity'):
             raise ValueError('download status/length/encoding differs from its pin')
-        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         with os.fdopen(fd, 'wb') as stream:
             while True:
                 if time.monotonic() >= end:
@@ -131,9 +202,9 @@ def fetch(url, output, size, sha256, opener=None, redirects=None):
 
 def checked_pins(platform_id):
     pins = strict(Path(__file__).with_name('kimi-native-pins.json').read_bytes())
-    if set(pins) != set(VERSIONS):
+    if set(pins) != set(HISTORICAL_VERSIONS):
         raise ValueError('the fixed reviewed versions changed')
-    for version in VERSIONS:
+    for version in HISTORICAL_VERSIONS:
         manifest = Path(__file__).with_name('kimi-native-manifests') / (version + '.json')
         observed = manifest.read_bytes()
         observed_sha256 = hashlib.sha256(observed).hexdigest()
@@ -362,7 +433,7 @@ def main():
     if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip() != args.source_sha:
         raise ValueError('source changed')
     checked_methods()
-    platform_id, pins = target(), checked_pins(target())
+    platform_id = target()
     out = args.output.resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     out.mkdir(mode=0o700)
@@ -381,49 +452,40 @@ def main():
     source, hgs_sha = source_map(), digest(hgs)
     tools = {str(path): digest(path) for path in (Path(sys.executable).resolve(), args.tmux.resolve(), Path('/usr/bin/cc'))}
     write(evidence / 'plan.json', dict(source_sha=args.source_sha, platform=platform_id, methods=METHODS,
-          native_cases=16, mac_shim_compiles=16 if platform_id == 'darwin-arm64' else 0,
+          native_cases=8, mac_shim_compiles=8 if platform_id == 'darwin-arm64' else 0,
           hgs_sha256=hgs_sha, tools=tools, environment=env, runtime=str(runtime), no_retries=True))
     write(evidence / 'source-before.json', source)
     records, custody, success = [], [], False
     try:
-        for version in VERSIONS:
-            prefix = 'https://code.kimi.com/kimi-code/binaries/' + version + '/'
-            manifest = images / (version + '-manifest.json')
-            record = fetch(prefix + 'manifest.json', manifest, 1685, pins[version]['manifest_sha256'])
-            strict(manifest.read_bytes())
-            write(evidence / (version + '-manifest-fetch.json'), record)
-            pin = pins[version][platform_id]
-            image = images / ('kimi-' + version)
-            write(evidence / (version + '-image-fetch.json'), fetch(prefix + 'kimi-code-' + platform_id, image, pin['size'], pin['sha256']))
-        write(evidence / 'reservation.json', dict(state='SPENT', versions=VERSIONS, native_cases=16, time=time.time()))
-        for version in VERSIONS:
-            if source_map() != source or digest(hgs) != hgs_sha:
-                raise ValueError('source or hgs changed before native execution')
-            image = images / ('kimi-' + version)
-            if digest(image) != pins[version][platform_id]['sha256'] or stat.S_IMODE(image.stat().st_mode) != 0o400:
-                raise ValueError('the staged image changed')
-            case_evidence = evidence / ('native-' + version)
-            case_evidence.mkdir(mode=0o700)
-            result, owned = evidence / (version + '-result.json'), evidence / (version + '-custody.jsonl')
-            custody.append(owned)
-            native_env = dict(env, HGS_KIMI_TEST_BIN=str(image), HGS_KIMI_TEST_SHA256=pins[version][platform_id]['sha256'],
-                              HGS_KIMI_GUARD=os.pathsep.join(str(images / ('kimi-' + v)) for v in VERSIONS),
-                              ZERUS_KIMI_GUARD=os.pathsep.join(str(images / ('kimi-' + v)) for v in VERSIONS),
-                              HGS_KIMI_EVIDENCE_DIR=str(case_evidence))
-            argv = [sys.executable, '-s', '-B', str(Path(__file__).resolve()), '--suite-child', str(result), str(owned)]
-            write(evidence / (version + '-command.json'), dict(argv=argv, environment=native_env))
-            log = evidence / (version + '.log')
-            with log.open('xb') as stream:
-                child = subprocess.Popen(argv, env=native_env, cwd=ROOT, stdin=subprocess.DEVNULL,
-                                         stdout=stream, stderr=stream, start_new_session=True)
-                code = await_child(child, log)
-            value = strict(result.read_bytes())
-            if not outcome(value, code):
-                raise ValueError('native result did not qualify all eight exact cases without skips/errors')
-            records.append(value)
+        release, image, record_path = stage_latest(images, evidence, platform_id)
+        version = release['version']
+        selected_seals = {str(path): digest(path) for path in (image, record_path, images / 'manifest.json')}
+        write(evidence / 'reservation.json', dict(state='SPENT', versions=[version], native_cases=8,
+              selected_release=release, time=time.time()))
+        if source_map() != source or digest(hgs) != hgs_sha:
+            raise ValueError('source or hgs changed before native execution')
+        case_evidence = evidence / ('native-' + version)
+        case_evidence.mkdir(mode=0o700)
+        result, owned = evidence / (version + '-result.json'), evidence / (version + '-custody.jsonl')
+        custody.append(owned)
+        native_env = dict(env, HGS_KIMI_TEST_BIN=str(image), HGS_KIMI_TEST_SHA256=release['image_sha256'], HGS_KIMI_TEST_RECORD=str(record_path),
+                          HGS_KIMI_GUARD=str(image),
+                          ZERUS_KIMI_GUARD=str(image),
+                          HGS_KIMI_EVIDENCE_DIR=str(case_evidence))
+        argv = [sys.executable, '-s', '-B', str(Path(__file__).resolve()), '--suite-child', str(result), str(owned)]
+        write(evidence / (version + '-command.json'), dict(argv=argv, environment=native_env))
+        log = evidence / (version + '.log')
+        with log.open('xb') as stream:
+            child = subprocess.Popen(argv, env=native_env, cwd=ROOT, stdin=subprocess.DEVNULL,
+                                     stdout=stream, stderr=stream, start_new_session=True)
+            code = await_child(child, log)
+        value = strict(result.read_bytes())
+        if not outcome(value, code):
+            raise ValueError('native result did not qualify all eight exact cases without skips/errors')
+        records.append(value)
         if source_map() != source or digest(hgs) != hgs_sha or any(digest(path) != sha for path, sha in tools.items()):
             raise ValueError('source/binary/tool post-seal changed')
-        if any(digest(images / ('kimi-' + v)) != pins[v][platform_id]['sha256'] for v in VERSIONS):
+        if any(digest(path) != sha for path, sha in selected_seals.items()):
             raise ValueError('a staged image changed')
         success = True
     except BaseException as error:
@@ -435,7 +497,7 @@ def main():
         raise
     finally:
         write(evidence / 'receipt.json', dict(source=args.source_sha, platform=platform_id, outcome='PASS' if success else 'FAIL',
-              completed_versions=len(records), native_cases=16 if success else None, images_retained=str(images), runtime_retained=str(runtime),
+              completed_versions=len(records), native_cases=8 if success else None, images_retained=str(images), runtime_retained=str(runtime),
               owner_install=False, historical_np50_authority=False))
     return 0
 

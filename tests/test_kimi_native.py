@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real Kimi Code against a localhost-only model, never a user's account.
-Run with HGS_KIMI_TEST_BIN=/absolute/path/to/kimi (otherwise skipped).
+Run with HGS_KIMI_TEST_BIN, HGS_KIMI_TEST_SHA256 and the runner's sealed
+HGS_KIMI_TEST_RECORD; a missing native image skips this opt-in suite.
 
 Kimi's updater replaces the executable it runs from, whatever its home. Each
 case therefore runs its own copy, with automatic updates off, never the given
@@ -36,6 +37,7 @@ import urllib.error
 import urllib.request
 import uuid
 import test_pause as lifecycle
+from kimi_release import admitted_version
 
 KIMI = os.environ.get('HGS_KIMI_TEST_BIN')
 GUARDS = [Path(path).resolve() for path in os.environ.get('ZERUS_KIMI_GUARD', '').split(os.pathsep) if path]
@@ -509,6 +511,7 @@ class Model(http.server.BaseHTTPRequestHandler):
 @unittest.skipUnless(KIMI, 'Set HGS_KIMI_TEST_BIN for isolated native Kimi coverage')
 class NativeKimi(lifecycle.Harness):
     def setUp(self):
+        self.version = admitted_version(KIMI, os.environ.get('HGS_KIMI_TEST_SHA256', ''))
         # Kimi's trust panel wraps a folder wider than its frame, and only a
         # path on one row is answered through hgs: keep the fixture's short.
         with mock.patch.object(tempfile, 'tempdir', '/tmp'):

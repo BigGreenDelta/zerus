@@ -1,4 +1,4 @@
-name: Pinned Kimi native contracts
+name: Latest Kimi native contracts
 
 on:
   pull_request:
@@ -8,6 +8,7 @@ on:
       - 'scripts/ci/kimi-native*'
       - 'scripts/ci/kimi-native-manifests/**'
       - 'scripts/ci/install-tmux.sh'
+      - 'tests/kimi_release.py'
       - 'tests/test_kimi*.py'
       - 'tests/test_questions.py'
       - 'tests/test_input.py'
@@ -33,7 +34,7 @@ concurrency:
 
 jobs:
   contracts:
-    name: Kimi 2.1.1 and 2.2.0 (${{ matrix.os }})
+    name: Kimi latest (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -82,7 +83,7 @@ jobs:
         run: |
           rustup toolchain install 1.99.1 --profile minimal
           cargo +1.99.1 build --locked --bin hgs -j 2
-      - name: Two reviewed versions, eight exact native cases each
+      - name: One official latest release, eight exact native cases
         shell: bash
         run: |
           python -s -B scripts/ci/kimi-native.py --source-sha "$SOURCE_SHA" \

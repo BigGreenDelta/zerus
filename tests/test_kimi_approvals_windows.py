@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The seven Kimi Bash approval contracts in a private Windows ConPTY host.
 
-Only the reviewed win32-x64 2.1.1/2.2.0 images qualify. No tmux, shared Kimi,
+Only the sealed selected official latest win32-x64 image qualifies. No tmux, shared Kimi,
 user profile, real provider or relaxed screen predicate is used. A separate
 known-environment child must first qualify kimi_windows_process on this exact
 hosted Windows image. That reader uses an internal x64 ABI and refuses unknown
@@ -23,8 +23,6 @@ import uuid
 import kimi_windows_process as process
 import test_kimi_approvals_native as approvals
 
-PINS = {'28096756410623f0413607b10872dc16fe8c037c87b005821030daba569a32d4': '2.1.1',
-        '5120f69812bc6437354d7d99e801c1b38fee1eeefdc858e2ad726356f1a245b0': '2.2.0'}
 ROOT = Path(__file__).resolve().parents[1]
 WAIT = 120
 
@@ -78,8 +76,7 @@ class NativeWindowsKimiApprovals(approvals.ApprovalCases, unittest.TestCase):
     tool_results = approvals.NativeKimiApprovals.tool_results
 
     def setUp(self):
-        self.assertIn(approvals.KIMI_SHA256, PINS, 'only the two reviewed Windows Kimi pins may run')
-        self.version = PINS[approvals.KIMI_SHA256]
+        self.version = approvals.admitted_version(approvals.KIMI, approvals.KIMI_SHA256)
         self.source = Path(approvals.KIMI).resolve(strict=True)
         self.guards = approvals.seals([self.source, *approvals.GUARDED])
         self.assertEqual(self.guards[str(self.source)], approvals.KIMI_SHA256)

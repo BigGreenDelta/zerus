@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
 from types import SimpleNamespace
@@ -20,6 +21,50 @@ spec.loader.exec_module(gate)
 
 
 class ApprovalGateControls(unittest.TestCase):
+    def test_one_latest_release_runs_seven_cases_or_discovery_fails_without_fallback(self):
+        selected = gate.methods('darwin-arm64')
+        for failed in (False, True):
+            with tempfile.TemporaryDirectory(prefix='kimi-approval-selection-') as directory:
+                root = Path(directory).resolve(); runtime = root / 'runtime'; runtime.mkdir()
+                output = root / 'artifacts/test-results/fixture'
+                hgs, tmux = root / 'hgs', root / 'tmux'
+                hgs.write_bytes(b'hgs'); tmux.write_bytes(b'tmux')
+                record = dict(version='2.3.1', image_sha256='b' * 64)
+                def stage(images, evidence, platform):
+                    if failed:
+                        raise ValueError('unknown official latest')
+                    image, admission = images / 'kimi-code-darwin-arm64', images / 'selected-release.json'
+                    for path in (image, admission, images / 'manifest.json'):
+                        path.write_bytes(b'synthetic'); path.chmod(0o400)
+                    return record, image, admission
+                def invoke(evidence, version, env, methods):
+                    reservation = json.loads((evidence / 'reservation.json').read_text())
+                    self.assertEqual((reservation['state'], reservation['versions'], reservation['native_cases']), ('SPENT', ['2.3.1'], 7))
+                    self.assertEqual((version, methods), ('2.3.1', selected))
+                    self.assertIn('HGS_KIMI_TEST_RECORD', env)
+                with mock.patch.dict(os.environ, dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted',
+                              RUNNER_TEMP=str(root), GITHUB_WORKSPACE=str(root))), \
+                        mock.patch.object(sys, 'argv', [str(gate.__file__), '--source-sha', 'a' * 40, '--hgs', str(hgs),
+                              '--tmux', str(tmux), '--output', str(output)]), \
+                        mock.patch.object(gate, 'ROOT', root), mock.patch.object(gate, 'target', return_value='darwin-arm64'), \
+                        mock.patch.object(gate, 'methods', return_value=selected), \
+                        mock.patch.object(gate.tempfile, 'mkdtemp', return_value=str(runtime)), \
+                        mock.patch.object(gate.subprocess, 'check_output', return_value='a' * 40), \
+                        mock.patch.object(gate.retained, 'source_map', return_value={}), \
+                        mock.patch.object(gate, 'digest', return_value='b' * 64), \
+                        mock.patch.object(gate.retained, 'stage_latest', side_effect=stage) as choose, \
+                        mock.patch.object(gate, 'invoke', side_effect=invoke) as run, \
+                        mock.patch.object(gate, 'retain_declared_roots', return_value={}):
+                    if failed:
+                        with self.assertRaises(ValueError):
+                            gate.main()
+                        run.assert_not_called()
+                    else:
+                        self.assertEqual(gate.main(), 0); run.assert_called_once()
+                    choose.assert_called_once()
+                receipt = json.loads((output / 'evidence/receipt.json').read_text())
+                self.assertEqual((receipt['outcome'], receipt['native_cases']), ('FAIL', None) if failed else ('PASS', 7))
+
     def test_both_platforms_keep_the_exact_seven_semantic_names(self):
         for platform in ('darwin-arm64', 'win32-x64'):
             methods = gate.methods(platform)
@@ -52,7 +97,7 @@ class ApprovalGateControls(unittest.TestCase):
 
     def test_windows_pins_are_the_retained_official_manifest_entries(self):
         pins = gate.retained.checked_pins('win32-x64')
-        self.assertEqual([pins[v]['win32-x64']['size'] for v in gate.VERSIONS], [159601440, 160725792])
+        self.assertEqual([pins[v]['win32-x64']['size'] for v in gate.retained.HISTORICAL_VERSIONS], [159601440, 160725792])
         self.assertEqual(pins['2.2.0']['win32-x64']['sha256'],
                          '5120f69812bc6437354d7d99e801c1b38fee1eeefdc858e2ad726356f1a245b0')
         original_read = Path.read_bytes
@@ -73,7 +118,7 @@ class ApprovalGateControls(unittest.TestCase):
         calls = [(node.lineno, ast.unparse(node.func), ast.unparse(node)) for node in ast.walk(main)
                  if isinstance(node, ast.Call)]
         oracle = next(line for line, func, text in calls if func == 'invoke' and 'oracle=True' in text)
-        download = next(line for line, func, _ in calls if func == 'fetch')
+        download = next(line for line, func, _ in calls if func == 'retained.stage_latest')
         launches = [line for line, func, text in calls if func == 'invoke' and 'oracle=True' not in text]
         self.assertLess(oracle, download)
         self.assertTrue(launches and all(download < line for line in launches))
