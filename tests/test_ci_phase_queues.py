@@ -29,6 +29,10 @@ def evaluate(expression, *, event='push', repository='ufna/zerus', ref='refs/hea
     })
 
 
+def concurrency_value(expression, **context):
+    return evaluate(expression, **context) if expression.startswith('${{ ') else expression
+
+
 class PhaseQueues(unittest.TestCase):
     def setUp(self):
         workflows = ROOT / '.github/workflows'
@@ -73,7 +77,42 @@ class PhaseQueues(unittest.TestCase):
                 self.assertEqual(evaluate(group, **overrides), 'ci-CI-' + overrides.get('ref', 'refs/heads/main'))
         self.assertEqual(evaluate(group, event='workflow_dispatch', test_ref='b' * 40), 'ci-CI-' + 'b' * 40)
 
-    def test_distinct_fixed_caller_locks_span_whole_phases_without_nested_self_lock(self):
+    def test_rollout_qualification_waits_on_the_legacy_whole_run_lock(self):
+        caller = job(self.ci, 'qualification')
+        qualification = re.search(r'(?m)^      group: (.*)$', caller)[1]
+        top = re.search(r'(?m)^  group: (.*)$', self.ci)[1]
+        tail = re.search(r'(?m)^      group: (.*)$', job(self.ci, 'dev-tail'))[1]
+        publisher = re.search(r'(?m)^  group: (.*)$', self.publisher)[1]
+        # These are the old CI key's two admitted source forms. The caller
+        # shares that lock with an active old run, but never its own new top.
+        for test_ref in ('', 'a' * 40):
+            with self.subTest(test_ref=test_ref):
+                legacy = 'ci-CI-' + (test_ref or 'refs/heads/main')
+                self.assertEqual(self.selected(test_ref=test_ref), ['qualification'])
+                self.assertEqual(concurrency_value(qualification, test_ref=test_ref), legacy)
+                self.assertNotEqual(evaluate(top, test_ref=test_ref), legacy)
+                self.assertNotIn(legacy, (tail, publisher))
+        self.assertIn('      cancel-in-progress: false\n', caller)
+
+    def test_non_dev_legacy_top_never_acquires_the_same_nested_lock(self):
+        qualification = job(self.ci, 'qualification')
+        child_group = re.search(r'(?m)^      group: (.*)$', qualification)[1]
+        top_group = re.search(r'(?m)^  group: (.*)$', self.ci)[1]
+        for overrides in ({'enabled': ''}, {'private': True}, {'repository': 'fork/zerus'},
+                          {'event': 'pull_request', 'ref': 'refs/pull/7/merge'},
+                          {'event': 'workflow_dispatch'},
+                          {'event': 'workflow_dispatch', 'test_ref': 'b' * 40},
+                          {'event': 'schedule'}, {'ref': 'refs/heads/topic'}):
+            with self.subTest(overrides=overrides):
+                # Reusing the legacy top is safe only because this entire
+                # reusable caller is skipped before acquiring its job lock.
+                self.assertEqual(concurrency_value(top_group, **overrides), concurrency_value(child_group, **overrides))
+                self.assertFalse(evaluate(field(qualification, 'if'), **overrides))
+                self.assertNotIn('qualification', self.selected(**overrides))
+        self.assertEqual(self.selected(test_ref='b' * 40), ['review'])
+        self.assertEqual(concurrency_value(child_group, test_ref='b' * 40), 'ci-CI-' + 'b' * 40)
+
+    def test_distinct_caller_locks_span_whole_phases_without_nested_self_lock(self):
         groups = []
         for name, callee in (('qualification', self.qualification), ('dev-tail', self.tail)):
             caller = job(self.ci, name)

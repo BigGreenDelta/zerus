@@ -65,6 +65,8 @@ credential-free checks and the parallel unsigned Mac bundle. The bundle uses pin
 official Qt, tests the Release GUI, then packages that same tested app; there is no
 second GUI compilation with tests disabled. Its gate requires successful checks and
 the exact run's selected bundle; a disabled Mac bundle must be skipped.
+The qualification caller reuses the former whole-CI concurrency key, so the first
+new run waits for any active old CI run to finish before starting qualification.
 
 After the public **CI gate** admits exactly one successful check workflow,
 `ci-dev-tail.yml` holds one separate noncancelling CI slot through Android/Mac

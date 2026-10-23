@@ -103,7 +103,9 @@ jobs:
       (!inputs.ref || inputs.ref == github.sha)
     cache-mode: write
     concurrency:
-      group: ci-main-dev-qualification
+      # Share the old whole-run lock during rollout. Once old runs finish, this
+      # lock covers qualification only; the Dev top-level lock is run-specific.
+      group: ${{ format('ci-{0}-{1}', github.workflow, inputs.ref || github.ref) }}
       cancel-in-progress: false
     uses: ./.github/workflows/ci-dev-qualification.yml
   gate:
