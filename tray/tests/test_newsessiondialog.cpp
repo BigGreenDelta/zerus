@@ -298,6 +298,15 @@ elif a and a[0]=='worktrees':
         QTRY_VERIFY(dialog.findChild<QPushButton *>("primary")->isEnabled());
         const auto preview=qEnvironmentVariable("ZERUS_PREVIEW_DIR");if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/new-session-repository.png"));
     }
+    void repositorySourceKeepsOpaqueProjectId(){
+        const QString project="new-repository-project";
+        SessionOrganization projects(QJsonObject{{"projects",QJsonArray{QJsonObject{{"id",project},{"name","Existing project"}}}},{"default_project",project}});
+        NewSessionDialog dialog(program(),fleet(),{},"codex",project,nullptr,nullptr,&projects);dialog.setGroups(projects,project);dialog.show();
+        dialog.findChild<QPushButton *>("launchRepositorySource")->click();dialog.findChild<QLineEdit *>("launchRepositoryUrl")->setText("git@example.invalid:team/fresh.git");
+        dialog.findChild<QLineEdit *>("launchRepositoryDestination")->setText("/workspace/fresh");QVERIFY(!dialog.findChild<QLineEdit *>("launchNewProjectName")->isVisible());
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][5].toString(),project);QCOMPARE(projects.groups().size(),1);QCOMPARE(projects.group(project)->folders.first().path,QString("/workspace/fresh"));
+    }
     void repositoryFormFitsWorkspace_data(){QTest::addColumn<QString>("theme");QTest::newRow("dark")<<QString("dark");QTest::newRow("light")<<QString("light");}
     void repositoryFormFitsWorkspace(){
         QFETCH(QString,theme);QSettings().setValue("workspace/theme",theme);

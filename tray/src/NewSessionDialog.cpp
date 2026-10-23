@@ -37,7 +37,7 @@
 #include <QVBoxLayout>
 namespace {
 using namespace AccountChoice;
-const auto NewRepositoryProject=QStringLiteral("new-repository-project");
+constexpr int NewRepositoryProjectRole=Qt::UserRole+1;
 QLabel *plainLabel(const QString &text = {}) {auto *l=new QLabel(text);l->setTextFormat(Qt::PlainText);l->setWordWrap(true);return l;}
 // Each OpenCode model row keeps its validated variants for the effort choice
 // and its label for the model button.
@@ -491,10 +491,11 @@ void NewSessionDialog::loadMachines()
 void NewSessionDialog::setGroups(const SessionOrganization &projects,const QString &selected)
 {
     m_prefillRequest=0;
+    const bool keepNew=m_repositorySource&&m_project->currentData(NewRepositoryProjectRole).toBool()&&selected.isEmpty();
     m_projects=projects;const QSignalBlocker block(m_project);m_project->clear();
     for(const auto &p:m_projects.groups())if(p.accessible)m_project->addItem(workspaceIcon("projects",QColor(p.color)),p.name,p.id);
-    if(m_repositorySource)m_project->addItem(tr("New project…"),NewRepositoryProject);
-    int index=m_project->findData(selected);if(index<0)index=m_project->findText(m_initialProject);
+    if(m_repositorySource){m_project->addItem(tr("New project…"),QString());m_project->setItemData(m_project->count()-1,true,NewRepositoryProjectRole);}
+    int index=keepNew?m_project->count()-1:selected.isEmpty()?-1:m_project->findData(selected);if(index<0)index=m_project->findText(m_initialProject);
     if(index<0)index=m_project->findData(m_projects.defaultProject());m_project->setCurrentIndex(index);loadMachines();loadFolders();
 }
 bool NewSessionDialog::selectFolder(const QString &folderId)
@@ -570,8 +571,8 @@ void NewSessionDialog::setRepositorySource(bool enabled)
     if(m_validation||m_creation||(m_repository&&m_repository->busy()))return;
     m_prefillRequest=0;
     m_repositorySource=enabled;
-    const auto newProject=m_project->findData(NewRepositoryProject);
-    if(enabled&&newProject<0)m_project->addItem(tr("New project…"),NewRepositoryProject);
+    const auto newProject=m_project->findData(true,NewRepositoryProjectRole);
+    if(enabled&&newProject<0){m_project->addItem(tr("New project…"),QString());m_project->setItemData(m_project->count()-1,true,NewRepositoryProjectRole);}
     else if(!enabled&&newProject>=0){
         if(m_project->currentIndex()==newProject)m_project->setCurrentIndex(qMax(0,m_project->findData(m_projects.defaultProject())));
         m_project->removeItem(newProject);
@@ -616,7 +617,7 @@ void NewSessionDialog::useRepository(const QString &path)
     if(!m_repository||m_repository->host()!=host())return;
     const auto target=host();const auto style=folderStyle(m_fleet,target);auto *projects=m_liveProjects?m_liveProjects:&m_projects;
     auto project=m_project->currentData().toString();
-    if(project==NewRepositoryProject)project=projects->createGroup(m_newProjectName->text().trimmed());
+    if(m_project->currentData(NewRepositoryProjectRole).toBool())project=projects->createGroup(m_newProjectName->text().trimmed());
     if(project.isEmpty()||!projects->group(project)){
         m_error->setText(tr("The project changed. The checkout is available at %1. Choose a project to use it.").arg(path));updateForm();return;
     }
@@ -637,7 +638,7 @@ void NewSessionDialog::updateForm()
     const bool repository=m_repositorySource;
     const auto *machine=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
     const bool online=machine&&machine->ok;
-    const bool newProject=repository&&m_project->currentData()==NewRepositoryProject;
+    const bool newProject=repository&&m_project->currentData(NewRepositoryProjectRole).toBool();
     m_form->setRowVisible(m_newProjectName,newProject);m_form->setRowVisible(m_folderField,!repository);
     m_form->setRowVisible(m_repositoryUrl,repository);m_form->setRowVisible(m_repositoryDestinationField,repository);
     m_folderSource->setChecked(!repository);m_gitSource->setChecked(repository);
