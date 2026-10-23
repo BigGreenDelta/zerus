@@ -1,6 +1,7 @@
 #include <QtTest>
 #include <memory>
 #include <QComboBox>
+#include <QDialogButtonBox>
 #include <QFile>
 #include <QFrame>
 #include <QJsonArray>
@@ -339,6 +340,49 @@ elif a and a[0]=='worktrees':
         QCOMPARE(launched[0][5].toString(),project);QCOMPARE(projects.groups().size(),1);QCOMPARE(projects.group(project)->folders.first().path,QString("/workspace/fresh"));
     }
     void repositoryFormFitsWorkspace_data(){QTest::addColumn<QString>("theme");QTest::newRow("dark")<<QString("dark");QTest::newRow("light")<<QString("light");}
+    void sourceSwitchKeepsControls_data(){
+        QTest::addColumn<QString>("theme");QTest::addColumn<QString>("state");
+        for(const auto &theme:{QString("dark"),QString("light")})
+            for(const auto &state:{QString("existing"),QString("new-project"),QString("recovery")})
+                QTest::newRow(qPrintable(theme+'-'+state))<<theme<<state;
+    }
+    void sourceSwitchKeepsControls(){
+        QFETCH(QString,theme);QFETCH(QString,state);QSettings().setValue("workspace/theme",theme);
+        if(state=="recovery"){
+            const QJsonArray source{program(),QString()};
+            const auto key="workspace/repositoryClone/"+QString::fromLatin1(QJsonDocument(source).toJson(QJsonDocument::Compact).toHex());
+            const QJsonObject pending{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"url","git@example.invalid:team/fresh.git"},{"parent","/workspace"},{"name","fresh"},{"path","/workspace/fresh"}};
+            QSettings().setValue(key+"/pending",QJsonDocument(pending).toJson(QJsonDocument::Compact));
+        }
+        SessionOrganization projects;const auto project=projects.createGroup("Example");projects.addFolder(project,"pc","/workspace/example");
+        SessionsWindow workspace(program());workspace.setFleet(fleet());
+        NewSessionDialog dialog(program(),fleet(),{},"codex",project,&workspace);dialog.setGroups(projects,project);dialog.resize(600,850);dialog.show();
+        auto *folder=dialog.findChild<QPushButton *>("launchFolderSource"),*repository=dialog.findChild<QPushButton *>("launchRepositorySource");
+        dialog.findChild<QPushButton *>("launchWithoutWorktree")->click();QTRY_VERIFY(dialog.findChild<QPushButton *>("refreshLaunchAccounts")->isEnabled());
+        if(state!="existing")repository->click();
+        if(state=="new-project"){
+            auto *choice=dialog.findChild<QComboBox *>("launchProject");choice->setCurrentIndex(choice->count()-1);
+            auto *name=dialog.findChild<QLineEdit *>("launchNewProjectName");name->selectAll();QTest::keyClicks(name,"Keep my project");
+        }
+        QList<QWidget *> controls;
+        for(const auto *name:{"launchFolderSource","launchRepositorySource","automaticLaunchWorktree","launchWithoutWorktree","launchWorktreeOptions","launchAccount","refreshLaunchAccounts","launchName","launchOpenTerminal","primary"})controls<<dialog.findChild<QWidget *>(name);
+        controls<<dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel);
+        const auto capture=[&]{QList<QRect> positions;for(auto *w:controls)positions<<QRect(w->mapTo(&dialog,QPoint()),w->size());return positions;};
+        QTest::qWait(30);const auto before=capture();const auto size=dialog.size();
+        for(int i=0;i<4;++i){
+            (repository->isChecked()?folder:repository)->click();QTest::qWait(30);
+            const auto after=capture();for(qsizetype at=0;at<controls.size();++at)QCOMPARE(after[at],before[at]);QCOMPARE(dialog.size(),size);
+        }
+        QVERIFY(lines("clone-calls").isEmpty());
+    }
+    void sourceSwitchKeepsActionGeometry_data(){QTest::addColumn<QString>("theme");QTest::newRow("dark")<<QString("dark");QTest::newRow("light")<<QString("light");}
+    void sourceSwitchKeepsActionGeometry(){
+        QFETCH(QString,theme);QSettings().setValue("workspace/theme",theme);
+        SessionsWindow workspace(program());workspace.setFleet(fleet());NewSessionDialog dialog(program(),fleet(),{},"codex",{},&workspace);dialog.resize(600,850);dialog.show();
+        auto *start=dialog.findChild<QPushButton *>("primary");QTest::qWait(30);const auto before=start->geometry();
+        dialog.findChild<QPushButton *>("launchRepositorySource")->click();QTest::qWait(30);QCOMPARE(start->geometry(),before);
+        QVERIFY(lines("clone-calls").isEmpty());
+    }
     void repositoryFormFitsWorkspace(){
         QFETCH(QString,theme);QSettings().setValue("workspace/theme",theme);
         SessionOrganization projects;const auto project=projects.createGroup("Example repository with a long descriptive project name");projects.addFolder(project,"pc","/workspace/example");
