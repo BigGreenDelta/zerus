@@ -5,7 +5,7 @@ COPY relay/.cargo ./.cargo
 COPY relay/src ./src
 COPY crypto/Cargo.toml ../crypto/Cargo.toml
 COPY crypto/src ../crypto/src
-RUN cargo build --release --locked
+RUN cargo build --release --locked --jobs 2
 
 FROM debian:bookworm-slim
 ENV TMPDIR=/spool MALLOC_ARENA_MAX=2 MALLOC_MMAP_THRESHOLD_=131072 MALLOC_TRIM_THRESHOLD_=131072
