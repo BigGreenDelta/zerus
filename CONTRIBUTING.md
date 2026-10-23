@@ -129,7 +129,7 @@ Some platform tests only exist on macOS, Linux or Windows. Record any unavailabl
 checks.
 
 The OpenCode 2 native suite needs an installed OpenCode 2.0.32 or newer 2.x. Run it
-locally on request; full Linux and macOS CI run it with the pinned minimum. See
+locally on request; full Linux and macOS CI run it with the latest release. See
 [OpenCode qualification](docs/opencode.md#qualification).
 
 Color-popup dismissal also needs Cocoa qualification on macOS. These cases post
@@ -237,7 +237,7 @@ HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
 HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" \
 HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
   python -m unittest discover -s tests -p 'test_windows_host*.py' -v </dev/null
-# Downloads the pinned win32-x64 Claude Code and Codex for their real-agent suites:
+# Resolves the latest win32-x64 Claude Code and Codex for their real-agent suites:
 HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
 HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
   python -X utf8 scripts/ci/agent-compatibility.py </dev/null
@@ -267,7 +267,7 @@ native session host of Windows Phase 2 has its own isolated recipe and tests,
 `tests/test_windows_host_conpty.py`, the survival tests in
 `tests/test_windows_host_survival.py` and the real-agent suites in
 `tests/test_windows_native_agents.py`, which `scripts/ci/agent-compatibility.py`
-runs with the reviewed Claude Code and Codex packages, each against a local fake
+runs with one latest Claude Code and Codex package per agent, each against a local fake
 API: [testing the Windows session host](docs/windows-host-testing.md).
 
 Kimi's optional native input, question and startup-trust fixtures are

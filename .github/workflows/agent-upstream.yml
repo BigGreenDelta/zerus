@@ -32,7 +32,7 @@ jobs:
           echo "$RUNNER_TEMP/tmux/bin" >> "$GITHUB_PATH"
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - run: cargo build --locked
-      - name: Discover releases, compare capabilities and test latest Codex, Claude Code and OpenCode
+      - name: Discover releases and capture latest Codex, Claude Code and OpenCode capabilities
         run: python3 scripts/ci/agent-compatibility.py --latest
       - name: Retain public compatibility evidence
         if: always()

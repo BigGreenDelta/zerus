@@ -352,8 +352,8 @@ agent's executable (`HGS_CLAUDE_TEST_BIN`, `HGS_CODEX_TEST_BIN`), and
 `HGS_TEST_CONPTY_DIR` gives the pinned pair as for the host suites. Rather than
 setting those by hand, run `scripts/ci/agent-compatibility.py`
 ([native agent compatibility](ci-and-aur.md#native-agent-compatibility-and-upstream-review)):
-it downloads the reviewed `win32-x64` packages, checks them against their SHA-512
-pins, extracts only `claude.exe` and `codex.exe` into a temporary folder and runs
+it resolves one latest `win32-x64` package per agent, records and verifies its SHA-512
+integrity, extracts only `claude.exe` and `codex.exe` into a temporary folder and runs
 each class with them, and a skipped or empty class fails the run. Codex never gets
 its Windows sandbox: the suites run it without one, and its sandbox setup program
 is never extracted. In a new Git Bash window with no `HGS_*` variables:

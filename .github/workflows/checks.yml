@@ -606,7 +606,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
-      - name: Keyless native Codex, Claude Code and OpenCode compatibility matrix
+      - name: Keyless latest Codex, Claude Code and OpenCode compatibility
         run: python3 scripts/ci/agent-compatibility.py
       - name: Retain test logs
         if: always() && (github.event_name != 'schedule' || failure())
@@ -1096,8 +1096,8 @@ jobs:
           retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
           compression-level: 0
 
-  # The reviewed win32-x64 Claude Code and Codex pins of
-  # scripts/ci/agent-compatibility.json through isolated session hosts of the
+  # The latest win32-x64 Claude Code and Codex packages selected by
+  # scripts/ci/agent-compatibility.py through isolated session hosts of the
   # release build, each agent against a local fake API. A job of its own, so a
   # failure points at the host and windows-desktop keeps its time margin.
   windows-host:
