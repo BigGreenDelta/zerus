@@ -14,13 +14,20 @@ original_review_fixture = _focus_projection.original_review_fixture
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
 # Keep the reviewed 9b217ddd/b9c1e29c reconstruction pins unchanged. The exact
-# test fixture reverses only the later 962699e6 read-catalog/badge update and
-# c1eebe96 mobile checkout additions; neither changes question eligibility or
-# the ten verification writes. No Git history or Android SDK is needed at run time.
+# fixtures first reverse the composed 3d33de39 workspace changes to ac601e36,
+# then the 962699e6 read-catalog/badge update and c1eebe96 mobile checkout
+# additions. None changes question eligibility or the ten verification writes.
+# No Git history or Android SDK is needed at run time.
 MODEL_SHA = "a94c04695da3626c49f1cc5a875c82f8b3893688d256c7cfa3ebf66cad9e619a"
 MAIN_SHA = "7c676d33a2218da83511697f5a597c4876b946e1c130d601c265e855b7259f4b"
 UPDATES = ROOT / "tests/fixtures/question-availability-reviewed-updates.patch"
 UPDATES_SHA = "5088def68877668c9a7e261851d552cd30b0fee1806aa072a911172f6ff4f60a"
+WORKSPACE_UPDATES = ROOT / "tests/fixtures/question-availability-workspace-updates.patch"
+WORKSPACE_UPDATES_SHA = "02c52292e8713aa238f159054907c41a8bc9f605860dde2d38575dd379ca06fd"
+WORKSPACE_BASE_SHA = {
+    "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
+    "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
+}
 WRITERS = ["INSTALL_WAIT_PRESENTATION", "INSTALL_PRESENTATION", "PREPARE_PRESENTATION", "TERMINAL_CLOSED",
            "ACTION_RESULT", "CONNECTION_FORGOTTEN", "OPEN_SESSION", "BACK", "CLEAR_UNCONFIRMED", "INSPECT_FAILED"]
 
@@ -30,10 +37,10 @@ def strip_availability(source):
     return re.sub(r" /\* BEGIN QUESTION_AVAILABILITY_PROBE (writer-[a-z-]+) \*/[\s\S]*?/\* END QUESTION_AVAILABILITY_PROBE \1 \*/", "", source)
 
 
-def reverse_reviewed_updates(name, source):
+def reverse_reviewed_patch(name, source, fixture, fixture_sha):
     """Reverse exact reviewed hunks, never an arbitrary function/line range."""
-    raw = UPDATES.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != UPDATES_SHA:
+    raw = fixture.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != fixture_sha:
         raise AssertionError("reviewed source-update fixture changed")
     prefix = "mobile/android/app/src/main/java/app/zerus/mobile/"
     files = {}
@@ -67,6 +74,11 @@ def reverse_reviewed_updates(name, source):
     return source
 
 
+def reverse_reviewed_updates(name, source):
+    source = reverse_reviewed_patch(name, source, WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
+    return reverse_reviewed_patch(name, source, UPDATES, UPDATES_SHA)
+
+
 def reconstructed(name, source):
     return strip_availability(reverse_reviewed_updates(name, source))
 
@@ -80,6 +92,13 @@ def original_source(name, source):
 
 
 class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
+    def test_workspace_projection_matches_reviewed_current_main_exactly(self):
+        for name, digest in WORKSPACE_BASE_SHA.items():
+            with self.subTest(source=name):
+                projected = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                  WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
+                self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(), digest)
+
     def test_original_model_and_main_reconstruct_including_every_policy_and_assignment(self):
         for name, digest in [("ZerusViewModel.kt", MODEL_SHA), ("MainActivity.kt", MAIN_SHA)]:
             source = (MAIN / name).read_text()
@@ -120,6 +139,27 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
                 self.assertFalse(original_source("ZerusViewModel.kt", source.replace(old, new, 1)))
         main = (MAIN / "MainActivity.kt").read_text()
         self.assertFalse(original_source("MainActivity.kt", main.replace("!SharedReadPolicies.canShowReplyBadge(session)", "true", 1)))
+
+    def test_workspace_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        model = (MAIN / "ZerusViewModel.kt").read_text()
+        for addition in (
+                "    private val api = RelayApi(workspace = store.workspaceJournal)\n",
+                "    var pendingEncryptedPairings by mutableStateOf<Set<String>>(emptySet());private set\n",
+                "    fun resumeEncryptedPair(connection:Connection)=viewModelScope.launch {\n",
+                "                        WorkspaceCatalogCache.preserve(connection,computers,\n",
+                "                sessions = preparedSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations; machineFeatures = newFeatures\n"):
+            for changed in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
+                with self.subTest(addition=addition, replacement=changed):
+                    self.assertIn(addition, model)
+                    self.assertNotEqual(addition, changed)
+                    self.assertFalse(original_source("ZerusViewModel.kt", model.replace(addition, changed, 1)))
+        main = (MAIN / "MainActivity.kt").read_text()
+        for addition in ("Messages are encrypted between enrolled devices.",
+                         "This erases this phone's connection keys."):
+            for changed in ("Changed reviewed text.", "", addition + addition):
+                with self.subTest(addition=addition, replacement=changed):
+                    self.assertIn(addition, main)
+                    self.assertFalse(original_source("MainActivity.kt", main.replace(addition, changed, 1)))
 
     def test_each_existing_write_is_followed_by_its_fixed_reason_without_changing_rhs(self):
         source = (MAIN / "ZerusViewModel.kt").read_text()

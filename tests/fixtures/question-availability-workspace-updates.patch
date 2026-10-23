@@ -1,0 +1,150 @@
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
+index 1ded2fdc..d09c7f5d 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
+@@ -335,13 +335,13 @@ class MainActivity : ComponentActivity() {
+             ScanPairingButton(enabled = !model.busy) { invite -> server = invite.server;code = invite.code }
+             OutlinedTextField(server, { server = it }, label = { Text("Gateway URL") }, placeholder = { Text("https://zerus.example") }, singleLine = true)
+             OutlinedTextField(code, { code = it }, label = { Text("Invitation code") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
+-            Text("The gateway can read relayed messages. Credentials and drafts stay encrypted on this phone.", style = MaterialTheme.typography.bodySmall, color = Muted)
++            Text(if(WorkspaceProtocol.encryptedInvitationCode(code)) "Messages are encrypted between enrolled devices. The computer that executes a request can read its content." else "Legacy invitations trust the relay with relayed content. Use a new phone invitation from an enrolled computer for encrypted transport.", style = MaterialTheme.typography.bodySmall, color = Muted)
+         } }, confirmButton = { TextButton(enabled = !model.busy && model.storageReady && code.isNotBlank() && server.isNotBlank(),
+             onClick = { model.pair(server, code) { pairing = false; code = ""; onNotifications() } }) { Text("Pair") } },
+         dismissButton = { TextButton(onClick = { pairing = false;code = "" }, enabled = !model.busy) { Text("Cancel") } })
+-    disconnect?.let { connection -> ZerusAlertDialog(onDismissRequest = { disconnect = null }, title = { Text("Disconnect ${connection.displayName}?") },
+-        text = { Text("This removes the gateway credential from this phone. Saved drafts remain available.") },
+-        confirmButton = { TextButton(onClick = { model.disconnect(connection); disconnect = null }) { Text("Disconnect") } },
++    disconnect?.let { connection -> ZerusAlertDialog(onDismissRequest = { disconnect = null }, title = { Text("${if(connection.protocolVersion==2) "Forget" else "Disconnect"} ${connection.displayName}?") },
++        text = { Text(if(connection.protocolVersion==2) "This erases this phone's connection keys. Saved drafts remain available. To revoke this phone across the workspace, remove it from an enrolled computer." else "This removes the gateway credential from this phone. Saved drafts remain available.") },
++        confirmButton = { TextButton(onClick = { model.disconnect(connection); disconnect = null }) { Text(if(connection.protocolVersion==2) "Forget connection" else "Disconnect") } },
+         dismissButton = { TextButton(onClick = { disconnect = null }) { Text("Cancel") } }) }
+     review?.let { draft -> ZerusAlertDialog(onDismissRequest = { review = null }, title = { Text("Review unconfirmed delivery") },
+         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+index fb73302d..bfdf59f6 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+@@ -31,6 +31,6 @@ import org.json.JSONObject
+ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+     private val store = PrivateStore(application)
+-    private val api = RelayApi()
++    private val api = RelayApi(workspace = store.workspaceJournal)
+     private val gitStatusRelay = GitStatusRelay(api)
+     private fun gitStatusCatalog() = GitStatusCatalog(connections, machines, relayOperations, machineOperations, demo, storageReady)
+     private fun gitStatusAccess(key: MachineKey) = gitStatusCatalog().access(key)
+@@ -142,6 +142,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         persistence!!.flush()
+     }
+     var connections by mutableStateOf<List<Connection>>(emptyList()); private set
++    var pendingEncryptedPairings by mutableStateOf<Set<String>>(emptySet());private set
+     var machines by mutableStateOf<List<Machine>>(emptyList()); private set
+     private var catalogSessions by mutableStateOf<List<Session>>(emptyList(),referentialEqualityPolicy())
+     private var publishedSessions by mutableStateOf<List<Session>>(emptyList(),referentialEqualityPolicy())
+@@ -174,7 +175,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+     private suspend fun loadArchivePage(key:MachineKey,query:JSONObject):ArchivePage {
+         val connection=connections.find { it.id==key.connectionId } ?: error("Workspace disconnected")
+         val id=UUID.randomUUID().toString()
+-        val initial=api.call(connection.url,connection.token,"/v1/requests",JSONObject().put("request_id",id).put("computer_id",key.computerId).put("session","").put("operation","archive_list").put("payload",query))
++        val initial=api.post(connection,key.computerId,"","archive_list",query,id)
+         check(initial.string("request_id")==id){"Gateway returned another archive receipt"}
+         val receipt=api.await(connection,initial,150,200)
+         check(receipt.string("request_id")==id && receipt.string("state")=="completed"){receipt.string("error").ifBlank{"Archive page is not available. Refresh to retry."}}
+@@ -823,6 +824,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         viewModelScope.launch {
+             try {
+                 connections = withContext(Dispatchers.IO) { store.connections() }
++                pendingEncryptedPairings=withContext(Dispatchers.IO) { connections.filter { it.protocolVersion==2 && runCatching { store.workspaceJournal.load(it).enrollment==null }.getOrDefault(false) }.map { it.id }.toSet() }
+                 persistence = messageRepository.open()
+                 accountsWriter=AccountsPersistence.get(application).open()
+                 accountsWriter!!.edit { rows -> rows.filter { row -> connections.any { it.id==row.key.connectionId } } }
+@@ -2218,22 +2220,37 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         if (!storageReady || busy) return@launch
+         busy = true
+         try {
+-            val connection = api.pair(url, code)
++            val encrypted=WorkspaceProtocol.encryptedInvitationCode(code.trim())
++            val connection = if(encrypted) api.prepareEncryptedPair(url,code) else api.pair(url, code)
+             val next = connections + connection
+             withContext(Dispatchers.IO) { store.saveConnections(next) }; connections = next; demo = false
+-            onDone(); refresh(); AppTelemetry.registerPush(getApplication())
++            if(encrypted) pendingEncryptedPairings+=connection.id
++            onDone()
++            if(encrypted) api.enrollPrepared(connection)
++            refresh(); AppTelemetry.registerPush(getApplication())
+             if (LiveConnectionService.running) getApplication<Application>().startService(android.content.Intent(getApplication(), LiveConnectionService::class.java))
+         } catch (e: Exception) { error = e.message ?: "Pairing failed." }
+         finally { busy = false }
+     }
++    fun resumeEncryptedPair(connection:Connection)=viewModelScope.launch {
++        if(busy || connection.protocolVersion!=2 || connection !in connections) return@launch
++        busy=true
++        try { api.enrollPrepared(connection);refresh() }
++        catch(e:Exception) { error=e.message ?: "Could not resume encrypted phone enrollment." }
++        finally { busy=false }
++    }
+     fun disconnect(connection: Connection) = viewModelScope.launch {
+         if (busy) return@launch
+         busy = true
+         try {
+-            try { api.call(connection.url, connection.token, "/v1/device", delete = true) }
++            try { if(connection.protocolVersion==1) api.revoke(connection) }
+             catch (e: RelayException) { if (e.status != 401) throw e }
+-            val next = connections.filterNot { it.id == connection.id }
+-            withContext(Dispatchers.IO) { store.saveConnections(next) }; connections = next
++            val current=connections
++            val next=withContext(Dispatchers.IO) {
++                ConnectionRemoval.forget(connection,current,{ store.workspaceJournal.forget(it) },store::saveConnections)
++            }
++            connections = next
++            pendingEncryptedPairings-=connection.id
+             sharedReadRetries.forget(connection.id); scheduleSharedReadRetries()
+             if (catalogErrorOwner == connection.id || detailReadErrorOwner?.first?.connectionId == connection.id) error = ""
+             accountsWriter?.edit { rows -> rows.filterNot { it.key.connectionId==connection.id } }; accountsWriter?.flushAsync()
+@@ -2261,7 +2278,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+             selectedMachines = selectedMachines.filterNot { it.connectionId == connection.id }.toSet()
+             relayOperations = relayOperations - connection.id; machineOperations = machineOperations.filterKeys { it.connectionId != connection.id }
+             if (selected?.target?.connectionId == connection.id) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-connection-forgotten */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.CONNECTION_FORGOTTEN) /* END QUESTION_AVAILABILITY_PROBE writer-connection-forgotten */; conversationEvents = emptyList(); conversationQuestions = emptyList(); conversationOutgoing = emptyList(); cancelCompactContinuation(); clearExpectation = null }
+-        } catch (e: Exception) { error = "Could not revoke this phone on the gateway. The connection is preserved. ${e.message}" }
++        } catch (e: Exception) { error = if(connection.protocolVersion==2) "Could not finish forgetting this encrypted connection. Try Forget again. ${e.message}"
++            else "Could not revoke this phone on the gateway. The connection is preserved. ${e.message}" }
+         finally { busy = false }
+     }
+     fun refresh(explicit: Boolean = false) {
+@@ -2282,7 +2300,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         val newSessions = mutableListOf<Session>(); val newMachines = mutableListOf<Machine>(); val newAccounts=mutableListOf<AccountCatalog>()
+         val successfulConnections=mutableSetOf<String>()
+         var published=false
+-        val newProjects = mutableListOf<ProjectSummary>(); val newOperations = mutableMapOf<MachineKey, Set<String>>(); val warnings = mutableListOf<String>()
++        val newProjects = mutableListOf<ProjectSummary>(); val newOperations = mutableMapOf<MachineKey, Set<String>>(); val newFeatures = mutableMapOf<MachineKey, Set<String>>(); val warnings = mutableListOf<String>()
+         try {
+             pushStatuses = withContext(Dispatchers.IO) { originalConnections.associate { it.id to store.pushStatus(it.id) } }
+             for (connection in originalConnections) {
+@@ -2306,13 +2324,17 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+                     if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
+                     catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Reports)
+                     val computers = api.computers(connection)
++                    if(connection.protocolVersion==2) pendingEncryptedPairings-=connection.id
+                     val retained=catalogSessions;val actions=messageState.sessionActions
++                    val previousMachines=machines;val previousProjects=projects;val previousAccounts=accountCatalogs
+                     val prepared = withContext(Dispatchers.Default) {
+-                        SessionCatalogParser.parse(connection, computers.optJSONArray("computers")?.objects().orEmpty(),retained,actions)
++                        WorkspaceCatalogCache.preserve(connection,computers,
++                            SessionCatalogParser.parse(connection, computers.optJSONArray("computers")?.objects().orEmpty(),retained,actions),
++                            retained,previousMachines,previousProjects,previousAccounts)
+                     }
+                     if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
+                     newAccounts += prepared.accounts; newMachines += prepared.machines
+-                    newOperations += prepared.operations; machineFeatures = machineFeatures + prepared.features
++                    newOperations += prepared.operations; newFeatures += prepared.features
+                     val catalog = prepared.projects
+                     newSessions += catalog.sessions; newProjects += catalog.projects; warnings += catalog.unavailableComputers
+                     successfulConnections += connection.id
+@@ -2347,7 +2369,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+             }
+             accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
+             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+-                sessions = preparedSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
++                sessions = preparedSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations; machineFeatures = newFeatures
+                 projects = newProjects; projectWarnings = warnings
+             }
+             refreshReadAttention();adoptSharedReads()

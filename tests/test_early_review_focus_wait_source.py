@@ -15,6 +15,57 @@ FIXTURE = _focus_projection.FIXTURE
 PROBE = _focus_projection.PROBE
 BASELINES = _focus_projection.BASELINES
 reverse_focus_wait = _focus_projection.reverse_focus_wait
+reverse_disclosure_reveal = _focus_projection.reverse_disclosure_reveal
+
+
+def disclosure_preparation_memory(source, visibility, *, header=True, ready=True, capture=True):
+    """Finite source-bound accessibility stand-in; no Kotlin or device qualification."""
+    body = source.split('    private fun reveal(', 1)[1].split('    private data class DisclosureScroll', 1)[0]
+    ordinary = re.search(r'if \((visible\(label\) != null(?: && !captureDisclosure)?)\) true else', body)[1]
+    capturing = 'captureDisclosure: Boolean = false' in body
+    assert ordinary == ('visible(label) != null && !captureDisclosure' if capturing else 'visible(label) != null')
+    for exact in ('await("option $label")',
+                  'disclosureScroll ?: bindDisclosureScroll(disclosureLabel).also { disclosureScroll = it }',
+                  'check(disclosureScrollReady(disclosure))',
+                  'disclosure.node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)'):
+        assert exact in body
+    assert ('if (captureDisclosure && visible(label) != null) true else' in body) == capturing
+    assert ('return disclosureScroll' in body) == capturing
+    awaited = source.split('    private fun await(', 1)[1].split('    private fun find(', 1)[0]
+    assert 'SystemClock.elapsedRealtime() + 10_000' in awaited and 'SystemClock.sleep(30)' in awaited
+    lifecycle = source.split('            boundary("begin", "lifecycle_no_submit")', 1)[1].split(
+        '            tap("Approve for this session"); reviewed()', 1)[0]
+    if capturing:
+        assert 'val lifecycleDisclosure = checkNotNull(reveal("Approve for this session", "Review synthetic background", captureDisclosure = true))' in lifecycle
+        assert 'bindDisclosureScroll' not in lifecycle
+    else:
+        assert 'val lifecycleDisclosure = bindDisclosureScroll("Approve for this session")' in lifecycle
+    observations = iter(visibility)
+    state = {'last': False, 'binds': [], 'scrolls': 0, 'now': 0}
+    owned = object()
+    def visible():
+        state['last'] = next(observations, state['last'])
+        return state['last']
+    def bind(label):
+        state['binds'].append(label)
+        assert header if label == 'header' else visible(), 'Current disclosure anchor is not visible'
+        assert ready, 'Bound disclosure is not in the active window'
+        return owned
+    disclosure = None
+    while True:
+        # Evaluate the actual short-circuit and the sealed added capture branch.
+        if visible() and (not capture if capturing else True):
+            break
+        disclosure = disclosure or bind('header')
+        assert ready, 'Bound disclosure is not in the active window'
+        if capturing and capture and visible():
+            break
+        state['scrolls'] += 1
+        assert state['now'] < 10_000, 'original preparation deadline'
+        state['now'] += 30
+    if capture and not capturing:
+        disclosure = bind('option')  # Actual old lifecycle's second, unguarded lookup.
+    return disclosure, owned, state
 
 
 def evaluate(source, values):
@@ -181,6 +232,68 @@ class EarlyReviewFocusWaitSource(unittest.TestCase):
         self.assertLess(current.index('if (!currentCard()) return false'), current.index('awaitCurrentReview(bound)'))
         self.assertLess(current.index('if (reviewStart == null) return true'), current.index('awaitCurrentReview(bound)'))
         self.assertLess(current.index('awaitCurrentReview(bound)'), current.index('currentReview(bound,'))
+
+
+class DisclosureRevealBindingSource(unittest.TestCase):
+    def setUp(self):
+        self.fixture = (ROOT / FIXTURE).read_text()
+        self.before = reverse_disclosure_reveal(self.fixture)
+
+    def test_later_exact_projection_preserves_prior_patch_and_every_other_fixture_statement(self):
+        self.assertEqual(hashlib.sha256(self.before.encode()).hexdigest(),
+                         '48e42224d7358f2f9bd98758a19bb1ba66d42b756aa8bc77ce7cfb5f9d8a3f2a')
+        self.assertEqual(hashlib.sha256(_focus_projection.PATCH.read_bytes()).hexdigest(),
+                         '36aba7369aff6650774184d1283ed80f47af9d32aa79ea836f76fc81475720d4')
+        self.assertEqual(hashlib.sha256(reverse_focus_wait(FIXTURE, self.fixture).encode()).hexdigest(), BASELINES[FIXTURE])
+        for start, end in [('    private fun bindDisclosureScroll(', '    private fun screenshot('),
+                           ('    private fun await(', '    private fun find('),
+                           ('            tap("Approve for this session"); reviewed()\n            proveBroaderDraft()',
+                            '            boundary("complete", "lifecycle_no_submit")')]:
+            self.assertEqual(self.fixture.split(start, 1)[1].split(end, 1)[0], self.before.split(start, 1)[1].split(end, 1)[0])
+
+    def test_transient_option_lookup_has_old_failure_and_retains_one_current_disclosure(self):
+        with self.assertRaisesRegex(AssertionError, 'Current disclosure anchor is not visible'):
+            disclosure_preparation_memory(self.before, [True, False])
+        disclosure, owned, state = disclosure_preparation_memory(self.fixture, [True, False, True, True])
+        self.assertIs(disclosure, owned)
+        self.assertEqual(state['binds'], ['header'])
+        self.assertEqual(state['scrolls'], 1)
+        self.assertEqual(state['now'], 30)
+        # Resume uses the same native node: no option/header acquisition is present.
+        resume = self.fixture.split('await("same current card body restored")', 1)[1].split('prepareEarlySendAnchor(lifecycleSend)', 1)[0]
+        self.assertIn('disclosureScrollReady(lifecycleDisclosure)', resume)
+        self.assertNotIn('bindDisclosureScroll', resume)
+
+    def test_ordinary_visible_option_keeps_offscreen_header_short_circuit(self):
+        for source in (self.before, self.fixture):
+            disclosure, _, state = disclosure_preparation_memory(source, [True], header=False, capture=False)
+            self.assertIsNone(disclosure)
+            self.assertEqual(state['binds'], [])
+            self.assertEqual(state['scrolls'], 0)
+
+    def test_capture_refuses_unknown_or_stale_ownership_and_keeps_original_bound(self):
+        for facts in (dict(header=False), dict(ready=False)):
+            with self.subTest(facts=facts), self.assertRaises(AssertionError):
+                disclosure_preparation_memory(self.fixture, [True], **facts)
+        with self.assertRaisesRegex(AssertionError, 'original preparation deadline'):
+            disclosure_preparation_memory(self.fixture, [False])
+        guards = self.fixture.split('    private fun bindDisclosureScroll(', 1)[1].split('    private fun screenshot(', 1)[0]
+        for exact in ('anchor.refresh() && exactVisible(anchor, label)',
+                      'anchor.packageName?.toString() == targetContext.packageName',
+                      'check(window >= 0)', 'current.refresh() && current.windowId == window',
+                      'current.packageName?.toString() == targetContext.packageName',
+                      'check(parents++ < 16)', 'active.windowId != window',
+                      'active.packageName?.toString() != targetContext.packageName'):
+            self.assertIn(exact, guards)
+
+    def test_changed_missing_or_duplicated_later_hunks_refuse(self):
+        patch = _focus_projection.DISCLOSURE_PATCH.read_text()
+        for hunk in re.split(r'(?m)^@@[^\n]*\n', patch)[1:]:
+            new = ''.join(line[1:] for line in hunk.splitlines(keepends=True) if line[0] in ' +')
+            self.assertEqual(self.fixture.count(new), 1)
+            for changed in (new + '// changed reviewed preparation\n', '', new + new):
+                with self.subTest(hunk=new[:80], replacement=changed[:80]), self.assertRaises(AssertionError):
+                    reverse_focus_wait(FIXTURE, self.fixture.replace(new, changed, 1))
 
 
 if __name__ == '__main__':
