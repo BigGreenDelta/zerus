@@ -3,12 +3,14 @@
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
+    future::Future,
     rc::Rc,
     time::Duration,
 };
+use tokio::time::Instant;
 use zerus_mobile_connector::{
     config, encrypted_runtime,
-    http::Relay,
+    http::{Relay, RelayError},
     journal::Journal,
     native::{Call, Native, NativeError, NativeResult, Output},
     runtime::{Connector, Event, Settings},
@@ -18,7 +20,7 @@ use zerus_mobile_crypto::{
     self as crypto, EncryptedEnvelope, EnrollmentCandidate, Header, Identity, Invitation,
     OperationClass, PayloadKind, Role, SignedEnrollment, SignedMembershipSnapshot,
 };
-use zerus_relay::config::Config;
+use zerus_relay::{config::Config, store::ServiceClass};
 #[path = "../../relay/tests/common/mod.rs"]
 mod common;
 #[path = "../../relay/tests/support/mod.rs"]
@@ -76,17 +78,176 @@ impl Native for FixtureNative {
         ))
     }
 }
+const ADMISSION_DEADLINE: &str = "Fixture admission deadline exhausted";
+
+fn replay_safe(method: &str, path: &str, has_body: bool) -> bool {
+    let identified = |prefix| {
+        path.strip_prefix(prefix)
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+    };
+    match (method, path, has_body) {
+        ("POST", "/v2/enrollments" | "/v2/requests", true) => true,
+        ("GET", "/v2/computers?limit=100", false) => true,
+        ("GET", _, false) => identified("/v2/enrollments/") || identified("/v2/requests/"),
+        _ => false,
+    }
+}
+
+/// This fixture deliberately overlaps phone reads with the connector's live
+/// heartbeat/claim loops under the real public admission limits. Only a 429 on
+/// these exact replay-safe calls is retried; an unknown delivery is never replayed.
+async fn admitted_api<F, Fut>(
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    deadline: Instant,
+    mut call: F,
+) -> Result<Value, RelayError>
+where
+    F: FnMut(Option<Vec<u8>>) -> Fut,
+    Fut: Future<Output = Result<Option<Value>, RelayError>>,
+{
+    let retry = replay_safe(method, path, body.is_some());
+    // Retain the same candidate/token or signed envelope bytes for every attempt.
+    let raw = body.map(|value| serde_json::to_vec(&value).unwrap());
+    loop {
+        if Instant::now() >= deadline {
+            return Err(RelayError::Failed(ADMISSION_DEADLINE));
+        }
+        let result = tokio::time::timeout_at(deadline, call(raw.clone()))
+            .await
+            .map_err(|_| RelayError::Failed(ADMISSION_DEADLINE))?;
+        match result {
+            Ok(Some(value)) => return Ok(value),
+            Ok(None) => return Err(RelayError::Failed("Fixture response is empty")),
+            Err(RelayError::Status(429)) if retry => {
+                tokio::time::sleep_until(deadline.min(Instant::now() + Duration::from_millis(25)))
+                    .await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 async fn api(relay: &Relay, method: &str, path: &str, body: Option<Value>) -> Value {
-    relay
-        .call(
-            method.parse().unwrap(),
-            path,
-            body.map(|v| serde_json::to_vec(&v).unwrap()),
-            3 * 1024 * 1024,
+    admitted_api(
+        method,
+        path,
+        body,
+        Instant::now() + Duration::from_secs(5),
+        |raw| relay.call(method.parse().unwrap(), path, raw, 3 * 1024 * 1024),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method} {path} failed: {error:?}"))
+}
+
+#[tokio::test]
+async fn fixture_admission_retries_only_exact_safe_calls() {
+    let id = uuid::Uuid::new_v4();
+    for (method, path, body) in [
+        (
+            "POST",
+            "/v2/enrollments".to_owned(),
+            Some(json!({"candidate":"synthetic", "service_token":"fixed"})),
+        ),
+        (
+            "POST",
+            "/v2/requests".to_owned(),
+            Some(json!({"envelope":"fixed ciphertext"})),
+        ),
+        ("GET", format!("/v2/enrollments/{id}"), None),
+        ("GET", "/v2/computers?limit=100".to_owned(), None),
+        ("GET", format!("/v2/requests/{id}"), None),
+    ] {
+        let attempts = RefCell::new(Vec::new());
+        let result = admitted_api(
+            method,
+            &path,
+            body.clone(),
+            Instant::now() + Duration::from_secs(5),
+            |raw| {
+                let mut attempts = attempts.borrow_mut();
+                attempts.push(raw);
+                std::future::ready(if attempts.len() == 1 {
+                    Err(RelayError::Status(429))
+                } else {
+                    Ok(Some(json!({"ok":true})))
+                })
+            },
         )
         .await
-        .unwrap()
-        .unwrap()
+        .unwrap();
+        assert_eq!(result, json!({"ok":true}));
+        let expected = body.map(|value| serde_json::to_vec(&value).unwrap());
+        assert_eq!(*attempts.borrow(), vec![expected.clone(), expected]);
+    }
+    // Claim, invitation, result delivery and removal are never safe simply
+    // because their method resembles a fixture read or submission.
+    for (method, path, body) in [
+        ("GET", "/v2/node/requests?wait=25".to_owned(), None),
+        ("POST", "/v2/node/invitations".to_owned(), Some(json!({}))),
+        (
+            "POST",
+            format!("/v2/node/requests/{id}/result"),
+            Some(json!({})),
+        ),
+        ("DELETE", "/v2/node/self".to_owned(), Some(json!({}))),
+        ("GET", format!("/v2/requests/{id}?extra=1"), None),
+        ("POST", "/v2/requests".to_owned(), None),
+    ] {
+        let attempts = Cell::new(0);
+        let result = admitted_api(
+            method,
+            &path,
+            body,
+            Instant::now() + Duration::from_secs(5),
+            |_| {
+                attempts.set(attempts.get() + 1);
+                std::future::ready(Err(RelayError::Status(429)))
+            },
+        )
+        .await;
+        assert_eq!(result, Err(RelayError::Status(429)), "{method} {path}");
+        assert_eq!(attempts.get(), 1, "{method} {path}");
+    }
+    for error in [
+        RelayError::Status(401),
+        RelayError::Status(409),
+        RelayError::Failed("unknown delivery"),
+    ] {
+        let attempts = Cell::new(0);
+        let result = admitted_api(
+            "POST",
+            "/v2/requests",
+            Some(json!({"envelope":"fixed"})),
+            Instant::now() + Duration::from_secs(5),
+            |_| {
+                attempts.set(attempts.get() + 1);
+                std::future::ready(Err(error.clone()))
+            },
+        )
+        .await;
+        assert_eq!(result, Err(error));
+        assert_eq!(attempts.get(), 1);
+    }
+}
+
+#[tokio::test]
+async fn fixture_admission_deadline_does_not_start_another_call() {
+    let attempts = Cell::new(0);
+    let result = admitted_api(
+        "GET",
+        "/v2/computers?limit=100",
+        None,
+        Instant::now(),
+        |_| {
+            attempts.set(attempts.get() + 1);
+            std::future::ready(Ok(Some(json!({}))))
+        },
+    )
+    .await;
+    assert_eq!(result, Err(RelayError::Failed(ADMISSION_DEADLINE)));
+    assert_eq!(attempts.get(), 0);
 }
 
 #[tokio::test]
@@ -144,13 +305,94 @@ async fn transport_flow(stop_during_native: bool) {
     let token = crypto::encode(&[7; 32]);
     let transport = zerus_mobile_connector::url::Transport::new(&server.url).unwrap();
     let mobile = Relay::new(&transport, &token, None);
-    api(
-        &mobile,
-        "POST",
-        "/v2/enrollments",
-        Some(json!({"candidate":candidate,"service_token":token})),
-    )
-    .await;
+    let enrollment = json!({"candidate":candidate,"service_token":token});
+    if stop_during_native {
+        // Force a genuine HTTP admission refusal before the Stop contract. This
+        // is independent of scheduler speed and retains the production limits.
+        assert!(
+            support::eventually(|| async {
+                store
+                    .db
+                    .one(
+                        "SELECT used_standard FROM service_resources WHERE lane='database'",
+                        &[],
+                    )
+                    .await
+                    .unwrap()
+                    .is_some_and(|row| row["used_standard"] == 0)
+            })
+            .await
+        );
+        let held = RefCell::new(
+            store
+                .acquire_service(
+                    "database",
+                    ServiceClass::Standard,
+                    backend
+                        .cfg
+                        .standard_capacity(backend.cfg.payload_pool_max() as usize),
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(held.borrow().is_some());
+        let attempts = RefCell::new(Vec::new());
+        let pending = admitted_api(
+            "POST",
+            "/v2/enrollments",
+            Some(enrollment.clone()),
+            Instant::now() + Duration::from_secs(5),
+            |raw| {
+                attempts.borrow_mut().push(raw.clone());
+                let first = attempts.borrow().len() == 1;
+                let mobile = &mobile;
+                let held = &held;
+                async move {
+                    let response = mobile
+                        .call(
+                            "POST".parse().unwrap(),
+                            "/v2/enrollments",
+                            raw,
+                            3 * 1024 * 1024,
+                        )
+                        .await;
+                    if first {
+                        assert_eq!(
+                            response,
+                            Err(RelayError::Status(429)),
+                            "Held standard database capacity must cause HTTP429 before enrollment",
+                        );
+                        drop(held.borrow_mut().take());
+                    }
+                    response
+                }
+            },
+        )
+        .await
+        .expect("Exact enrollment must recover after admission capacity is released");
+        assert_eq!(pending["state"], "pending");
+        {
+            let attempts = attempts.borrow();
+            assert!(attempts.len() >= 2);
+            let expected = Some(serde_json::to_vec(&enrollment).unwrap());
+            assert!(attempts.iter().all(|body| body == &expected));
+        }
+        let row = store
+            .db
+            .one(
+                "SELECT count(*) AS count FROM enrollment_candidates WHERE device_id=?",
+                zerus_relay::args![&phone.public().device_id],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row["count"], 1,
+            "Retries must retain one candidate identity"
+        );
+    } else {
+        api(&mobile, "POST", "/v2/enrollments", Some(enrollment)).await;
+    }
     let environment = config::Environment {
         home: Some(local.path().into()),
         cwd: local.path().into(),
