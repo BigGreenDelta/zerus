@@ -88,7 +88,8 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     // END QUESTION_SEND_DIAGNOSTIC definition
     private data class EarlySend(private val initialNode: AccessibilityNodeInfo, val window: Int, val currentCard: () -> Boolean,
         val observation: (Int?) -> QuestionUiProbe.ContentSnapshot?,
-        val currentReview: (QuestionUiProbe.ContentSnapshot, Long, Long) -> Boolean) {
+        val currentReview: (QuestionUiProbe.ContentSnapshot, Long, Long) -> Boolean,
+        val reviewState: (QuestionUiProbe.ContentSnapshot, Long, Long) -> QuestionUiProbe.EarlyReviewState) {
         // BEGIN EARLY_SEND_LIVE_ANCHOR state
         var node: AccessibilityNodeInfo = initialNode
             private set
@@ -132,9 +133,34 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
             if (!currentCard()) return false
             if (reviewStart == null) return true
             val bound = checkNotNull(boundSnapshot)
+            // BEGIN EARLY_REVIEW_FOCUS_WAIT current
+            if (!awaitCurrentReview(bound)) return false
+            // END EARLY_REVIEW_FOCUS_WAIT current
             return bound.generation == checkNotNull(boundGeneration) &&
                 currentReview(bound, SystemClock.elapsedRealtime(), checkNotNull(resumeEnd))
         }
+        // BEGIN EARLY_REVIEW_FOCUS_WAIT observation
+        private fun awaitCurrentReview(bound: QuestionUiProbe.ContentSnapshot): Boolean {
+            val end = checkNotNull(resumeEnd)
+            while (true) {
+                if (!currentCard() || bound.generation != checkNotNull(boundGeneration)) return false
+                val now = SystemClock.elapsedRealtime()
+                check(now < end) { "Early-review deadline expired while awaiting eligibility" }
+                when (reviewState(bound, now, end)) {
+                    QuestionUiProbe.EarlyReviewState.INVALID -> return false
+                    QuestionUiProbe.EarlyReviewState.CURRENT -> {
+                        check(SystemClock.elapsedRealtime() < end) { "Early-review deadline expired after eligibility observation" }
+                        return true
+                    }
+                    QuestionUiProbe.EarlyReviewState.WAIT -> {
+                        val remaining = end - SystemClock.elapsedRealtime()
+                        check(remaining > 0) { "Early-review deadline expired while ineligible" }
+                        SystemClock.sleep(minOf(30L, remaining))
+                    }
+                }
+            }
+        }
+        // END EARLY_REVIEW_FOCUS_WAIT observation
         fun elapsed() = SystemClock.elapsedRealtime() - checkNotNull(reviewStart)
     }
     private var earlySend: EarlySend? = null
@@ -764,7 +790,14 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
                 QuestionUiProbe.earlyReviewCurrent(checkNotNull(actionProbeSession),
                     checkNotNull(model.conversationQuestions.singleOrNull()), bound, now, end)
             } }
-            return EarlySend(send, send.windowId, current, observation, currentReview)
+            // BEGIN EARLY_REVIEW_FOCUS_WAIT callback
+            val reviewState = { bound: QuestionUiProbe.ContentSnapshot, now: Long, end: Long -> main {
+                check(currentCard())
+                QuestionUiProbe.classifyEarlyReview(checkNotNull(actionProbeSession),
+                    checkNotNull(model.conversationQuestions.singleOrNull()), bound, now, end)
+            } }
+            // END EARLY_REVIEW_FOCUS_WAIT callback
+            return EarlySend(send, send.windowId, current, observation, currentReview, reviewState)
         }
         fun earlyReview(name: String, checkEarly: () -> Unit) {
             val captured = captureEarlySend()

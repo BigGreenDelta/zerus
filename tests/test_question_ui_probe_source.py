@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 import unittest
 
+from review_focus_projection import original_review_fixture
+
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = "mobile/android/app/src/main/java/app/zerus/mobile/"
 FIXTURE = "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
@@ -75,7 +77,7 @@ def diagnostic_text_memory(source):
 
 class QuestionUiProbeSourceTests(unittest.TestCase):
     def test_failure_classifiers_and_post_observations_leave_all_original_client_and_ui_code_exact(self):
-        source = (ROOT / FIXTURE).read_text()
+        source = original_review_fixture()
         self.assertEqual(hashlib.sha256(strip_send_diagnostics(source).encode()).hexdigest(),
             "fa989a142274bf10ac59eacd8e753227c0ace5635b9a226ab28d5ff13a9ef320")
         model = source.split("    private fun modelEvidence(", 1)[1].split("    private fun set(", 1)[0]
@@ -87,7 +89,7 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
         self.assertTrue(original_fixture(source))
 
     def test_error_text_classification_never_emits_unknown_payload_and_hashes_only_a_bounded_prefix(self):
-        source = (ROOT / FIXTURE).read_text()
+        source = original_review_fixture()
         classify, branches = diagnostic_text_memory(source)
         for condition, kind in branches:
             if condition.startswith('value == '):
@@ -106,7 +108,7 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
             diagnostic_text_memory(source.replace('"k=$kind n=${value.length} p=${prefix.length} sha256Prefix=$digest"', '"raw=$value"'))
 
     def test_post_stage_counters_saturate_unknown_without_changing_delegates_or_refusing_actions(self):
-        source = (ROOT / FIXTURE).read_text()
+        source = original_review_fixture()
         definition = source.split('// BEGIN QUESTION_SEND_DIAGNOSTIC definition\n', 1)[1].split('// END QUESTION_SEND_DIAGNOSTIC definition', 1)[0]
         self.assertIn('AtomicIntegerArray(7)', definition)
         self.assertIn('postStages.updateAndGet(index) { if (it < 128) it + 1 else 128 } == 128', definition)
@@ -128,7 +130,7 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
         self.assertEqual(source.count('synchronized(calls) { calls.add(JSONObject(payload.toString())) }'), 1)
 
     def test_pass_serializer_keeps_multiline_probe_inside_one_field_for_the_actual_parser(self):
-        source = (ROOT / FIXTURE).read_text()
+        source = original_review_fixture()
         lines = [line for line in source.splitlines() if 'result.putString("stream", "Approval choices smoke passed:' in line]
         self.assertEqual(len(lines), 1)
         flat = r' | ${actionProbeEvidence().replace("\n", " | ")}'
@@ -171,7 +173,7 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
 
     def test_original_actions_guards_bindings_and_seven_case_oracles_reconstruct_exactly(self):
         ui = (ROOT / MAIN / "QuestionUi.kt").read_text()
-        fixture = (ROOT / FIXTURE).read_text()
+        fixture = original_review_fixture()
         self.assertTrue(original_ui(ui))
         self.assertTrue(original_fixture(fixture))
         # A changed delegate/guard/oracle outside the observation cannot pass this admission.
@@ -248,7 +250,7 @@ class QuestionUiProbeSourceTests(unittest.TestCase):
         self.assertNotIn("last", first)
 
     def test_fixture_closes_owned_session_and_keeps_original_exception_and_result_schema(self):
-        source = (ROOT / FIXTURE).read_text()
+        source = original_review_fixture()
         report = source.split("// BEGIN QUESTION_UI_PROBE fixture-report\n", 1)[1].split("// END QUESTION_UI_PROBE fixture-report", 1)[0]
         self.assertIn("val owned = QuestionUiProbe.install()", report)
         self.assertIn("try { smokeBody(store) }", report)

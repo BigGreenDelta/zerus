@@ -103,6 +103,30 @@ internal object QuestionUiProbe {
         return snapshot
     }
 
+    // BEGIN EARLY_REVIEW_FOCUS_WAIT classification
+    enum class EarlyReviewState { CURRENT, WAIT, INVALID }
+
+    /** Read-only fixture evidence. WAIT never authorizes input or renews the first bound clock. */
+    @Synchronized fun classifyEarlyReview(owned: Session, question: Question, bound: ContentSnapshot,
+        elapsedNow: Long, originalEnd: Long): EarlyReviewState {
+        val latest = checkNotNull(contentSnapshot(owned, question))
+        if (bound.generation <= 0 || latest.generation < bound.generation ||
+            owned.firstReviewSnapshot(bound.generation - 1) != bound) return EarlyReviewState.INVALID
+        val first = bound.record.detail as? Committed ?: return EarlyReviewState.INVALID
+        val current = latest.record.detail as? Committed ?: return EarlyReviewState.INVALID
+        val start = first.reviewStartedAt ?: return EarlyReviewState.INVALID
+        val currentStart = current.reviewStartedAt
+        if (bound.record.stage != Stage.CONTENT_COMMIT || latest.record.stage != Stage.CONTENT_COMMIT ||
+            bound.record.card != latest.record.card || bound.record.questionObject != latest.record.questionObject ||
+            bound.record.selection != latest.record.selection || !first.eligible ||
+            start < 0 || start > Long.MAX_VALUE - 3_000 || originalEnd != start + 3_000 ||
+            elapsedNow < start || elapsedNow >= originalEnd ||
+            currentStart != null && (currentStart < start || currentStart > elapsedNow)) return EarlyReviewState.INVALID
+        if (earlyReviewCurrent(owned, question, bound, elapsedNow, originalEnd)) return EarlyReviewState.CURRENT
+        return if (!current.eligible || currentStart == null) EarlyReviewState.WAIT else EarlyReviewState.INVALID
+    }
+    // END EARLY_REVIEW_FOCUS_WAIT classification
+
     /** Negative-input evidence only: a forward reset cannot renew the first bound review window. */
     @Synchronized fun earlyReviewCurrent(owned: Session, question: Question, bound: ContentSnapshot,
         elapsedNow: Long, originalEnd: Long): Boolean {

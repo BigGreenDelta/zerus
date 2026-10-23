@@ -15,6 +15,8 @@ import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
+from review_focus_projection import original_review_fixture, reverse_focus_wait, BASELINES
+
 ROOT = Path(__file__).resolve().parents[1]
 # Fixture pins include the parent-selection correction; its exact two-term reverse retains full 96fc.
 
@@ -990,7 +992,7 @@ class ApprovalHarnessTests(unittest.TestCase):
                 self.ui.instrumentation_result(value)
 
     def test_android_streaming_progress_is_bounded_passive_and_preserves_all_original_fixture_bytes(self):
-        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        source = original_review_fixture()
         pattern = re.compile(r'^([ ]*)// BEGIN APPROVAL_PROGRESS ([a-z-]+)\n[\s\S]*?^\1// END APPROVAL_PROGRESS \2\n', re.M)
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['definition', 'case-boundary', 'on-start',
             'store-begin', 'store-ready', 'bootstrap-begin', 'activity-launch-begin', 'activity-launch-ready', 'bootstrap-ready'])
@@ -1014,7 +1016,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('[*device, "am", "instrument", "-w", "-r", "app.zerus.mobile.test/" + RUNNER], 240)', runner)
 
     def test_lifecycle_read_checkpoints_are_bounded_passive_and_preserve_every_original_read(self):
-        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        source = original_review_fixture()
         pattern = re.compile(r'^([ ]*)// BEGIN LIFECYCLE_READ_DIAGNOSTIC ([a-z-]+)\n[\s\S]*?^\1// END LIFECYCLE_READ_DIAGNOSTIC \2\n', re.M)
         names = ['definition', 'resumed-main-returned', 'body-restore-begin', 'body-restore-passed',
                  'confirm-retire-begin', 'confirm-retire-passed', 'disabled-send-begin', 'disabled-send-passed',
@@ -1060,7 +1062,7 @@ class ApprovalHarnessTests(unittest.TestCase):
 
     def test_android_runner_case_literal_matches_admitted_inventory(self):
         self.ui.select_suite(["--approval-choices"])
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         literal = re.search(r"val CASES = listOf\(([^\n]+)\)", source)[1]
         self.assertEqual(re.findall(r'"([a-z_]+)"', literal), self.ui.CASES.split(","))
 
@@ -1219,7 +1221,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('"app.zerus.mobile.test/" + RUNNER], 240)', source)
         with self.assertRaises(AssertionError):
             self.ui.instrumentation_result("INSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: 0\n")
-        fixture = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        fixture = original_review_fixture()
         expected = [(event, name) for name in self.ui.CASES.split(",") for event in ("begin", "complete")]
         self.assertEqual(re.findall(r'boundary\("(begin|complete)", "([a-z_]+)"\)', fixture), expected)
         self.assertEqual(re.findall(r'cases \+= "([a-z_]+)"', fixture), self.ui.CASES.split(","))
@@ -1233,7 +1235,9 @@ class ApprovalHarnessTests(unittest.TestCase):
             "mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt": "beb6a3caf6ae07ca3a062f4f30286aad3b19b71427eed7c9e8d662f7d5ae85be",
             "mobile/android/app/src/main/java/app/zerus/mobile/QuestionUi.kt": "841c0d5b2df250497b0f54ef8854574ca386e83cb735dc1a0873096d719e22a2",
         }.items():
-            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digest, path)
+            raw = (ROOT / path).read_text()
+            if path in BASELINES: raw = reverse_focus_wait(path, raw)
+            self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), digest, path)
         tree = ast.parse(source)
         main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
         handler = next(node for node in main.body if isinstance(node, ast.Try)).handlers[0]
@@ -1325,7 +1329,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(len(re.findall(r"^        launchFixture\(", source, re.M)), 7)
 
     def test_android_interceptor_failure_is_first_only_and_cannot_qualify_or_use_network(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         self.assertIn("private val interceptorFailure = AtomicReference<InterceptorFailure?>(null)", source)
         self.assertIn("interceptorFailure.compareAndSet(null, failure)", source)
         self.assertNotIn("interceptorFailure.set(", source)
@@ -1346,7 +1350,7 @@ class ApprovalHarnessTests(unittest.TestCase):
             "answer-target", "answer-receipt-identity", "answer-question-identity", "answer-list", "answer-body", "receipt"])
 
     def test_android_native_text_search_keeps_exact_matches_refresh_fallback_and_real_touch(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         self.assertIn("root.findAccessibilityNodeInfosByText(label).orEmpty().firstOrNull { it.refresh() && exactVisible(it, label) }", source)
         self.assertIn("node.isVisibleToUser &&\n        (node.text?.toString() == label || node.contentDescription?.toString() == label)", source)
         self.assertIn("return find(root) { exactVisible(it, label) }", source)
@@ -1363,7 +1367,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertNotIn("setReviewDelayForTests", source)
 
     def test_android_failure_phase_buffer_is_bounded_and_does_not_change_pass_schema(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         self.assertIn("private val phases = ArrayDeque<String>()", source)
         phase = source.split("    private fun phase(", 1)[1].split("    override fun onCreate", 1)[0]
         self.assertIn(".take(160)", phase)
@@ -1375,7 +1379,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('finish(Activity.RESULT_OK, result)', success)
 
     def test_android_early_windows_use_owned_lifecycle_and_scoped_fresh_identity_cache(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         button = source.split("    private fun button(", 1)[1].split("    private fun tap(", 1)[0]
         self.assertIn('earlySend?.takeIf { label == "Send answer" }', button)
         self.assertIn('return cachedSendButton(cached)', button)
@@ -1417,7 +1421,7 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
     def test_android_cached_send_rewalks_only_stale_ancestors_under_one_original_end(self):
-        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        source = original_review_fixture()
         clock = SimpleNamespace(now=1_000)
         class Node:
             def __init__(self, *, refresh=True, parent=None, **values):
@@ -1479,7 +1483,7 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertNotIn(forbidden, resolver)
 
     def test_android_live_anchor_preparation_preserves_the_original_fixture_and_reader(self):
-        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        source = original_review_fixture()
         pattern = re.compile(r'^([ ]*)// BEGIN EARLY_SEND_LIVE_ANCHOR ([a-z-]+)\n[\s\S]*?^\1// END EARLY_SEND_LIVE_ANCHOR \2\n', re.M)
         self.assertEqual([match[2] for match in pattern.finditer(source)], ['state', 'preparation', 'early-review', 'lifecycle'])
         projected = pattern.sub('', source)
@@ -1511,7 +1515,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(source.count('prepareEarlySendAnchor('), 3)  # One definition and the two fixed call sites.
 
     def test_android_live_anchor_has_a_source_bound_obsolete_node_counterexample(self):
-        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        source = original_review_fixture()
         clock = SimpleNamespace(now=1000)
         def node(*, refresh=True, parent=None, clickable=False, enabled=True):
             return SimpleNamespace(refresh=lambda: refresh, parent=parent, clickable=clickable, enabled=enabled,
@@ -1546,7 +1550,7 @@ class ApprovalHarnessTests(unittest.TestCase):
             assert not cached_send_memory(source, cache.node, 7, 'app.zerus.mobile', 4000, clock)[0].enabled
 
     def test_android_live_anchor_refuses_missing_foreign_late_faulted_or_repeated_preparation(self):
-        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        source = original_review_fixture()
         clock = SimpleNamespace(now=1000)
         def candidate(**changes):
             value = SimpleNamespace(refresh=lambda: True, window=7, package='app.zerus.mobile', visible=True,
@@ -1611,7 +1615,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIs(prepare_anchor_memory(source, cache, lambda _: fresh, clock, 'app.zerus.mobile'), fresh)
 
     def test_android_early_clock_binds_once_to_the_current_owned_production_start(self):
-        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        source = original_review_fixture()
         clock = SimpleNamespace(now=1000)
         snapshot = SimpleNamespace(generation=1, start=500, eligible=True)
         alive = True
@@ -1680,7 +1684,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('await("same Activity regained focus for $name") { main { activity.hasWindowFocus() } && captured.bindReview() }', source)
 
     def test_android_owned_probe_snapshot_never_reenters_the_main_thread_helper(self):
-        source = (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        source = original_review_fixture()
         self.assertEqual(early_probe_main_depths(source), dict(currentCard=0, current=1, observation=1, currentReview=1))
         old_nested = source.replace('                check(currentCard())\n', '                check(current())\n', 1)
         self.assertNotEqual(old_nested, source)
@@ -1695,7 +1699,7 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertNotIn(forbidden, observation)
 
     def test_android_lifecycle_stop_requires_the_same_alive_created_activity_not_modal_focus_loss(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         body = source.split('boundary("begin", "lifecycle_no_submit")', 1)[1].split('boundary("complete", "lifecycle_no_submit")', 1)[0]
         stop = body.split('await("Activity stopped") { main {\n', 1)[1].split('                } }', 1)[0]
         resume = body.split('await("same Activity regained focus") { main {\n', 1)[1].split('                } && lifecycleSend.bindReview() }', 1)[0]
@@ -1793,7 +1797,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn("changes the agent's permissions beyond this request.\\n\\nExact command for this session only", tests)
 
     def test_android_metadata_source_predicate_refuses_every_unbound_origin_and_extra_path(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         metadata = source.split('                if (request.method == "GET") {', 1)[1].split('                check(request.url.host == "relay.example.test"', 1)[0]
         condition = metadata.split("                    check(", 1)[1].split(')\n                    guard = "metadata-path"', 1)[0]
         fields = {"request.url.scheme": "scheme", "request.url.host": "host", "request.url.port": "port",
@@ -1825,7 +1829,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertNotIn("chain.proceed(", source)
 
     def test_android_broader_proof_and_failure_windows_do_not_rewrite_or_hide_primary_outcome(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         proof = source.split("        fun broaderDraftMatches(", 1)[1].split("        fun proveBroaderDraft()", 1)[0]
         for value in ('model.draft(target, question)', 'QuestionPolicies.broaderChoice(question, mapOf("approval" to ids))',
                       'ids == setOf("2")', 'answer.string("text").isEmpty()', 'draft.status == "editing"',
@@ -1874,7 +1878,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertLess(failure.index("error.stackTraceToString()"), failure.index("$failureEvidence"))
 
     def test_android_receipt_applied_source_predicate_requires_every_exact_settled_identity(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         helper = source.split("        fun receiptApplied(number: Int)", 1)[1].split("        fun open(", 1)[0]
         condition = helper.split("                    val applied =", 1)[1].split("\n                    applied", 1)[0]
         fields = {
@@ -1908,7 +1912,7 @@ class ApprovalHarnessTests(unittest.TestCase):
                 self.assertFalse(finite_source_predicate(condition, {**valid, "draft_answers": answer}))
 
     def test_android_receipt_gates_follow_original_counts_without_writes_or_unsent_card_admission(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         helper = source.split("        fun receiptApplied(number: Int)", 1)[1].split("        fun open(", 1)[0]
         for required in ('synchronized(calls)', 'check(calls.size == number)', 'JSONObject(calls[number - 1].toString())',
                          'payload.getString("request_id")', 'payload.getString("question_id")', 'payload.getString("expected_question_hash")',
@@ -1932,7 +1936,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(source.count('proveBroaderDraft()'), 5)  # Definition plus the four actual broader Send paths.
 
     def test_android_failure_is_captured_before_teardown_and_primary_survives_diagnostic_or_cleanup_error(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         outer = source.split('    override fun onStart()', 1)[1].split('    private fun <T> main(', 1)[0]
         self.assertNotIn('windowEvidence()', outer)
         self.assertNotIn('screenshot("failure")', outer)
@@ -1950,7 +1954,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('if (original == null) throw cleanup else if (cleanup !== original) original.addSuppressed(cleanup)', cleanup)
 
     def test_android_tap_diagnostics_refresh_and_bind_existing_one_physical_touch_without_new_actions(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         tap = source.split('    private fun tap(label: String)', 1)[1].split('    private fun reveal(', 1)[0]
         self.assertLess(tap.index('check(action.refresh())'), tap.index('check(action.isEnabled && action.isClickable)'))
         for required in ('action.windowId', 'action.isVisibleToUser', 'action.isSelected', 'action.isChecked',
@@ -1965,7 +1969,7 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertNotIn(forbidden, tap)
 
     def test_android_reject_proof_source_predicate_requires_existing_current_option_three_without_fabrication(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         helper = source.split('        fun proveRejectDraft()', 1)[1].split('        fun expect(', 1)[0]
         self.assertIn('QuestionPolicies.savedDraft(model.drafts, target, it)', helper)
         for forbidden in ('model.draft(', 'model.edit(', 'set(model', 'model.send(', 'tap(', 'expected.set(', 'refreshActivity('):
@@ -2011,7 +2015,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('elapsed >= 0 && elapsed < 3_000', source)
 
     def test_android_staged_diagnostic_fault_retains_active_partial_when_window_query_throws(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         record, stage, order = android_diagnostic_memory(source)
         lines, calls = [], []
         def active():
@@ -2039,7 +2043,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(bounded[-1], 'owned-evidence UNKNOWN line-limit')
 
     def test_android_staged_diagnostics_and_cleanup_preserve_the_identical_primary_in_memory(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         record, stage, order = android_diagnostic_memory(source)
         failure = source.split('        var primaryFailure: Throwable? = null', 1)[1].rsplit('        } catch (error: Throwable) {', 1)[1]
         capture, cleanup = failure.split('        } finally {', 1)
@@ -2095,7 +2099,7 @@ class ApprovalHarnessTests(unittest.TestCase):
                                  'owned-evidence UNKNOWN stage=window-list type=LookupError'])
 
     def test_android_failure_labels_model_and_tree_diagnostics_are_fixed_owned_and_readonly(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         diagnostics = source.split('    private fun evidenceLine(', 1)[1].split('    private fun set(', 1)[0]
         for required in ('root.refresh() && root.packageName?.toString() == targetContext.packageName',
                          'node.packageName?.toString() == targetContext.packageName', 'depth <= 16', '++visited <= 128', '++matched <= 12',
@@ -2306,7 +2310,7 @@ class ApprovalHarnessTests(unittest.TestCase):
 
 
     def test_android_stale_case_delivers_inspection_before_one_negative_physical_attempt(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         role_seams = re.compile(r'^([ ]*)// BEGIN STALE_COMPOSE_ROLE ([a-z-]+)\n[\s\S]*?^\1// END STALE_COMPOSE_ROLE \2\n', re.M)
         self.assertEqual([match[2] for match in role_seams.finditer(source)], ['definition', 'admission'])
         source = role_seams.sub('', source)
@@ -2337,7 +2341,7 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertNotIn(forbidden, after_mutation)
 
     def test_android_stale_inspection_source_predicate_refuses_every_unknown_or_changed_identity(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         case = source.split('            boundary("begin", "readonly_stale_identity")', 1)[1].split('            boundary("complete", "readonly_stale_identity")', 1)[0]
         condition = case.split('                val proven =', 1)[1].split('\n                proven', 1)[0]
         fields = {'activity.hasWindowFocus()': 'focused', 'model.activityVerified': 'verified', 'model.detailBusy': 'busy',
@@ -2370,7 +2374,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('} && !postStagesUnknown && postStages.get(2) == answerEntries && count() == 4 && expected.get() == null', case)
 
     def test_android_stale_negative_gesture_requires_fresh_owned_disabled_label_and_unchanged_bounds(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         role_seams = re.compile(r'^([ ]*)// BEGIN STALE_COMPOSE_ROLE ([a-z-]+)\n[\s\S]*?^\1// END STALE_COMPOSE_ROLE \2\n', re.M)
         self.assertEqual([match[2] for match in role_seams.finditer(source)], ['definition', 'admission'])
         source = role_seams.sub('', source)
@@ -2435,7 +2439,7 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertIn('if (question != null) NativeQuestionCard(model, target, question, available', ui)
 
     def test_android_stale_choice_resolves_disabled_action_ancestor_independently_of_label_enabled_state(self):
-        source = (ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt").read_text()
+        source = original_review_fixture()
         walker = source.split('            fun staleDisabledAction(label: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo {', 1)[1].split('            val choice = checkNotNull(', 1)[0]
         roles = dict(re.findall(r'"([^"]+)" -> "([^"]+)"', walker))
         self.assertEqual(roles, {'Approve once': 'android.widget.RadioButton', 'Send answer': 'android.widget.Button'})
@@ -2482,7 +2486,7 @@ class ApprovalHarnessTests(unittest.TestCase):
 
 class StaleComposeRoleSourceTests(unittest.TestCase):
     def source(self):
-        return (ROOT / 'mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt').read_text()
+        return original_review_fixture()
 
     def test_option_only_seams_restore_every_byte_of_4233_and_the_send_walker(self):
         source = self.source()

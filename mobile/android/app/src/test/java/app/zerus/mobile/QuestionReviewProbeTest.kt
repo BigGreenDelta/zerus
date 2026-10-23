@@ -169,6 +169,104 @@ class QuestionReviewProbeTest {
         } finally { QuestionUiProbe.close(owned) }
     }
 
+    @Test fun sameCardFocusResetIsWaitOnlyAndNeverRenewsTheFirstWindow() {
+        val question = Question("card", "hash", emptyList(), true, false, false, "input")
+        val owned = QuestionUiProbe.install()
+        try {
+            val first = questionRecord(question, committed(1000))
+            owned.append(first)
+            val bound = owned.contentSnapshot()
+            assertEquals(QuestionUiProbe.EarlyReviewState.CURRENT,
+                QuestionUiProbe.classifyEarlyReview(owned, question, bound, 1000, 4000))
+            val sequence = listOf(
+                committed(1000).copy(eligible = false, focused = false),
+                committed(null).copy(eligible = false, focused = false),
+                committed(null))
+            for ((index, detail) in sequence.withIndex()) {
+                owned.append(first.copy(detail = detail))
+                assertEquals(QuestionUiProbe.EarlyReviewState.WAIT,
+                    QuestionUiProbe.classifyEarlyReview(owned, question, bound, 2000L + index, 4000))
+                assertFalse(QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 2000L + index, 4000))
+            }
+            owned.append(first.copy(detail = committed(2200)))
+            assertEquals(QuestionUiProbe.EarlyReviewState.CURRENT,
+                QuestionUiProbe.classifyEarlyReview(owned, question, bound, 2300, 4000))
+            assertTrue(QuestionUiProbe.earlyReviewCurrent(owned, question, bound, 2300, 4000))
+            assertEquals(bound, owned.firstReviewSnapshot(0))
+            assertEquals(1000L, (bound.record.detail as QuestionUiProbe.Committed).reviewStartedAt)
+            for ((now, end) in listOf(4000L to 4000L, 4001L to 4000L, 2300L to 5200L)) {
+                assertEquals(QuestionUiProbe.EarlyReviewState.INVALID,
+                    QuestionUiProbe.classifyEarlyReview(owned, question, bound, now, end))
+            }
+            owned.append(first.copy(detail = committed(null).copy(eligible = false)))
+            assertEquals(QuestionUiProbe.EarlyReviewState.INVALID,
+                QuestionUiProbe.classifyEarlyReview(owned, question, bound, 4000, 4000))
+        } finally { QuestionUiProbe.close(owned) }
+    }
+
+    @Test fun focusWaitCannotHideChangedSelectionGenerationOrUnknownClocks() {
+        data class Case(val detail: QuestionUiProbe.Committed, val now: Long = 2300, val end: Long = 4000)
+        for (case in listOf(Case(committed(999).copy(eligible = false)),
+            Case(committed(2301).copy(eligible = false)), Case(committed(null), now = 999),
+            Case(committed(null), end = 3999), Case(committed(null), end = 5200))) {
+            val question = Question("card", "hash", emptyList(), true, false, false, "input")
+            val owned = QuestionUiProbe.install()
+            try {
+                val first = questionRecord(question, committed(1000))
+                owned.append(first)
+                val bound = owned.contentSnapshot()
+                owned.append(first.copy(detail = case.detail))
+                assertEquals(case.toString(), QuestionUiProbe.EarlyReviewState.INVALID,
+                    QuestionUiProbe.classifyEarlyReview(owned, question, bound, case.now, case.end))
+                for (changed in listOf(bound.copy(generation = 0), bound.copy(generation = 9),
+                    bound.copy(record = first.copy(selection = "other")),
+                    bound.copy(record = first.copy(detail = committed(null))),
+                    bound.copy(record = first.copy(detail = committed(-1))),
+                    bound.copy(record = first.copy(detail = committed(Long.MAX_VALUE))))) {
+                    assertEquals(QuestionUiProbe.EarlyReviewState.INVALID,
+                        QuestionUiProbe.classifyEarlyReview(owned, question, changed, 2300, 4000))
+                }
+                owned.append(first.copy(selection = "other", detail = committed(null).copy(eligible = false)))
+                assertEquals(QuestionUiProbe.EarlyReviewState.INVALID,
+                    QuestionUiProbe.classifyEarlyReview(owned, question, bound, 2300, 4000))
+                for (changed in listOf(first.copy(card = "other"), first.copy(questionObject = first.questionObject + 1))) {
+                    owned.append(changed.copy(detail = committed(null).copy(eligible = false)))
+                    assertThrows(IllegalStateException::class.java) {
+                        QuestionUiProbe.classifyEarlyReview(owned, question, bound, 2300, 4000)
+                    }
+                }
+            } finally { QuestionUiProbe.close(owned) }
+        }
+    }
+
+    @Test fun focusClassificationIsReadOnlyAndRequiresTheHealthyOwnedRecorder() {
+        val question = Question("card", "hash", emptyList(), true, false, false, "input")
+        val owned = QuestionUiProbe.install()
+        val bound: QuestionUiProbe.ContentSnapshot
+        try {
+            owned.append(questionRecord(question, committed(1000)))
+            bound = owned.contentSnapshot()
+            repeat(200) {
+                assertEquals(QuestionUiProbe.EarlyReviewState.CURRENT,
+                    QuestionUiProbe.classifyEarlyReview(owned, question, bound, 2000, 4000))
+            }
+            assertEquals(bound, owned.contentSnapshot())
+            for (other in listOf(QuestionUiProbe.Session())) assertThrows(IllegalStateException::class.java) {
+                QuestionUiProbe.classifyEarlyReview(other, question, bound, 2000, 4000)
+            }
+            for (other in listOf(question.copy(), question.copy(hash = "other"))) assertThrows(IllegalStateException::class.java) {
+                QuestionUiProbe.classifyEarlyReview(owned, other, bound, 2000, 4000)
+            }
+            owned.failed()
+            assertThrows(IllegalStateException::class.java) {
+                QuestionUiProbe.classifyEarlyReview(owned, question, bound, 2000, 4000)
+            }
+        } finally { assertEquals(1, QuestionUiProbe.close(owned).records.size) }
+        assertThrows(IllegalStateException::class.java) {
+            QuestionUiProbe.classifyEarlyReview(owned, question, bound, 2000, 4000)
+        }
+    }
+
     @Test fun earlyReviewRequiresTheActiveHealthyOwnerAndExactQuestionObject() {
         val question = Question("card", "hash", emptyList(), true, false, false, "input")
         val owned = QuestionUiProbe.install()

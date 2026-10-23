@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import unittest
 
+from review_focus_projection import original_review_fixture
+
 ROOT = Path(__file__).resolve().parents[1]
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
@@ -160,7 +162,7 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         fixture = ROOT / "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt"
         # The fixture baseline includes the parent-selection and Compose role-child corrections;
         # physical case oracles stay exact.
-        self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(),
+        self.assertEqual(hashlib.sha256(original_review_fixture().encode()).hexdigest(),
                          "73cee450f08e33c007ad6f3188a6a69135674e2503f80ea48582ba8aa394a9f7")
 
     def test_prepared_publication_uses_the_actual_bounded_owner_before_any_atomic_install(self):
