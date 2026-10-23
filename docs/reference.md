@@ -2017,6 +2017,12 @@ A single-letter SSH alias must use an explicit address such as `ssh://c/repo`.
 
 ### Worktrees and ordinary folders
 
+New session keeps **Auto** available when the selected computer confirms the
+working checkout, even if the repository has more checkouts than its bounded
+catalog can list. Missing, bare, stale or unconfirmed folders remain ineligible.
+Opening the form or choosing a folder creates no worktree; creation starts only
+after **Start session**.
+
 Session cards show a checkout line of the form `folder / branch`, such as
 `zerus / work-1a2b`, preceded by a small Git branch icon; **detached HEAD**
 replaces a missing branch. A linked worktree names its main checkout folder
