@@ -20,20 +20,15 @@ permissions:
 cache-mode: none
 
 jobs:
-  # Builds and signs in parallel with the checks of the same run. The sealed
-  # candidate is uploaded only after that run's CI gate succeeds; the gate
-  # requires the credential-free Android unit tests and release lint in checks.yml.
+  # The trusted caller starts this short signed build only after its CI gate.
   android:
     if: >-
       !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-24.04
-    # The build takes about 5 minutes; the wait covers the slowest checks
-    # (quick checks 20 plus Windows 90) and queued runners.
-    timeout-minutes: 180
+    timeout-minutes: 40
     environment: release
     permissions:
       contents: read
-      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -76,7 +71,6 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0'
       - name: Build the dev APK with the shared signer
         working-directory: mobile/android
-        # The job timeout is sized for the gate wait, not for a hung build.
         timeout-minutes: 30
         env:
           DEV_RUN_NUMBER: ${{ github.run_number }}
@@ -107,75 +101,11 @@ jobs:
                           '--published-at', datetime.datetime.now(datetime.timezone.utc).isoformat()], check=True)
           PY
       # Also runs after a failed step, so no private input outlives the build.
-      - name: Remove private signing inputs before waiting
+      - name: Remove private signing inputs
         if: always()
         run: |
           rm -rf "$RUNNER_TEMP/zerus-dev-signing" mobile/android/app/build
           rm -f mobile/android/app/google-services.json
-      - name: Wait for this run's CI gate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          python3 - <<'PY'
-          import json, os, subprocess, time
-
-          def gate(jobs, attempt):
-              """Return success, pending or the conclusion that rejects this run's CI gate."""
-              records = [job for job in jobs if job.get('name') == 'CI gate']
-              if any(type(job.get('run_attempt')) is not int or not 0 < job['run_attempt'] <= attempt for job in records):
-                  return 'invalid attempt'
-              current = [job for job in records if job['run_attempt'] == attempt]
-              if len(current) > 1:
-                  return 'ambiguous'
-              if current:
-                  if current[0].get('status') != 'completed':
-                      return 'pending'
-                  return str(current[0].get('conclusion'))
-              # A failed-job retry keeps a gate that already passed. A failed or
-              # cancelled earlier gate is rerun, so wait for this attempt's record.
-              earlier = max(records, key=lambda job: job['run_attempt'], default=None)
-              if earlier and earlier.get('status') == 'completed' and earlier.get('conclusion') == 'success':
-                  return 'success'
-              return 'pending'
-
-          def jobs(run_id):
-              # filter=latest lists only jobs of the newest attempt, not a gate
-              # that passed earlier and was therefore not rerun.
-              rows = []
-              for page in range(1, 11):
-                  result = subprocess.run(['gh', 'api', f'repos/ufna/zerus/actions/runs/{run_id}/jobs'
-                                           f'?filter=all&per_page=100&page={page}'], capture_output=True, text=True)
-                  if result.returncode:
-                      raise LookupError((result.stderr.strip().splitlines() or ['no error output'])[-1][:200])
-                  data = json.loads(result.stdout)
-                  rows += data['jobs']
-                  if not data['jobs'] or len(rows) >= data['total_count']:
-                      return rows
-              raise LookupError('Unexpected job count')
-
-          if __name__ == '__main__':
-              run_id, attempt = os.environ['RUN_ID'], int(os.environ['RUN_ATTEMPT'])
-              deadline, errors = time.monotonic() + 135 * 60, 0
-              while True:
-                  try:
-                      state, errors = gate(jobs(run_id), attempt), 0
-                  except (LookupError, ValueError, KeyError, TypeError) as error:
-                      errors += 1
-                      print(f'Job lookup failed ({errors}/6): {error}', flush=True)
-                      if errors == 6:
-                          raise SystemExit('Cannot read the CI gate; nothing uploaded. Re-run failed jobs to rebuild.')
-                      state = 'pending'
-                  if state == 'success':
-                      print('CI gate succeeded; uploading the sealed candidate.')
-                      break
-                  if state != 'pending':
-                      raise SystemExit(f'CI gate: {state}; nothing uploaded. Re-run failed jobs to rebuild.')
-                  if time.monotonic() > deadline:
-                      raise SystemExit('CI gate did not finish in time; nothing uploaded. Re-run failed jobs to rebuild.')
-                  time.sleep(20)
-          PY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zerus-dev-android-a${{ github.run_attempt }}

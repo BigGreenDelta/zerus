@@ -7,7 +7,7 @@ Keychain pairing across them.
 | Channel | Source | Version shown in About |
 | --- | --- | --- |
 | Local Dev | `mobile/ios/scripts/dev-install.sh` on the Mac the phone is attached to | `X.Y.Z-local` and the Git revision |
-| Dev | Every successful main CI run, uploaded to TestFlight for internal testers; chosen builds also reach the public beta | `X.Y.Z-dev.N`, N = the CI run number |
+| Dev | Successful full Nightly verification, uploaded to TestFlight for internal testers; chosen builds also reach the public beta | `X.Y.Z-dev.N`, N = the CI run number |
 | Stable | A maintainer-dispatched upload, submitted for App Store review | `X.Y.Z` |
 
 `mobile/ios/DEV_VERSION` names the next planned release. `mobile/ios/VERSION`
@@ -45,10 +45,14 @@ the `codesign --sign` leaf in an archive log establishes attribution, not safe
 revocation by itself. Never revoke the dedicated CI identity or a personal,
 distribution or Developer ID certificate.
 
-- **Dev:** `ci.yml` job `dev-ios` calls the workflow after the CI gate of a main
-  push succeeds, when the repository variable `IOS_TESTFLIGHT_ENABLED` is `true`.
-  Internal testers with automatic distribution enabled receive each processed
-  build.
+- **Dev:** `nightly.yml` calls the upload workflow after full Windows/iOS and
+  shared checks succeed, when `IOS_TESTFLIGHT_ENABLED=true`. Build numbers come
+  from successful upstream main CI for the exact source SHA; Nightly's own
+  sequence never resets them. A read-only GET-only App Store Connect preflight
+  checks the app, marketing version and build number before any archive or
+  signing identity import. Known valid/processing builds are kept without
+  uploading again; failed/expired/ambiguous records or API errors refuse.
+  Internal testers with automatic distribution receive processed new builds.
 - **Public beta:** until the App Store release, anyone can join through the
   public TestFlight link of the external group **Public beta**. A maintainer
   promotes a chosen processed Dev build by adding it to that group (App Store
@@ -56,15 +60,16 @@ distribution or Developer ID certificate.
   testers receive it. Dev uploads are therefore no longer marked
   internal-testing-only; only promoted builds leave the internal group.
 - **Stable:** dispatch **iOS TestFlight** from `main` with channel `stable`
-  after adding `mobile/ios/VERSION` and once that commit's main CI has succeeded:
+  after adding `mobile/ios/VERSION` and once that commit's main CI has succeeded.
+  The manual workflow additionally requires full exact-source platform verification:
   the candidate's build number is that CI run number, so it is higher than every
   Dev build uploaded with the same version before the Dev base advanced. The uploaded build is then submitted for
   review in App Store Connect, together with the store listing.
 
 The upload job runs in the `ios-testflight` environment and verifies that it runs
-for `refs/heads/main` of `ufna/zerus`. Only `ci.yml` forwards the five secret
-names; PR code and other workflows never receive them. The workflow has no cache
-access.
+for `refs/heads/main` of `ufna/zerus`. Nightly forwards the five secret names;
+manual Stable uses the same protected environment. PR code and other workflows
+never receive them. The workflow has no cache access.
 
 ## One-time setup (maintainer)
 
@@ -99,7 +104,7 @@ access.
    description, feedback email, the privacy policy URL) and the Beta App Review
    contact; the review notes point to **Try demo** as for App Review.
 5. **Enable Dev uploads.** Set the repository variable `IOS_TESTFLIGHT_ENABLED`
-   to `true`. The next main push uploads a Dev build.
+   to `true`. The next successful full Nightly uploads a new Dev build.
 6. **Push notifications.** In Certificates, Identifiers & Profiles enable Push
    Notifications for `app.zerus.mobile`; automatic signing then includes the
    app's `aps-environment` entitlement (development for Local Dev builds,

@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       ci_run_id:
-        description: Successful full main-push ci.yml run for this exact SHA
+        description: Successful full Nightly/Release candidate (or historical full main CI) for this exact SHA
         required: true
         type: string
       signing_cert_sha256:
@@ -53,7 +53,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Admit exact stable source and completed full main CI before signing inputs
+      - name: Admit exact stable source and completed full qualification before signing inputs
         id: admission
         env:
           GH_TOKEN: ${{ github.token }}

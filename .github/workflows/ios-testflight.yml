@@ -1,12 +1,9 @@
 name: iOS TestFlight
 
-# Archives the iOS app of an exact main revision and uploads it to App Store
-# Connect. Trusted main CI calls it for the Dev channel (TestFlight internal
-# testing) after the CI gate succeeds; a maintainer dispatches it from main for a
-# Stable App Store candidate. Only these callers forward the three App Store
-# Connect secret names and the two of the dedicated CI development identity; the
-# upload job alone reads their values from the ios-testflight environment, whose
-# policy admits only main.
+# Nightly calls Dev only after full exact-source verification. Manual Stable
+# uploads run the same full matrix here. Build numbers stay in the main CI
+# sequence; the read-only ASC preflight avoids repeated nightly uploads.
+
 on:
   workflow_call:
     inputs:
@@ -30,12 +27,13 @@ on:
       channel:
         description: Upload channel
         type: choice
-        # Dev uploads come only from CI, whose run number is the Dev build sequence.
+        # Dev uploads come from Nightly and retain the main CI build sequence.
         options: [stable]
         default: stable
 
 permissions:
   contents: read
+  actions: read
 
 cache-mode: none
 
@@ -44,7 +42,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify:
+    if: inputs.channel == 'stable'
+    cache-mode: read
+    uses: ./.github/workflows/checks.yml
+    with:
+      ref: ${{ github.sha }}
+      run_linux: true
+      run_arch: true
+      run_macos: true
+      run_windows: true
+      run_ios: true
   upload:
+    needs: verify
+    if: >-
+      !cancelled() && ((inputs.channel == 'dev' && needs.verify.result == 'skipped') ||
+      (inputs.channel == 'stable' && needs.verify.result == 'success'))
     name: iOS archive and App Store Connect upload
     runs-on: macos-15
     timeout-minutes: 60
@@ -68,22 +81,19 @@ jobs:
         id: build
         env:
           CHANNEL: ${{ inputs.channel }}
-          RUN_NUMBER: ${{ github.run_number }}
-          SOURCE_COMMIT: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          # Dev runs inside ci.yml, whose run number is the Dev sequence. A Stable
-          # candidate takes the sequence of its commit's successful main CI run, so
-          # build numbers keep growing across both channels of one version.
-          if [ "$CHANNEL" = dev ]; then
-            number=$RUN_NUMBER
-          else
-            number=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SOURCE_COMMIT&event=push&branch=main&status=success" \
-              --jq '.workflow_runs[0].run_number // empty')
-            test -n "$number" || { echo "Main CI has not succeeded for $SOURCE_COMMIT yet." >&2; exit 1; }
-          fi
-          echo "number=$number" >> "$GITHUB_OUTPUT"
+        run: python3 scripts/ci/ios-ci-number.py
+      - name: Check whether this iOS build already exists
+        id: preflight
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          BUILD_NUMBER: ${{ steps.build.outputs.number }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: python3 scripts/ci/ios-testflight-preflight.py
       - name: Archive, sign and upload
+        if: steps.preflight.outputs.upload == 'true'
         env:
           CHANNEL: ${{ inputs.channel }}
           BUILD_NUMBER: ${{ steps.build.outputs.number }}

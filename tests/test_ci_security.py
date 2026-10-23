@@ -71,7 +71,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         }))
 
     def test_dev_requires_exact_main_gate_without_inheriting_skipped_review(self):
-        passed = {'gate':'success', 'automatic':'success', 'dev-android':'success', 'dev-macos':'success', 'review':'skipped'}
+        passed = {'gate':'success', 'automatic':'success', 'dev-android':'success', 'dev-macos':'success', 'dev-macos-bundle':'success', 'review':'skipped'}
         self.assertTrue(self.dev_selected(self.ci, 'dev', passed))
         for key in ['gate','automatic','dev-android','dev-macos']:
             for result in ['failure','cancelled','skipped']:
@@ -110,22 +110,21 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertNotRegex(dev, r'(?m)^  android:')
         self.assertNotIn('zerus-dev-android', dev)
 
-    def test_android_candidate_builds_with_the_checks_but_only_on_dev_main_pushes(self):
-        caller = job(self.ci,'dev-android')
-        # No needs: building starts with the checks; the callee waits for the gate.
-        self.assertNotRegex(caller, r'(?m)^    needs:')
-        self.assertEqual(field(caller,'uses'),'./.github/workflows/dev-android.yml')
-        self.assertIn('    permissions:\n      contents: read\n      actions: read\n', caller)
-        self.assertTrue(self.dev_selected(self.ci,'dev-android',{}))
+    def test_android_candidate_starts_only_after_successful_dev_main_checks(self):
+        caller = job(self.ci, 'dev-android')
+        self.assertEqual(field(caller, 'needs'), '[gate, automatic]')
+        self.assertEqual(field(caller, 'uses'), './.github/workflows/dev-android.yml')
+        self.assertIn('    permissions:\n      contents: read\n', caller)
+        self.assertNotIn('actions: read', caller)
+        passed = {'gate': 'success', 'automatic': 'success'}
+        self.assertTrue(self.dev_selected(self.ci, 'dev-android', passed))
+        for key in passed:
+            for result in ('failure', 'cancelled', 'skipped'):
+                self.assertFalse(self.dev_selected(self.ci, 'dev-android', {**passed, key: result}))
         for overrides in [dict(cancelled=True), dict(event='pull_request'), dict(event='workflow_dispatch'),
                           dict(event='schedule'), dict(ref='refs/heads/feature'), dict(repository='example/zerus'),
                           dict(enabled=''), dict(private=True)]:
-            with self.subTest(overrides=overrides):
-                self.assertFalse(self.dev_selected(self.ci,'dev-android',{},**overrides))
-        # A newer main push must never cancel a signed build in progress.
-        android = (ROOT / '.github/workflows/dev-android.yml').read_text()
-        self.assertNotIn('concurrency', caller)
-        self.assertNotIn('concurrency', android)
+            self.assertFalse(self.dev_selected(self.ci, 'dev-android', passed, **overrides))
 
     def test_dev_passes_only_required_android_secrets_to_protected_build(self):
         workflow = (ROOT / '.github/workflows/dev-android.yml').read_text()
@@ -273,27 +272,24 @@ class WorkflowSecurityTests(unittest.TestCase):
                     with self.assertRaises(SystemExit):
                         exec(code, {})
 
-    def test_windows_suite_selection_matches_the_other_full_suites(self):
-        checks = (ROOT / ".github/workflows/checks.yml").read_text()
-        automatic = "github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_windows"
-        self.assertIn(f"RUN_WINDOWS: ${{{{ {automatic} }}}}", job(checks, "source"))
-        self.assertIn("run_windows: ${{ steps.revision.outputs.run_windows }}", job(checks, "source"))
-        for name in ("automatic", "review"):
-            with self.subTest(caller=name):
-                self.assertIn(f"run_windows: ${{{{ {automatic} }}}}", job(self.ci, name))
-        # Manual CI selects every suite by default; reusable callers opt in.
-        self.assertRegex(self.ci, r"(?m)^      run_windows:\n        description: .+\n        type: boolean\n        default: true$")
-        self.assertRegex(self.ci, r"(?m)^      run_windows:\n        type: boolean\n        default: false$")
-        # Stable and nightly candidates carry the zip that their own run tested.
-        for name in ("nightly.yml", "release.yml"):
-            with self.subTest(workflow=name):
-                workflow = (ROOT / ".github/workflows" / name).read_text()
-                self.assertIn("      run_windows: true\n", job(workflow, "verify"))
-                assemble = job(workflow, "assemble")
-                self.assertIn("name: windows-x86_64-${{ github.sha }}\n          path: artifacts/windows\n", assemble)
-                self.assertIn('portables=(artifacts/windows/*.zip)', assemble)
-                self.assertIn('test "${#portables[@]}" = 1', assemble)
-                self.assertIn('--windows-zip "${portables[0]}"', assemble)
+    def test_windows_and_ios_coverage_are_explicit_and_independent(self):
+        checks = (ROOT / '.github/workflows/checks.yml').read_text()
+        source = job(checks, 'source')
+        for platform in ('windows', 'ios'):
+            self.assertIn(f"RUN_{platform.upper()}: ${{{{ inputs.run_{platform} }}}}", source)
+            self.assertIn(f"run_{platform}: ${{{{ steps.revision.outputs.run_{platform} }}}}", source)
+            self.assertRegex(self.ci, rf"(?m)^      run_{platform}:\n        description: .+\n        type: boolean\n        default: true$")
+        for name in ('nightly.yml', 'release.yml'):
+            workflow = (ROOT / '.github/workflows' / name).read_text()
+            self.assertIn('      run_windows: true\n', job(workflow, 'verify'))
+            self.assertIn('      run_ios: true\n', job(workflow, 'verify'))
+            assemble = job(workflow, 'assemble')
+            self.assertIn('name: windows-x86_64-${{ github.sha }}\n          path: artifacts/windows\n', assemble)
+            self.assertIn('--windows-zip "${portables[0]}"', assemble)
+        review = job(self.ci, 'review')
+        self.assertIn("filter_pr_platforms: ${{ github.event_name == 'pull_request' }}", review)
+        self.assertIn('fetch-depth: 0', source)
+        self.assertIn('python3 scripts/ci/select-coverage.py', source)
 
     def test_windows_job_is_bounded_credential_free_and_pinned(self):
         windows = job((ROOT / ".github/workflows/checks.yml").read_text(), "windows-desktop")
@@ -454,7 +450,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                 results = {key: {"result": value}
                            for key, value in {**base, **dict.fromkeys(windows, other), name: result}.items()}
                 environment = {"RESULTS": json.dumps(results), "RUN_CLI": "true", "RUN_ARCH": "true",
-                               "RUN_MACOS": "true", "RUN_WINDOWS": selected}
+                               "RUN_MACOS": "true", "RUN_IOS": "true", "RUN_WINDOWS": selected}
                 with self.subTest(job=name, selected=selected, result=result), patch.dict(os.environ, environment):
                     if success:
                         exec(code, {})
@@ -477,7 +473,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             ({**arch_skipped, "arch": "success"}, "false", False),
         ]:
             environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
-                           "RUN_CLI": "true", "RUN_ARCH": run_arch, "RUN_MACOS": "true", "RUN_WINDOWS": "true"}
+                           "RUN_CLI": "true", "RUN_ARCH": run_arch, "RUN_MACOS": "true", "RUN_IOS": "true", "RUN_WINDOWS": "true"}
             with self.subTest(results=results, run_arch=run_arch), patch.dict(os.environ, environment):
                 if success:
                     exec(code, {})
@@ -664,7 +660,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                 results["ios"] = "skipped"
             results["connector-macos"] = smoke_result
             environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
-                           "RUN_CLI": "true", "RUN_ARCH": "true", "RUN_MACOS": run_macos, "RUN_WINDOWS": "true"}
+                           "RUN_CLI": "true", "RUN_ARCH": "true", "RUN_MACOS": run_macos, "RUN_IOS": run_macos, "RUN_WINDOWS": "true"}
             with self.subTest(run_macos=run_macos, result=smoke_result), patch.dict(os.environ, environment):
                 if success:
                     exec(code, {})
@@ -676,7 +672,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
         ios = job(checks, "ios")
         self.assertEqual(field(ios, "runs-on"), "macos-15")
-        self.assertEqual(field(ios, "if"), "needs.source.outputs.run_macos == 'true'")
+        self.assertEqual(field(ios, "if"), "needs.source.outputs.run_ios == 'true'")
         self.assertRegex(field(ios, "timeout-minutes"), r"^\d+$")
         for text in ("secrets", "vars.", "environment:", "permissions", "github.token", "continue-on-error", "cache",
                      "allowProvisioningUpdates", "DEVELOPMENT_TEAM"):
@@ -686,23 +682,20 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", ios)
         self.assertIn("swift test", ios)
         self.assertIn("CODE_SIGNING_ALLOWED=NO", ios)
-        self.assertIn("'ios': json.loads(os.environ['RUN_MACOS']),", job(checks, "gate"))
+        self.assertIn("'ios': json.loads(os.environ['RUN_IOS']),", job(checks, "gate"))
         gate = job(checks, "gate")
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "cli", "arch", "arch-package",
                  "mac-desktop", "windows-desktop", "windows-host")
-        for run_macos, ios_result, success in [("true", "success", True), ("true", "failure", False),
+        for run_ios, ios_result, success in [("true", "success", True), ("true", "failure", False),
                                                ("true", "skipped", False), ("true", "cancelled", False),
                                                ("false", "skipped", True), ("false", "success", False)]:
             results = dict.fromkeys(names, "success")
-            if run_macos == "false":
-                results["mac-desktop"] = "skipped"
-                results["connector-macos"] = "skipped"
             results["ios"] = ios_result
             environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
-                           "RUN_CLI": "true", "RUN_ARCH": "true", "RUN_MACOS": run_macos, "RUN_WINDOWS": "true"}
-            with self.subTest(run_macos=run_macos, result=ios_result), patch.dict(os.environ, environment):
+                           "RUN_CLI": "true", "RUN_ARCH": "true", "RUN_MACOS": "true", "RUN_IOS": run_ios, "RUN_WINDOWS": "true"}
+            with self.subTest(run_ios=run_ios, result=ios_result), patch.dict(os.environ, environment):
                 if success:
                     exec(code, {})
                 else:
@@ -757,7 +750,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             text = path.read_text()
             with self.subTest(workflow=path.name):
                 passed = re.findall(r"(?m)^ +save_caches: *(.*)$", text)
-                if path.name == "ci.yml":
+                if path.name in {"ci.yml", "nightly.yml"}:
                     self.assertEqual(passed, ["true"])
                 elif path.name == "checks.yml":
                     self.assertEqual(passed, [""])
@@ -1087,23 +1080,16 @@ class WorkflowSecurityTests(unittest.TestCase):
                 for runner in re.findall(r'"((?:ubuntu|macos|windows)-[^"]+)"', text):
                     self.assertIn(runner, labels)
 
-    def test_dev_candidates_follow_the_whole_main_matrix_and_include_the_checked_mac_bundle(self):
-        # Dev starts after the main gate, which selects every suite on a push,
-        # Windows included: a Windows failure also holds back Dev.
-        selected = dict(re.findall(r"(?m)^      (run_\w+): \$\{\{ (.*) \}\}$", job(self.ci, "automatic")))
-        self.assertEqual(set(selected), {"run_linux", "run_arch", "run_macos", "run_windows"})
-        for name, expression in selected.items():
-            with self.subTest(suite=name):
-                self.assertTrue(eval(expression.replace("||", " or "), {"__builtins__": {}}, {
-                    "github": SimpleNamespace(event_name="push"), "inputs": SimpleNamespace(**{name: False})}))
-        self.assertIn("    needs: [gate, automatic, dev-android, dev-macos]\n", job(self.ci, "dev"))
-        # The v2 Dev catalogs have no Windows artifact kind; the portable zip
-        # stays a GitHub asset of stable and nightly releases.
-        dev = (ROOT / ".github/workflows/dev.yml").read_text()
-        downloads = re.findall(r"uses: actions/download-artifact@\S+ # v[\d.]+\n(?:        if: inputs.macos\n)?        with:\n          name: (.+)", dev)
-        self.assertEqual(downloads, ["arch-x86_64-${{ github.sha }}", "macos-signed-${{ github.sha }}"])
-        self.assertEqual(dev.count("actions/download-artifact@"), len(downloads))
-        self.assertNotIn("windows-x86_64", dev)
+    def test_dev_candidates_require_shared_checks_arch_mac_android(self):
+        automatic = job(self.ci, 'automatic')
+        for name in ('linux', 'arch', 'macos'):
+            self.assertIn("run_" + name + ": ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_" + name + " }}", automatic)
+        self.assertIn('      run_windows: false\n      run_ios: false', automatic)
+        self.assertIn('    needs: [gate, automatic, dev-android, dev-macos]\n', job(self.ci, 'dev'))
+        dev = (ROOT / '.github/workflows/dev.yml').read_text()
+        self.assertNotIn('windows-x86_64', dev)
+        self.assertNotIn('dev-ios:', self.ci)
+        self.assertIn('needs: [gate, automatic, dev-macos-bundle]', job(self.ci, 'dev-macos'))
 
     def test_privileged_publishers_have_no_cache_access(self):
         for name in ("publish.yml", "publish-nightly.yml", "dev.yml", "dev-android.yml", "android-release.yml", "publish-dev.yml"):
@@ -1116,41 +1102,24 @@ class WorkflowSecurityTests(unittest.TestCase):
     def dev_android(self):
         return job((ROOT / ".github/workflows/dev-android.yml").read_text(), "android")
 
-    def test_android_candidate_is_uploaded_only_after_this_runs_ci_gate(self):
+    def test_android_candidate_needs_no_polling_runner_or_actions_token(self):
         android = self.dev_android()
         listed = steps(android)
-        names = [re.match(r"      - (?:name|uses): (.*)", step)[1] for step in listed]
-        remove, wait = "Remove private signing inputs before waiting", "Wait for this run's CI gate"
-        self.assertEqual(names[-3:-1], [remove, wait])
-        self.assertTrue(names[-1].startswith("actions/upload-artifact@"))
-        self.assertEqual(android.count("actions/upload-artifact@"), 1)
-        self.assertLess(names.index("Prepare existing Android identity and private Firebase configuration"),
-                        names.index("Seal the signed APK and exact source"))
-        self.assertLess(names.index("Seal the signed APK and exact source"), names.index(remove))
-        # The signer, its properties and the Firebase file are gone before the
-        # wait, also after a failed build; the upload needs a successful wait.
-        removal, waiting, upload = listed[-3:]
-        self.assertIn("        if: always()\n", removal)
-        for path in ('"$RUNNER_TEMP/zerus-dev-signing"', "mobile/android/app/google-services.json"):
+        removal, upload = listed[-2:]
+        self.assertIn('name: Remove private signing inputs', removal)
+        self.assertIn('        if: always()\n', removal)
+        for path in ('"$RUNNER_TEMP/zerus-dev-signing"', 'mobile/android/app/google-services.json'):
             self.assertIn(path, removal)
-        for step in (waiting, upload):
-            self.assertNotRegex(step, r"(?m)^        if:")
-        self.assertIn("'CI gate'", waiting)
-        for line in ("name: zerus-dev-android-a${{ github.run_attempt }}", "path: artifacts/dev-android",
-                     "retention-days: 3", "if-no-files-found: error"):
-            self.assertIn(f"          {line}\n", upload)
-        # Only the wait step receives the job token; it can only read Actions.
-        self.assertEqual([step for step in listed if "github.token" in step], [waiting])
-        self.assertIn("    permissions:\n      contents: read\n      actions: read\n", android)
-        self.assertEqual(field(android, "environment"), "release")
-        # The wait covers the slowest checks (quick checks 20 plus Windows 90)
-        # and the gate; the job timeout also covers the build before it.
-        minutes = int(re.search(r"time\.monotonic\(\) \+ (\d+) \* 60", waiting)[1])
-        self.assertGreaterEqual(minutes, 20 + 90 + 5)
-        self.assertGreaterEqual(int(field(android, "timeout-minutes")), minutes + 35)
-        # A hung build stays bounded like the former 35-minute job.
-        build = listed[names.index("Build the dev APK with the shared signer")]
-        self.assertLessEqual(int(re.search(r"(?m)^        timeout-minutes: (\d+)$", build)[1]), 35)
+        self.assertNotIn('github.token', android)
+        self.assertNotIn('actions: read', android)
+        self.assertNotIn('time.sleep', android)
+        self.assertNotIn('Wait for', android)
+        self.assertEqual(field(android, 'environment'), 'release')
+        self.assertEqual(int(field(android, 'timeout-minutes')), 40)
+        for line in ('name: zerus-dev-android-a${{ github.run_attempt }}', 'path: artifacts/dev-android',
+                     'retention-days: 3', 'if-no-files-found: error'):
+            self.assertIn('          ' + line + '\n', upload)
+        self.assertNotRegex(upload, r'(?m)^        if:')
 
     def test_signed_android_job_only_assembles_after_the_credential_free_checks(self):
         workflow = (ROOT / ".github/workflows/dev-android.yml").read_text()
@@ -1162,9 +1131,8 @@ class WorkflowSecurityTests(unittest.TestCase):
                       '            -PzerusDevBuildNumber="$DEV_RUN_NUMBER"\n', build)
         # Unit tests and lint run in checks.yml, never with the signer.
         self.assertNotRegex(workflow, r"\b(?:test|lint|check|connected)[A-Z]\w*")
-        # The wait accepts only ci.yml's CI gate. It requires exactly one
-        # checks.yml call, whose own gate requires the Android check.
-        self.assertIn("'CI gate'", listed[-2])
+        # Dependency admission requires the same run's gate and trusted checks.
+        self.assertEqual(field(job(self.ci, 'dev-android'), 'needs'), '[gate, automatic]')
         gate = job(self.ci, "gate")
         self.assertEqual(field(gate, "name"), "CI gate")
         self.assertEqual(field(gate, "needs"), "[automatic, review]")
@@ -1175,77 +1143,6 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("android", field(suites, "needs").strip("[]").split(", "))
         self.assertIn("'android': True,", suites)
         self.assertIn("testDebugUnitTest lintRelease -PzerusFirebase=true", job(checks, "android"))
-
-    def test_android_candidate_accepts_only_a_successful_gate_of_this_attempt(self):
-        namespace = {}
-        exec(compile(inline_python(steps(self.dev_android())[-2]), "workflow-dev-android-wait", "exec"), namespace)
-        gate = namespace["gate"]
-        def record(attempt, status="completed", conclusion=None, name="CI gate"):
-            return {"name": name, "run_attempt": attempt, "status": status, "conclusion": conclusion}
-        others = [record(1, conclusion="success", name="Trusted main checks / Suite results"),
-                  record(1, conclusion="success", name="Signed Android dev candidate / CI gate")]
-        for jobs, attempt, state in [
-            ([], 1, "pending"),
-            ([record(1, "queued")], 1, "pending"),
-            ([record(1, "in_progress")], 1, "pending"),
-            ([record(1, conclusion="success")], 1, "success"),
-            ([record(1, conclusion="failure")], 1, "failure"),
-            ([record(1, conclusion="cancelled")], 1, "cancelled"),
-            ([record(1, conclusion="skipped")], 1, "skipped"),
-            ([record(1, conclusion="timed_out")], 1, "timed_out"),
-            # A failed-job retry reruns a failed gate: the earlier record is not final.
-            ([record(1, conclusion="failure")], 2, "pending"),
-            ([record(1, conclusion="cancelled")], 2, "pending"),
-            ([record(1, conclusion="failure"), record(2, "queued")], 2, "pending"),
-            ([record(2, conclusion="failure")], 2, "failure"),
-            ([record(1, conclusion="failure"), record(2, conclusion="success")], 2, "success"),
-            # A gate that already passed is not rerun with the failed jobs.
-            ([record(1, conclusion="success")], 2, "success"),
-            ([record(3, conclusion="success")], 2, "invalid attempt"),
-            ([record(1, conclusion="success"), record(1, conclusion="success")], 1, "ambiguous"),
-        ]:
-            with self.subTest(jobs=jobs, attempt=attempt):
-                self.assertEqual(gate(others + jobs, attempt), state)
-
-    def test_android_candidate_wait_fails_closed_without_printing_the_token(self):
-        code = compile(inline_python(steps(self.dev_android())[-2]), "workflow-dev-android-wait", "exec")
-        def page(jobs, total=None):
-            body = {"total_count": len(jobs) if total is None else total, "jobs": jobs}
-            return SimpleNamespace(returncode=0, stdout=json.dumps(body), stderr="")
-        def gate(status, conclusion=None):
-            return {"name": "CI gate", "run_attempt": 1, "status": status, "conclusion": conclusion}
-        failed = SimpleNamespace(returncode=1, stdout="", stderr="gh: Server Error (HTTP 502)\n")
-        filler = [{"name": f"job {n}", "run_attempt": 1, "status": "completed", "conclusion": "success"}
-                  for n in range(100)]
-        for responses, clock, succeeds in [
-            ([page([gate("in_progress")]), page([gate("completed", "success")])], None, True),
-            ([page(filler, 101), page([gate("completed", "success")], 101)], None, True),
-            ([failed, page([gate("completed", "success")])], None, True),
-            ([page([gate("in_progress")]), page([gate("completed", "failure")])], None, False),
-            ([page([gate("completed", "cancelled")])], None, False),
-            ([failed] * 6, None, False),
-            ([page([gate("queued")])], [0, 135 * 60 + 1], False),
-        ]:
-            calls = []
-            def run(command, **kwargs):
-                calls.append(command)
-                return responses[len(calls) - 1]
-            environment = {"RUN_ID": "123", "RUN_ATTEMPT": "1", "GH_TOKEN": "synthetic-token"}
-            with (self.subTest(responses=len(responses), succeeds=succeeds),
-                  patch.dict(os.environ, environment), patch("subprocess.run", run), patch("time.sleep"),
-                  patch("time.monotonic", side_effect=clock or (lambda: 0)),
-                  patch("sys.stdout", new_callable=io.StringIO) as output):
-                if succeeds:
-                    exec(code, {"__name__": "__main__"})
-                else:
-                    with self.assertRaises(SystemExit) as stopped:
-                        exec(code, {"__name__": "__main__"})
-                    self.assertIn("nothing uploaded", str(stopped.exception.code))
-                self.assertEqual(len(calls), len(responses))
-                for command in calls:
-                    self.assertEqual(command[:2], ["gh", "api"])
-                    self.assertRegex(command[2], r"^repos/ufna/zerus/actions/runs/123/jobs\?filter=all&per_page=100&page=\d$")
-                self.assertNotIn("synthetic-token", output.getvalue())
 
     def test_cache_trim_is_main_only_housekeeping_without_checked_out_code(self):
         trim = job(self.ci, "cache-trim")
@@ -1332,7 +1229,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             with self.subTest(workflow=name):
                 text = (ROOT / ".github/workflows" / name).read_text()
                 verify = job(text, "verify")
-                self.assertEqual(field(verify, "cache-mode"), "read")
+                self.assertEqual(field(verify, "cache-mode"), "write" if name == "nightly.yml" else "read")
                 self.assertEqual(field(verify, "uses"), "./.github/workflows/checks.yml")
                 checks = (ROOT / ".github/workflows/checks.yml").read_text()
                 # GitHub validates nested permissions even for skipped jobs.
@@ -1399,9 +1296,9 @@ class WorkflowSecurityTests(unittest.TestCase):
         # Dispatch offers only Stable; Dev build numbers come from the CI sequence.
         dispatch = text.split("  workflow_dispatch:\n", 1)[1].split("\npermissions:", 1)[0]
         self.assertIn("options: [stable]", dispatch)
-        ci = self.ci
+        ci = (ROOT / '.github/workflows/nightly.yml').read_text()
         self.assertNotIn("secrets: inherit", ci)
-        dev_ios = job(ci, "dev-ios")
+        dev_ios = job(ci, "ios")
         self.assertEqual(field(dev_ios, "uses"), "./.github/workflows/ios-testflight.yml")
         self.assertIn("channel: dev", dev_ios)
         forwarded = dict(re.findall(r"(?m)^      (\w+): \$\{\{ secrets\.(\w+) \}\}$", dev_ios))
@@ -1409,31 +1306,31 @@ class WorkflowSecurityTests(unittest.TestCase):
         for secret in asc_secrets:
             self.assertNotIn(f"secrets.{secret}", ci.replace(dev_ios, ""))
         for workflow in (ROOT / ".github/workflows").glob("*.yml"):
-            if workflow.name not in {"ci.yml", "ios-testflight.yml"}:
+            if workflow.name not in {"nightly.yml", "ios-testflight.yml"}:
                 self.assertNotIn("APP_STORE_CONNECT_API", workflow.read_text(), workflow.name)
                 self.assertNotIn("IOS_DEVELOPMENT_P12", workflow.read_text(), workflow.name)
 
-    def test_ios_testflight_dev_follows_only_a_successful_main_gate(self):
-        expression = field(job(self.ci, "dev-ios"), "if")
+    def test_ios_testflight_dev_follows_only_full_nightly_verification(self):
+        expression = field(job((ROOT / '.github/workflows/nightly.yml').read_text(), 'ios'), "if")
         self.assertIn("!cancelled()", expression)
         expression = expression.replace("&&", " and ").replace("||", " or ")
         expression = re.sub(r"!(?!=)", "not ", expression)
         expression = re.sub(r"\bfalse\b", "False", expression)
         expression = re.sub(r"\bneeds\.([\w-]+)\.", r"needs['\1'].", expression)
 
-        def runs(gate="success", automatic="success", event="push", ref="refs/heads/main", enabled="true",
+        def runs(gate="success", event="schedule", ref="refs/heads/main", enabled="true",
                  repository="ufna/zerus", private=False, cancelled=False):
             return bool(eval(expression, {"__builtins__": {}}, {
                 "cancelled": lambda: cancelled,
                 "github": SimpleNamespace(repository=repository, ref=ref, event_name=event,
                                           event=SimpleNamespace(repository=SimpleNamespace(private=private))),
                 "vars": SimpleNamespace(IOS_TESTFLIGHT_ENABLED=enabled),
-                "needs": {"gate": SimpleNamespace(result=gate), "automatic": SimpleNamespace(result=automatic)},
+                "needs": {"gate": SimpleNamespace(result=gate)},
             }))
 
         self.assertTrue(runs())
-        for change in ({"gate": "failure"}, {"gate": "skipped"}, {"automatic": "failure"}, {"automatic": "skipped"},
-                       {"event": "pull_request"}, {"event": "workflow_dispatch"}, {"ref": "refs/heads/feature"},
+        for change in ({"gate": "failure"}, {"gate": "skipped"}, {"gate": "cancelled"},
+                       {"event": "pull_request"}, {"event": "push"}, {"ref": "refs/heads/feature"},
                        {"enabled": ""}, {"repository": "fork/zerus"}, {"private": True}, {"cancelled": True}):
             with self.subTest(change=change):
                 self.assertFalse(runs(**change))
@@ -1447,7 +1344,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         return bool(eval(expression, {"__builtins__": {}}, {
             "cancelled": lambda: False, "inputs": SimpleNamespace(macos_cask=requested),
             "vars": SimpleNamespace(MACOS_CASKS_ENABLED="true" if enabled else ""),
-            "needs": SimpleNamespace(verify=SimpleNamespace(result=verify), macos=SimpleNamespace(result=macos)),
+            "needs": SimpleNamespace(verify=SimpleNamespace(result=verify), gate=SimpleNamespace(result=verify), macos=SimpleNamespace(result=macos)),
         }))
 
     def test_casks_are_built_only_once_signing_is_enabled(self):
@@ -1458,7 +1355,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertEqual(field(macos, "uses"), "./.github/workflows/macos-cask.yml")
                 self.assertIn(f"channel: {channel}", macos)
                 self.assertIn("vars.MACOS_CASKS_ENABLED == 'true'", field(macos, "if"))
-                self.assertIn("verify", field(macos, "needs"))
+                self.assertIn("gate" if name == "nightly.yml" else "verify", field(macos, "needs"))
                 for requested in (True, False):
                     if name == "nightly.yml" and not requested:
                         continue

@@ -24,16 +24,14 @@ if [ -n "${ZERUS_DEV_BUILD_NUMBER:-}" ]; then
 fi
 # Release bundles always configure from scratch: a cached build directory can name
 # an SDK that an Xcode update has since removed.
-rm -rf .ci-build/macos-tests .ci-build/macos-release
+rm -rf .ci-build/macos-tests
 # The shipped GUI is tested against exactly the Qt it bundles.
 cmake -S tray -B .ci-build/macos-tests "${cmake_args[@]}" -DBUILD_TESTING=ON
 cmake --build .ci-build/macos-tests --parallel "$jobs"
 QT_QPA_PLATFORM=offscreen \
     ctest --test-dir .ci-build/macos-tests --parallel "$jobs" --timeout 240 --output-on-failure \
     --output-junit "$PWD/artifacts/test-results/macos-bundle-qt.xml"
-cmake -S tray -B .ci-build/macos-release "${cmake_args[@]}" -DBUILD_TESTING=OFF
-cmake --build .ci-build/macos-release --parallel "$jobs"
-python3 scripts/package-macos.py --qt "$qt" --app .ci-build/macos-release/hgs-tray.app \
+python3 scripts/package-macos.py --qt "$qt" --app .ci-build/macos-tests/hgs-tray.app \
     --cli target/release/hgs --connector services/mobile/connector/target/release/zerus-mobile-connector \
     --licenses artifacts/macos-licenses --version "$version" --release "$release" \
     --output "$output"

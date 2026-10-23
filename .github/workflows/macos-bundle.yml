@@ -1,0 +1,82 @@
+name: macOS unsigned bundle
+
+# Credential-free distribution build; Dev overlaps it with checks. Signing is
+# a separate trusted-main job and always waits for the verification gate.
+on:
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        required: true
+    outputs:
+      release:
+        value: ${{ jobs.bundle.outputs.release }}
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+jobs:
+  bundle:
+    name: macOS bundle
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    outputs:
+      release: ${{ steps.release.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # A nightly version counts the revisions of main.
+          fetch-depth: 0
+      - name: Select the release version
+        id: release
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          COMMIT: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess, sys
+          sys.path.insert(0, 'scripts')
+          from macos_release import cask_for
+          from nightly_common import nightly_version
+          channel = os.environ['CHANNEL']
+          cask_for(channel)
+          product = pathlib.Path('VERSION').read_text().strip()
+          if channel == 'nightly':
+              # The same inputs prepare-nightly.py uses for the Arch nightly.
+              count = int(subprocess.check_output(['git', 'rev-list', '--count', 'HEAD'], text=True))
+              release = nightly_version(product, count, os.environ['COMMIT'], int(os.environ['RUN_NUMBER']))
+          elif channel == 'dev':
+              release = pathlib.Path('DEV_VERSION').read_text().strip() + '-dev.' + os.environ['RUN_NUMBER']
+          else:
+              release = product
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'release={release}\n')
+          print(f'Building the {channel} macOS bundle {release}.')
+          PY
+      - run: brew install cmake ninja tmux
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Install the pinned official Qt
+        run: python3 scripts/install-qt-macos.py --output "$RUNNER_TEMP/qt"
+      - name: Build, test and assemble the unsigned bundle
+        env:
+          ZERUS_RELEASE_VERSION: ${{ steps.release.outputs.release }}
+          ZERUS_DEV_BUILD_NUMBER: ${{ inputs.channel == 'dev' && github.run_number || '' }}
+        run: ZERUS_QT_PREFIX="$RUNNER_TEMP/qt" bash scripts/ci/macos-bundle.sh
+      - name: Retain macOS bundle test logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-bundle-results-${{ github.sha }}
+          path: artifacts/test-results
+          retention-days: 3
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-unsigned-${{ github.sha }}
+          path: artifacts/macos-unsigned/Zerus-unsigned.zip
+          retention-days: 3

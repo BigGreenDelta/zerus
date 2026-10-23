@@ -64,23 +64,45 @@ def stable_identity(text, code_text, request):
 
 
 def validate_ci(run, workflow, jobs, request):
-    require(type(run.get('id')) is int and run['id'] == request['ci_run_id'], 'Wrong main CI run.')
-    require(run.get('path') == '.github/workflows/ci.yml' and run.get('event') == 'push' and
-            run.get('head_branch') == 'main' and run.get('head_sha') == request['source_commit'] and
+    require(type(run.get('id')) is int and run['id'] == request['ci_run_id'], 'Wrong qualification run.')
+    callers = {'.github/workflows/ci.yml': ('push', 'Trusted main checks'),
+               '.github/workflows/nightly.yml': (('schedule', 'workflow_dispatch'), 'verify'),
+               '.github/workflows/release.yml': ('workflow_dispatch', 'verify')}
+    policy = callers.get(run.get('path'))
+    require(policy is not None, 'Wrong full-matrix workflow.')
+    events, prefix = policy
+    if run.get('path') == '.github/workflows/nightly.yml' and run.get('event') == 'workflow_dispatch':
+        present = [p for p in ('verify', 'review') if any(j.get('name') == p + ' / Suite results' and j.get('conclusion') == 'success' for j in jobs)]
+        require(len(present) == 1, 'Ambiguous full Nightly matrix.')
+        prefix = present[0]
+    events = (events,) if isinstance(events, str) else events
+    require(run.get('event') in events and run.get('head_branch') == 'main' and
+            run.get('head_sha') == request['source_commit'] and
             run.get('head_repository', {}).get('full_name') == REPOSITORY and
             run.get('repository', {}).get('full_name') == REPOSITORY,
-            'Successful PR/manual/fork/other-source CI cannot admit signing.')
-    require(run.get('status') == 'completed' and run.get('conclusion') == 'success', 'Full main CI must finish successfully.')
-    require(workflow.get('path') == '.github/workflows/ci.yml' and
-            type(workflow.get('id')) is int and workflow['id'] == run.get('workflow_id'), 'Wrong CI workflow identity.')
+            'PR/fork/other-source runs cannot admit signing.')
+    require(run.get('status') == 'completed' and run.get('conclusion') == 'success', 'Full qualification must finish successfully.')
+    require(workflow.get('path') == run['path'] and type(workflow.get('id')) is int and
+            workflow['id'] == run.get('workflow_id'), 'Wrong qualification workflow identity.')
     attempt = run.get('run_attempt')
-    require(type(attempt) is int and attempt > 0, 'Unknown main CI attempt.')
-    # latest is deliberate: no guessing/reusing an absent earlier-attempt gate.
-    for name in ('CI gate', 'Trusted main checks / Suite results'):
+    require(type(attempt) is int and attempt > 0, 'Unknown qualification attempt.')
+    names = ['Resolve commit', 'Quick checks (source and Rust 1.99)',
+             'Rust relay (v1, PostgreSQL and connector contracts)',
+             'Rust mobile connector (Rust 1.99 and black-box suites)',
+             'Rust mobile connector on macOS (smoke)', 'iOS core tests and simulator build',
+             'Android unit tests and lint', 'CLI (ubuntu-24.04)', 'CLI (macos-15)',
+             'Arch desktop', 'Arch package', 'macOS desktop',
+             'Windows client, desktop and portable zip', 'Windows real agents through the session host',
+             'Suite results']
+    required = [prefix + ' / ' + name for name in names]
+    if run['path'] == '.github/workflows/ci.yml':
+        required.append('CI gate')
+    # A reduced Dev gate must never masquerade as full stable qualification.
+    for name in required:
         found = [j for j in jobs if j.get('name') == name]
         require(len(found) == 1 and found[0].get('status') == 'completed' and
                 found[0].get('conclusion') == 'success' and found[0].get('run_attempt') == attempt,
-                'Both exact full-matrix main CI gates must succeed in the selected attempt.')
+                'Every exact full-matrix suite must succeed in the selected attempt: ' + name)
     return dict(run_id=run['id'], run_attempt=attempt, workflow_id=workflow['id'])
 
 
@@ -102,7 +124,9 @@ def json_api(endpoint, end):
 
 def main_ci(request, end):
     run = json_api('actions/runs/' + str(request['ci_run_id']), end)
-    workflow = json_api('actions/workflows/ci.yml', end)
+    require(run.get('path') in ('.github/workflows/ci.yml', '.github/workflows/nightly.yml',
+                                '.github/workflows/release.yml'), 'Wrong full qualification workflow.')
+    workflow = json_api('actions/workflows/' + run['path'].rsplit('/', 1)[1], end)
     jobs = []
     for page in range(1, 11):
         data = json_api(f"actions/runs/{request['ci_run_id']}/jobs?filter=latest&per_page=100&page={page}", end)

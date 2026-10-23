@@ -41,8 +41,8 @@ class StablePolicy(unittest.TestCase):
         def name(text, key):
             return re.search(r'(?m)^  ' + key + r':\n    name: (.+)$', text)[1]
         expected = {name(ci, 'gate'), name(ci, 'automatic') + ' / ' + name(checks, 'gate')}
-        self.assertEqual({job['name'] for job in self.jobs}, expected)
-        self.assertEqual({job['id'] for job in self.jobs}, {118902869022, 118902907985})
+        self.assertTrue(expected <= {job['name'] for job in self.jobs})
+        self.assertEqual(len(self.jobs), 16)
         self.assertEqual(C.validate_ci(self.run, self.workflow, self.jobs, self.request)['run_id'], 123)
         wrong_nested = [{**job, 'name': name(ci, 'automatic') + ' / ' + name(ci, 'gate')}
                         if job['name'] != name(ci, 'gate') else job for job in self.jobs]
@@ -85,6 +85,24 @@ class StablePolicy(unittest.TestCase):
                      [{**j, 'run_attempt': 2} for j in self.jobs]]:
             with self.subTest(jobs=jobs), self.assertRaises(ValueError):
                 C.validate_ci(self.run, self.workflow, jobs, self.request)
+
+    def test_reduced_dev_cannot_qualify_stable_and_full_nightly_release_can(self):
+        for missing in ('Windows client, desktop and portable zip', 'iOS core tests and simulator build'):
+            changed = [{**j, 'conclusion': 'skipped'} if j['name'].endswith(missing) else j for j in self.jobs]
+            with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, 'Every exact full-matrix'):
+                C.validate_ci(self.run, self.workflow, changed, self.request)
+        for file, event in [('nightly.yml', 'schedule'), ('nightly.yml', 'workflow_dispatch'),
+                            ('release.yml', 'workflow_dispatch')]:
+            run = {**self.run, 'path': '.github/workflows/' + file, 'event': event}
+            workflow = {**self.workflow, 'path': run['path']}
+            jobs = [{**j, 'name': j['name'].replace('Trusted main checks / ', 'verify / ')}
+                    for j in self.jobs if j['name'] != 'CI gate']
+            self.assertEqual(C.validate_ci(run, workflow, jobs, self.request)['run_id'], 123)
+            if file == 'nightly.yml' and event == 'workflow_dispatch':
+                reviewed = [{**j, 'name': j['name'].replace('verify / ', 'review / ')} for j in jobs]
+                self.assertEqual(C.validate_ci(run, workflow, reviewed, self.request)['run_id'], 123)
+            with self.assertRaises(ValueError):
+                C.validate_ci(run, workflow, jobs[:-1], self.request)
 
     def test_full_ci_refusal_precedes_any_generation_or_signing_allocation(self):
         with patch.object(C, 'source_check'), patch.object(C, 'main_ci', side_effect=ValueError('CI refused')), \

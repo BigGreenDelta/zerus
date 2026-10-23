@@ -140,7 +140,12 @@ this forwarding even for environment secrets; without it their values are empty.
 The values remain in the main-only `macos-signing` environment and are resolved
 only by the signing job. The callers never use `secrets: inherit`. See
 [GitHub's reusable workflow secret rules](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#using-inputs-and-secrets-in-a-reusable-workflow).
-It runs three jobs after full CI:
+The same three stages remain required. Stable/Nightly start them after full
+verification. Dev overlaps only the credential-free bundle with its core gate;
+`macos-cask.yml` reuses that exact run's checked artifact and waits for both before
+signing. An unsigned version from another Dev run is refused before key import.
+The bundle packages the Release app already exercised by its pinned-Qt test build,
+so it no longer compiles the same GUI again with `BUILD_TESTING=OFF`:
 
 1. **macOS bundle** (`macos-15`, no secrets) selects the release version (the
    product version, the nightly version computed exactly like

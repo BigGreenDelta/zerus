@@ -15,7 +15,19 @@ concurrency:
 
 jobs:
   verify:
-    if: github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event.repository.private == false
+    if: github.event_name == 'schedule' && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event.repository.private == false
+    cache-mode: write
+    uses: ./.github/workflows/checks.yml
+    with:
+      ref: ${{ github.sha }}
+      run_linux: true
+      run_arch: true
+      run_macos: true
+      run_windows: true
+      run_ios: true
+      save_caches: true
+  review:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event.repository.private == false
     cache-mode: read
     uses: ./.github/workflows/checks.yml
     with:
@@ -24,11 +36,49 @@ jobs:
       run_arch: true
       run_macos: true
       run_windows: true
+      run_ios: true
+  gate:
+    name: Nightly verification gate
+    needs: [verify, review]
+    if: always() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    cache-mode: none
+    env:
+      RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - run: |
+          python3 - <<'PY'
+          import json, os
+          results = sorted(row['result'] for row in json.loads(os.environ['RESULTS']).values())
+          assert results == ['skipped', 'success'], 'Exactly one full Nightly matrix must succeed.'
+          PY
+  ios:
+    permissions:
+      contents: read
+      actions: read
+    name: iOS TestFlight Dev build
+    # Independent of the zerus.dev Dev catalog: TestFlight delivers it to internal testers;
+    # a maintainer promotes chosen builds to the public beta through Beta App Review.
+    needs: gate
+    if: >-
+      !cancelled() && needs.gate.result == 'success' &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.event.repository.private == false && vars.IOS_TESTFLIGHT_ENABLED == 'true'
+    uses: ./.github/workflows/ios-testflight.yml
+    with:
+      channel: dev
+    secrets:
+      APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+      APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+      IOS_DEVELOPMENT_P12: ${{ secrets.IOS_DEVELOPMENT_P12 }}
+      IOS_DEVELOPMENT_P12_PASSWORD: ${{ secrets.IOS_DEVELOPMENT_P12_PASSWORD }}
   macos:
     # The zerus@nightly cask starts once the macos-signing environment is
     # provisioned; see docs/macos-distribution.md. A failed cask fails the nightly.
-    if: vars.MACOS_CASKS_ENABLED == 'true'
-    needs: verify
+    if: >-
+      !cancelled() && needs.gate.result == 'success' && vars.MACOS_CASKS_ENABLED == 'true'
+    needs: gate
     uses: ./.github/workflows/macos-cask.yml
     with:
       channel: nightly
@@ -39,10 +89,10 @@ jobs:
       APPLE_NOTARY_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
       APPLE_NOTARY_API_ISSUER_ID: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
   assemble:
-    needs: [verify, macos]
+    needs: [gate, macos]
     # A skipped cask is acceptable only while macOS casks are disabled.
     if: >-
-      !cancelled() && needs.verify.result == 'success' &&
+      !cancelled() && needs.gate.result == 'success' &&
       (needs.macos.result == 'success' || (needs.macos.result == 'skipped' && vars.MACOS_CASKS_ENABLED != 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 15

@@ -1,17 +1,115 @@
 {
   "fixture_kind": "Synthetic run/source identity with root-confirmed successful main1111 gate names and example job IDs",
-  "source": "Root independent read, 2026-10-21; ci.yml automatic/gate plus checks.yml gate name contract",
+  "source": "Public successful full main CI39871287493, narrowed to qualification job metadata; coverage is validated per suite, not only aggregate gates.",
   "jobs": [
     {
-      "id": 118902907985,
-      "name": "CI gate",
+      "id": 120153287775,
+      "name": "Trusted main checks / Resolve commit",
       "status": "completed",
       "conclusion": "success",
       "run_attempt": 1
     },
     {
-      "id": 118902869022,
+      "id": 120153349086,
+      "name": "Trusted main checks / CLI (macos-15)",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349129,
+      "name": "Trusted main checks / Rust mobile connector (Rust 1.99 and black-box suites)",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349132,
+      "name": "Trusted main checks / Quick checks (source and Rust 1.99)",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349155,
+      "name": "Trusted main checks / Rust relay (v1, PostgreSQL and connector contracts)",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349158,
+      "name": "Trusted main checks / Rust mobile connector on macOS (smoke)",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349223,
+      "name": "Trusted main checks / Arch desktop",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349235,
+      "name": "Trusted main checks / macOS desktop",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349239,
+      "name": "Trusted main checks / Android unit tests and lint",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349240,
+      "name": "Trusted main checks / iOS core tests and simulator build",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349242,
+      "name": "Trusted main checks / Windows real agents through the session host",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349268,
+      "name": "Trusted main checks / Windows client, desktop and portable zip",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349360,
+      "name": "Trusted main checks / CLI (ubuntu-24.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120153349635,
+      "name": "Trusted main checks / Arch package",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120165567171,
       "name": "Trusted main checks / Suite results",
+      "status": "completed",
+      "conclusion": "success",
+      "run_attempt": 1
+    },
+    {
+      "id": 120165597521,
+      "name": "CI gate",
       "status": "completed",
       "conclusion": "success",
       "run_attempt": 1
