@@ -718,10 +718,11 @@ struct ActivityRenderResult {
         }
         return result;
     };
-    // A non-empty markdown source adds a button that copies it at the right of the header.
+    // The header can carry recording metadata or a markdown copy button at its right.
     // A boundary marks a change that needs attention, such as a cleared context.
     const auto card = [&](const QString &key, const QString &label, const QString &stamp, const QString &body, bool user,
-                          bool notice = false, bool thinking = false, const QString &markdownSource = {}, bool boundary = false) {
+                          bool notice = false, bool thinking = false, const QString &markdownSource = {}, bool boundary = false,
+                          const QString &headerMetadata = {}) {
         auto content = body;
         // User text always starts with a paragraph. Anchor inside that block:
         // Qt discards an empty anchor between paragraphs, and a header-relative
@@ -737,6 +738,9 @@ struct ActivityRenderResult {
             // Qt drops the bottom margin of a cell's last paragraph: the table keeps the header spacing.
             header = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-bottom:8px;'><tr><td><p style='font-size:11px;margin:0;'>%1</p></td>"
                 "<td align='right' valign='top'><img src='%2' width='14' height='14'></td></tr></table>").arg(title, copyButton("copy", copyKey));
+        } else if (!headerMetadata.isEmpty()) {
+            header = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-bottom:8px;'><tr><td valign='top'><p style='font-size:11px;margin:0;'>%1</p></td>"
+                "<td align='right' valign='top'><p style='font-size:11px;color:%3;margin:0;'>%2</p></td></tr></table>").arg(title, headerMetadata, muted);
         }
         // The spacer goes before each card, so nothing pads the journal below the last one.
         return QString("<p style='font-size:5px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='0'><tr><td width='3' bgcolor='%1'></td><td bgcolor='%2' style='padding:11px 13px;'>"
@@ -904,19 +908,22 @@ struct ActivityRenderResult {
                 const QHash<QString,QString> labels{{"uploading",tr("Sending recording…")},{"queued",tr("Waiting for recognition")},{"transcribing",tr("Recognizing…")},{"ready",tr("Ready to deliver")},
                     {"waiting_agent",tr("Waiting for agent")},{"delivering",tr("Delivering…")},{"submitted",tr("Accepted by native app")},{"failed",tr("Voice message failed")},
                     {"cancelled",tr("Cancelled")},{"uncertain",tr("Delivery not confirmed")}};
-                const int playerWidth=qBound(140,int(qMin(width,widthWithScrollBar)/m_scale)-72,420);
+                const auto transcript=voice.value("transcript").toString();
+                // Reserve the transcript button's width before laying out the
+                // inline player, including when a scroll bar first appears.
+                const int transcriptWidth=video.isEmpty() && !transcript.isEmpty()?40:0;
+                const int playerWidth=qBound(80,int(qMin(width,widthWithScrollBar)/m_scale)-72-transcriptWidth,420);
                 const QUrl playerUrl("hgs-voice-player:"+key);
                 document->addResource(QTextDocument::ImageResource,playerUrl,
                     VoicePlayerImage::draw(qRound(playerWidth*m_scale),m_scale,document->pixelRatio,m_dark,audio,0,false,false));
                 const auto label=tr("Play or pause voice message (%1)").arg(VoicePlayerImage::time(audio.value("duration_ms").toInteger()));
-                QString body=QString("<p style='margin:8px 0 4px;'><a href='hgs-voice:%1' title='%2'><img src='%3' width='%4' height='52' alt='%2'></a></p>")
+                QString player=QString("<a href='hgs-voice:%1' title='%2'><img src='%3' width='%4' height='52' style='vertical-align:middle;' alt='%2'></a>")
                     .arg(key,escaped(label),playerUrl.toString(),QString::number(playerWidth));
                 if(!video.isEmpty()){
                     document->addResource(QTextDocument::ImageResource,playerUrl,VoicePlayerImage::videoPoster(m_scale,document->pixelRatio,video));
-                    body=QString("<p style='margin:4px 0;'><a href='hgs-voice:%1' title='%2'><img src='%3' width='200' height='200' alt='%2'></a></p>")
+                    player=QString("<a href='hgs-voice:%1' title='%2'><img src='%3' width='200' height='200' alt='%2'></a>")
                         .arg(key,escaped(tr("Play video message")),playerUrl.toString());
                 }
-                const auto transcript=voice.value("transcript").toString();
                 QString transcriptAction;
                 if(!transcript.isEmpty()) {
                     const auto toggle="voice-text-"+key;m_toggleKeys.insert(toggle);
@@ -925,17 +932,21 @@ struct ActivityRenderResult {
                     const auto label=escaped(m_expanded.value(toggle)?tr("Hide transcript"):tr("Show transcript"));
                     transcriptAction=QString("<a href='hgs-activity:%1' title='%2'><img src='%3' width='32' height='32' style='vertical-align:middle;' alt='%2'></a>").arg(toggle,label,icon.toString());
                 }
+                QString body=video.isEmpty()
+                    ?QString("<p style='margin:8px 0 4px;'>%1%2</p>").arg(player,transcriptAction.isEmpty()?QString():"&nbsp;&nbsp;"+transcriptAction)
+                    :QString("<p style='margin:4px 0;'>%1</p>").arg(player);
                 const auto statusLabel=escaped(labels.value(state,tr("Delivery not confirmed")));
                 const auto statusDetail=state=="submitted"?escaped(tr("The native app accepted the recognized text. Queue status, when present, is shown alongside this recording. This does not confirm model delivery, reading or completion.")):statusLabel;
                 const QUrl statusIcon("hgs-voice-status:"+key);
                 document->addResource(QTextDocument::ImageResource,statusIcon,VoicePlayerImage::deliveryIcon(state,m_scale,document->pixelRatio,m_dark));
                 const auto mediaTime=video.isEmpty()?QString():VoicePlayerImage::time(video.value("duration_ms").toInteger());
-                body+=QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin:0;'><tr><td valign='middle' style='font-size:11px;color:%3;'>%1%2</td><td align='right' valign='middle' style='font-size:11px;color:%3;'>%4 &nbsp;<img src='%5' width='18' height='18' style='vertical-align:middle;' alt='%6' title='%7'></td></tr></table>")
-                    .arg(transcriptAction,escaped(mediaTime),muted,escaped(timeText(event)),statusIcon.toString(),statusLabel,statusDetail);
+                if(!video.isEmpty())body+=QString("<p style='margin:0;font-size:11px;color:%3;'>%1%2</p>").arg(transcriptAction,escaped(mediaTime),muted);
+                const auto metadata=QString("%1 &nbsp;<img src='%2' width='18' height='18' style='vertical-align:middle;' alt='%3' title='%4'>")
+                    .arg(escaped(timeText(event)),statusIcon.toString(),statusLabel,statusDetail);
                 if(!transcript.isEmpty() && m_expanded.value("voice-text-"+key))body+=userMessage(transcript);
                 if(!voice.value("error").toString().isEmpty())body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(voice.value("error").toString()));
                 if(!m_voiceError.isEmpty() && m_voiceError.startsWith(key+"\n"))body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(m_voiceError.mid(key.size()+1)));
-                html+=card(eventKey(event),video.isEmpty()?tr("You (voice)"):tr("You (video)"),{},body,true);
+                html+=card(eventKey(event),video.isEmpty()?tr("You (voice)"):tr("You (video)"),{},body,true,false,false,{},false,metadata);
                 ++i;continue;
             }
             const QString label = role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
@@ -1569,7 +1580,8 @@ bool ActivityView::eventFilter(QObject *watched, QEvent *event)
                 return true;
             }
         } else if (event->type() == QEvent::MouseMove || event->type() == QEvent::Leave) {
-            const bool over = mouse && (!copyKeyAt(mouse->position().toPoint()).isEmpty() || !voiceKeyAt(mouse->position().toPoint()).isEmpty());
+            const bool over = mouse && (!copyKeyAt(mouse->position().toPoint()).isEmpty() || !voiceKeyAt(mouse->position().toPoint()).isEmpty()
+                                       || !transcriptKeyAt(mouse->position().toPoint()).isEmpty());
             if (over && !m_copyHover) { m_copyCursor = viewport->cursor(); viewport->setCursor(Qt::PointingHandCursor); }
             else if (!over && m_copyHover) viewport->setCursor(m_copyCursor);
             m_copyHover = over;
@@ -1578,6 +1590,8 @@ bool ActivityView::eventFilter(QObject *watched, QEvent *event)
             // A press on the button keeps the reader's selection and position.
             m_voicePressed=voiceKeyAt(mouse->position().toPoint());
             if(!m_voicePressed.isEmpty())return true;
+            m_transcriptPressed=transcriptKeyAt(mouse->position().toPoint());
+            if(!m_transcriptPressed.isEmpty())return true;
             m_copyPressed = copyKeyAt(mouse->position().toPoint());
             if (!m_copyPressed.isEmpty()) return true;
         } else if(mouse && mouse->button()==Qt::LeftButton && event->type()==QEvent::MouseButtonRelease && !m_voicePressed.isEmpty()){
@@ -1590,6 +1604,10 @@ bool ActivityView::eventFilter(QObject *watched, QEvent *event)
                 else if(waveform.contains(local))activateVoice(key,qBound<qreal>(0,(local.x()-waveform.left())/waveform.width(),1));
                 else if(local.x()<48*scale)activateVoice(key);
             }
+            return true;
+        } else if(mouse && mouse->button()==Qt::LeftButton && event->type()==QEvent::MouseButtonRelease && !m_transcriptPressed.isEmpty()){
+            const auto key=std::exchange(m_transcriptPressed,QString());
+            if(transcriptKeyAt(mouse->position().toPoint())==key)activateLink(QUrl("hgs-activity:"+key));
             return true;
         } else if (mouse && mouse->button() == Qt::LeftButton && event->type() == QEvent::MouseButtonRelease && !m_copyPressed.isEmpty()) {
             const auto pressed = std::exchange(m_copyPressed, QString());
@@ -1611,9 +1629,18 @@ void ActivityView::activateLink(const QUrl &url)
 {
     if (url.scheme() == "hgs-activity" && m_toggleKeys.contains(url.path())) {
         const auto key = url.path();
+        bool follow = false;
+        if (key.startsWith("voice-text-") && m_followLatest && nearBottom() && !m_browser->textCursor().hasSelection()) {
+            const int position = m_voicePositions.value(key.mid(QStringLiteral("voice-text-").size()), -1);
+            follow = position >= 0;
+            // Only the final card follows its new bottom. Opening an older
+            // recording must keep the reader's current position instead.
+            const auto anchors = bookmarks(m_browser->document());
+            for (auto it = anchors.cbegin(); it != anchors.cend(); ++it)
+                if (it.value() > position && !it.key().startsWith("item-body-")) { follow = false; break; }
+        }
         m_expanded.insert(key, !m_expanded.value(key));
-        // Expanding a card is an explicit reading action, even at the bottom.
-        m_followLatest = false; render(false); updateJumpButton();
+        m_followLatest = follow; render(false); updateJumpButton();
     } else if (url.scheme() == "hgs-file" && m_fileLinks.contains(url.path())) {
         emit fileReferenceActivated(m_fileLinks.value(url.path()));
     } else if(url.scheme()=="hgs-attachment" && m_attachmentLinks.contains(url.path())) {
@@ -1645,6 +1672,14 @@ QString ActivityView::voiceKeyAt(const QPoint &position) const
     const QPointF content=position+QPoint(m_browser->horizontalScrollBar()->value(),m_browser->verticalScrollBar()->value());
     const QUrl image(m_browser->document()->documentLayout()->imageAt(content));
     return image.scheme()=="hgs-voice-player" && m_voiceLinks.contains(image.path())?image.path():QString();
+}
+
+QString ActivityView::transcriptKeyAt(const QPoint &position) const
+{
+    const QPointF content=position+QPoint(m_browser->horizontalScrollBar()->value(),m_browser->verticalScrollBar()->value());
+    const QUrl image(m_browser->document()->documentLayout()->imageAt(content));
+    const auto key="voice-text-"+image.path();
+    return image.scheme()=="hgs-voice-transcript" && m_toggleKeys.contains(key)?key:QString();
 }
 
 QRect ActivityView::voiceRect(const QString &key) const

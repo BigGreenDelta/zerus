@@ -11,10 +11,12 @@ license = {text = "MIT"}
 dependencies = []
 
 [project.optional-dependencies]
+http = ["aiohttp==3.14.5"]
 gigaam = ["gigaam @ git+https://github.com/salute-developers/GigaAM.git@7447938d791c4f3e643386ee22c33777004293a5"]
 
 [project.scripts]
 zerus-speech = "zerus_speech.__main__:main"
+zerus-speech-http = "zerus_speech.http_api:main"
 
 [tool.setuptools.packages.find]
 include = ["zerus_speech*"]

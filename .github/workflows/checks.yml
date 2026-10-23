@@ -77,6 +77,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - run: python3 scripts/ci/check-source.py
+      - name: Standalone speech HTTP contracts
+        run: |
+          python3 -m venv "$RUNNER_TEMP/speech-http-venv"
+          "$RUNNER_TEMP/speech-http-venv/bin/pip" install './services/speech[http]'
+          "$RUNNER_TEMP/speech-http-venv/bin/python" -m unittest discover -s services/speech/tests -v
       - name: Release publication contract checks
         run: python3 -m unittest discover -s tests -p 'test_*publication.py'
       - name: Workflow trust boundary checks

@@ -23,6 +23,12 @@ COUNTERS = ("submitted", "completed", "failed", "cancelled", "uncertain", "audio
 RETENTION_DAYS = 90
 
 
+class AdmissionError(ValueError):
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(message)
+
+
 def empty_counters():
     return dict.fromkeys(COUNTERS, 0) | {"error_codes": {}}
 
@@ -239,9 +245,9 @@ class Jobs:
         if not available:
             raise ValueError(reason)
         if self.db.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0] >= self.config["max_queue"]:
-            raise ValueError("Speech queue is full; try a new recording later")
+            raise AdmissionError("queue_full", "Speech queue is full; try a new recording later")
         if self.db.execute("SELECT count(*) FROM jobs").fetchone()[0] >= self.config["max_receipts"]:
-            raise ValueError("Speech receipt storage is full; contact this computer's owner")
+            raise AdmissionError("receipt_storage_full", "Speech receipt storage is full; contact this computer's owner")
         path = self.state_dir / (job_id + ".pcm")
         try:
             with path.open("xb") as output:

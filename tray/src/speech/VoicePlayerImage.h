@@ -31,9 +31,15 @@ inline QImage transcriptIcon(qreal scale,qreal ratio,bool dark,bool expanded) {
     QImage image(qCeil(32*scale*ratio),qCeil(32*scale*ratio),QImage::Format_ARGB32_Premultiplied);
     image.setDevicePixelRatio(ratio);image.fill(Qt::transparent);
     QPainter p(&image);p.setRenderHint(QPainter::Antialiasing);p.scale(scale,scale);
-    p.setPen(QPen(QColor(dark?"#8bdfc0":"#167357"),1.5,Qt::SolidLine,Qt::RoundCap));
-    p.drawLine(7,10,24,10);p.drawLine(7,15,24,15);p.drawLine(7,20,16,20);
-    p.drawPolyline(expanded?QPolygonF{{20,23},{23,20},{26,23}}:QPolygonF{{20,20},{23,23},{26,20}});
+    const QColor accent(dark?"#8bdfc0":"#167357");
+    auto background=accent;background.setAlphaF(dark?.14:.09);
+    p.setPen(Qt::NoPen);p.setBrush(background);p.drawRoundedRect(QRectF(0,0,32,32),6,6);
+    p.setBrush(Qt::NoBrush);p.setPen(QPen(accent,1.6,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
+    if(expanded)p.drawPolyline(QPolygonF{{10,19},{16,13},{22,19}});
+    else {
+        p.drawLine(10,8,10,19);p.drawPolyline(QPolygonF{{6,15},{10,19},{14,15}});
+        p.drawPolyline(QPolygonF{{16,24},{20.5,12},{25,24}});p.drawLine(QPointF(17.5,20),QPointF(23.5,20));
+    }
     return image;
 }
 inline QString time(qint64 milliseconds) {

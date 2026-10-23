@@ -6,7 +6,7 @@ import socketserver
 import stat
 import threading
 
-from .jobs import Jobs, canonical_uuid, private_directory
+from .jobs import AdmissionError, Jobs, canonical_uuid, private_directory
 
 MAX_REQUEST_BYTES = 5_130_000
 
@@ -21,6 +21,8 @@ class Handler(socketserver.StreamRequestHandler):
                 raise ValueError("Speech request is too large or incomplete")
             request = json.loads(raw)
             result = self.server.jobs.handle(request)
+        except AdmissionError as error:
+            result = {"schema": 1, "state": "failed", "error_code": error.code, "error": str(error)}
         except (ValueError, TypeError, KeyError, RecursionError) as error:
             result = {"schema": 1, "state": "failed", "error_code": "invalid_request", "error": str(error)[:256]}
         except (OSError, sqlite_error):

@@ -1,5 +1,10 @@
 # Optional speech host
 
+For an independently deployed server with an optional OpenAI-compatible HTTP
+API, see [Standalone speech HTTP server](../../docs/speech-server.md). It needs
+no desktop application or `hgs`. HTTP listening is opt-in; the existing private
+Unix-socket service and the lightweight HTTP client remain available separately.
+
 Zerus records on the client and recognizes speech on an explicitly selected
 computer. This optional Python service owns model configuration, model memory,
 the inference queue and private job receipts. `hgs speech --json` is its bounded

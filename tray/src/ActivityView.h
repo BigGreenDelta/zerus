@@ -111,6 +111,7 @@ private:
     void updateColumnActions();
     void activateVoice(const QString &key,std::optional<qreal> fraction = {});
     QString voiceKeyAt(const QPoint &position) const;
+    QString transcriptKeyAt(const QPoint &position) const;
     QRect voiceRect(const QString &key) const;
     void updateVoiceImage(const QString &key);
 
@@ -136,6 +137,7 @@ private:
     QAudioOutput *m_voiceOutput = nullptr;
     QString m_voiceKey, m_voicePlaying, m_voiceLoading, m_voiceError;
     QString m_voicePressed;
+    QString m_transcriptPressed;
     QHash<QString,int> m_voicePositions;
     qint64 m_voicePosition = 0, m_voicePendingSeek = -1;
     bool m_voiceStartAfterLoad = false;

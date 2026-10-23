@@ -118,6 +118,10 @@ keep their original provider selection until you explicitly change it.
 
 ## OpenAI-compatible server
 
+To run your own GigaAM endpoint on a separate computer, follow
+[Standalone speech HTTP server](speech-server.md). The steps below configure
+the processing computer as a client of that server.
+
 Use this provider when you already have a server implementing the transcription
 API below. The server performs model inference; the processing computer only
 forwards the audio and receives the transcript.

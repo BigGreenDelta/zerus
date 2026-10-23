@@ -32,7 +32,8 @@ def load(path: Path) -> dict:
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", profile["id"]) or profile["id"] in ids):
             raise ValueError("Speech profile IDs must be unique ASCII names")
         for field in ("name", "adapter", "model", "language"):
-            if not isinstance(profile.get(field), str) or not 1 <= len(profile[field]) <= 128:
+            minimum = 0 if field == "language" else 1
+            if not isinstance(profile.get(field), str) or not minimum <= len(profile[field]) <= 128:
                 raise ValueError("Speech profile requires bounded name, adapter, model and language")
         if profile.get("device", "cpu") not in {"cpu", "cuda", "cuda:0", "cuda:1", "mps"}:
             raise ValueError("Unsupported speech inference device")
