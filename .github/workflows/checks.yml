@@ -585,17 +585,17 @@ jobs:
             target
           key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
-      # The reviewed lockfile fixes every transitive version and its SHA-512
-      # integrity. The copy keeps node_modules outside the workspace, caches and
-      # artifacts.
+      # Resolve one latest official release, record its complete registry-only
+      # source lock before installation, and retain the install identity for the
+      # mandatory native suites. node_modules stays outside source/caches/artifacts.
       - name: Keyless official DeepSeek contract fixture
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/dsh"
-          cp scripts/ci/dsh-fixture/package.json scripts/ci/dsh-fixture/package-lock.json "$RUNNER_TEMP/dsh/"
-          npm ci --prefix "$RUNNER_TEMP/dsh" --no-audit --no-fund
+          python3 scripts/ci/dsh_fixture.py --prefix "$RUNNER_TEMP/dsh" \
+            --evidence "$GITHUB_WORKSPACE/artifacts/test-results/dsh-fixture"
           echo "$RUNNER_TEMP/dsh/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "ZERUS_TEST_DSH_RECEIPT=$GITHUB_WORKSPACE/artifacts/test-results/dsh-fixture/installed.json" >> "$GITHUB_ENV"
       - run: bash scripts/ci/cli.sh
       - name: Save Rust cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
@@ -606,7 +606,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
-      - name: Keyless native Codex, Claude Code and OpenCode compatibility matrix
+      - name: Keyless latest Codex, Claude Code and OpenCode compatibility
         run: python3 scripts/ci/agent-compatibility.py
       - name: Retain test logs
         if: always() && (github.event_name != 'schedule' || failure())
@@ -1096,8 +1096,8 @@ jobs:
           retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
           compression-level: 0
 
-  # The reviewed win32-x64 Claude Code and Codex pins of
-  # scripts/ci/agent-compatibility.json through isolated session hosts of the
+  # The latest win32-x64 Claude Code and Codex packages selected by
+  # scripts/ci/agent-compatibility.py through isolated session hosts of the
   # release build, each agent against a local fake API. A job of its own, so a
   # failure points at the host and windows-desktop keeps its time margin.
   windows-host:

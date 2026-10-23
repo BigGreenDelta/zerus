@@ -38,7 +38,7 @@ conservative change selection, including both sides of renames.
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
 | macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
 | Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
-| Windows real agents | Affected PR; full nightly/stable | The pinned `win32-x64` Claude Code and Codex in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
+| Windows real agents | Affected PR; full nightly/stable | One latest `win32-x64` Claude Code and Codex release in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
 Quick checks and the full suites start together once the commit is resolved, so
@@ -239,7 +239,7 @@ The Arch base image is digest-pinned, but `pacman -Syu` intentionally uses curre
 Arch packages. This tests rolling-distribution compatibility; it does not promise
 bit-for-bit reproducibility months later. Rust dependencies are locked, fetched
 in `prepare()` and built/tested with `--frozen` inside source packages. The CI
-image, tmux, official DeepSeek fixture and Windows Qt pins need periodic
+image, tmux and Windows Qt pins need periodic
 maintainer review.
 
 ### Dependency updates and cost
@@ -261,8 +261,9 @@ Dependabot vulnerability alerts and security updates are enabled separately in
 repository settings. Security proposals have their own per-ecosystem groups;
 they are not delayed by the monthly version schedule or counted against its PR
 limit. A fix requiring a manifest migration still needs maintainer attention.
-The DeepSeek fixture lockfile has no version-update entry; a security proposal
-for it must keep the exact reviewed `@deepseek-ai/dsh` version.
+The historical DeepSeek fixture lockfile has no version-update entry. Ordinary
+CI resolves a fresh exact source lock for the official latest release and retains
+it with that run's evidence; it never silently falls back to the historical lock.
 Do not disable security alerts to reduce routine version-update noise.
 
 Dependabot jobs on standard GitHub-hosted runners do not consume included Actions
@@ -291,14 +292,18 @@ its own `HGS_TEST_BIN`. Python integration modules run in separate processes so
 module patches do not leak between suites. Terminal fixtures use private socket
 paths and synthetic homes. No check runs against existing agent sessions.
 Authenticated native-client tests remain explicit opt-ins; baseline CI needs no
-model API keys. Linux installs the pinned official `@deepseek-ai/dsh@0.2.1-rc.2`
-for its keyless local-model contract fixture with `npm ci` from
-`scripts/ci/dsh-fixture/package-lock.json`. The lockfile fixes every transitive
-version and its SHA-512 integrity, so a newly published dependency can neither
-change nor break the install. To adopt another DeepSeek version, change it in that
-`package.json` together with the adapter, regenerate the lock with
-`npm install --package-lock-only` under the CI Node major and review the dependency
-diff. Native agent CLIs are not included in the product package.
+model API keys. Linux resolves one official latest `@deepseek-ai/dsh` release for
+its keyless local-model contract fixture. `scripts/ci/dsh_fixture.py` verifies the
+official package identity and SHA-512 integrity, then records the complete exact
+registry-only dependency lock before `npm ci`. Private npm configuration disables
+Git, file, directory and remote dependency sources during both resolution and
+installation. Metadata, source lock, installation identity and logs remain in the
+test evidence. The original ten-minute end covers selection through publication
+of the install receipt, reserving fifteen seconds for owned npm-group cleanup.
+Missing or changed receipts and a version mismatch fail mandatory native admission.
+The fixture is not a package-script sandbox. A new release can expose an adapter
+incompatibility and fail CI; selecting it does not itself change product support.
+Native agent CLIs are not included in the product package.
 
 The CI CLI jobs set `ZERUS_PYTHON_JOBS` to twice the runner vCPUs (8 on Ubuntu,
 6 on macOS): the Python test classes mostly wait on terminals and subprocesses.
@@ -313,13 +318,13 @@ usage lists the commands. A test the file does not list still runs exactly once.
 `tests/test_claude_input_native.py` checks exact message acceptance by the real
 Claude TUI with a private home/socket and a localhost fake API; it never reads a
 user's account. Full Linux and macOS CI run it with the other Claude native
-suites against the pinned Claude Code package (see below); `HGS_CLAUDE_TEST_BIN`
-selects another executable for a manual run. Claude 2.1.296 and 2.1.308 coverage verifies
+suites against one latest Claude Code package (see below); `HGS_CLAUDE_TEST_BIN`
+selects another executable for a manual run. The coverage verifies
 literal trailing backslashes, multiline messages and durable request replay.
 Terminal submission alone is insufficient: the test waits for the unchanged user
 message in native history. `tests/test_claude_settings_native.py` drives the
-real `/model` picker with a synthetic model catalog and history. Claude 2.1.296 and
-2.1.308 coverage changes model and effort in a fresh session, accepts Claude's own cache
+real `/model` picker with a synthetic model catalog and history. It changes
+model and effort in a fresh session, accepts Claude's own cache
 notice in a resumed conversation, and requires the session-only transcript
 receipt while `settings.json` stays unchanged. A session-only change made in
 Terminal must reach hgs through `PostModelSwitch` with the exact model ID.
@@ -654,7 +659,7 @@ On a Windows development PC the same steps run from Git Bash;
 
 ### Windows real agents through the session host
 
-The `windows-host` job runs the reviewed `win32-x64` Claude Code and Codex in
+The `windows-host` job runs one latest `win32-x64` Claude Code and Codex release in
 isolated session hosts of the release `hgs.exe` on a standard `windows-2025` runner
 (M7 of [Windows Phase 2](superpowers/specs/2026-10-13-windows-native-host-design.md)).
 It is selected with the Windows desktop job and the gate requires both, but it is a
@@ -666,7 +671,7 @@ the same way.
 
 It then runs `scripts/ci/agent-compatibility.py` with `HGS_TEST_BIN` and
 `HGS_TEST_CONPTY_DIR` ([native agent compatibility](#native-agent-compatibility-and-upstream-review)):
-the runner verifies each package against its pin, extracts only `claude.exe` or
+the runner verifies each package against its selected SHA-512 integrity, extracts only `claude.exe` or
 `codex.exe` and runs that agent's class of `tests/test_windows_native_agents.py`,
 whose agents reach only a local fake API (Anthropic's for Claude Code, OpenAI's
 for Codex) and keep their homes private. The suites confirm what spike S6 ran by
@@ -770,19 +775,23 @@ accounts in private configuration.
 
 Full Linux and macOS CLI CI also run `python3
 scripts/ci/agent-compatibility.py`, and the Windows real-agent job runs it on
-Windows ([above](#windows-real-agents-through-the-session-host)). Each reviewed
-version in `scripts/ci/agent-compatibility.json` names the official npm package
-for one target, `linux-x64`, `linux-x64-baseline`, `darwin-arm64` or `win32-x64`,
-with an exact version and SHA-512 integrity pin. The runner selects the pins for its
-host and refuses an agent that has none. The Codex matrix pins 0.162.0 for Linux and
-Windows and retains 0.160.1 (a resident-session regression boundary) on Linux only.
-The Claude Code matrix pins 2.1.308 for all three targets and retains 2.1.296, the
-oldest version whose hooks hgs registers, on Linux only. From 2.1.304 Claude also
+Windows ([above](#windows-real-agents-through-the-session-host)). Each ordinary
+compatibility invocation resolves the official npm `latest` tag once for each
+selected agent, then resolves its exact platform package and SHA-512 integrity.
+All selected packages must resolve before any native execution. The report saves
+their exact versions, URLs and digests before the first test; a missing release,
+platform package or valid digest fails without falling back to historical pins.
+Every terminal case uses that same selected image. Historical package records in
+`scripts/ci/agent-compatibility.json` remain evidence for separately selected old
+fixtures; ordinary CI and the daily upstream report do not execute those versions.
+Targets are `linux-x64`, `linux-x64-baseline`, `darwin-arm64` and `win32-x64`.
+From 2.1.304 Claude also
 records each API request as an `api-request-blob` transcript row and can defer
 WebFetch behind ToolSearch (its approval fixture sets `ENABLE_TOOL_SEARCH=false`).
-Both pins offer a one-time default permission mode change; fixtures set
-`hasSeenAutoDefaultNudge` except the suite that answers that offer. The OpenCode matrix pins
-its reviewed minimum, 2.0.32, for Linux and macOS; on x86_64 Linux it uses the
+Claude offers a one-time default permission mode change; fixtures set
+`hasSeenAutoDefaultNudge` except the suite that answers that offer. OpenCode has
+a supported minimum of 2.0.32; CI tests its latest release on Linux and macOS.
+On x86_64 Linux it uses the
 `@opencode/cli-linux-x64-baseline` package, which runs without AVX2 on every x86_64
 host. macOS therefore runs Claude Code and OpenCode, and Windows, where Zerus has no
 OpenCode adapter, runs Codex and Claude Code. Only the native executable is
@@ -896,29 +905,30 @@ The separate **Agent upstream compatibility** workflow runs daily at 04:41 UTC
 and is also available manually on upstream main. It discovers published Codex,
 Claude Code, OpenCode, Kimi Code and DeepSeek Harness versions from their official
 package indexes, links their official release notes and tests the latest Codex,
-Claude Code and OpenCode as additional canaries. OpenCode follows a minimum version
+Claude Code and OpenCode, once per agent, using the same latest-only selection as
+ordinary CI. OpenCode follows a minimum version
 policy: Zerus accepts any 2.x at or above the reviewed minimum whose service offers
-every operation it uses, so its pin is that minimum, and the canary qualifies the
-newest `@opencode/cli` release each day and reports an incompatibility without
-changing the pin. The report labels the newest OpenCode as newer than, the same as
+every operation it uses. CI qualifies the newest `@opencode/cli` release and reports
+an incompatibility without changing the product's minimum. The report labels the newest OpenCode as newer than, the same as
 or older than the reviewed minimum, and flags another major version or a prerelease
-for review. It does not advance reviewed pins or install
+for review. Kimi discovery uses the current `@moonshot-ai/kimi-code` package,
+not the archived Python `kimi-cli` project. The workflow does not install
 anything on development machines. Its hosted job has read-only repository
 access, no cache access and no publication credentials. Reports, native logs
 and public protocol schemas expire after three days. A discovery or
 native-contract failure fails the run; successful unittest skips do not hide
 missing coverage.
 
-Codex protocol schemas are generated separately with and without experimental
-APIs. The report compares the latest canary with the newest reviewed pin and
-lists added/removed methods and added/removed/changed schemas. Changes to Codex,
-Claude Code and OpenCode CLI help appear with a generated diff per agent. A detected
-addition is a review candidate, not evidence that Zerus supports it or that a
+Codex protocol schemas are captured separately with and without experimental
+APIs, together with the selected release's CLI help and schema hashes. Reports
+can be compared as data; the workflow does not execute an older agent to generate
+a comparison. A detected addition is a review candidate, not evidence that Zerus supports it or that a
 signed-in account can use it. For Kimi this workflow currently discovers
-versions only. DeepSeek's existing pinned keyless contract fixture runs in full
-Linux CLI CI.
+versions only. Its separate native and approval workflows qualify one latest
+Kimi release for affected PRs or manual runs. DeepSeek's latest-release keyless
+contract fixture runs in full Linux CLI CI.
 
-To run the reviewed matrix or inspect current upstream changes locally:
+To test the latest releases or inspect current upstream changes locally:
 
 ```sh
 cargo build --locked
@@ -929,15 +939,16 @@ python3 scripts/ci/agent-compatibility.py --latest
 ```
 
 The unshipped static coordination hint has a separately selected source candidate:
-`--contract agent-hint`. Its fixture is authored for the same reviewed Claude and
-Codex pins and targets above. Native acceptance requires retained successful
+`--contract agent-hint`. This historical, separately granted fixture consumes its
+frozen Claude and Codex pins and targets from `agent-compatibility.json`; it is
+not part of ordinary CI's latest-only matrix. Native acceptance requires retained successful
 results on the exact reviewed source. It selects
 exactly four methods per pin: actual hgs lifecycle (launch, compact, clear, two
 resumes, rename, fork), lost-mark output, real pre-feature first resume, and
 global/account exclusions with instruction and personal-hook preservation. The
 Unix launcher sentinel covers supported project shell launchers; Windows starts
 the real executable directly and makes no shell-launcher claim. Existing default
-UI matrices, geometry/animation coverage and pin values are unchanged.
+UI method and geometry/animation coverage remain unchanged.
 
 The source inputs are the candidate hgs, a real CLI built from pre-feature main
 `ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce`, the `session_start_observer` Rust example,
@@ -1172,16 +1183,15 @@ The ordinary Windows compatibility matrix takes the release build and ConPTY pai
 [testing the session host](windows-host-testing.md#real-agents) shows. The
 generated `artifacts/test-results/agent-compatibility/summary.md` and
 `report.json` contain the coverage result and review candidates. Before changing
-a pin, read the provider's release notes and compare CLI flags, hook events,
+a supported integration, read the provider's release notes and compare CLI flags, hook events,
 native history and protocol schemas. Classify each relevant feature as already
 supported, requiring an adapter change, or requiring a separately reviewed
 integration; track implementation work in Beads. Add an isolated native contract
-for every adopted lifecycle/input change and retain versions still used by
-resident sessions until their compatibility boundary is deliberately reviewed.
-Pin a reviewed version for every target its agent supports. Only an older version
-kept as a regression boundary may cover fewer targets: each of its pins gives the
-reason in `retained`, and the newest version is never retained. The runner refuses
-a manifest that breaks this rule, and its unit tests cover it.
+for every adopted lifecycle/input change. CI tests one latest release per supported
+agent and does not add retained resident versions. Historical frozen fixture
+records retain their original target and integrity checks; they are not a CI
+version-selection policy. Qualification does not update an installed agent or
+restart a resident session.
 
 Zerus receives activity from structured hooks, conversation messages and usage
 from native history, and DeepSeek controls from its native API. Terminal checks

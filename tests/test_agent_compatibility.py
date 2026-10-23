@@ -18,6 +18,22 @@ spec.loader.exec_module(compat)
 
 
 class AgentCompatibility(unittest.TestCase):
+    def registry(self, version='9.8.7'):
+        manifest = json.loads(compat.MANIFEST.read_text())
+        responses = {}
+        for source in manifest['upstream']:
+            value = version
+            for key in reversed(source['version_path']):
+                value = {key: value}
+            responses[source['url']] = value
+        for agent, spec in compat.AGENTS.items():
+            for target in spec['members']:
+                responses[spec['metadata'].format(version=version, target=target)] = {
+                    'version': spec['published'].format(version=version, target=target),
+                    'dist': {'tarball': spec['tarball'].format(version=version, target=target),
+                             'integrity': 'sha512-' + base64.b64encode(b'fixture integrity'.ljust(64, b'.')).decode()}}
+        return responses
+
     def archive(self, *, name=compat.AGENTS['codex']['members']['linux-x64'], symlink=False, others=()):
         stream = io.BytesIO()
         with tarfile.open(fileobj=stream, mode='w:gz') as tar:
@@ -220,10 +236,9 @@ class AgentCompatibility(unittest.TestCase):
 
     def test_latest_claude_canary_uses_the_official_platform_package(self):
         manifest = json.loads(compat.MANIFEST.read_text())
-        pinned = [package['version'] for package in manifest['claude'] if package['target'] == 'linux-x64']
         metadata = {'version': '9.8.7', 'dist': {
             'tarball': compat.AGENTS['claude']['tarball'].format(version='9.8.7', target='linux-x64'),
-            'integrity': 'sha512-fixture'}}
+            'integrity': 'sha512-' + base64.b64encode(b'x' * 64).decode()}}
         responses = {source['url']: {'version': '9.8.7'} if source['name'] == 'Claude Code' else OSError('fixture')
                      for source in manifest['upstream']}
         responses[compat.AGENTS['claude']['metadata'].format(version='9.8.7', target='linux-x64')] = metadata
@@ -253,9 +268,9 @@ class AgentCompatibility(unittest.TestCase):
         self.assertTrue(failed)
         self.assertEqual(report['canary_versions'], {'claude': '9.8.7'})
         self.assertEqual([(row['agent'], row['version']) for row in report['contracts']],
-                         [('claude', version) for version in pinned] + [('claude', '9.8.7')])
+                         [('claude', '9.8.7')])
         self.assertEqual(report['contracts'][-1]['url'], metadata['dist']['tarball'])
-        self.assertEqual(report['cli_help_changed'], {'claude': True})
+        self.assertNotIn('cli_help_changed', report)
         self.assertIn('## Real Claude Code contracts', summary)
         self.assertNotIn('Codex contracts', summary)
 
@@ -264,7 +279,7 @@ class AgentCompatibility(unittest.TestCase):
         before = compat.MANIFEST.read_bytes()
         metadata = {'version': '2.1.0', 'dist': {
             'tarball': compat.AGENTS['opencode']['tarball'].format(version='2.1.0', target='linux-x64-baseline'),
-            'integrity': 'sha512-fixture'}}
+            'integrity': 'sha512-' + base64.b64encode(b'x' * 64).decode()}}
 
         def published(source):
             value = '2.1.0' if source['name'] == 'OpenCode' else (source['reviewed_versions'] or ['0.0.1'])[-1]
@@ -290,13 +305,13 @@ class AgentCompatibility(unittest.TestCase):
         self.assertFalse(failed, report['errors'])
         self.assertEqual(report['canary_versions'], {'opencode': '2.1.0'})
         self.assertEqual([(row['version'], row['target']) for row in report['contracts']],
-                         [('2.0.32', 'linux-x64-baseline'), ('2.1.0', 'linux-x64-baseline')])
+                         [('2.1.0', 'linux-x64-baseline')])
         row = next(row for row in report['upstream'] if row['name'] == 'OpenCode')
         self.assertEqual(row['review'], 'newer than the reviewed minimum; see its canary')
         self.assertIn('## Real OpenCode contracts', summary)
         self.assertEqual(compat.MANIFEST.read_bytes(), before)
 
-    def test_host_target_selects_its_pinned_agents_and_rejects_unreviewed_ones(self):
+    def test_host_target_runs_one_latest_release_per_supported_agent(self):
         qualified = []
 
         def qualify(agent, package, work, results, hgs):
@@ -305,19 +320,19 @@ class AgentCompatibility(unittest.TestCase):
 
         for target, arguments, expected in [
                 # OpenCode runs its baseline x86_64 package on Linux.
-                ('linux-x64', [], [('codex', '0.160.1', 'linux-x64'), ('codex', '0.162.0', 'linux-x64'),
-                                   ('claude', '2.1.296', 'linux-x64'), ('claude', '2.1.308', 'linux-x64'),
-                                   ('opencode', '2.0.32', 'linux-x64-baseline')]),
-                ('linux-x64', ['--agent', 'opencode'], [('opencode', '2.0.32', 'linux-x64-baseline')]),
-                ('darwin-arm64', [], [('claude', '2.1.308', 'darwin-arm64'), ('opencode', '2.0.32', 'darwin-arm64')]),
+                ('linux-x64', [], [('codex', '9.8.7', 'linux-x64'), ('claude', '9.8.7', 'linux-x64'),
+                                   ('opencode', '9.8.7', 'linux-x64-baseline')]),
+                ('linux-x64', ['--agent', 'opencode'], [('opencode', '9.8.7', 'linux-x64-baseline')]),
+                ('darwin-arm64', [], [('claude', '9.8.7', 'darwin-arm64'), ('opencode', '9.8.7', 'darwin-arm64')]),
                 ('darwin-arm64', ['--agent', 'codex'], SystemExit),
                 ('win32-x64', ['--agent', 'opencode'], SystemExit),
-                # The retained Codex 0.160.1 and Claude 2.1.296 have no Windows pin.
-                ('win32-x64', [], [('codex', '0.162.0', 'win32-x64'), ('claude', '2.1.308', 'win32-x64')]),
+                ('win32-x64', [], [('codex', '9.8.7', 'win32-x64'), ('claude', '9.8.7', 'win32-x64')]),
                 ('win32-arm64', [], SystemExit),
                 (None, [], SystemExit)]:
             qualified.clear()
+            responses = self.registry()
             with self.subTest(target=target, arguments=arguments), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(compat, 'fetch_json', side_effect=lambda url: responses[url]), \
                     patch.object(compat, 'qualify', side_effect=qualify), \
                     patch.object(compat, 'host_target', return_value=target), \
                     patch.object(compat.sys, 'argv', ['agent-compatibility.py', '--results', temporary, *arguments]), \
@@ -332,6 +347,76 @@ class AgentCompatibility(unittest.TestCase):
                     summary = (Path(temporary) / 'summary.md').read_text()
                     for _, _, package_target in expected:
                         self.assertIn('(' + package_target + '): passed', summary)
+
+    def test_latest_selection_is_complete_and_saved_before_any_native_execution(self):
+        responses, fetched, calls = self.registry(), [], []
+
+        def fetch(url):
+            self.assertNotIn(url, fetched, 'A release must not move between terminal cases')
+            fetched.append(url)
+            return responses[url]
+
+        def qualify(agent, package, work, results, hgs):
+            report = json.loads((results / 'report.json').read_text())
+            self.assertEqual(report['selection_policy'], 'latest-only')
+            self.assertEqual(len(report['selected_packages']), 3)
+            self.assertEqual(len(fetched), 6, 'Resolve all three tags and platform packages first')
+            self.assertIn(dict(agent=agent, **package), report['selected_packages'])
+            calls.append((agent, package['version']))
+            return dict(agent=agent, **package, status='passed')
+
+        with tempfile.TemporaryDirectory() as temporary, patch.object(compat, 'fetch_json', side_effect=fetch), \
+                patch.object(compat, 'qualify', side_effect=qualify), \
+                patch.object(compat, 'host_target', return_value='linux-x64'), \
+                patch.object(compat.sys, 'argv', ['compat', '--results', temporary]):
+            self.assertFalse(compat.main())
+        self.assertEqual(calls, [('codex', '9.8.7'), ('claude', '9.8.7'), ('opencode', '9.8.7')])
+
+    def test_latest_discovery_or_package_failure_never_falls_back_to_old_pins(self):
+        source = next(row for row in json.loads(compat.MANIFEST.read_text())['upstream']
+                      if row['name'] == 'Claude Code')
+        metadata = compat.AGENTS['claude']['metadata'].format(version='9.8.7', target='linux-x64')
+        for fault in ('discovery', 'package', 'wrong-version', 'foreign-url', 'missing-digest', 'short-digest'):
+            responses = self.registry()
+            if fault == 'discovery':
+                responses[source['url']] = OSError('registry unavailable')
+            elif fault == 'package':
+                responses[metadata] = OSError('platform package not published')
+            elif fault == 'wrong-version':
+                responses[metadata]['version'] = '9.8.6'
+            elif fault == 'foreign-url':
+                responses[metadata]['dist']['tarball'] = 'https://registry.example.test/foreign.tgz'
+            elif fault == 'missing-digest':
+                del responses[metadata]['dist']['integrity']
+            else:
+                responses[metadata]['dist']['integrity'] = 'sha512-YQ=='
+
+            def fetch(url):
+                if isinstance(responses[url], Exception):
+                    raise responses[url]
+                return responses[url]
+
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(compat, 'fetch_json', side_effect=fetch), patch.object(compat, 'qualify') as run, \
+                    patch.object(compat, 'host_target', return_value='linux-x64'), \
+                    patch.object(compat.sys, 'argv', ['compat', '--results', temporary]):
+                self.assertEqual(compat.main(), 1)
+                run.assert_not_called()
+                report = json.loads((Path(temporary) / 'report.json').read_text())
+                self.assertTrue(report['errors'])
+                self.assertEqual(report['contracts'], [])
+
+    def test_repeated_agent_selection_does_not_repeat_a_release(self):
+        responses = self.registry()
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(compat, 'fetch_json', side_effect=lambda url: responses[url]), \
+                patch.object(compat, 'host_target', return_value='linux-x64'), \
+                patch.object(compat, 'qualify', return_value=dict(agent='claude', version='9.8.7',
+                    target='linux-x64', status='passed')) as run, \
+                patch.object(compat.sys, 'argv', ['compat', '--agent', 'claude', '--agent', 'claude',
+                                                 '--results', temporary]):
+            self.assertFalse(compat.main())
+            self.assertEqual(run.call_count, 1)
 
     def test_host_target_names_64_bit_windows_as_its_npm_packages_do(self):
         for system, machine, expected in [('Windows', 'AMD64', 'win32-x64'), ('Windows', 'ARM64', 'win32-arm64'),
@@ -391,7 +476,8 @@ class AgentCompatibility(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         work, results = Path(temporary.name) / 'work', Path(temporary.name) / 'results'
         (work / agent / '1.2.3').mkdir(parents=True)
-        package = {'version': '1.2.3', 'target': target, 'integrity': 'sha512-fixture'}
+        package = {'version': '1.2.3', 'target': target, 'integrity': 'sha512-fixture',
+                   'url': compat.AGENTS[agent]['tarball'].format(version='1.2.3', target=target)}
         with patch.object(compat, 'install_native', return_value=work / agent / '1.2.3' / 'native'), \
                 patch.object(compat, 'probe', side_effect=probe), \
                 patch.object(compat.subprocess, 'run', side_effect=run), \

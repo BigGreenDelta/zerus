@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real Kimi TUI against a localhost-only API fixture, never a user's account.
 Run with HGS_KIMI_TEST_BIN=/absolute/path/to/a/pinned/kimi and its sha256 in
-HGS_KIMI_TEST_SHA256 (otherwise skipped). Kimi installs updates over the
+HGS_KIMI_TEST_SHA256 plus its sealed HGS_KIMI_TEST_RECORD. Kimi installs updates over the
 executable it runs from, so the fixture runs a private copy with automatic
 updates off and never the user's installed Kimi. HGS_KIMI_GUARD lists
 executables, such as that installed Kimi, that must not change during a run;
@@ -192,6 +192,7 @@ display_name = "Fixture"
   switches off, and prove afterwards that nothing outside changed."""
   self.assertRegex(KIMI_SHA256,'^[0-9a-f]{64}$','HGS_KIMI_TEST_SHA256 must pin the executable')
   self.assertEqual(sha256(KIMI),KIMI_SHA256)
+  self.version=guard.admitted_version(KIMI,KIMI_SHA256)
   self.guarded={str(path):sha256(path) for path in GUARDED}
   kimi=self.images/'kimi';shutil.copyfile(KIMI,kimi);kimi.chmod(0o755)
   self.assertEqual(sha256(kimi),KIMI_SHA256)
@@ -612,7 +613,7 @@ class QuestionFixtureControls(unittest.TestCase):
   digest=hashlib.sha256(b'pinned bytes').hexdigest()
   for pin,refused in (('0'*64,True),('not-a-pin',True),(digest,False)):
    case=self.case();case.images=root/('images-'+pin[:4]);case.images.mkdir()
-   with mock.patch.multiple(sys.modules[__name__],KIMI=str(pinned),KIMI_SHA256=pin,GUARDED=[]):
+   with mock.patch.multiple(sys.modules[__name__],KIMI=str(pinned),KIMI_SHA256=pin,GUARDED=[]),mock.patch.object(guard,'admitted_version',return_value='2.3.1'):
     if refused:
      with self.assertRaises(AssertionError):case.stage()
      self.assertFalse((case.images/'kimi').exists(),pin)

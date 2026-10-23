@@ -200,8 +200,8 @@ The ordinary CLI suite covers parsing and projections. The native adapter suite
 runs against the actual OpenCode 2 binary with private HOME and XDG folders, its
 own service on a private port and a keyless local model; it never touches the
 service, settings or sessions of the person running it and does not contact paid
-model APIs. Full Linux and macOS CI run it with the reviewed minimum, and a daily
-canary runs it with the newest release
+model APIs. Full Linux and macOS CI and the daily upstream report each test one
+latest release, while product admission retains the supported minimum
 ([native agent compatibility](ci-and-aur.md#native-agent-compatibility-and-upstream-review)).
 Run it explicitly with OpenCode installed:
 

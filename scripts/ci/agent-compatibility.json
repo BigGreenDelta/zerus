@@ -86,9 +86,9 @@
     },
     {
       "name": "Kimi Code",
-      "url": "https://pypi.org/pypi/kimi-cli/json",
-      "version_path": ["info", "version"],
-      "notes": "https://github.com/MoonshotAI/kimi-cli/releases",
+      "url": "https://registry.npmjs.org/@moonshot-ai/kimi-code/latest",
+      "version_path": ["version"],
+      "notes": "https://github.com/MoonshotAI/kimi-code/releases",
       "reviewed_versions": []
     },
     {

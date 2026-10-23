@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Keyless released Codex, Claude Code and OpenCode contracts and read-only upstream capability reports."""
+"""Keyless latest-release Codex, Claude Code and OpenCode contracts and capability snapshots."""
 import argparse
 import contextlib
 import base64
 import datetime
-import difflib
 import hashlib
 import http.client
 import importlib.util
@@ -64,8 +63,8 @@ AGENTS = {
         windows=dict(suites=['test_windows_native_agents.NativeWindowsClaude'], timeout=1200,
                      coverage=HOST_COVERAGE + '; exec-form answer channel for questions and approvals, Terminal answers, '
                      'owned hook exit and channel-absent unviewed-pane growth')),
-    # OpenCode 2 is accepted at or above a reviewed minimum (the pin); the canary
-    # qualifies its newest release without moving the pin. Its x86_64 Linux package
+    # OpenCode 2 is accepted at or above the recorded minimum; CI tests only the
+    # newest release without changing that product boundary. Its x86_64 Linux package
     # without AVX2 requirements is named `baseline` and runs on every x86_64 host.
     # The suite owns its private homes, service port and keyless model.
     'opencode': dict(
@@ -275,6 +274,36 @@ def discover_upstream(manifest):
             row['error'] = str(error)
         rows.append(row)
     return rows
+
+
+def latest_packages(agents, target, upstream):
+    """Resolve one exact official package per selected agent before any native run.
+
+    The registry's latest tag is read once, not once per terminal case. Historical
+    pins are never a fallback for a missing release, target package or integrity.
+    """
+    packages, errors = {}, []
+    for agent in agents:
+        spec = AGENTS[agent]
+        try:
+            rows = [row for row in upstream if row['name'] == spec['name']]
+            if len(rows) != 1 or 'error' in rows[0]:
+                raise ValueError('Latest release discovery is absent, ambiguous or failed')
+            version = version_text(rows[0]['version'])
+            package_target = agent_target(agent, target)
+            metadata = fetch_json(spec['metadata'].format(version=version, target=package_target))
+            if metadata['version'] != spec['published'].format(version=version, target=package_target):
+                raise ValueError('Latest platform package version mismatch')
+            url, integrity = metadata['dist']['tarball'], metadata['dist']['integrity']
+            if url != spec['tarball'].format(version=version, target=package_target):
+                raise ValueError('Latest platform package is not the official distribution')
+            algorithm, encoded = integrity.split('-', 1)
+            if algorithm != 'sha512' or len(base64.b64decode(encoded, validate=True)) != 64:
+                raise ValueError('Latest platform package needs an exact SHA-512 integrity')
+            packages[agent] = [dict(version=version, target=package_target, url=url, integrity=integrity)]
+        except Exception as error:
+            errors.append(spec['name'] + ' latest package: ' + str(error))
+    return packages, errors
 
 
 DOWNLOAD_ATTEMPTS = 3
@@ -487,7 +516,7 @@ def qualify(agent, package, work, results, hgs, hint_inputs=None, package_cache=
     spec = target_spec(agent, target)
     version = version_text(package['version'])
     print('Checking real', spec['name'], version, flush=True)
-    row = {'agent': agent, 'version': version, 'target': target,
+    row = {'agent': agent, 'version': version, 'target': target, 'package_url': package['url'],
            'package_integrity': package['integrity'], 'status': 'failed'}
     if hint_inputs is not None:
         row.update(contract='agent-hint', source_inputs=hint_inputs, original_end_monotonic=hint_end,
@@ -602,7 +631,7 @@ def write_report(report, results):
     for agent, changed in report.get('cli_help_changed', {}).items():
         lines.extend(['', AGENTS[agent]['name'] + ' CLI help changed: ' +
                       (f'yes; review {agent}-cli-help.diff' if changed else 'no') + '.'])
-    lines.extend(['', 'Review release notes and schema diffs before changing pins or implementing new features.', ''])
+    lines.extend(['', 'Review release notes and captured capabilities before implementing new features.', ''])
     summary = '\n'.join(lines)
     (results / 'summary.md').write_text(summary, encoding='utf-8')
     if path := os.environ.get('GITHUB_STEP_SUMMARY'):
@@ -613,9 +642,9 @@ def write_report(report, results):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--latest', action='store_true',
-                        help='Discover agent releases and qualify latest Codex, Claude Code and OpenCode as canaries')
+                        help='Also discover other providers; native execution still uses one latest release per agent')
     parser.add_argument('--agent', choices=sorted(AGENTS), action='append',
-                        help='Qualify only this agent (repeatable); default: every agent pinned for this host')
+                        help='Qualify only this agent (repeatable); default: every agent supported on this host')
     parser.add_argument('--results', type=Path, default=ROOT / 'artifacts/test-results/agent-compatibility')
     debug = ROOT / 'target/debug' / ('hgs.exe' if os.name == 'nt' else 'hgs')
     parser.add_argument('--hgs', type=Path, default=os.environ.get('HGS_TEST_BIN') or debug,
@@ -648,36 +677,42 @@ def main():
     results = args.results.resolve()
     results.mkdir(parents=True, exist_ok=True)
     target = host_target()
-    agents = args.agent or [agent for agent, spec in AGENTS.items() if agent_target(agent, target) in spec['members']]
+    agents = list(dict.fromkeys(args.agent)) if args.agent else [
+        agent for agent, spec in AGENTS.items() if agent_target(agent, target) in spec['members']]
     if hint_inputs is not None:
         if args.agent and any(agent not in HINT_CLASSES for agent in agents):
             parser.error('The agent-hint contract covers Claude and Codex only')
         agents = [agent for agent in agents if agent in HINT_CLASSES]
     unsupported = [agent for agent in agents if agent_target(agent, target) not in AGENTS[agent]['members']]
     if not agents or unsupported:
-        parser.error('No reviewed native packages for ' + str(target) + ': ' + ', '.join(unsupported or AGENTS))
+        parser.error('No supported native packages for ' + str(target) + ': ' + ', '.join(unsupported or AGENTS))
     report = {'checked_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'target': target,
               'contracts': [], 'errors': []}
-    packages = {agent: [package for package in manifest[agent] if package['target'] == agent_target(agent, target)]
-                for agent in agents}
-    if args.latest:
-        report['upstream'] = discover_upstream(manifest)
+    if hint_inputs is not None:
+        # This separately selected historical fixture consumes its frozen grants
+        # and package cache. It is not an ordinary CI compatibility matrix.
+        report['selection_policy'] = 'historical-agent-hint'
+        packages = {agent: [package for package in manifest[agent]
+                            if package['target'] == agent_target(agent, target)] for agent in agents}
+    else:
+        report['selection_policy'] = 'latest-only'
+        names = {AGENTS[agent]['name'] for agent in agents}
+        sources = manifest['upstream'] if args.latest else [source for source in manifest['upstream']
+                                                           if source['name'] in names]
+        report['upstream'] = discover_upstream({'upstream': sources})
         report['errors'].extend(row['name'] + ': ' + row['error'] for row in report['upstream'] if 'error' in row)
+        packages, errors = latest_packages(agents, target, report['upstream'])
+        report['errors'].extend(errors)
+        report['selected_packages'] = [dict(agent=agent, **package) for agent in agents
+                                       for package in packages.get(agent, [])]
+        # Preserve the exact selection even if a later native invocation times out.
+        write_report(report, results)
+        if errors:
+            return 1
+    if args.latest:
         report['canary_versions'] = {}
         for agent in agents:
-            spec = AGENTS[agent]
-            try:
-                latest = next(row['version'] for row in report['upstream'] if row['name'] == spec['name'])
-                if latest not in {package['version'] for package in packages[agent]}:
-                    package_target = agent_target(agent, target)
-                    data = fetch_json(spec['metadata'].format(version=latest, target=package_target))
-                    if data['version'] != spec['published'].format(version=latest, target=package_target):
-                        raise ValueError('Latest native package version mismatch')
-                    packages[agent].append({'version': latest, 'target': package_target, 'url': data['dist']['tarball'],
-                                            'integrity': data['dist']['integrity']})
-                report['canary_versions'][agent] = latest
-            except Exception as error:
-                report['errors'].append(spec['name'] + ' canary discovery: ' + str(error))
+            report['canary_versions'][agent] = packages[agent][0]['version']
     # A scanner or a leftover process may still hold a file there on Windows.
     work_context = (tempfile.TemporaryDirectory(prefix='zerus-native-compat-', ignore_cleanup_errors=True)
                     if hint_inputs is None else contextlib.nullcontext(tempfile.mkdtemp(prefix='zerus-hint-compat-')))
@@ -698,23 +733,6 @@ def main():
             # No finalizer removes failed or unknown hint work. All case cleanup
             # records were checked before removing this successful cache root.
             shutil.rmtree(temporary)
-    for agent in agents:
-        rows = {row['version']: row for row in report['contracts'] if row['agent'] == agent}
-        current = rows.get(next((package['version'] for package in reversed(manifest[agent])
-                                 if package['target'] == agent_target(agent, target)), None))
-        latest = rows.get(report.get('canary_versions', {}).get(agent))
-        if not (current and latest):
-            continue
-        if agent == 'codex':
-            report['capability_changes'] = {
-                'Codex ' + label: schema_changes(current['schema_' + label], latest['schema_' + label])
-                for label in ('stable', 'experimental') if 'schema_' + label in current and 'schema_' + label in latest}
-        if 'cli_help_sha256' in current and 'cli_help_sha256' in latest:
-            report.setdefault('cli_help_changed', {})[agent] = current['cli_help_sha256'] != latest['cli_help_sha256']
-            before = (results / agent / current['version'] / 'cli-help.txt').read_text(encoding='utf-8').splitlines(keepends=True)
-            after = (results / agent / latest['version'] / 'cli-help.txt').read_text(encoding='utf-8').splitlines(keepends=True)
-            (results / (agent + '-cli-help.diff')).write_text(''.join(difflib.unified_diff(
-                before, after, fromfile=current['version'], tofile=latest['version'])), encoding='utf-8')
     write_report(report, results)
     return bool(report['errors'] or any(row['status'] != 'passed' for row in report['contracts']))
 

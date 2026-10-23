@@ -854,12 +854,13 @@ class WorkflowSecurityTests(unittest.TestCase):
                             if f"key: ${{{{ steps.{step_id}.outputs.cache-primary-key }}}}" in step)
                 self.assertIn(f"if: inputs.save_caches && steps.{step_id}.outputs.cache-hit != 'true'\n", save)
 
-    def test_deepseek_fixture_installs_only_its_reviewed_lockfile(self):
-        version = re.search(r'(?m)^const VERSION: &str = "([^"]+)";$', (ROOT / "src/state/dsh.rs").read_text())[1]
+    def test_historical_deepseek_lock_keeps_exact_registry_integrities(self):
         fixture = ROOT / "scripts/ci/dsh-fixture"
         manifest = json.loads((fixture / "package.json").read_text())
         lock = json.loads((fixture / "package-lock.json").read_text())
-        # The adapter's exact version, with no range for npm to float.
+        # Historical evidence remains internally exact, not a CI version selector.
+        version = manifest["dependencies"]["@deepseek-ai/dsh"]
+        self.assertRegex(version, r'^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$')
         self.assertEqual(manifest["dependencies"], {"@deepseek-ai/dsh": version})
         self.assertEqual(lock["lockfileVersion"], 3)
         packages = lock["packages"]
@@ -875,10 +876,17 @@ class WorkflowSecurityTests(unittest.TestCase):
             tarball = f"{name.rsplit('/', 1)[-1]}-{entry['version']}.tgz"
             self.assertEqual(entry["resolved"], f"https://registry.npmjs.org/{name}/-/{tarball}", path)
             self.assertRegex(entry["integrity"], r"^sha512-[A-Za-z0-9+/]{86}==$", path)
-        step = next(step for step in self.checks_steps("cli") if "DeepSeek contract fixture" in step)
-        self.assertIn('cp scripts/ci/dsh-fixture/package.json scripts/ci/dsh-fixture/package-lock.json '
-                      '"$RUNNER_TEMP/dsh/"\n', step)
-        self.assertIn('npm ci --prefix "$RUNNER_TEMP/dsh" --no-audit --no-fund\n', step)
+    def test_deepseek_ci_selects_and_requires_a_sealed_latest_install_before_tests(self):
+        steps = self.checks_steps("cli")
+        step = next(step for step in steps if "DeepSeek contract fixture" in step)
+        self.assertIn("if: runner.os == 'Linux'", step)
+        self.assertIn('python3 scripts/ci/dsh_fixture.py --prefix "$RUNNER_TEMP/dsh"', step)
+        self.assertIn('--evidence "$GITHUB_WORKSPACE/artifacts/test-results/dsh-fixture"', step)
+        self.assertIn('echo "$RUNNER_TEMP/dsh/node_modules/.bin" >> "$GITHUB_PATH"', step)
+        self.assertIn('ZERUS_TEST_DSH_RECEIPT=$GITHUB_WORKSPACE/artifacts/test-results/dsh-fixture/installed.json', step)
+        self.assertIn('>> "$GITHUB_ENV"', step)
+        self.assertLess(steps.index(step), next(i for i, value in enumerate(steps) if 'scripts/ci/cli.sh' in value))
+        self.assertNotIn('scripts/ci/dsh-fixture/package-lock.json', step)
         self.assertNotIn("npm install", job((ROOT / ".github/workflows/checks.yml").read_text(), "cli"))
         workflows = "".join(path.read_text() for path in (ROOT / ".github/workflows").glob("*.yml"))
         self.assertNotIn("@deepseek-ai/dsh@", workflows)
