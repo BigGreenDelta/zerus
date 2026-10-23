@@ -298,6 +298,37 @@ elif a and a[0]=='worktrees':
         QTRY_VERIFY(dialog.findChild<QPushButton *>("primary")->isEnabled());
         const auto preview=qEnvironmentVariable("ZERUS_PREVIEW_DIR");if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/new-session-repository.png"));
     }
+    void repositorySourceKeepsNewProjectIntent_data(){
+        QTest::addColumn<QString>("host");QTest::addColumn<QString>("overrideProject");
+        for(const auto &host:{QString(),QString("mac")}){
+            const auto prefix=host.isEmpty()?"local-":"remote-";
+            QTest::newRow(qPrintable(prefix+QString("keep-new")))<<host<<QString();
+            QTest::newRow(qPrintable(prefix+QString("choose-existing")))<<host<<QString("existing");
+            QTest::newRow(qPrintable(prefix+QString("choose-inbox")))<<host<<QString("ungrouped");
+        }
+    }
+    void repositorySourceKeepsNewProjectIntent(){
+        QFETCH(QString,host);QFETCH(QString,overrideProject);
+        SessionOrganization projects;const auto existing=projects.createGroup("Existing");
+        NewSessionDialog dialog(program(),fleet(),host,"codex",existing);dialog.setGroups(projects,existing);dialog.show();
+        auto *repository=dialog.findChild<QPushButton *>("launchRepositorySource"),*folder=dialog.findChild<QPushButton *>("launchFolderSource");
+        auto *project=dialog.findChild<QComboBox *>("launchProject");auto *name=dialog.findChild<QLineEdit *>("launchNewProjectName");
+        repository->click();dialog.findChild<QLineEdit *>("launchRepositoryUrl")->setText("git@example.invalid:team/fresh.git");
+        project->setCurrentIndex(project->count()-1);QVERIFY(name->isVisible());name->selectAll();QTest::keyClicks(name,"My new project");
+        folder->click();QVERIFY(!name->isVisible());QVERIFY(!project->currentData().toString().isEmpty());
+        // A repeated source click must not erase the remembered repository choice.
+        folder->click();
+        if(!overrideProject.isEmpty()){
+            const int at=project->findData(overrideProject=="existing"?existing:overrideProject);QVERIFY(at>=0);project->setCurrentIndex(at);
+            // User activation is explicit even when Inbox is already the fallback.
+            QVERIFY(QMetaObject::invokeMethod(project,"activated",Qt::DirectConnection,Q_ARG(int,at)));
+        }
+        repository->click();
+        QCOMPARE(name->isVisible(),overrideProject.isEmpty());QCOMPARE(name->text(),QString("My new project"));
+        if(!overrideProject.isEmpty())QCOMPARE(project->currentData().toString(),overrideProject=="existing"?existing:overrideProject);
+        else QVERIFY(project->currentData().toString().isEmpty());
+        QVERIFY(lines("clone-calls").isEmpty());
+    }
     void repositorySourceKeepsOpaqueProjectId(){
         const QString project="new-repository-project";
         SessionOrganization projects(QJsonObject{{"projects",QJsonArray{QJsonObject{{"id",project},{"name","Existing project"}}}},{"default_project",project}});

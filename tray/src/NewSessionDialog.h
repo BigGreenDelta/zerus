@@ -95,7 +95,7 @@ private:
     FleetState m_fleet;
     SessionOrganization m_projects;
     SessionOrganization *m_liveProjects=nullptr;
-    bool m_cloneLaunchPending=false,m_repositorySource=false,m_customDestination=false,m_customProjectName=false;
+    bool m_cloneLaunchPending=false,m_repositorySource=false,m_customDestination=false,m_customProjectName=false,m_repositoryNewProject=false;
     RepositoryClone *m_repository=nullptr;
     MachinePlatform::Style m_repositoryStyle=MachinePlatform::Style::Posix;
     QFormLayout *m_form;

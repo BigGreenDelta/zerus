@@ -259,7 +259,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     connect(buttons,&QDialogButtonBox::rejected,this,&QDialog::reject);connect(m_start,&QPushButton::clicked,this,&NewSessionDialog::start);
     connect(m_manage,&QToolButton::clicked,this,[this]{const auto id=m_project->currentData().toString();reject();emit projectFoldersRequested(id);});
     connect(m_openMachines,&QPushButton::clicked,this,[this]{if(m_creation)return;reject();emit machinesRequested();});
-    connect(m_project,&QComboBox::activated,this,[this]{m_projectExplicit=true;updateForm();});
+    connect(m_project,&QComboBox::activated,this,[this]{m_projectExplicit=true;if(!m_repositorySource)m_repositoryNewProject=false;updateForm();});
     connect(m_project,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;loadMachines();loadFolders();});
     connect(m_machine,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;m_accountPreset=false;loadFolders();});
     connect(m_browse,&QPushButton::clicked,this,&NewSessionDialog::browseFolder);
@@ -568,8 +568,9 @@ void NewSessionDialog::browseFolder()
 
 void NewSessionDialog::setRepositorySource(bool enabled)
 {
-    if(m_validation||m_creation||(m_repository&&m_repository->busy()))return;
+    if(m_repositorySource==enabled||m_validation||m_creation||(m_repository&&m_repository->busy()))return;
     m_prefillRequest=0;
+    if(m_repositorySource&&!enabled)m_repositoryNewProject=m_project->currentData(NewRepositoryProjectRole).toBool();
     m_repositorySource=enabled;
     const auto newProject=m_project->findData(true,NewRepositoryProjectRole);
     if(enabled&&newProject<0){m_project->addItem(tr("New project…"),QString());m_project->setItemData(m_project->count()-1,true,NewRepositoryProjectRole);}
@@ -577,6 +578,9 @@ void NewSessionDialog::setRepositorySource(bool enabled)
         if(m_project->currentIndex()==newProject)m_project->setCurrentIndex(qMax(0,m_project->findData(m_projects.defaultProject())));
         m_project->removeItem(newProject);
     }
+    // Folder mode needs a real project; keep the repository-only choice until
+    // the user explicitly chooses a project there, even the same fallback Inbox.
+    if(enabled&&m_repositoryNewProject)m_project->setCurrentIndex(m_project->findData(true,NewRepositoryProjectRole));
     syncRepositoryComputer();updateForm();
     if(enabled)m_repositoryUrl->setFocus();
 }
@@ -622,7 +626,7 @@ void NewSessionDialog::useRepository(const QString &path)
         m_error->setText(tr("The project changed. The checkout is available at %1. Choose a project to use it.").arg(path));updateForm();return;
     }
     const auto folder=projects->addFolder(project,target.isEmpty()?m_fleet.local().host:target,path,{},style);
-    emit organizationChanged();m_repositorySource=false;
+    emit organizationChanged();m_repositorySource=false;m_repositoryNewProject=false;
     const auto snapshot=*projects;setGroups(snapshot,project);setProjectExplicit(true);
     const auto index=m_machine->findData(target);
     if(index<0||folder.isEmpty()){
