@@ -5315,15 +5315,28 @@ void TestSessionsWindow::activityEscapingAndActions()
     scroll->setValue(0);
     auto cursor = activity->textCursor(); cursor.movePosition(QTextCursor::Start); cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, 5);
     activity->setTextCursor(cursor);
+    const auto selectionAnchor = cursor.anchor(), selectionPosition = cursor.position();
+    const auto selectedText = cursor.selectedText();
+    const auto selectedKey = list->currentItem()->data(SessionRoles::Key).toString();
+    const bool initiallyCollapsed = list->currentItem()->data(SessionRoles::RowCollapsed).toBool();
     const auto point = list->visualItemRect(list->currentItem()).center();
     QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, point);
     QCOMPARE(scroll->value(), 0); QVERIFY(activity->textCursor().hasSelection());
+    // Double-click changes only row density, including the release at the
+    // original point after the row's height changes. Keep the reading position.
     QTest::mouseDClick(list->viewport(), Qt::LeftButton, {}, point);
-    QTRY_COMPARE(scroll->value(), scroll->maximum()); QVERIFY(!activity->textCursor().hasSelection()); QVERIFY(view->jumpButton()->isHidden());
+    QTest::mouseRelease(list->viewport(), Qt::LeftButton, {}, point);
+    QCOMPARE(list->currentItem()->data(SessionRoles::RowCollapsed).toBool(), !initiallyCollapsed);
+    QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selectedKey); QVERIFY(list->currentItem()->isSelected());
+    QCOMPARE(scroll->value(), 0);
+    QCOMPARE(activity->textCursor().anchor(), selectionAnchor); QCOMPARE(activity->textCursor().position(), selectionPosition);
+    QCOMPARE(activity->textCursor().selectedText(), selectedText);
     QCOMPARE(opened.size(), 0); QCOMPARE(copied.size(), 0); QCOMPARE(composer->editor()->toPlainText(), QString("Keep my draft"));
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); tabs->setCurrentIndex(1);
     scroll->setValue(0); QTest::keyClick(list, Qt::Key_Return);
     QCOMPARE(tabs->currentIndex(), 0); QTRY_COMPARE(scroll->value(), scroll->maximum());
+    QVERIFY(!activity->textCursor().hasSelection()); QVERIFY(view->jumpButton()->isHidden());
+    QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selectedKey);
     QCOMPARE(opened.size(), 0); QCOMPARE(copied.size(), 0); QCOMPARE(composer->editor()->toPlainText(), QString("Keep my draft"));
     window.findChild<QAction *>("openSessionAction")->trigger(); QCOMPARE(opened.size(), 1);
     QCOMPARE(opened[0][1].toString(), QStringLiteral("codex/hgs/dashboard"));
