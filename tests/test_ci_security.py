@@ -270,7 +270,10 @@ class WorkflowSecurityTests(unittest.TestCase):
             self.assertEqual(field(job(self.ci, name), "uses"), "./.github/workflows/checks.yml")
         # A callee cannot request broader permissions than its caller's limit.
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
-        self.assertNotRegex(checks, r"(?m)^\s*cache-mode:")
+        self.assertEqual({name: field(job(checks, name), 'cache-mode') for name in
+                          ('cli-macos-debug', 'cli-macos-native', 'cli-macos')},
+                         {'cli-macos-debug': 'read', 'cli-macos-native': 'none', 'cli-macos': 'none'})
+        self.assertNotRegex(checks, r"(?m)^\s*cache-mode: write$")
 
     def test_final_gate_rejects_failure_cancellation_and_all_skipped(self):
         gate = job(self.ci, "gate")
@@ -449,13 +452,14 @@ class WorkflowSecurityTests(unittest.TestCase):
 
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
-        self.assertIn("needs: [source, quick, relay, connector, connector-macos, ios, android, cli, arch, arch-package, "
+        self.assertIn("needs: [source, quick, relay, connector, connector-macos, ios, android, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch, arch-package, "
                       "mac-desktop, windows-desktop, windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         base = {"source": "success", "quick": "success", "relay": "success", "connector": "success",
-                "android": "success", "cli": "success", "arch": "success", "arch-package": "success",
+                "android": "success", "cli": "success", "cli-macos-debug": "success",
+                "cli-macos-core": "success", "cli-macos-native": "success", "cli-macos": "success", "arch": "success", "arch-package": "success",
                 "mac-desktop": "success", "connector-macos": "success", "ios": "success"}
         # Both Windows jobs are selected together, and each must pass on its own.
         windows = ("windows-desktop", "windows-host")
@@ -466,7 +470,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                 other = "success" if selected == "true" else "skipped"
                 results = {key: {"result": value}
                            for key, value in {**base, **dict.fromkeys(windows, other), name: result}.items()}
-                environment = {"RESULTS": json.dumps(results), "RUN_CLI": "true", "RUN_ARCH": "true",
+                environment = {"RESULTS": json.dumps(results), "RUN_LINUX": "true", "RUN_ARCH": "true",
                                "RUN_MACOS": "true", "RUN_IOS": "true", "RUN_WINDOWS": selected}
                 with self.subTest(job=name, selected=selected, result=result), patch.dict(os.environ, environment):
                     if success:
@@ -490,7 +494,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             ({**arch_skipped, "arch": "success"}, "false", False),
         ]:
             environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
-                           "RUN_CLI": "true", "RUN_ARCH": run_arch, "RUN_MACOS": "true", "RUN_IOS": "true", "RUN_WINDOWS": "true"}
+                           "RUN_LINUX": "true", "RUN_ARCH": run_arch, "RUN_MACOS": "true", "RUN_IOS": "true", "RUN_WINDOWS": "true"}
             with self.subTest(results=results, run_arch=run_arch), patch.dict(os.environ, environment):
                 if success:
                     exec(code, {})
@@ -526,11 +530,14 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt",
                      "run: cargo +1.99.1 test --locked"):
             self.assertIn(line, quick)
-        for name in ("quick", "relay", "connector", "connector-macos", "android", "cli", "arch", "arch-package",
+        for name in ("quick", "relay", "connector", "connector-macos", "android", "cli", "cli-macos-debug", "arch", "arch-package",
                      "mac-desktop", "windows-desktop", "windows-host"):
             with self.subTest(job=name):
                 self.assertEqual(field(job(checks, name), "needs"), "source")
                 self.assertIn("ref: ${{ needs.source.outputs.commit }}", job(checks, name))
+        for name in ('cli-macos-core', 'cli-macos-native'):
+            self.assertEqual(field(job(checks, name), 'needs'), '[source, cli-macos-debug]')
+            self.assertIn('ref: ${{ needs.source.outputs.commit }}', job(checks, name))
         # Builds use every runner vCPU; recipes leave the job count to Ninja.
         self.assertNotIn("CARGO_BUILD_JOBS", job(checks, "cli"))
         for name, jobs in (("arch", 4), ("mac-desktop", 3), ("windows-desktop", 4)):
@@ -666,7 +673,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         gate = job(checks, "gate")
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "cli", "arch", "arch-package",
+        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch", "arch-package",
                  "mac-desktop", "windows-desktop", "windows-host")
         for run_macos, smoke_result, success in [("true", "success", True), ("true", "failure", False),
                                                  ("true", "skipped", False), ("false", "skipped", True),
@@ -675,9 +682,11 @@ class WorkflowSecurityTests(unittest.TestCase):
             if run_macos == "false":
                 results["mac-desktop"] = "skipped"
                 results["ios"] = "skipped"
+                for name in ("cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos"):
+                    results[name] = "skipped"
             results["connector-macos"] = smoke_result
             environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
-                           "RUN_CLI": "true", "RUN_ARCH": "true", "RUN_MACOS": run_macos, "RUN_IOS": run_macos, "RUN_WINDOWS": "true"}
+                           "RUN_LINUX": "true", "RUN_ARCH": "true", "RUN_MACOS": run_macos, "RUN_IOS": run_macos, "RUN_WINDOWS": "true"}
             with self.subTest(run_macos=run_macos, result=smoke_result), patch.dict(os.environ, environment):
                 if success:
                     exec(code, {})
@@ -703,7 +712,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         gate = job(checks, "gate")
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
-        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "cli", "arch", "arch-package",
+        names = ("source", "quick", "relay", "connector", "connector-macos", "ios", "android", "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch", "arch-package",
                  "mac-desktop", "windows-desktop", "windows-host")
         for run_ios, ios_result, success in [("true", "success", True), ("true", "failure", False),
                                                ("true", "skipped", False), ("true", "cancelled", False),
@@ -711,7 +720,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             results = dict.fromkeys(names, "success")
             results["ios"] = ios_result
             environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
-                           "RUN_CLI": "true", "RUN_ARCH": "true", "RUN_MACOS": "true", "RUN_IOS": run_ios, "RUN_WINDOWS": "true"}
+                           "RUN_LINUX": "true", "RUN_ARCH": "true", "RUN_MACOS": "true", "RUN_IOS": run_ios, "RUN_WINDOWS": "true"}
             with self.subTest(run_ios=run_ios, result=ios_result), patch.dict(os.environ, environment):
                 if success:
                     exec(code, {})
@@ -784,7 +793,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         names = re.findall(r"(?m)^  ([a-z][\w-]*):\n", checks.split("\njobs:\n", 1)[1])
         # windows-host restores the Rust cache that windows-desktop saves, and
         # never saves it: two jobs saving one key would race.
-        read_only = {"windows-host": {"rust-cache"}}
+        read_only = {"windows-host": {"rust-cache"}, "cli-macos-debug": {"rust-cache"}}
         saves = 0
         for name in names:
             restores, saved = {}, []
@@ -843,6 +852,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         identity = "${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-"
         rust = {"quick": ("msrv-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.99.1 -Vv"),
                 "cli": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
+                "cli-macos-debug": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
+                "cli-macos-core": ("cli-${{ runner.os }}-${{ runner.arch }}-", "rustc -Vv"),
                 "windows-desktop": ("windows-cli-${{ runner.arch }}-", "rustc -Vv"),
                 "windows-host": ("windows-cli-${{ runner.arch }}-", "rustc -Vv"),
                 "connector": ("connector-${{ runner.os }}-${{ runner.arch }}-", "rustc +1.99.1 -Vv")}
@@ -861,7 +872,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("          key: arch-cargo-v1-${{ steps.epoch.outputs.month }}-"
                       "${{ hashFiles('Cargo.lock', 'services/mobile/connector/Cargo.lock') }}\n"
                       "          restore-keys: arch-cargo-v1-${{ steps.epoch.outputs.month }}-\n", cargo)
-        for name, step_id in (("quick", "rust-cache"), ("cli", "rust-cache"), ("windows-desktop", "rust-cache"),
+        for name, step_id in (("quick", "rust-cache"), ("cli", "rust-cache"), ("cli-macos-core", "rust-cache"), ("windows-desktop", "rust-cache"),
                               ("connector", "rust-cache"), ("arch-package", "cargo-cache"),
                               ("windows-desktop", "qt-cache"), ("android", "gradle-cache")):
             with self.subTest(job=name, cache=step_id):

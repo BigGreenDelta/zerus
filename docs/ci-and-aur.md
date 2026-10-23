@@ -59,6 +59,22 @@ number zero, package `app.zerus.mobile`). The google-services and Crashlytics
 plugins only turn that file into resources; tests and lint never contact
 Firebase, and the mapping upload follows R8, which these tasks do not run.
 
+The macOS CLI unit/debug job finishes before two independent consumers start.
+One continues the original smoke, Python integration and release build; the other
+runs the unchanged latest-agent contracts from that exact debug CLI. A three-file
+handoff contains only `hgs`, `fake_agent` and a manifest bound to the selected
+source, run, producer attempt, actual OS/architecture, producing Rust toolchain
+and source-helper/binary hashes. Consumers use the completed producer's exact
+artifact ID and manifest digest, including its original attempt on a partial
+rerun; there is no live-producer polling or name/latest fallback. The CLI consumer
+selects the producer's exact Rust release and verifies the compiler identity.
+The public `CLI (macos-15)` result and `Suite results` require every selected
+component. The producer restores Rust caches without saving; only the integration
+and release consumer retains the previous complete-build save opportunity. The
+native consumer has no cache access. Linux retains the default complete CLI path.
+Separate runner setup, dependency restoration and artifact transfer add overhead;
+this split does not establish an observed speedup without hosted evidence.
+
 On upstream `main` pushes with the [Dev channel](public-distribution.md#verified-main-dev-channel)
 enabled, `ci-dev-qualification.yml` holds one qualification slot through both
 credential-free checks and the parallel unsigned Mac bundle. The bundle uses pinned
