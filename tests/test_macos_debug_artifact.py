@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 import struct
 import subprocess
@@ -171,6 +172,8 @@ class ArtifactControls(unittest.TestCase):
 
 class CliPhases(unittest.TestCase):
     def test_default_preserves_every_command_and_split_excludes_only_the_other_phase(self):
+        selected_bash=shutil.which('bash')
+        self.assertIsNotNone(selected_bash, 'CLI phase controls require an installed Bash')
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder); script=root/'scripts/ci/cli.sh';script.parent.mkdir(parents=True)
             script.write_bytes((ROOT/'scripts/ci/cli.sh').read_bytes())
@@ -182,7 +185,7 @@ class CliPhases(unittest.TestCase):
             results={}
             for phase in ('all','debug','remaining','unknown'):
                 log=root/(phase+'.log');env=dict(os.environ, PATH=str(binaries)+':/usr/bin:/bin', CALL_LOG=str(log), HGS_SHOULD_NOT_EXIST='contaminated')
-                result=subprocess.run(['/usr/bin/bash',str(script),*([phase] if phase!='all' else [])],env=env,capture_output=True,text=True)
+                result=subprocess.run([selected_bash,str(script),*([phase] if phase!='all' else [])],env=env,capture_output=True,text=True)
                 self.assertEqual(result.returncode, 2 if phase=='unknown' else 0,result.stderr)
                 results[phase]=log.read_text().splitlines() if log.exists() else []
             debug=['python3:-','cargo:test --locked','cargo:build --locked','cargo:build --locked --example fake_agent']
