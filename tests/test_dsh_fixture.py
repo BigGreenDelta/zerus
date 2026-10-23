@@ -4,6 +4,7 @@ All install/version subprocesses and registry responses are stand-ins. These
 controls execute no npm package, native agent, model or installed application.
 """
 import base64
+from contextlib import contextmanager
 import copy
 import importlib.util
 import io
@@ -22,6 +23,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('dsh_fixture', ROOT / 'scripts/ci/dsh_fixture.py')
 F = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(F)
+
+
+@contextmanager
+def private_root(**kwargs):
+    # macOS TemporaryDirectory may use /var, whose canonical name is /private/var.
+    with tempfile.TemporaryDirectory(**kwargs) as root:
+        yield Path(root).resolve()
 
 
 @unittest.skipUnless(hasattr(os, 'O_DIRECTORY'), 'Unix private-directory receipt controls')
@@ -144,7 +152,7 @@ class LatestFixture(unittest.TestCase):
         return receipt
 
     def test_one_resolution_is_sealed_before_install_and_runtime_identity_is_bound(self):
-        with tempfile.TemporaryDirectory() as root:
+        with private_root() as root:
             receipt = self.fixture(root)
             self.assertEqual([c[1] for c in self.commands], ['--version', 'config', 'config', 'install', 'ci'])
             executable = self.prefix / 'node_modules/.bin/dsh'
@@ -157,9 +165,26 @@ class LatestFixture(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'bytes changed'):
                 F.verify_install(receipt, executable)
 
+    def test_temporary_root_alias_is_resolved_without_weakening_prefix_admission(self):
+        with private_root() as parent:
+            target, alias = parent / 'actual', parent / 'alias'
+            target.mkdir()
+            alias.symlink_to(target, target_is_directory=True)
+            with private_root(dir=alias) as root:
+                self.assertEqual(root.parent, target)
+                self.assertEqual(root, root.resolve())
+                self.assertEqual((alias / root.name).resolve(), root)
+                with patch.object(F.shutil, 'which') as npm, \
+                        self.assertRaisesRegex(ValueError, 'Canonical private fixture prefix'):
+                    F.install(alias / root.name / 'prefix', root / 'evidence')
+                npm.assert_not_called()
+                self.assertEqual(list(root.iterdir()), [])
+                receipt = self.fixture(root)
+                self.assertEqual(F.verify_install(receipt, self.prefix / 'node_modules/.bin/dsh'), self.version)
+
     def test_latest_metadata_lock_and_receipt_tampering_all_refuse_before_version_execution(self):
         for target in ('latest.json', 'package-lock.json', 'selection.json', 'installed.json', 'npm-policy.json', 'npm-config-denied.log'):
-            with self.subTest(target=target), tempfile.TemporaryDirectory() as root:
+            with self.subTest(target=target), private_root() as root:
                 receipt = self.fixture(root)
                 path = self.evidence / target
                 path.write_bytes(path.read_bytes() + b' ')
@@ -171,7 +196,7 @@ class LatestFixture(unittest.TestCase):
                 probe.assert_not_called()
 
     def test_discovery_failure_stops_without_install_or_historical_lock(self):
-        with tempfile.TemporaryDirectory() as root:
+        with private_root() as root:
             evidence = Path(root) / 'evidence'
             with patch.object(F.shutil, 'which', return_value='/fixture/npm'), \
                     patch.object(F, 'discover', side_effect=urllib.error.URLError('offline')) as discover, \
@@ -182,7 +207,7 @@ class LatestFixture(unittest.TestCase):
             self.assertFalse((evidence / 'installed.json').exists())
 
     def test_install_failure_retains_selection_but_never_admits_native_fixture(self):
-        with tempfile.TemporaryDirectory() as root:
+        with private_root() as root:
             self.prefix, self.evidence = Path(root) / 'prefix', Path(root) / 'evidence'
             self.commands, self.environments = [], []
             def fail(command, **kwargs):
@@ -197,7 +222,7 @@ class LatestFixture(unittest.TestCase):
 
     def test_nonregistry_or_mismatched_resolution_never_reaches_install(self):
         for change in ('foreign', 'old'):
-            with self.subTest(change=change), tempfile.TemporaryDirectory() as root:
+            with self.subTest(change=change), private_root() as root:
                 self.prefix, self.evidence = Path(root) / 'prefix', Path(root) / 'evidence'
                 self.commands, self.environments = [], []
                 lock = copy.deepcopy(self.lock)
@@ -217,7 +242,7 @@ class LatestFixture(unittest.TestCase):
                 self.assertFalse((self.evidence / 'installed.json').exists())
 
     def test_original_deadline_failure_never_admits_partial_install(self):
-        with tempfile.TemporaryDirectory() as root:
+        with private_root() as root:
             self.prefix, self.evidence = Path(root) / 'prefix', Path(root) / 'evidence'
             with patch.object(F.shutil, 'which', return_value='/fixture/npm'), patch.object(F, 'discover', return_value=self.raw), \
                     patch.object(F, 'owned_command', side_effect=subprocess.TimeoutExpired('npm', 600)) as npm:
@@ -229,7 +254,7 @@ class LatestFixture(unittest.TestCase):
     def test_unsupported_npm_or_unknown_source_policy_refuses_before_discovery(self):
         for version, missing, ignored in [('11.15.9', False, False), ('12.0.0', False, False),
                                           ('11.19.0', True, False), ('11.19.0', False, True)]:
-            with self.subTest(version=version, missing=missing, ignored=ignored), tempfile.TemporaryDirectory() as root:
+            with self.subTest(version=version, missing=missing, ignored=ignored), private_root() as root:
                 self.prefix, self.evidence = Path(root) / 'prefix', Path(root) / 'evidence'
                 self.commands, self.environments = [], []
                 def probe(command, **kwargs):
@@ -282,7 +307,7 @@ class LatestFixture(unittest.TestCase):
     def test_late_pending_publication_fsync_or_final_close_cannot_leave_installed_receipt(self):
         fsync, close = F.os.fsync, F.os.close
         for stage in ('pending', 'published', 'closed'):
-            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as root:
+            with self.subTest(stage=stage), private_root() as root:
                 self.prefix, self.evidence = Path(root) / 'prefix', Path(root) / 'evidence'
                 self.commands, self.environments = [], []
                 clock = [0.0]
@@ -313,7 +338,7 @@ class LatestFixture(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'linux' and hasattr(os, 'WNOWAIT'), 'Linux owned-group custody')
     def test_owned_npm_descendant_timeout_cannot_make_a_delayed_installed_receipt(self):
-        with tempfile.TemporaryDirectory() as root:
+        with private_root() as root:
             root = Path(root)
             receipt, ready = root / 'installed.json', root / 'ready'
             child = 'import pathlib,time;time.sleep(1.5);pathlib.Path(' + repr(str(receipt)) + ').write_text("late")'
@@ -346,7 +371,7 @@ class LatestFixture(unittest.TestCase):
             self.assertNotIn('reap', events)
             events.append('signal')
             return killpg(group, value)
-        with tempfile.TemporaryDirectory() as root, open(os.devnull, 'wb') as log:
+        with private_root() as root, open(os.devnull, 'wb') as log:
             started = time.monotonic()
             with patch.object(F.subprocess, 'Popen', side_effect=spawn), patch.object(F.os, 'killpg', side_effect=signal):
                 result = F.owned_command([sys.executable, '-c', 'pass'], cwd=root, env={'PATH': os.environ['PATH']},
@@ -368,7 +393,7 @@ class LatestFixture(unittest.TestCase):
             signal.assert_not_called()
 
     def test_prefix_is_fresh_and_npm_has_private_configuration_without_credentials(self):
-        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {'NPM_TOKEN': 'synthetic-secret',
+        with private_root() as root, patch.dict(os.environ, {'NPM_TOKEN': 'synthetic-secret',
                 'DEEPSEEK_API_KEY': 'synthetic-secret', 'npm_config_registry': 'https://example.invalid'}):
             self.fixture(root)
             for env in self.environments:
@@ -382,7 +407,7 @@ class LatestFixture(unittest.TestCase):
             discover.assert_not_called()
 
     def test_mandatory_ci_missing_or_wrong_version_is_an_error_not_a_skip(self):
-        with tempfile.TemporaryDirectory() as root:
+        with private_root() as root:
             receipt = self.fixture(root)
             hgs = Path(root) / 'hgs'; hgs.write_text('synthetic CLI')
             executable = str(self.prefix / 'node_modules/.bin/dsh')
