@@ -1,0 +1,57 @@
+name: CI Dev qualification
+
+# One caller-level slot owns both parallel credential-free branches. Do not
+# release it when checks finish while an unsigned bundle is still building.
+on:
+  workflow_call:
+    outputs:
+      unsigned_release:
+        value: ${{ jobs.bundle.outputs.release }}
+
+permissions:
+  contents: read
+
+cache-mode: read
+
+jobs:
+  checks:
+    name: Trusted main checks
+    if: >-
+      !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
+    cache-mode: write
+    uses: ./.github/workflows/checks.yml
+    with:
+      ref: ${{ github.sha }}
+      run_linux: true
+      run_arch: true
+      run_macos: true
+      run_windows: false
+      run_ios: false
+      save_caches: true
+  bundle:
+    name: Parallel unsigned macOS dev bundle
+    if: >-
+      !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' &&
+      github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' && vars.MACOS_CASKS_ENABLED == 'true'
+    uses: ./.github/workflows/macos-bundle.yml
+    with:
+      channel: dev
+  gate:
+    name: Dev qualification results
+    needs: [checks, bundle]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    cache-mode: none
+    env:
+      CHECKS: ${{ needs.checks.result }}
+      BUNDLE: ${{ needs.bundle.result }}
+      MACOS: ${{ vars.MACOS_CASKS_ENABLED }}
+    steps:
+      - run: |
+          python3 - <<'PY'
+          import os
+          expected_bundle = 'success' if os.environ['MACOS'] == 'true' else 'skipped'
+          if os.environ['CHECKS'] != 'success' or os.environ['BUNDLE'] != expected_bundle:
+              raise SystemExit('Dev qualification requires successful checks and its selected unsigned bundle.')
+          PY

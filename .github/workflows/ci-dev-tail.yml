@@ -1,0 +1,85 @@
+name: CI Dev signing and sealing
+
+# This caller holds one noncancelling CI-tail slot through signing, installation
+# checks, immutable candidate sealing and the monotonic Dev tag. Publication is
+# still the independent Publish Dev workflow after the whole CI run succeeds.
+on:
+  workflow_call:
+    inputs:
+      unsigned_release:
+        type: string
+        default: ''
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: true
+      ANDROID_STORE_PASSWORD:
+        required: true
+      ANDROID_KEY_ALIAS:
+        required: true
+      ANDROID_KEY_PASSWORD:
+        required: true
+      ANDROID_GOOGLE_SERVICES_JSON:
+        required: true
+      MACOS_DEVELOPER_ID_P12:
+        required: false
+      MACOS_DEVELOPER_ID_P12_PASSWORD:
+        required: false
+      APPLE_NOTARY_API_KEY_P8:
+        required: false
+      APPLE_NOTARY_API_KEY_ID:
+        required: false
+      APPLE_NOTARY_API_ISSUER_ID:
+        required: false
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+jobs:
+  dev-android:
+    name: Signed Android dev candidate
+    # The short signed build fits alongside macOS signing preparation after
+    # checks, without occupying a runner polling the gate.
+    if: >-
+      !cancelled() &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/dev-android.yml
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_GOOGLE_SERVICES_JSON: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON }}
+  dev-macos:
+    name: Signed macOS dev candidate
+    if: >-
+      !cancelled() &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' && vars.MACOS_CASKS_ENABLED == 'true'
+    uses: ./.github/workflows/macos-cask.yml
+    with:
+      channel: dev
+      reuse_unsigned: true
+      unsigned_release: ${{ inputs.unsigned_release }}
+    secrets:
+      MACOS_DEVELOPER_ID_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+      MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+      APPLE_NOTARY_API_KEY_P8: ${{ secrets.APPLE_NOTARY_API_KEY_P8 }}
+      APPLE_NOTARY_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
+      APPLE_NOTARY_API_ISSUER_ID: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
+  dev:
+    name: Verified main dev candidates
+    needs: [dev-android, dev-macos]
+    # The optional Mac call is deliberately skipped when casks are disabled.
+    # Check its exact result instead of inheriting a transitive success().
+    if: >-
+      !cancelled() && needs.dev-android.result == 'success' &&
+      (needs.dev-macos.result == 'success' || vars.MACOS_CASKS_ENABLED != 'true' && needs.dev-macos.result == 'skipped') &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/dev.yml
+    with:
+      macos: ${{ vars.MACOS_CASKS_ENABLED == 'true' }}

@@ -43,8 +43,10 @@ conservative change selection, including both sides of renames.
 
 Quick checks and the full suites start together once the commit is resolved, so
 a quick-check failure no longer holds back the other suites. New PR/manual runs cancel
-obsolete runs for the same branch/PR and workflow. Dev main finishes its active
-qualifying run while the newest pending main revision waits. PR jobs have read-only
+obsolete runs for the same branch/PR and workflow. Trusted public Dev main pushes
+use separate bounded qualification and signing/sealing queues; each keeps its active
+phase and coalesces pending revisions to the newest one. PR/manual checks and main
+before Dev rollout keep their existing whole-run concurrency. PR jobs have read-only
 permissions and no publication credentials; fork PRs use `pull_request`, never
 `pull_request_target`. Publishing is confined to trusted upstream `main` and the
 branch-restricted `release` environment. Authenticated model-turn tests remain
@@ -58,12 +60,27 @@ plugins only turn that file into resources; tests and lint never contact
 Firebase, and the mapping upload follows R8, which these tasks do not run.
 
 On upstream `main` pushes with the [Dev channel](public-distribution.md#verified-main-dev-channel)
-enabled, credential-free checks and `dev-macos-bundle` run in parallel. The latter
-uses pinned official Qt, tests the Release GUI, then packages that same tested
-app; there is no second GUI compilation with tests disabled. Signing remains
-in `macos-cask.yml` and starts only after both the trusted CI gate and that exact
-run's unsigned bundle succeed. Candidate source/version checks, Developer ID,
-notarization and disposable cask installation remain required.
+enabled, `ci-dev-qualification.yml` holds one qualification slot through both
+credential-free checks and the parallel unsigned Mac bundle. The bundle uses pinned
+official Qt, tests the Release GUI, then packages that same tested app; there is no
+second GUI compilation with tests disabled. Its gate requires successful checks and
+the exact run's selected bundle; a disabled Mac bundle must be skipped.
+
+After the public **CI gate** admits exactly one successful check workflow,
+`ci-dev-tail.yml` holds one separate noncancelling CI slot through Android/Mac
+signing, installation checks, candidate sealing and the monotonic Dev tag. The next
+revision can qualify while this tail runs. Signing remains in the existing protected
+workflows; source/version checks, Developer ID, notarization and disposable cask
+installation remain required. Qualification and delivery retain the same CI run ID,
+number, SHA and artifact namespace. Only trusted checks write caches; PR checks read
+them and signing/publication have no cache access.
+
+The existing **Publish Dev** workflow is the third, independently serialized lane.
+It still starts only after the entire source CI run succeeds and validates that
+run's immutable candidate. Active signing and publication are never cancelled by a
+new main push. All queues retain GitHub's default single pending entry, so newer
+pending work can replace older pending work; every revision is not promised a
+published build. Existing monotonic candidate/catalog checks reject stale delivery.
 
 The short signed `dev-android.yml` build starts after the CI gate alongside Mac
 signing/installation. It builds `assembleRelease`, seals the APK/source and removes
