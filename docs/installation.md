@@ -384,7 +384,10 @@ Claude Code and Kimi Code with their vendors' PowerShell installers (`install.ps
 which verify the binaries they download. Zerus looks the agents up on `PATH` (with
 `PATHEXT`), adds `%USERPROFILE%\.local\bin`, npm's `%APPDATA%\npm` and Kimi Code's
 `%USERPROFILE%\.kimi-code\bin`, and runs the script of an npm command shim with
-Node.js directly; other batch files are refused.
+Node.js directly; other batch files are refused. A project's `run_claude.ps1`,
+`run_codex.ps1` or `run_kimi.ps1` runs with PowerShell in place of the agent
+([project wrappers](reference.md#project-wrappers)); a `run_*.sh` is not used on
+Windows.
 
 - **Claude Code** and **Codex** run tracked, with Zerus hooks in their
   configuration. Every automatic CI run tests their

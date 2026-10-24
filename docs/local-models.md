@@ -73,7 +73,8 @@ hgs codex /path/to/project --account local-ollama --new -n local-qwen --bare -- 
   --oss --local-provider ollama -m qwen3-coder:30b
 ```
 
-`--bare` selects Codex directly instead of a project's `run_codex.sh`. The ordinary
+`--bare` selects Codex directly instead of a project's `run_codex.sh` or
+`run_codex.ps1` ([project wrappers](reference.md#project-wrappers)). The ordinary
 Codex alternate screen is supported; keep its default for this example. On first
 launch, review the folder-access and hook-trust prompts. Zerus tracking hooks must
 be trusted for native state and conversation identity to appear.

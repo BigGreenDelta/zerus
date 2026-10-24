@@ -273,8 +273,8 @@ new launches. Native hook trust still requires an explicit user choice in Codex.
 Claude Code's `PostModelSwitch` is registered only once `claude --version` reports
 2.1.296 or later: older versions stop every start at a settings warning for a hook
 event they do not know. Until then each launch reads the version again; a version
-that cannot be read gets no such event. A launch through a project `run_claude.sh`
-never reads it, because a launcher runs only under supervision. Once registered,
+that cannot be read gets no such event. A launch through a project wrapper
+(`run_claude.sh` or `run_claude.ps1`) never reads it, because a launcher runs only under supervision. Once registered,
 the version is read again only when the `claude` executable changes; a version older
 than 2.1.296 then has hgs remove its own `PostModelSwitch` entries before a tracked
 start, dropping the event only when nothing else is left in it; started outside hgs
@@ -456,8 +456,22 @@ the exact observed run even when its reusable session label later changes owner.
 
 ## Project wrappers
 
-An executable `run_COMMAND.sh` in the project folder runs inside the tmux session.
-Use it to prepare the environment and launch the native agent.
+A wrapper in the project folder runs inside the session in place of the native
+agent. Use it to prepare the environment and launch the agent with the arguments
+it receives.
+
+- On Linux and macOS an executable `run_COMMAND.sh` runs as it is. Without one, a
+  `run_COMMAND.ps1` runs when PowerShell 7 (`pwsh`) is on `PATH`, as
+  `pwsh -NoLogo -NoProfile -File run_COMMAND.ps1 ARGS...`; without `pwsh` the
+  native agent starts, so a project may ship a `.ps1` for its Windows users only.
+- On Windows only `run_COMMAND.ps1` is a wrapper; a `.sh` file is never started.
+  It runs as `pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File
+  run_COMMAND.ps1 ARGS...` with PowerShell 7 (`pwsh.exe`) from `PATH`, the Microsoft
+  Store installation included, else with Windows PowerShell (`powershell.exe`).
+  Windows PowerShell drops the double quotes and the empty arguments that a script
+  passes on to a native program, such as Codex's `-c key="value"`, so install
+  PowerShell 7 for wrappers. When neither can be found, the launch fails with an
+  error naming the wrapper; `--bare` starts the native agent instead.
 
 ```sh
 hgs codex sample-project                 # run_codex.sh starts a new conversation
@@ -466,14 +480,35 @@ hgs codex sample-project -- resume ID     # continue this exact conversation
 hgs codex sample-project --bare          # bypass the wrapper
 ```
 
+A PowerShell wrapper passes its arguments on with `@args` and returns the agent's
+exit code:
+
+```powershell
+# run_claude.ps1
+$env:EXAMPLE_TOKEN = (Get-Content -Raw "$HOME/.config/example/token").Trim()
+& claude @args
+exit $LASTEXITCODE
+```
+
 Explicit arguments after `--` suppress automatic Codex `resume --last` insertion,
 even with `-c`. Use `-- resume --last --model MODEL` when needed. Claude and Kimi
 forward `-c` to their wrapper. Existing sessions attach without rerunning the
 wrapper. Interactive setup needs an attached launch; detached mode assumes the
 required environment is already available. Never put private keys in wrappers.
-Tracking never runs `run_codex.sh` to detect Codex capabilities; it runs only as
-the launch and always receives `--no-daemon`, so it must start a Codex release with
-that flag. `--bare` checks the native Codex and omits the flag for an older release.
+Pause, resume, recovery, fork and archive restore start the same wrapper again
+with the conversation's resume arguments after it. `-File` hands every later
+argument to the script unchanged, except that PowerShell splits an argument of the
+form `-name:value` at its colon. PowerShell cannot replace itself with the agent
+as `exec` does in a `.sh` wrapper, so the tracked process is PowerShell and the
+agent its child, as with a `.sh` wrapper that does not `exec`. Checks that need
+the tracked process to be the agent itself then refuse: the first message to a
+resumed or forked Codex conversation goes through Terminal until Codex confirms
+it. On Linux and macOS a pause sends SIGTERM to that process only; prefer a `.sh`
+wrapper that ends with `exec` there.
+Tracking never runs `run_codex.sh` or `run_codex.ps1` to detect Codex capabilities;
+a wrapper runs only as the launch and always receives `--no-daemon`, so it must
+start a Codex release with that flag. `--bare` checks the native Codex and omits
+the flag for an older release.
 
 <a id="desktop"></a>
 
