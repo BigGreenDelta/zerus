@@ -9,9 +9,10 @@ pub(super) fn fork_pending(record: &Value) -> bool {
     record["agent"] == "codex"
         && record["startup_kind"] == "new"
         && uuid::Uuid::parse_str(string(record, "fork_parent_id")).is_ok()
-        && record["base"].as_array().is_some_and(|args| {
-            args.get(1).is_some_and(|arg| arg == "fork")
-                && args.get(2) == record.get("fork_parent_id")
+        && recipes::argv(record).is_ok_and(|args| {
+            let program = crate::project_launcher::program_words(&args);
+            args.get(program).is_some_and(|arg| arg == "fork")
+                && args.get(program + 1).map(|id| json!(id)).as_ref() == record.get("fork_parent_id")
         })
         && string(record, "conversation_id").is_empty()
         && string(record, "expected_id").is_empty()
@@ -47,7 +48,8 @@ fn fork_directory(record: &Value) -> Result<PathBuf> {
     let launch = Path::new(string(record, "launch_dir"));
     let mut cwd = launch.to_path_buf();
     let args = recipes::argv(record)?;
-    let mut index = 3;
+    // After the program and `fork <parent>`.
+    let mut index = crate::project_launcher::program_words(&args) + 2;
     while index < args.len() && args[index] != "--" {
         let (key, value) = args[index]
             .split_once('=')
@@ -589,6 +591,26 @@ mod tests {
 
     const FORK_PARENT: &str = "11111111-1111-4111-8111-111111111111";
     const FORK_CHILD: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// A fork's `fork <parent>` follows its program, also when a `.ps1`
+    /// project launcher spreads that over a PowerShell command line.
+    #[test]
+    fn a_pending_codex_fork_is_recognised_after_any_project_launcher() {
+        let temporary = tempfile::tempdir().unwrap();
+        let launch = crate::platform::canonical(temporary.path()).unwrap();
+        fs::create_dir(launch.join("sub")).unwrap();
+        let pwsh = ["pwsh", "-NoLogo", "-NoProfile", "-File", "/p/run_codex.ps1"];
+        for program in [&["codex"][..], &["/p/run_codex.sh"][..], &pwsh[..]] {
+            let base = |args: &[&'static str]| [program, args].concat();
+            let record = |args: &[&'static str]| json!({"agent":"codex","startup_kind":"new",
+                "fork_parent_id":FORK_PARENT,"base":base(args),"launch_dir":launch});
+            assert!(fork_pending(&record(&["fork", FORK_PARENT, "--no-daemon"])), "{program:?}");
+            assert!(!fork_pending(&record(&["resume", FORK_PARENT])), "{program:?}");
+            assert!(!fork_pending(&record(&["fork", FORK_CHILD])), "{program:?}");
+            assert_eq!(fork_directory(&record(&["fork", FORK_PARENT, "-C", "sub"])).unwrap(),
+                launch.join("sub"), "{program:?}");
+        }
+    }
 
     struct ForkHistory {
         temporary: tempfile::TempDir,

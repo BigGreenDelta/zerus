@@ -150,7 +150,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
   --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (omit for the model's default)
   --new    always create a separate session; generate a name unless -n is given
   -d       start detached (do not attach)      --fresh  explicitly replace a saved conversation
-  --rc     claude --remote-control (phone)     --bare   ignore a project run_<cmd>.sh launcher
+  --rc     claude --remote-control (phone)     --bare   ignore a project run_<cmd>.sh/.ps1 launcher
   --dry-run  print the tmux/ssh command
 ~/.config/hgs/config sets HGS_SELF (names that mean "this box") and HGS_PEERS
 (the ssh aliases that hgs ls polls and @host hops to); environment variables win.
@@ -2032,13 +2032,18 @@ fn launch(
         ),
         _ => (vec![command.into()], Vec::new()),
     };
-    let launcher = Path::new(&directory).join(format!("run_{command_name}.sh"));
-    if !options.bare && !directory.is_empty() && platform::executable(&launcher) {
-        base[0] = launcher.to_string_lossy().into_owned();
-        if !resume.is_empty() {
-            resume[0] = base[0].clone();
-        }
-    }
+    // A project launcher replaces the program, which for a Windows `sh` session
+    // is its PowerShell with any options (`powershell.exe -NoLogo`).
+    let program = if command_name == "sh" && cfg!(windows) { base.len() } else { 1 };
+    crate::project_launcher::apply(
+        &directory,
+        &command_name,
+        options.bare,
+        program,
+        &mut base,
+        &mut resume,
+    )
+    .map_err(|error| Error::new(1, error))?;
     if let Some(id) = &options.resume_id {
         base.extend([
             match command_name.as_str() {

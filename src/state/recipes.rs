@@ -107,9 +107,14 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
         "kimi" => &["-y", "--yolo", "--auto", "--plan"],
         _ => &[],
     };
-    let executable = argv.first().ok_or("saved agent executable is missing")?;
-    let mut result = vec![
-        executable.clone(),
+    if argv.is_empty() {
+        return Err("saved agent executable is missing".into());
+    }
+    // The program: the agent, a `.sh` launcher or a `.ps1` launcher's PowerShell
+    // command line, whose agent arguments follow it.
+    let program = crate::project_launcher::program_words(argv);
+    let mut result = argv[..program].to_vec();
+    result.extend([
         match agent {
             "codex" => "resume",
             "claude" => "--resume",
@@ -117,8 +122,8 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
         }
         .into(),
         sid.into(),
-    ];
-    let mut index = 1;
+    ]);
+    let mut index = program;
     while index < argv.len() {
         let argument = &argv[index];
         let key = argument.split('=').next().unwrap_or(argument);
@@ -188,8 +193,9 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
 /// The resume recipe keeps only safe launch options and never replays the
 /// original prompt; without its selector it starts a new conversation.
 pub(super) fn fresh_argv(agent: &str, argv: &[String]) -> Result<Vec<String>> {
+    let program = crate::project_launcher::program_words(argv);
     let mut argv = resume_argv(agent, argv, "-")?;
-    argv.drain(1..3);
+    argv.drain(program..program + 2);
     Ok(argv)
 }
 
@@ -273,5 +279,42 @@ mod tests {
             strings(&["kimi", "--plan"])
         );
         assert!(fresh_argv("codex", &strings(&["codex", "--unknown"])).is_err());
+    }
+
+    /// A `.ps1` project launcher's saved recipe keeps its whole PowerShell
+    /// command line in front, on Windows and on Unix alike.
+    #[test]
+    fn powershell_launcher_recipes_resume_after_the_script_path() {
+        let windows = [
+            r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoLogo", "-NoProfile",
+            "-ExecutionPolicy", "Bypass", "-File", r"C:\p\run_codex.ps1",
+        ];
+        let unix = ["/usr/bin/pwsh", "-NoLogo", "-NoProfile", "-File", "/p/run_codex.ps1"];
+        for launcher in [&windows[..], &unix[..]] {
+            let with = |args: &[&str]| [strings(launcher), strings(args)].concat();
+            assert_eq!(
+                resume_argv("codex", &with(&["resume", "--last", "--no-daemon", "-m", "gpt-6-astra", "prompt"]), "id").unwrap(),
+                with(&["resume", "id", "--no-daemon", "-m", "gpt-6-astra"])
+            );
+            assert_eq!(
+                fresh_argv("codex", &with(&["resume", "old", "-c", "model=\"m\""])).unwrap(),
+                with(&["-c", "model=\"m\""])
+            );
+            assert_eq!(
+                resume_argv("claude", &with(&["-c", "--effort", "high"]), "id").unwrap(),
+                with(&["--resume", "id", "--effort", "high"])
+            );
+            assert_eq!(
+                resume_argv("kimi", &with(&["--plan"]), "id").unwrap(),
+                with(&["--session", "id", "--plan"])
+            );
+            assert_eq!(fresh_argv("claude", &with(&[])).unwrap(), with(&[]));
+            assert!(resume_argv("codex", &with(&["--unknown"]), "id").is_err());
+        }
+        // A `.sh` launcher is one word, like the native CLI.
+        assert_eq!(
+            resume_argv("claude", &strings(&["/p/run_claude.sh", "-c"]), "id").unwrap(),
+            strings(&["/p/run_claude.sh", "--resume", "id"])
+        );
     }
 }

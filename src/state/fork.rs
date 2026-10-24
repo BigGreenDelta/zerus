@@ -50,13 +50,15 @@ pub(super) fn wait_for_chooser(output: &mut Value, reason: &str) {
 
 fn fork_argv(record: &Value, new_id: Option<&str>) -> Result<Vec<String>> {
     let agent = string(record, "agent");
+    let saved = recipes::argv(record)?;
     let mut argv = recipes::resume_argv(
         agent,
-        &recipes::argv(record)?,
+        &saved,
         new_id.unwrap_or_else(|| string(record, "conversation_id")),
     )?;
     match agent {
-        "codex" => argv[1] = "fork".into(),
+        // `resume` follows the program, which a `.ps1` launcher spreads over words.
+        "codex" => argv[crate::project_launcher::program_words(&saved)] = "fork".into(),
         "claude" => argv.push("--fork-session".into()),
         "kimi" => {}
         _ => return Err("this provider does not support session forks".into()),
@@ -392,6 +394,19 @@ mod tests {
             .unwrap(),
             vec!["kimi", "--session", "new", "--plan"]
         );
+        // A `.ps1` project launcher forks through its own PowerShell command line.
+        let launcher = [r"C:\pwsh.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", r"C:\p\run_codex.ps1"];
+        let mut saved = launcher.to_vec();
+        saved.extend(["resume", "old", "--no-daemon", "prompt"]);
+        let mut forked = launcher.to_vec();
+        forked.extend(["fork", "parent", "--no-daemon"]);
+        assert_eq!(fork_argv(&record("codex", json!(saved)), None).unwrap(), forked);
+        let mut saved = launcher.to_vec();
+        saved.push("-c");
+        let mut forked = launcher.to_vec();
+        forked.extend(["--resume", "parent", "--fork-session"]);
+        assert_eq!(fork_argv(&record("claude", json!(saved)), None).unwrap(), forked);
     }
     #[test]
     fn unique_names_and_distinct_kimi_ids() {

@@ -145,6 +145,27 @@ check "codex launcher: bare resume"    0 "/hgs 3 codex resume --last codex\$" --
 check "codex launcher: fresh beats resume" 0 "/hgs 0 [^ ]+/run_codex.sh\$" --dry-run codex wl -c --fresh
 check "codex launcher: explicit resume" 0 "/hgs 0 [^ ]+/run_codex.sh resume abc\$" --dry-run codex wl -c -- resume abc
 check "codex launcher: config argument stays quoted" 0 "/hgs 0 [^ ]+/run_codex.sh -c .model=\"test model\".\$" --dry-run codex wl -- -c 'model="test model"'
+# A run_COMMAND.ps1 runs with pwsh from PATH, only when no executable .sh exists.
+PSL="$tmp/proj/pslauncher"
+mkdir -p "$PSL" "$tmp/fakebin" "$tmp/claude-projects/$(printf "%s" "$PSL" | sed "s/[^A-Za-z0-9]/-/g")"
+touch "$tmp/claude-projects/$(printf "%s" "$PSL" | sed "s/[^A-Za-z0-9]/-/g")/s1.jsonl"
+printf 'exit 0\n' > "$PSL/run_claude.ps1"; printf 'exit 0\n' > "$PSL/run_codex.ps1"
+if ! command -v pwsh >/dev/null 2>&1; then
+  check "ps1 launcher: no pwsh -> plain agent" 0 "/hgs 0 claude\$" --dry-run claude "$PSL"
+fi
+printf '#!/bin/sh\nexit 0\n' > "$tmp/fakebin/pwsh"; chmod +x "$tmp/fakebin/pwsh"
+saved_path="$PATH"; export PATH="$tmp/fakebin:$PATH"
+ps="$tmp/fakebin/pwsh -NoLogo -NoProfile -File $PSL/run_claude.ps1"
+psc="$tmp/fakebin/pwsh -NoLogo -NoProfile -File $PSL/run_codex.ps1"
+check "ps1 launcher: pwsh runs it"          0 "/hgs 0 $ps\$" --dry-run claude "$PSL"
+check "ps1 launcher: -c both variants"      0 "/hgs 6 $ps -c $ps\$" --dry-run claude "$PSL" -c
+check "ps1 launcher: --bare -> plain agent" 0 "/hgs 0 claude\$" --dry-run claude "$PSL" --bare
+check "ps1 codex launcher: resume both variants" 0 "/hgs 7 $psc resume --last $psc\$" --dry-run codex "$PSL" -c
+check "ps1 codex launcher: arguments follow the script" 0 "/hgs 0 $psc -c .model=\"test model\".\$" --dry-run codex "$PSL" -- -c 'model="test model"'
+printf 'exit 0\n' > "$tmp/proj/withlauncher/run_claude.ps1"
+check "launcher: run_claude.sh beats run_claude.ps1" 0 "/hgs 0 [^ ]+/run_claude.sh\$" --dry-run claude wl
+rm -f "$tmp/proj/withlauncher/run_claude.ps1"
+export PATH="$saved_path"
 check "claude explicit --resume <id>"   0 "/hgs 0 claude --resume abc\$"             --dry-run claude sample-project -- --resume abc
 check "-c + own -r <id> -> no double"   0 "/hgs 0 claude -r abc\$"                   --dry-run claude sample-project -c -- -r abc
 check "extra args without -c"           0 "/hgs 0 claude --model opus\$"             --dry-run claude sample-project -- --model opus

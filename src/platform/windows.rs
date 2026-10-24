@@ -368,6 +368,19 @@ pub fn powershell() -> std::result::Result<Vec<String>, String> {
         .map(|powershell| vec![powershell, "-NoLogo".into()])
         .ok_or_else(|| "neither pwsh.exe nor powershell.exe was found".into())
 }
+/// The PowerShell that runs a project's `run_<command>.ps1` launcher
+/// (`project_launcher`): `pwsh.exe` from PATH, else Windows PowerShell as
+/// `powershell` finds it. A `pwsh.exe` that cannot be made canonical runs by the
+/// path PATH gives: the Store package's app execution alias is such a file,
+/// which Windows starts but cannot open. PowerShell 7 must win wherever it is
+/// installed, because Windows PowerShell drops the double quotes and the empty
+/// arguments that a script passes on to a native program with `@args`.
+pub fn launcher_powershell() -> std::result::Result<String, String> {
+    if let Some(pwsh) = native_program("pwsh") {
+        return Ok(canonical(&pwsh).unwrap_or(pwsh).display().to_string());
+    }
+    powershell().map(|words| words[0].clone())
+}
 /// The stable CLI `<home>\.local\bin\hgs.exe` (spec D2, D8), the only hgs.exe a
 /// session, hook, recipe or record names, so none of them names a portable
 /// folder that a GUI update replaces. Whichever hgs.exe runs, this is the one

@@ -836,3 +836,17 @@ mod tests {
         assert!(!marker.exists());
     }
 }
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::*;
+
+    /// A `.ps1` project launcher's program is PowerShell, which is never asked
+    /// for Codex's capabilities: like a `.sh` launcher it gets `--no-daemon`.
+    #[test]
+    fn powershell_launchers_get_no_daemon_without_a_capability_check() {
+        for program in [r"C:\Program Files\PowerShell\7\pwsh.exe", "/usr/bin/pwsh", "pwsh"] {
+            assert_eq!(codex_daemon_flag(program), Ok(true), "{program}");
+        }
+    }
+}

@@ -16,6 +16,7 @@ mod phones;
 mod session_reference;
 mod platform;
 mod presence;
+mod project_launcher;
 mod screen;
 mod speech;
 mod status;
