@@ -2561,6 +2561,10 @@ Small jitter is applied. Class counters persist within an episode when errors ch
 Temporary overload covers HTTP 500, 502–504 and 529, model capacity errors and the
 520–524 gateway failures that Cloudflare reports for an unreachable or timed-out
 provider, often without a response body.
+Kimi's explicit HTTP 429 message about its rolling 5-hour window uses the
+**Rate limit** schedule, including when the message calls it a quota and offers
+an upgrade. It provides no reset timestamp, so recovery does not invent one.
+Monthly quota, billing and sign-in failures still require manual action.
 
 **Session usage limit** is separate from a temporary rate limit. Its default mode,
 **Wait for reset**, schedules a continuation at the provider's reset time, using

@@ -83,7 +83,7 @@ jobs:
         run: |
           rustup toolchain install 1.99.1 --profile minimal
           cargo +1.99.1 build --locked --bin hgs -j 2
-      - name: One official latest release, eight exact native cases
+      - name: One official latest release, nine exact native cases
         shell: bash
         run: |
           python -s -B scripts/ci/kimi-native.py --source-sha "$SOURCE_SHA" \

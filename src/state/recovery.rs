@@ -224,15 +224,23 @@ fn status_code(text: &str, codes: &[&str]) -> bool {
     text.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| codes.contains(&word))
 }
 fn class(error: &Value) -> &'static str {
+    if let Some(kind) = provider_errors::native_kind(error) {
+        return if kind == "session_limit" { "session_limit" } else { "manual" };
+    }
     if string(error, "error_kind") == "provider_policy"
         || provider_errors::category(string(error, "detail")) == "provider_policy"
     {
         return "manual";
     }
+    let native_detail = provider_errors::native_detail(error);
+    if ["", "provider", "quota", "rate_limit"].contains(&string(error, "error_kind"))
+        && provider_errors::rolling_rate_limit(&native_detail) {
+        return "rate_limit";
+    }
     let text = format!(
         "{} {}",
         string(error, "error_kind"),
-        string(error, "detail")
+        native_detail
     )
     .to_lowercase();
     // Permanent failures always win, including a quota error containing 429.
@@ -1239,6 +1247,44 @@ mod tests {
             advance(Value::Null, &s, &on(), 11.0)["action"],
             "retry_request"
         );
+    }
+    #[test]
+    fn kimi_rolling_window_uses_existing_rate_schedule_without_inventing_a_reset() {
+        let detail = "429 You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends. To continue now, purchase extra usage or upgrade your plan: https://example.invalid/?tab=quota";
+        let mut s = snapshot("kimi");
+        s["provider_error"]["detail"] = json!(detail);
+        s["provider_error"]["error_kind"] = json!("quota"); // Saved by an older hook.
+        let p: Policy = serde_json::from_value(json!({"version":2,"enabled":true,"enabled_at":1,
+            "schedules":{"rate_limit":[15,30,60,300,0]}})).unwrap();
+        let job = advance(Value::Null, &s, &p, 11.0);
+        assert_eq!(job["class"], "rate_limit");
+        assert_eq!(job["state"], "waiting");
+        assert_eq!(job["delays"], json!([15,30,60,300,0]));
+        assert_eq!(job["not_before"], 0.0);
+        assert!(seconds(&job, "due_at") >= 26.0 && seconds(&job, "due_at") < 29.0);
+        assert_eq!(advance(serde_json::from_str(&job.to_string()).unwrap(), &s, &p, 12.0), job);
+        let mut repeat = job.clone(); repeat["attempts"]["rate_limit"] = json!(50);
+        schedule(&mut repeat, &s, 100.0);
+        assert_eq!(repeat["state"], "waiting");
+        assert_eq!(repeat["class_attempt"], 50);
+        assert!(seconds(&repeat, "due_at") >= 400.0 && seconds(&repeat, "due_at") < 431.0);
+        for enabled in [false, true] {
+            let mut off = p.clone(); off.enabled = enabled; off.rate_limit = false;
+            assert!(advance(Value::Null, &s, &off, 11.0).is_null());
+        }
+        for kind in ["authentication", "provider_policy", "context_limit"] {
+            s["provider_error"]["error_kind"] = json!(kind);
+            assert_eq!(class(&s["provider_error"]), "manual");
+            assert!(advance(Value::Null, &s, &p, 11.0).is_null());
+        }
+        for detail in ["429 insufficient quota", "429 monthly quota exhausted", "429 billing limit", "You've hit your session limit"] {
+            s["provider_error"] = json!({"source":"native","message_id":"other","at":10.0,"detail":detail});
+            if detail.contains("session limit") {
+                assert_eq!(advance(Value::Null, &s, &p, 11.0)["state"], "blocked");
+            } else {
+                assert!(advance(Value::Null, &s, &p, 11.0).is_null());
+            }
+        }
     }
     #[test]
     fn off_and_old_errors_never_schedule_and_deadlines_survive_restart() {

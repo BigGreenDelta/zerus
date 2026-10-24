@@ -2,6 +2,60 @@
 use super::*;
 use rusqlite::{Connection, OpenFlags};
 
+fn structured_kind(text: &str) -> Option<&'static str> {
+    let mut reset = None;
+    for word in text.split(|c: char| c.is_whitespace() || "[]():,\"".contains(c)) {
+        let kind = match word.strip_suffix("_error").unwrap_or(word) {
+            "provider_policy" => Some("provider_policy"),
+            "session_limit" => Some("session_limit"),
+            "model_unavailable" => Some("model_unavailable"),
+            "invalid_request" => Some("provider"),
+            _ => None,
+        };
+        if kind == Some("session_limit") { reset = kind; }
+        else if kind.is_some() { return kind; }
+    }
+    reset
+}
+
+// Native structured refusal/reset evidence precedes a known transient message.
+// Generic saved error_kind=quota is deliberately not native type/code evidence.
+pub(super) fn native_kind(error: &Value) -> Option<&'static str> {
+    if category(string(error, "detail")) == "provider_policy" { return Some("provider_policy"); }
+    let mut reset = None;
+    for key in ["native_error_type", "native_error_code"] {
+        let value = string(error, key).to_lowercase();
+        let kind = structured_kind(&value).unwrap_or_else(|| category(&value));
+        if kind == "session_limit" { reset = Some(kind); }
+        else if ["quota", "authentication", "context_limit", "model_unavailable", "provider_policy"].contains(&kind)
+            || structured_kind(&value).is_some() { return Some(kind); }
+    }
+    reset
+}
+
+pub(super) fn rolling_rate_limit(text: &str) -> bool {
+    let text = text.to_lowercase().replace('’', "'");
+    let Some((prefix, rest)) = text.split_once("429 you've reached your 5-hour usage limit.") else {
+        return false;
+    };
+    // Kimi's rolling rate window is separate from its monthly total quota.
+    // Its native error includes quota wording and an upsell, but no reset time.
+    rest.trim_start().starts_with("your quota will reset when the current 5-hour window ends.")
+        && prefix.chars().last().is_none_or(|c| !c.is_ascii_alphanumeric())
+        && structured_kind(prefix).is_none()
+        && !["authentication", "auth_error", "autherror", "auth error", "auth failed", "auth_failed",
+             "auth failure", "authorization", "not authorized", "not authorised", "unauthorized", "unauthorised",
+             "api key", "api_key", "credential", "oauth", "insufficient", "account_on_hold",
+             "monthly quota", "weekly quota", "billing", "credit", "balance", "context", "max_output_tokens",
+             "max-tokens", "token limit", "model_not_found", "model not found", "not supported", "invalid request"]
+            .iter().any(|word| text.contains(word))
+        && !prefix.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| ["401", "403"].contains(&word))
+}
+
+pub(super) fn native_detail(error: &Value) -> String {
+    format!("{} {} {}", string(error, "native_error_type"), string(error, "native_error_code"), string(error, "detail"))
+}
+
 pub(super) fn category(text: &str) -> &'static str {
     let text = text.to_lowercase();
     // A provider policy block can quote authorized work or a transport status.
@@ -26,6 +80,9 @@ pub(super) fn category(text: &str) -> &'static str {
                 .any(|s| text.contains(s)))
     {
         return "provider_policy";
+    }
+    if rolling_rate_limit(&text) {
+        return "rate_limit";
     }
     // A permanent quota failure can also mention 429 or model capacity.
     if [
@@ -114,8 +171,18 @@ pub(super) fn failure_id(error: &Value) -> String {
 pub(super) fn apply(output: &mut Value, error: &Value) {
     // Normalize saved failures too; older hooks used the generic rate-limit kind.
     let mut error = error.clone();
-    let kind = category(&format!("{} {}", string(&error, "error_kind"), string(&error, "detail")));
-    if ["session_limit", "quota", "provider_policy"].contains(&kind) {
+    let detail = native_detail(&error);
+    let rolling = rolling_rate_limit(&detail);
+    let native = native_kind(&error);
+    let kind = if let Some(kind) = native {
+        kind.to_owned()
+    } else if rolling && !["", "provider", "quota", "rate_limit"].contains(&string(&error, "error_kind")) {
+        string(&error, "error_kind").to_owned()
+    } else {
+        category(&format!("{} {}", string(&error, "error_kind"), detail)).to_owned()
+    };
+    if native.is_some() || ["session_limit", "quota", "provider_policy"].contains(&kind.as_str())
+        || (kind == "rate_limit" && rolling) {
         error["error_kind"] = json!(kind);
     }
     session_limits::enrich(&mut error);
@@ -444,6 +511,63 @@ pub(super) fn enrich(record: &Value, output: &mut Value, live: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const KIMI_WINDOW: &str = "429 You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends. To continue now, purchase extra usage or upgrade your plan: https://example.invalid/subscription?tab=quota";
+
+    #[test]
+    fn kimi_rolling_window_is_a_rate_limit_despite_quota_and_upgrade_wording() {
+        for detail in [KIMI_WINDOW.to_owned(), KIMI_WINDOW.replace("You've", "You’ve"),
+            format!("[provider.api_error] {KIMI_WINDOW}"), KIMI_WINDOW.to_uppercase()] {
+            assert_eq!(category(&detail), "rate_limit", "{detail}");
+            let error = event("native-window", 123.0, &detail, "provider_hook");
+            assert_eq!(error["error_kind"], "rate_limit");
+            assert!(error.get("reset_at").is_none());
+        }
+    }
+
+    #[test]
+    fn rolling_window_normalizes_saved_quota_without_rewriting_native_identity() {
+        let mut error = event("native-window", 123.0, KIMI_WINDOW, "provider_hook");
+        error["error_kind"] = json!("quota");
+        let mut output = json!({"run_id":"run","conversation_id":"conversation"});
+        apply(&mut output, &error);
+        assert_eq!(output["provider_error"]["error_kind"], "rate_limit");
+        assert_eq!(output["activity_summary"], "Rate limit reached");
+        assert_eq!(output["last_error"], KIMI_WINDOW);
+        assert_eq!(failure_id(&output["provider_error"]), failure_id(&error));
+        assert_eq!(output["run_id"], "run");
+        assert_eq!(output["conversation_id"], "conversation");
+        for kind in ["authentication", "provider_policy", "context_limit"] {
+            error["error_kind"] = json!(kind);
+            apply(&mut output, &error);
+            assert_eq!(output["provider_error"]["error_kind"], kind);
+        }
+    }
+
+    #[test]
+    fn other_quota_and_explicit_policy_failures_remain_permanent() {
+        for detail in ["429 quota exhausted", "429 You've reached your 5-hour usage limit.",
+            "Your quota will reset when the current 5-hour window ends.",
+            "429 You've reached your weekly usage limit. Your quota will reset next week."] {
+            assert_eq!(category(detail), "quota", "{detail}");
+        }
+        assert_eq!(category(&format!("1{KIMI_WINDOW}")), "quota");
+        for prefix in ["monthly quota exhausted", "billing cycle exhausted", "insufficient credit", "HTTP 401 authentication failed"] {
+            assert_ne!(category(&format!("{prefix}: {KIMI_WINDOW}")), "rate_limit");
+        }
+        assert_eq!(category(&format!("content_filter: {KIMI_WINDOW}")), "provider_policy");
+        for kind in ["auth_error", "context_limit", "billing", "provider_policy", "provider_policy_error",
+            "session_limit", "session_limit_error", "model_unavailable", "model_unavailable_error", "invalid_request", "invalid_request_error"] {
+            let detail = format!("{kind} {KIMI_WINDOW}");
+            assert_ne!(category(&detail), "rate_limit");
+            let mut error = event("native-window", 123.0, KIMI_WINDOW, "provider_hook");
+            error["native_error_type"] = json!(kind);
+            error["error_kind"] = json!(category(&detail));
+            let mut output = json!({});
+            apply(&mut output, &error);
+            assert_ne!(output["provider_error"]["error_kind"], "rate_limit");
+        }
+    }
+
     #[test]
     fn upgraded_scan_does_not_reuse_cached_failures_without_native_turn_ids() {
         let temp = tempfile::tempdir().unwrap();

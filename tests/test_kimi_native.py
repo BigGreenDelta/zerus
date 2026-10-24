@@ -495,6 +495,17 @@ class Model(http.server.BaseHTTPRequestHandler):
         if self.path.startswith(PLATFORM + '/'):
             return self.platform(body)
         self.server.requests.append(body)
+        if getattr(self.server, 'failure', None):
+            error = json.dumps(dict(error=dict(type='rate_limit_error', code='rate_limit_exceeded',
+                                              message=self.server.failure))).encode()
+            self.send_response(429)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(error)))
+            self.send_header('x-should-retry', 'false')
+            self.end_headers()
+            self.wfile.write(error)
+            self.wfile.flush()
+            return
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
@@ -556,6 +567,7 @@ class NativeKimi(lifecycle.Harness):
         self.assertEqual(Path(shutil.which('kimi', path=self.env['PATH'])).resolve(),
                          (self.bin / 'kimi').resolve() if sys.platform == 'darwin' else image.resolve())
         server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Model)
+        self.model_server = server
         server.requests, server.platform, server.platform_completed = [], [], []
         self.requests, self.platform, self.platform_completed = server.requests, server.platform, server.platform_completed
         self.addCleanup(server.server_close)
@@ -840,6 +852,57 @@ class NativeKimi(lifecycle.Harness):
                    self.inspect(name).get('activity') == 'idle', name)
         self.assert_process(name, 'resumed')
         self.assertEqual(self.binding(name)['conversation_id'], before['conversation_id'])
+
+    def test_rolling_window_429_recovers_in_the_same_conversation(self):
+        name = self.launch()
+        self.model_server.failure = ("You've reached your 5-hour usage limit. Your quota will reset when the current "
+                                     "5-hour window ends. To continue now, purchase extra usage or upgrade your plan: "
+                                     "https://example.invalid/subscription?tab=quota")
+        text = 'Finish the synthetic recovery fixture'
+        self.send(name, self.payload(name, text))
+
+        def failed():
+            state = self.inspect(name)
+            return state if state.get('phase') == 'error' and state.get('provider_error') else None
+        failure = self.until(failed, name)
+        self.assertEqual(failure['provider_error']['error_kind'], 'rate_limit')
+        self.assertIn('429', failure['provider_error']['detail'])
+        self.assertIn(self.model_server.failure, failure['provider_error']['detail'])
+        self.assertFalse(failure['provider_error'].get('reset_at'))
+        self.assertEqual(len(self.requests), 1)  # Native attempts finished first.
+        self.assertEqual(self.held(text), 1)
+        binding = self.binding(name)
+        self.assert_process(name, 'rate-limit-stopped')
+        directory = self.root / 'state/recovery'
+        directory.mkdir(exist_ok=True)
+        policy = dict(version=2, revision=1, enabled=True, enabled_at=1,
+                      rate_limit=True, service=True, network=True, schedules=dict(rate_limit=[5,0]))
+        path = directory / 'policy.json'
+        path.write_text(json.dumps(policy))
+        self.hgs('recovery', 'tick')
+        waiting = self.inspect(name)['recovery']
+        self.assertEqual((waiting['state'], waiting['class'], waiting['attempt']), ('waiting', 'rate_limit', 0))
+        self.assertEqual(waiting['not_before'], 0.0)
+        self.model_server.failure = None
+
+        def recovered():
+            self.hgs('recovery', 'tick')
+            state = self.inspect(name)
+            return state if state.get('recovery', {}).get('state') == 'succeeded' else None
+        finished = self.until(recovered, name, seconds=60)
+        job = finished['recovery']
+        self.assertEqual((job['attempt'], job['attempts']), (1, dict(rate_limit=1)))
+        self.assertIn('[HGS automatic recovery]', job['receipt']['text'])
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(self.held(text), 1)  # No replay of the original request.
+        self.assertEqual(self.held(job['receipt']['text']), 1)
+        self.assertEqual((finished['run_id'], finished['conversation_id']), (binding['run_id'], binding['conversation_id']))
+        self.assertEqual(self.binding(name)['pid'], binding['pid'])
+        self.assertEqual(finished['phase'], 'idle')
+        self.assertEqual(json.loads(path.read_text()), policy)
+        self.assert_process(name, 'recovered')
+        self.hgs('recovery', 'tick')
+        self.assertEqual(len(self.requests), 2)
 
 
 class FixtureControls(unittest.TestCase):

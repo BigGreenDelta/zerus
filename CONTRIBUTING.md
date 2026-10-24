@@ -270,8 +270,8 @@ native session host of Windows Phase 2 has its own isolated recipe and tests,
 runs with one latest Claude Code and Codex package per agent, each against a local fake
 API: [testing the Windows session host](docs/windows-host-testing.md).
 
-Kimi's optional native input, question and startup-trust fixtures are
-`test_kimi_native.NativeKimi` (two cases),
+Kimi's optional native input, recovery, question and startup-trust fixtures are
+`test_kimi_native.NativeKimi` (three cases),
 `test_kimi_questions_native.NativeKimiQuestions` (three) and
 `test_kimi_questions_native.NativeKimiTrust` (three). Run them only with an
 privately selected `HGS_KIMI_TEST_BIN`, exact `HGS_KIMI_TEST_SHA256` and the runner's
@@ -281,7 +281,7 @@ the installed Kimi. Each case runs a private copy, disables automatic updates,
 uses its loopback model and platform fixture, proves the child image and private
 environment, and retains uncertain cleanup. The macOS cases compile one exec
 shim per case, so they require both native and compiler resources. A current
-latest-release campaign runs eight native cases. Historical two-version receipts
+latest-release campaign runs nine native cases. Historical two-version receipts
 do not define current selection. The seventeen R2 and seven question-fixture
 controls use stand-ins and loopback
 servers and establish fixture behavior only. `test_kimi_trust` and

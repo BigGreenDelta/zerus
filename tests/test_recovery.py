@@ -100,6 +100,91 @@ class Recovery(unittest.TestCase):
     def test_claude_delivery_acknowledgement_and_cancel(self):self.exercise('claude')
     def test_kimi_delivery_acknowledgement_and_cancel(self):self.exercise('kimi')
 
+    def test_kimi_saved_rolling_quota_recovers_once_under_the_existing_rate_policy(self):
+        self.prepare('kimi')
+        self.record['provider_error'].update(error_kind='quota',detail=
+            "429 You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends. "
+            "To continue now, purchase extra usage or upgrade your plan: https://example.invalid/?tab=quota")
+        self.write_record()
+        policy=json.loads(self.policy.read_text());policy.update(version=2,schedules=dict(rate_limit=[15,30,60,300,0]))
+        self.policy.write_text(json.dumps(policy));self.tick()
+        info=self.inspect();job=info['recovery']
+        self.assertEqual(info['provider_error']['error_kind'],'rate_limit')
+        self.assertEqual((job['state'],job['class'],job['not_before']),('waiting','rate_limit',0.0))
+        self.assertEqual(job['delays'],[15,30,60,300,0]);self.assertEqual(self.received(),b'')
+        self.command('recovery','action',payload=dict(name=self.name,id=job['id'],action='now'))
+        self.tick();sent=self.inspect()['recovery'];self.assertEqual((sent['state'],sent['attempt']),('retrying',1))
+        self.wait_for(lambda:self.received().endswith(b'\r'));raw=self.received()
+        self.assertEqual(raw.count(b'\r'),1)
+        self.assertIn('[HGS automatic recovery]',sent['receipt']['text'])
+        self.hook('UserPromptSubmit',prompt=sent['receipt']['text'])
+        self.hook('Stop',last_assistant_message='Fixture answer')
+        for _ in range(2):
+            self.tick();info=self.inspect()
+            self.assertEqual((info['recovery']['state'],info['recovery']['attempt']),('succeeded',1))
+            self.assertEqual((info['run_id'],info['conversation_id']),(self.run_id,self.conversation_id))
+            self.assertEqual(self.received(),raw)
+        self.assertEqual(json.loads(self.policy.read_text()),policy)
+
+    def test_kimi_permanent_quota_never_sends_a_continuation(self):
+        self.prepare('kimi')
+        for detail in ('429 insufficient quota','429 monthly quota exhausted','429 billing limit'):
+            self.hook('StopFailure',error_message=detail,error_type='quota')
+            self.tick();self.assertFalse(self.inspect().get('recovery'));self.assertEqual(self.received(),b'')
+
+    def test_kimi_explicit_permanent_hook_types_override_the_complete_rolling_message(self):
+        self.prepare('kimi')
+        detail = ("429 You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends. "
+                  "To continue now, purchase extra usage or upgrade your plan: https://example.invalid/?tab=quota")
+        for kind in ('auth_error', 'context_limit', 'billing', 'provider_policy', 'provider_policy_error',
+                     'model_unavailable', 'model_unavailable_error', 'invalid_request', 'invalid_request_error'):
+            for field in ('error_type', 'error'):
+                with self.subTest(kind=kind,field=field):
+                    self.hook('StopFailure',error_message=detail,**{field:kind})
+                    self.tick();info=self.inspect()
+                    self.assertEqual(info['provider_error']['native_error_type' if field=='error_type' else 'native_error_code'],kind)
+                    self.assertNotEqual(info['provider_error']['error_kind'],'rate_limit')
+                    self.assertEqual(info['recovery_error_class'],'manual')
+                    self.assertFalse(info.get('recovery'));self.assertEqual(self.received(),b'')
+        self.hook('StopFailure',error_type='session_limit',error='provider_policy',error_message=detail)
+        self.tick();info=self.inspect()
+        self.assertEqual(info['provider_error']['error_kind'],'provider_policy')
+        self.assertEqual(info['recovery_error_class'],'manual')
+        self.assertFalse(info.get('recovery'));self.assertEqual(self.received(),b'')
+
+    def test_kimi_policy_body_wins_over_both_session_limit_metadata_fields_and_deadline(self):
+        self.prepare('kimi')
+        detail = ("429 You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends. "
+                  "content_filter: request blocked")
+        for field in ('error_type', 'error'):
+            with self.subTest(field=field):
+                self.hook('StopFailure',retry_after_seconds=3600,error_message=detail,**{field:'session_limit'})
+                self.tick();info=self.inspect()
+                self.assertEqual(info['provider_error']['error_kind'],'provider_policy')
+                self.assertEqual(info['recovery_error_class'],'manual')
+                self.assertFalse(info.get('recovery'));self.assertEqual(self.received(),b'')
+
+    def test_kimi_explicit_session_limit_without_reset_never_uses_the_rate_schedule(self):
+        self.prepare('kimi')
+        self.hook('StopFailure',error_type='session_limit_error',error_message=
+            "429 You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.")
+        self.tick();info=self.inspect();job=info['recovery']
+        self.assertEqual(info['provider_error']['error_kind'],'session_limit')
+        self.assertEqual((job['class'],job['state'],job['attempt']),('session_limit','blocked',0))
+        self.assertEqual(self.received(),b'')
+
+    def test_kimi_explicit_session_limit_preserves_a_verified_retry_after_deadline(self):
+        self.prepare('kimi')
+        self.hook('StopFailure',error_type='session_limit',retry_after_seconds=3600,error_message=
+            "429 You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.")
+        self.tick();info=self.inspect();job=info['recovery'];deadline=info['provider_error']['retry_not_before']
+        self.assertEqual(info['provider_error']['error_kind'],'session_limit')
+        self.assertEqual((job['class'],job['state']),('session_limit','waiting'))
+        self.assertEqual((job['due_at'],job['not_before']),(deadline,deadline))
+        self.command('recovery','action',payload=dict(name=self.name,id=job['id'],action='now'))
+        self.tick();self.assertEqual(self.inspect()['recovery']['due_at'],deadline)
+        self.assertEqual(self.received(),b'')
+
     def capacity_sources(self, add_log=False):
         from datetime import datetime, timezone
         import sqlite3
