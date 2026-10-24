@@ -1148,13 +1148,19 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                     &detail(event),
                     "provider_hook",
                 );
-                let category = provider_errors::category(&format!(
+                // Keep native type/code evidence when the rolling-window text
+                // would otherwise erase a permanent refusal during projection.
+                if provider_errors::rolling_rate_limit(&detail(event)) {
+                    failure["native_error_type"] = json!(clipped(&event["error_type"], 1200));
+                    failure["native_error_code"] = json!(clipped(&event["error"], 1200));
+                }
+                let category = provider_errors::native_kind(&failure).unwrap_or_else(|| provider_errors::category(&format!(
                     "{} {} {}",
                     string(event, "error_type"),
                     string(event, "error"),
                     detail(event)
-                ));
-                if category != "provider" {
+                )));
+                if category != "provider" || provider_errors::native_kind(&failure).is_some() {
                     failure["error_kind"] = json!(category);
                 }
                 // Keep a provider deadline separate from the chosen backoff.
