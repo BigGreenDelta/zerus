@@ -96,13 +96,32 @@ class NativeClaudeFetchApproval(NativeClaudeReadApproval):
 
 class NativeClaudeInterrupt(NativeClaudeReadApproval):
     tool_name = 'Bash'
-    tool_input = {'command': 'sleep 30; printf done > slept.txt', 'description': 'Wait for the fixture'}
     test_session_grant_is_marked_broader_and_deny_reaches_claude = None
+
+    def native_tool_input(self, work):
+        # Claude 2.1.310 rejects long foreground sleeps with nonessential traffic
+        # disabled. Keep real interruptible work: a bounded fixture-owned pipe read.
+        script = work / 'interrupt-work.py'
+        script.write_text('import os, select\nfrom pathlib import Path\n'
+                          'root = Path(__file__).resolve().parent\n'
+                          'reader, writer = os.pipe()\n'
+                          'try:\n'
+                          '    (root / "interrupt-started.txt").write_text("started")\n'
+                          '    select.select([reader], [], [], 30)\n'
+                          '    (root / "slept.txt").write_text("done")\n'
+                          'finally:\n'
+                          '    os.close(reader)\n'
+                          '    os.close(writer)\n')
+        return dict(command=shlex.quote(sys.executable) + ' ' + shlex.quote(str(script)),
+                    description='Run bounded fixture I/O until interrupted')
 
     def test_escape_interrupt_is_recorded_without_a_hook(self):
         import json, time, uuid
+        self.assertNotIn('hooks', json.loads((self.root/'.claude/settings.json').read_text()))
         self.answer(self.choose('Yes'))
         self.wait_for(lambda: 'Do you want to proceed?' not in self.screen())
+        self.wait_for(lambda: (self.root/'work/interrupt-started.txt').exists())
+        self.assertFalse((self.root/'work/slept.txt').exists())
         record = json.loads(self.record_path.read_text())
         record.update(run_identity_version=1, supervisor=dict(pid=record['pid'], start=record['process_start']), activity='busy', turn_started=time.time())
         self.record_path.write_text(json.dumps(record))
